@@ -16,3 +16,4 @@ a commit message suffices.
 
 - 0001 — [Split Okena into a headless daemon and thin clients](0001-headless-two-process-daemon.md) — accepted (2026-06-29)
 - 0002 — [A window is a filtered viewport, not a partition](0002-window-as-viewport.md) — accepted (2026-05-12)
+- 0006 — [Connect claude panes to remote clients through a Bun preload, hooks and an MCP channel](0006-claude-remote-via-bun-preload.md) — accepted (2026-10-16)

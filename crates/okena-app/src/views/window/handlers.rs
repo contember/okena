@@ -1455,10 +1455,12 @@ impl WindowView {
                         });
                     }
                 },
-                OverlayRequest::AddProjectDialog => {
+                OverlayRequest::AddProjectDialog {
+                    target_connection_id,
+                } => {
                     let rm = self.remote_manager.clone();
                     self.overlay_manager.update(cx, |om, cx| {
-                        om.toggle_add_project_dialog(rm, cx);
+                        om.toggle_add_project_dialog(rm, target_connection_id, cx);
                     });
                 }
                 OverlayRequest::RemoteConnect => {

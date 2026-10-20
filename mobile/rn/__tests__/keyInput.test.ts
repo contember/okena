@@ -65,7 +65,7 @@ describe('toolbar layout', () => {
       'esc',
       'ctrl-c',
       'tab',
-      'shift-tab',
+      'compose',
       'up',
       'down',
       'enter',
@@ -107,7 +107,7 @@ describe('key bytes', () => {
 
   it('sends Shift+Tab as back-tab (CSI Z), not a named key', () => {
     expect(SHIFT_TAB).toBe('\x1b[Z');
-    const key = PRIMARY_KEYS.find((k) => k.id === 'shift-tab')!;
+    const key = ALL_KEYS.find((k) => k.id === 'shift-tab')!;
     expect(resolveKeyAction(key.action)).toEqual({ kind: 'text', text: '\x1b[Z' });
   });
 

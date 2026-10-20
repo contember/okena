@@ -2,7 +2,9 @@ use crate::settings::settings_entity;
 use crate::theme::theme;
 use crate::ui::tokens::{ui_text_md, ui_text_sm};
 use crate::views::components::simple_input::SimpleInput;
-use crate::workspace::settings::{HeaderDensity, StatusBarStyle};
+use crate::workspace::settings::{
+    HeaderDensity, HostStatsStyle, RemoteSidebarLayout, StatusBarStyle,
+};
 use gpui::prelude::*;
 use gpui::*;
 use okena_transport::client::tls::format_fingerprint;
@@ -27,13 +29,19 @@ impl SettingsPanel {
             .child(self.render_header_density_row(s.header_density, cx))
             .child(self.render_status_bar_style_row(s.status_bar.style, cx))
             .child(self.render_toggle(
-                "status-bar-graphs", "Status Bar CPU/Memory Graph", s.status_bar.metrics_graph, true,
+                "status-bar-metrics", "Status Bar CPU/Memory", s.status_bar.show_metrics, true,
+                |state, val, cx| state.set_status_bar_show_metrics(val, cx), cx,
+            ))
+            .child(self.render_toggle(
+                "status-bar-graphs", "Status Bar CPU/Memory Graph", s.status_bar.metrics_graph, s.status_bar.show_metrics,
                 |state, val, cx| state.set_status_bar_metrics_graph(val, cx), cx,
             ))
             .child(self.render_toggle(
                 "detached-by-default", "Detached Overlays by Default", s.detached_overlays_by_default, true,
                 |state, val, cx| state.set_detached_overlays_by_default(val, cx), cx,
             ))
+            .child(self.render_remote_sidebar_layout_row(s.sidebar.remote_layout, cx))
+            .child(self.render_host_stats_row(s.sidebar.host_stats, cx))
             .child(self.render_toggle(
                 "remote-server", "Remote Server", s.remote_server_enabled, true,
                 |state, val, cx| state.set_remote_server_enabled(val, cx), cx,
@@ -182,6 +190,80 @@ impl SettingsPanel {
                 });
             }),
         )
+    }
+
+    fn render_remote_sidebar_layout_row(
+        &self,
+        current: RemoteSidebarLayout,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let t = theme(cx);
+        let variants = RemoteSidebarLayout::all_variants();
+        let segments: Vec<Segment<'_>> = variants
+            .iter()
+            .map(|layout| Segment {
+                id: format!("{:?}", layout).into(),
+                label: layout.display_name(),
+                selected: *layout == current,
+            })
+            .collect();
+
+        settings_row(
+            "sidebar-remote-layout".to_string(),
+            "Sidebar Remote Projects",
+            &t,
+            cx,
+            true,
+        )
+        .child(segmented_control(
+            "sidebar-remote-layout",
+            &segments,
+            &t,
+            cx,
+            move |i, _, cx| {
+                let layout = variants[i];
+                settings_entity(cx).update(cx, |state, cx| {
+                    state.set_sidebar_remote_layout(layout, cx);
+                });
+            },
+        ))
+    }
+
+    fn render_host_stats_row(
+        &self,
+        current: HostStatsStyle,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let t = theme(cx);
+        let variants = HostStatsStyle::all_variants();
+        let segments: Vec<Segment<'_>> = variants
+            .iter()
+            .map(|style| Segment {
+                id: format!("{:?}", style).into(),
+                label: style.display_name(),
+                selected: *style == current,
+            })
+            .collect();
+
+        settings_row(
+            "sidebar-host-stats".to_string(),
+            "Sidebar Host CPU/Memory",
+            &t,
+            cx,
+            true,
+        )
+        .child(segmented_control(
+            "sidebar-host-stats",
+            &segments,
+            &t,
+            cx,
+            move |i, _, cx| {
+                let style = variants[i];
+                settings_entity(cx).update(cx, |state, cx| {
+                    state.set_sidebar_host_stats(style, cx);
+                });
+            },
+        ))
     }
 
     fn render_header_density_row(

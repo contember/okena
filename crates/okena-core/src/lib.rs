@@ -4,6 +4,7 @@ pub mod agent_harness;
 pub mod agent_session;
 pub mod agent_status;
 pub mod api;
+pub mod claude_remote;
 pub mod git_poll;
 pub mod keys;
 pub mod latency_probe;

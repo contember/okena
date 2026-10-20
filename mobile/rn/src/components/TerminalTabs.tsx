@@ -5,6 +5,8 @@
  * horizontally-scrolling chip row lists them (desktop layout order, custom
  * name or `Terminal N`) and switches the visible one. Purely client-side: it
  * never touches the server layout. The active chip is kept scrolled into view.
+ * A chip of a terminal running an agent carries its lifecycle dot and the
+ * count of open Claude dialogs.
  */
 
 import React, { useEffect, useRef } from 'react';
@@ -13,16 +15,20 @@ import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import type { ProjectInfo, TerminalId } from '../native/okena';
 import { terminalLabel } from '../models/terminalSelection';
 import { OkenaColors } from '../theme';
+import { DialogBadge, LifecycleDot } from './ClaudeIndicator';
 
 export interface TerminalTabsProps {
   project: ProjectInfo;
   activeTerminalId: TerminalId | null;
+  /** Open Claude dialogs per terminal id. */
+  claudeDialogs: Record<TerminalId, number>;
   onSelect(terminalId: TerminalId): void;
 }
 
 export const TerminalTabs: React.FC<TerminalTabsProps> = ({
   project,
   activeTerminalId,
+  claudeDialogs,
   onSelect,
 }) => {
   const scrollRef = useRef<ScrollView>(null);
@@ -51,6 +57,8 @@ export const TerminalTabs: React.FC<TerminalTabsProps> = ({
       >
         {project.terminalIds.map((tid) => {
           const active = tid === activeTerminalId;
+          const agent = project.terminalAgentStatus[tid];
+          const dialogs = claudeDialogs[tid] ?? 0;
           return (
             <Pressable
               key={tid}
@@ -65,9 +73,14 @@ export const TerminalTabs: React.FC<TerminalTabsProps> = ({
                 if (!active) onSelect(tid);
               }}
             >
-              <Text style={[styles.chipText, active && styles.chipTextActive]} numberOfLines={1}>
+              {agent ? <LifecycleDot lifecycle={agent.lifecycle} /> : null}
+              <Text
+                style={[styles.chipText, agent && styles.chipTextAfterDot, active && styles.chipTextActive]}
+                numberOfLines={1}
+              >
                 {terminalLabel(project, tid)}
               </Text>
+              {dialogs > 0 ? <DialogBadge count={dialogs} /> : null}
             </Pressable>
           );
         })}
@@ -85,6 +98,8 @@ const styles = StyleSheet.create({
   },
   content: { alignItems: 'center', paddingHorizontal: 8, gap: 6 },
   chip: {
+    flexDirection: 'row',
+    alignItems: 'center',
     maxWidth: 180,
     paddingHorizontal: 12,
     paddingVertical: 6,
@@ -92,7 +107,8 @@ const styles = StyleSheet.create({
     backgroundColor: OkenaColors.surfaceElevated,
   },
   chipActive: { backgroundColor: OkenaColors.accent },
-  chipText: { color: OkenaColors.textSecondary, fontSize: 13 },
+  chipText: { color: OkenaColors.textSecondary, fontSize: 13, flexShrink: 1 },
+  chipTextAfterDot: { marginLeft: 6 },
   chipTextActive: { color: '#ffffff', fontWeight: '600' },
 });
 

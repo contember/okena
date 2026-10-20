@@ -10,7 +10,9 @@
  *   - the fullscreen terminal (`getFullscreenTerminal`),
  *   - the selected project's layout JSON (`getProjectLayoutJson`),
  *   - per-terminal activity (`getTerminalActivity`), folded into per-project
- *     {@link ProjectSignals} for the activity-ordered project list.
+ *     {@link ProjectSignals} for the activity-ordered project list,
+ *   - open Claude dialogs per terminal (`getClaudeDialogCounts`) and the
+ *     terminals with a connected `claude` (`getClaudeSessions`).
  *
  * The terminal on screen counts as seen: each poll (and each selection)
  * clears its unseen bell / notification and acknowledges a `done` agent. Its
@@ -63,6 +65,9 @@ import type { TerminalActivity } from '../native/okena';
 /** Poll interval (ms) for the workspace state — Dart used 1000ms. */
 export const WORKSPACE_POLL_MS = 1000;
 
+/** A terminal shown as its terminal or as its Claude chat. */
+export type TerminalViewMode = 'terminal' | 'chat';
+
 /**
  * The slice of the native surface this store calls. Narrowed from
  * {@link OkenaNative} so a test stub only has to provide these.
@@ -75,6 +80,8 @@ export type WorkspaceNative = Pick<
   | 'getProjectOrder'
   | 'getFullscreenTerminal'
   | 'getProjectLayoutJson'
+  | 'getClaudeDialogCounts'
+  | 'getClaudeSessions'
   | 'secondsSinceActivity'
   | 'getTerminalActivity'
   | 'markTerminalSeen'
@@ -128,6 +135,12 @@ export interface WorkspaceState {
    * shows the project list and clears it via {@link clearRestoreProjectMissing}.
    */
   restoreProjectMissing: boolean;
+  /** Open Claude dialogs per terminal id; terminals without one are absent. */
+  claudeDialogs: Record<TerminalId, number>;
+  /** Terminals whose `claude` is connected to Claude remote, sorted. */
+  claudeSessions: TerminalId[];
+  /** How each terminal is shown; terminals not listed show the terminal. */
+  terminalViews: Record<TerminalId, TerminalViewMode>;
 
   // ── actions ────────────────────────────────────────────────────────────
   /**
@@ -149,6 +162,8 @@ export interface WorkspaceState {
   selectProject(projectId: ProjectId): void;
   /** Select a terminal within the current project. Mirrors `selectTerminal`. */
   selectTerminal(terminalId: TerminalId): void;
+  /** Show a terminal as its terminal or as its Claude chat. */
+  setTerminalView(terminalId: TerminalId, view: TerminalViewMode): void;
   /** Acknowledge {@link restoreProjectMissing}. */
   clearRestoreProjectMissing(): void;
   /**
@@ -271,6 +286,7 @@ function agentStatusEquals(
  */
 function deriveSignals(
   projects: ProjectInfo[],
+  claudeDialogs: Record<TerminalId, number>,
   shownTerminalId: TerminalId | null,
   connId: ConnId,
 ): Record<ProjectId, ProjectSignals> {
@@ -302,7 +318,7 @@ function deriveSignals(
       : lastActivity.map((a) =>
           a.terminalId === shownTerminalId ? { ...a, lastOutputMsAgo: undefined } : a,
         );
-  return computeProjectSignals(projects, activity, doneSeen);
+  return computeProjectSignals(projects, activity, doneSeen, claudeDialogs);
 }
 
 /** Folder lists equal by id, name, color and member order (drives drawer ordering). */
@@ -315,6 +331,12 @@ function folderListEquals(a: FolderInfo[], b: FolderInfo[]): boolean {
     if (!arrayEquals(fa.projectIds, fb.projectIds)) return false;
   }
   return true;
+}
+
+function countsEqual(a: Record<string, number>, b: Record<string, number>): boolean {
+  const entries = Object.entries(a);
+  if (entries.length !== Object.keys(b).length) return false;
+  return entries.every(([key, count]) => b[key] === count);
 }
 
 function arrayEquals<T>(a: readonly T[], b: readonly T[]): boolean {
@@ -346,6 +368,8 @@ function pollState(
   const newFolders = native.getFolders(connId);
   const newProjectOrder = native.getProjectOrder(connId);
   const newFullscreen = native.getFullscreenTerminal(connId) ?? null;
+  const newClaudeDialogs = native.getClaudeDialogCounts(connId);
+  const newClaudeSessions = native.getClaudeSessions(connId);
 
   const prev = get();
   const patch: Partial<WorkspaceState> = {};
@@ -365,6 +389,14 @@ function pollState(
   }
   if (newFullscreen?.terminalId !== prev.fullscreenTerminal?.terminalId) {
     patch.fullscreenTerminal = newFullscreen;
+    changed = true;
+  }
+  if (!countsEqual(newClaudeDialogs, prev.claudeDialogs)) {
+    patch.claudeDialogs = newClaudeDialogs;
+    changed = true;
+  }
+  if (!arrayEquals(newClaudeSessions, prev.claudeSessions)) {
+    patch.claudeSessions = newClaudeSessions;
     changed = true;
   }
 
@@ -437,7 +469,12 @@ function pollState(
 
   // Activity signals. The shown terminal is the validated selection above.
   lastActivity = native.getTerminalActivity(connId);
-  const signals = deriveSignals(projects, project ? selectedTerminalId : null, connId);
+  const signals = deriveSignals(
+    projects,
+    patch.claudeDialogs ?? prev.claudeDialogs,
+    project ? selectedTerminalId : null,
+    connId,
+  );
   if (!signalsEqual(signals, prev.projectSignals)) {
     patch.projectSignals = signals;
     changed = true;
@@ -469,7 +506,7 @@ function signalsPatch(
   terminalId: TerminalId | null,
   connId: ConnId,
 ): Partial<WorkspaceState> {
-  const signals = deriveSignals(projects, terminalId, connId);
+  const signals = deriveSignals(projects, get().claudeDialogs, terminalId, connId);
   return signalsEqual(signals, get().projectSignals) ? {} : { projectSignals: signals };
 }
 
@@ -498,6 +535,9 @@ export const useWorkspaceStore: UseBoundStore<StoreApi<WorkspaceState>> =
     projectSignals: {},
     previousProjectId: null,
     restoreProjectMissing: false,
+    claudeDialogs: {},
+    claudeSessions: [],
+    terminalViews: {},
 
     start(connId, restore) {
       if (pollTimer !== null && activeConnId === connId) return; // already polling this conn
@@ -525,6 +565,9 @@ export const useWorkspaceStore: UseBoundStore<StoreApi<WorkspaceState>> =
         projectSignals: {},
         previousProjectId: null,
         restoreProjectMissing: false,
+        claudeDialogs: {},
+        claudeSessions: [],
+        terminalViews: {},
       });
     },
 
@@ -573,6 +616,13 @@ export const useWorkspaceStore: UseBoundStore<StoreApi<WorkspaceState>> =
           : get().terminalByProject,
         ...(connId ? signalsPatch(get, get().projects, terminalId, connId) : {}),
       });
+    },
+
+    setTerminalView(terminalId, view) {
+      const views = { ...get().terminalViews };
+      if (view === 'terminal') delete views[terminalId];
+      else views[terminalId] = view;
+      set({ terminalViews: views });
     },
 
     clearRestoreProjectMissing() {

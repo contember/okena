@@ -77,6 +77,7 @@ impl AddProjectDialog {
         workspace: Entity<Workspace>,
         remote_manager: Option<Entity<RemoteConnectionManager>>,
         window_id: WindowId,
+        target_connection_id: Option<String>,
         cx: &mut Context<Self>,
     ) -> Self {
         let name_input =
@@ -121,6 +122,16 @@ impl AddProjectDialog {
             }
         }
 
+        // A section `+` (Separate remote layout) asks for a specific host;
+        // fall back to Local when that host is not connected (any more).
+        let selected_target = target_connection_id
+            .and_then(|wanted| {
+                targets.iter().position(|t| {
+                    matches!(t, AddProjectTarget::Remote { connection_id, .. } if *connection_id == wanted)
+                })
+            })
+            .unwrap_or(0);
+
         Self {
             workspace,
             window_id,
@@ -138,7 +149,7 @@ impl AddProjectDialog {
             pending_path_value: None,
             initial_focus_done: false,
             targets,
-            selected_target: 0,
+            selected_target,
         }
     }
 

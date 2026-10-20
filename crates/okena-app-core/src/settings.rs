@@ -138,6 +138,12 @@ impl SettingsState {
         self.save_and_notify(cx);
     }
 
+    /// Show or hide the CPU/MEM readout in the status bar.
+    pub fn set_status_bar_show_metrics(&mut self, value: bool, cx: &mut Context<Self>) {
+        self.settings.status_bar.show_metrics = value;
+        self.save_and_notify(cx);
+    }
+
     setting_setter!(set_cursor_blink, cursor_blink, bool);
     setting_setter!(set_scrollback_lines, scrollback_lines, u32, 100, 100000);
     setting_setter!(
@@ -175,6 +181,8 @@ impl SettingsState {
         auto_resume_agent_sessions,
         bool
     );
+    setting_setter!(set_claude_remote, claude_remote, bool);
+    setting_setter!(set_claude_remote_channel, claude_remote_channel, bool);
     setting_setter!(
         set_terminal_ctrl_c_copies_selection,
         terminal_ctrl_c_copies_selection,
@@ -296,6 +304,26 @@ impl SettingsState {
     /// Set sidebar auto-hide mode
     pub fn set_sidebar_auto_hide(&mut self, value: bool, cx: &mut Context<Self>) {
         self.settings.sidebar.auto_hide = value;
+        self.save_and_notify(cx);
+    }
+
+    /// Set how remote projects are laid out in the sidebar.
+    pub fn set_sidebar_remote_layout(
+        &mut self,
+        value: crate::workspace::settings::RemoteSidebarLayout,
+        cx: &mut Context<Self>,
+    ) {
+        self.settings.sidebar.remote_layout = value;
+        self.save_and_notify(cx);
+    }
+
+    /// Set how the sidebar shows host CPU / memory.
+    pub fn set_sidebar_host_stats(
+        &mut self,
+        value: crate::workspace::settings::HostStatsStyle,
+        cx: &mut Context<Self>,
+    ) {
+        self.settings.sidebar.host_stats = value;
         self.save_and_notify(cx);
     }
 

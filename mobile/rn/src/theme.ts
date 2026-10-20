@@ -44,6 +44,8 @@ const OkenaColorsArgb = {
   success: 0xff4ade80,
   warning: 0xfffbbf24,
   error: 0xfff87171,
+  warningBorder: 0x55fbbf24,
+  errorBorder: 0x88f87171,
   // Glass
   glassBg: 0xcc0a0a0a,
   glassStroke: 0x18ffffff,

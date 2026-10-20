@@ -38,6 +38,14 @@ pub enum RemoteCommand {
     GetTerminalSizes { terminal_ids: Vec<String> },
     /// Bracketed-paste server-local text into the target terminal.
     PastePath { terminal_id: String, text: String },
+    /// Agent session + lifecycle of a pane, answered with a serialized
+    /// [`okena_core::claude_remote::ClaudeTerminalInfo`]. `probe_foreground`
+    /// also fills `foreground_command`, which forks tmux or scans /proc: only
+    /// for typing into the pane, never on a polled read.
+    ClaudeTerminalInfo {
+        terminal_id: String,
+        probe_foreground: bool,
+    },
 }
 
 /// Channel types for the bridge.

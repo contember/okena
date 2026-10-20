@@ -6,6 +6,7 @@
  * the terminal id set is untouched (CORR-15).
  */
 
+import type { AgentLifecycle } from '../native/claude';
 import type { ProjectInfo, TerminalActivity } from '../native/okena';
 import {
   configureWorkspaceStore,
@@ -57,6 +58,8 @@ function stubNative(layouts: string[]): WorkspaceNative {
     getProjectOrder: () => [PROJECT.id],
     getFullscreenTerminal: () => undefined,
     getProjectLayoutJson: () => layouts[Math.min(tick++, layouts.length - 1)]!,
+    getClaudeDialogCounts: () => ({}),
+    getClaudeSessions: () => [],
     secondsSinceActivity: () => 0,
     getTerminalActivity: () => [],
     markTerminalSeen: () => {},
@@ -325,7 +328,7 @@ describe('workspace activity signals', () => {
   });
 
   it('acknowledges a done agent once seen, until the next transition to done', () => {
-    let lifecycle = 'done';
+    let lifecycle: AgentLifecycle = 'done';
     const withAgent = (): ProjectInfo[] => [
       A,
       { ...B, terminalAgentStatus: { b1: { lifecycle } } },
@@ -385,5 +388,75 @@ describe('workspace activity signals', () => {
     pinned = true;
     jest.advanceTimersByTime(WORKSPACE_POLL_MS);
     expect(useWorkspaceStore.getState().projects[0]!.pinned).toBe(true);
+  });
+});
+
+describe('workspace Claude dialog tracking', () => {
+  beforeEach(() => {
+    jest.useFakeTimers();
+  });
+
+  afterEach(() => {
+    useWorkspaceStore.getState().stop();
+    jest.useRealTimers();
+  });
+
+  it('publishes dialog-count changes', () => {
+    let counts: Record<string, number> = {};
+    configureWorkspaceStore({
+      native: { ...stubNative([TABS_FIRST_ACTIVE]), getClaudeDialogCounts: () => counts },
+    });
+
+    useWorkspaceStore.getState().start('conn-1');
+    expect(useWorkspaceStore.getState().claudeDialogs).toEqual({});
+
+    counts = { t1: 1 };
+    jest.advanceTimersByTime(WORKSPACE_POLL_MS);
+    expect(useWorkspaceStore.getState().claudeDialogs).toEqual({ t1: 1 });
+  });
+});
+
+describe('workspace Claude sessions', () => {
+  beforeEach(() => {
+    jest.useFakeTimers();
+  });
+
+  afterEach(() => {
+    useWorkspaceStore.getState().stop();
+    jest.useRealTimers();
+  });
+
+  it('publishes the terminals with a connected claude', () => {
+    let sessions: string[] = [];
+    configureWorkspaceStore({
+      native: { ...stubNative([TABS_FIRST_ACTIVE]), getClaudeSessions: () => sessions },
+    });
+
+    useWorkspaceStore.getState().start('conn-1');
+    expect(useWorkspaceStore.getState().claudeSessions).toEqual([]);
+
+    sessions = ['t1'];
+    jest.advanceTimersByTime(WORKSPACE_POLL_MS);
+    expect(useWorkspaceStore.getState().claudeSessions).toEqual(['t1']);
+  });
+});
+
+describe('workspace terminal views', () => {
+  afterEach(() => {
+    useWorkspaceStore.getState().stop();
+  });
+
+  it('remembers the chat view per terminal until switched back or stopped', () => {
+    configureWorkspaceStore({ native: stubNative([TABS_FIRST_ACTIVE]) });
+    const store = useWorkspaceStore.getState();
+    store.start('conn-1');
+
+    store.setTerminalView('t1', 'chat');
+    store.setTerminalView('t2', 'chat');
+    store.setTerminalView('t2', 'terminal');
+    expect(useWorkspaceStore.getState().terminalViews).toEqual({ t1: 'chat' });
+
+    store.stop();
+    expect(useWorkspaceStore.getState().terminalViews).toEqual({});
   });
 });

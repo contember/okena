@@ -188,6 +188,68 @@ pub struct FileFinderSettings {
     pub show_ignored: bool,
 }
 
+/// How the sidebar lays out projects that live on remote daemons.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RemoteSidebarLayout {
+    /// One list: remote projects interleave with local ones in `project_order`.
+    #[default]
+    Mixed,
+    /// A LOCAL section first, then one section per connected remote host.
+    Separate,
+}
+
+impl RemoteSidebarLayout {
+    pub fn display_name(self) -> &'static str {
+        match self {
+            RemoteSidebarLayout::Mixed => "Mixed",
+            RemoteSidebarLayout::Separate => "Separate",
+        }
+    }
+
+    pub fn all_variants() -> &'static [RemoteSidebarLayout] {
+        &[RemoteSidebarLayout::Mixed, RemoteSidebarLayout::Separate]
+    }
+
+    pub fn is_separate(self) -> bool {
+        self == RemoteSidebarLayout::Separate
+    }
+}
+
+/// How (whether) the sidebar shows each host's CPU / memory.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum HostStatsStyle {
+    #[default]
+    Off,
+    /// `CPU 41%  MEM 72%` in the status bar's colours.
+    Text,
+    /// `CPU` / `MEM` labels with a small vertical gauge each.
+    Gauge,
+}
+
+impl HostStatsStyle {
+    pub fn display_name(self) -> &'static str {
+        match self {
+            HostStatsStyle::Off => "Off",
+            HostStatsStyle::Text => "Text",
+            HostStatsStyle::Gauge => "Gauge",
+        }
+    }
+
+    pub fn all_variants() -> &'static [HostStatsStyle] {
+        &[
+            HostStatsStyle::Off,
+            HostStatsStyle::Text,
+            HostStatsStyle::Gauge,
+        ]
+    }
+
+    pub fn is_on(self) -> bool {
+        self != HostStatsStyle::Off
+    }
+}
+
 /// Sidebar settings
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SidebarSettings {
@@ -200,6 +262,13 @@ pub struct SidebarSettings {
     /// Sidebar width in pixels
     #[serde(default = "default_sidebar_width")]
     pub width: f32,
+    /// Mixed (default) or one section per host — see [`RemoteSidebarLayout`].
+    #[serde(default)]
+    pub remote_layout: RemoteSidebarLayout,
+    /// CPU / memory of the local machine and each remote host in the sidebar
+    /// (host rows in Separate layout, connection rows otherwise).
+    #[serde(default)]
+    pub host_stats: HostStatsStyle,
 }
 
 impl Default for SidebarSettings {
@@ -208,6 +277,8 @@ impl Default for SidebarSettings {
             is_open: false,
             auto_hide: false,
             width: DEFAULT_SIDEBAR_WIDTH,
+            remote_layout: RemoteSidebarLayout::default(),
+            host_stats: HostStatsStyle::default(),
         }
     }
 }
@@ -221,6 +292,9 @@ pub struct StatusBarSettings {
     /// Draw CPU/MEM as a short history graph instead of a single-value bar.
     #[serde(default = "default_status_bar_metrics_graph")]
     pub metrics_graph: bool,
+    /// Show the CPU/MEM readout in the status bar at all.
+    #[serde(default = "default_status_bar_show_metrics")]
+    pub show_metrics: bool,
 }
 
 impl Default for StatusBarSettings {
@@ -228,8 +302,13 @@ impl Default for StatusBarSettings {
         Self {
             style: StatusBarStyle::default(),
             metrics_graph: default_status_bar_metrics_graph(),
+            show_metrics: default_status_bar_show_metrics(),
         }
     }
+}
+
+fn default_status_bar_show_metrics() -> bool {
+    true
 }
 
 fn default_status_bar_metrics_graph() -> bool {
@@ -333,6 +412,17 @@ pub struct AppSettings {
     /// session whose agent is (still) running, so nothing is resumed.
     #[serde(default)]
     pub auto_resume_agent_sessions: bool,
+    /// Claude remote: let other clients (phone, web) follow and steer `claude`
+    /// sessions in panes. When on, new panes get a `BUN_OPTIONS` preload that
+    /// adds Okena's hooks (and the MCP channel, see `claude_remote_channel`)
+    /// to every interactive `claude`. Opt-in (default off). Unix only.
+    #[serde(default)]
+    pub claude_remote: bool,
+    /// With `claude_remote` on, also load Okena's MCP channel so remote prompts
+    /// reach Claude while it works. Claude shows a confirmation dialog for it
+    /// on every start; when off, prompts are typed into the idle terminal.
+    #[serde(default = "default_true")]
+    pub claude_remote_channel: bool,
 
     // File opener settings
     /// Editor command to open file paths (e.g. "code", "cursor", "zed", "subl", "vim")
@@ -510,6 +600,8 @@ impl Default for AppSettings {
             auto_hide_single_terminal_header: false,
             session_backend: SessionBackend::default(),
             auto_resume_agent_sessions: false,
+            claude_remote: false,
+            claude_remote_channel: true,
             file_opener: default_file_opener(),
             hooks: HooksConfig::default(),
             diff_view_mode: DiffViewMode::default(),

@@ -17,6 +17,7 @@ behaviour.
 - [`services.md`](services.md) — Docker Compose integration and port detection.
 - [`worktrees.md`](worktrees.md) — git worktree projects: create, close, parent linkage.
 - [`remote.md`](remote.md) — remote control server: pairing, HTTP/WS API, TLS.
+- [`claude-remote.md`](claude-remote.md) — chat view of `claude` panes for web and mobile: prompts, dialogs, transcript.
 - [`mobile.md`](mobile.md) — React Native mobile client architecture (uniffi over `okena-mobile-ffi`).
 - [`testing.md`](testing.md) — repo-wide test-selection rules + the GPUI test harness setup.
 

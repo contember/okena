@@ -299,20 +299,15 @@ const char = (c: string, accessibilityLabel: string): ToolbarKey => ({
 
 /**
  * The always-visible row: what driving Claude Code needs constantly.
- * esc interrupts, ^C clears/exits, tab completes, shift+tab cycles permission
- * and plan mode, up/down walk history and menus, return confirms.
+ * esc interrupts, ^C clears/exits, tab completes, edit opens the compose sheet
+ * for writing prompts with autocorrect, up/down walk history and menus, return
+ * confirms.
  */
 export const PRIMARY_KEYS: readonly ToolbarKey[] = [
   { id: 'esc', label: 'esc', accessibilityLabel: 'Escape', action: special('Escape') },
   { id: 'ctrl-c', label: '^C', accessibilityLabel: 'Control C', action: special('CtrlC') },
   { id: 'tab', label: 'tab', accessibilityLabel: 'Tab', action: special('Tab') },
-  {
-    id: 'shift-tab',
-    label: 'tab',
-    caption: 'shift',
-    accessibilityLabel: 'Shift Tab',
-    action: text(SHIFT_TAB),
-  },
+  { id: 'compose', label: 'edit', accessibilityLabel: 'Compose input', action: { type: 'compose' } },
   { id: 'up', icon: 'up', accessibilityLabel: 'Arrow up', action: { type: 'arrow', dir: 'up' }, repeat: true },
   { id: 'down', icon: 'down', accessibilityLabel: 'Arrow down', action: { type: 'arrow', dir: 'down' }, repeat: true },
   { id: 'enter', icon: 'return', accessibilityLabel: 'Return', action: special('Enter'), emphasis: true },
@@ -327,7 +322,13 @@ export const PRIMARY_KEYS: readonly ToolbarKey[] = [
 export const MORE_ROWS: readonly (readonly ToolbarKey[])[] = [
   [
     { id: 'paste', label: 'paste', accessibilityLabel: 'Paste clipboard', action: { type: 'paste' } },
-    { id: 'compose', label: 'edit', accessibilityLabel: 'Compose input', action: { type: 'compose' } },
+    {
+      id: 'shift-tab',
+      label: 'tab',
+      caption: 'shift',
+      accessibilityLabel: 'Shift Tab',
+      action: text(SHIFT_TAB),
+    },
     { id: 'select', label: 'select', accessibilityLabel: 'Select text', action: { type: 'selectText' } },
     char('/', 'Slash'),
     char('@', 'At sign'),
