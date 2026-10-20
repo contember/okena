@@ -230,7 +230,9 @@ key rail visible below the canvas:
   Home/End/Page Up/Page Down/Delete, explicit arrows, and common raw characters.
 - `paste` sends a single-line clipboard value directly. Multiline clipboard content opens in
   Compose first so pasted newlines cannot run several commands without review.
-- Compose offers **Insert** (send exactly the edited text) and **Run** (send text followed by Enter).
+- `edit` in the primary row opens Compose: a native text field with autocorrect, capitalization,
+  spellcheck, and dictation, for writing prompts. Compose offers **Insert** (send exactly the
+  edited text) and **Run** (send text followed by Enter).
 - Long-press and drag selects terminal text; release copies it to the OS clipboard and briefly
   shows a `Copied` confirmation. Double-tap copies the selected word.
 - Vertical drag scrolls the pane under the finger: scrollback in a normal shell, or wheel events
