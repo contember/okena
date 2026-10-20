@@ -1398,6 +1398,7 @@ mod tests {
             path: "/tmp/repo-worktree".to_string(),
             layout: None,
             terminal_names: HashMap::new(),
+            terminal_statuses: Default::default(),
             hidden_terminals: HashMap::new(),
             worktree_info: None,
             worktree_ids: Vec::new(),

@@ -396,6 +396,8 @@ pub struct ProjectRuntimeQuiesce {
 struct ProjectRuntimeSlot {
     path: Vec<usize>,
     terminal_name: Option<String>,
+    /// The user's board status, keyed by terminal id like the name.
+    status: Option<String>,
     hidden: Option<bool>,
     /// Carried for the same reason as the two above: the quiesce mints a new
     /// terminal id for the pane, and every one of these maps is keyed by the old
@@ -473,6 +475,7 @@ fn take_project_layout_runtime(
     global_default_shell: &ShellType,
     backend_preference: SessionBackend,
     terminal_names: &mut HashMap<String, String>,
+    terminal_statuses: &mut HashMap<String, String>,
     hidden_terminals: &mut HashMap<String, bool>,
     agent_sessions: &mut HashMap<String, okena_core::agent_session::AgentSession>,
     path: &mut Vec<usize>,
@@ -500,6 +503,7 @@ fn take_project_layout_runtime(
             slots.push(ProjectRuntimeSlot {
                 path: path.clone(),
                 terminal_name: terminal_names.remove(&terminal_id),
+                status: terminal_statuses.remove(&terminal_id),
                 hidden: hidden_terminals.remove(&terminal_id),
                 agent_session: agent_sessions.remove(&terminal_id),
             });
@@ -513,6 +517,7 @@ fn take_project_layout_runtime(
                     global_default_shell,
                     backend_preference,
                     terminal_names,
+                    terminal_statuses,
                     hidden_terminals,
                     agent_sessions,
                     path,
@@ -664,6 +669,7 @@ impl Workspace {
                         global_default_shell,
                         backend_preference,
                         &mut project.terminal_names,
+                        &mut project.terminal_statuses,
                         &mut project.hidden_terminals,
                         &mut project.agent_sessions,
                         &mut Vec::new(),
@@ -687,6 +693,7 @@ impl Workspace {
                         hook_terminal_ids.push(terminal_id.clone());
                         project.hook_terminals.remove(terminal_id);
                         project.terminal_names.remove(terminal_id);
+                        project.terminal_statuses.remove(terminal_id);
                         project.hidden_terminals.remove(terminal_id);
                         project.agent_sessions.remove(terminal_id);
                     } else {
@@ -776,6 +783,11 @@ impl Workspace {
                     .terminal_names
                     .insert(terminal_id.clone(), name.clone());
             }
+            if let Some(status) = &slot.status {
+                project
+                    .terminal_statuses
+                    .insert(terminal_id.clone(), status.clone());
+            }
             if let Some(hidden) = slot.hidden {
                 project.hidden_terminals.insert(terminal_id.clone(), hidden);
             }
@@ -814,6 +826,7 @@ impl Workspace {
                 global_default_shell,
                 backend_preference,
                 &mut project.terminal_names,
+                &mut project.terminal_statuses,
                 &mut project.hidden_terminals,
                 &mut project.agent_sessions,
                 &mut Vec::new(),
@@ -881,6 +894,7 @@ impl Workspace {
                 project.hook_terminals.drain().map(|(id, _)| id).collect();
             for terminal_id in &project_hook_ids {
                 project.terminal_names.remove(terminal_id);
+                project.terminal_statuses.remove(terminal_id);
                 project.hidden_terminals.remove(terminal_id);
                 project.agent_sessions.remove(terminal_id);
             }
@@ -2002,6 +2016,7 @@ impl Workspace {
                     }
                 }
                 project.terminal_names.remove(terminal_id);
+                project.terminal_statuses.remove(terminal_id);
                 project.agent_sessions.remove(terminal_id);
                 self.notify_data(cx);
                 return;
@@ -2104,6 +2119,9 @@ impl Workspace {
 
         if let Some(name) = project.terminal_names.remove(old_id) {
             project.terminal_names.insert(new_id.to_string(), name);
+        }
+        if let Some(status) = project.terminal_statuses.remove(old_id) {
+            project.terminal_statuses.insert(new_id.to_string(), status);
         }
 
         // Keyed by terminal id like the map above, so a rerun would otherwise
@@ -3059,6 +3077,7 @@ mod workspace_tests {
                 show_name_when_inactive: false,
             }),
             terminal_names: HashMap::new(),
+            terminal_statuses: Default::default(),
             hidden_terminals: HashMap::new(),
             worktree_info: None,
             worktree_ids: Vec::new(),
@@ -4116,6 +4135,7 @@ mod gpui_tests {
                 show_name_when_inactive: false,
             }),
             terminal_names: HashMap::new(),
+            terminal_statuses: Default::default(),
             hidden_terminals: HashMap::new(),
             worktree_info: None,
             worktree_ids: Vec::new(),
@@ -4301,6 +4321,7 @@ mod gpui_tests {
                     show_in_overview: true,
                     layout: Some(layout),
                     terminal_names: HashMap::new(),
+                    terminal_statuses: Default::default(),
                     git_status: None,
                     terminal_agent_status: HashMap::new(),
                     folder_color: FolderColor::Default,

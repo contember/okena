@@ -704,6 +704,15 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
             terminal_id: s(&terminal_id),
             name,
         },
+        ActionRequest::SetTerminalStatus {
+            project_id,
+            terminal_id,
+            status,
+        } => ActionRequest::SetTerminalStatus {
+            project_id: s(&project_id),
+            terminal_id: s(&terminal_id),
+            status,
+        },
         ActionRequest::SwitchTerminalShell {
             project_id,
             terminal_id,

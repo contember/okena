@@ -326,6 +326,17 @@ pub(super) fn rename(
     ActionResult::Ok(None)
 }
 
+pub(super) fn set_status(
+    ws: &mut Workspace,
+    project_id: String,
+    terminal_id: String,
+    status: Option<String>,
+    cx: &mut impl WorkspaceCx,
+) -> ActionResult {
+    ws.set_terminal_status(&project_id, &terminal_id, status, cx);
+    ActionResult::Ok(None)
+}
+
 pub(super) fn read_content(
     ws: &mut Workspace,
     terminal_id: String,

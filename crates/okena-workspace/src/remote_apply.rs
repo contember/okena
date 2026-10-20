@@ -159,6 +159,11 @@ pub fn apply_remote_snapshot(
                     .iter()
                     .map(|(k, v)| (format!("remote:{}:{}", conn_id, k), v.clone()))
                     .collect();
+                let terminal_statuses: HashMap<String, String> = api_project
+                    .terminal_statuses
+                    .iter()
+                    .map(|(k, v)| (format!("remote:{}:{}", conn_id, k), v.clone()))
+                    .collect();
 
                 let project_color = api_project.folder_color;
                 let conn_id_owned = conn_id.clone();
@@ -204,6 +209,7 @@ pub fn apply_remote_snapshot(
                         _ => layout,
                     };
                     existing.terminal_names = terminal_names;
+                    existing.terminal_statuses = terminal_statuses;
                     existing.folder_color = project_color;
                     existing.worktree_info =
                         api_project
@@ -284,6 +290,7 @@ pub fn apply_remote_snapshot(
                         path: api_project.path.clone(),
                         layout,
                         terminal_names,
+                        terminal_statuses,
                         hidden_terminals: HashMap::new(),
                         worktree_info,
                         worktree_ids,
@@ -582,6 +589,7 @@ mod tests {
             show_in_overview: true,
             layout,
             terminal_names: HashMap::new(),
+            terminal_statuses: Default::default(),
             terminal_agent_status: HashMap::new(),
             git_status: None,
             folder_color: FolderColor::Default,
@@ -628,6 +636,41 @@ mod tests {
             claude_dialogs: Default::default(),
             claude_sessions: Vec::new(),
         }
+    }
+
+    #[test]
+    fn terminal_statuses_are_prefixed_like_terminal_names() {
+        let mut data = empty_data();
+        let mut rs = RemoteSyncState::new();
+        let mut project = api_project("a", Some(terminal("ta")));
+        project
+            .terminal_statuses
+            .insert("ta".to_string(), "review".to_string());
+        let snap = RemoteSnapshot {
+            config: config("c1"),
+            state: Some(state_with(vec![project], vec!["a".into()], vec![])),
+        };
+
+        apply_remote_snapshot(&mut data, &mut rs, &[snap], WindowId::Main);
+        assert_eq!(
+            data.projects[0]
+                .terminal_statuses
+                .get("remote:c1:ta")
+                .map(String::as_str),
+            Some("review")
+        );
+
+        // A later snapshot that cleared the status clears the mirror too.
+        let snap = RemoteSnapshot {
+            config: config("c1"),
+            state: Some(state_with(
+                vec![api_project("a", Some(terminal("ta")))],
+                vec!["a".into()],
+                vec![],
+            )),
+        };
+        apply_remote_snapshot(&mut data, &mut rs, &[snap], WindowId::Main);
+        assert!(data.projects[0].terminal_statuses.is_empty());
     }
 
     #[test]

@@ -132,6 +132,7 @@ mod tests {
             path: path.to_string(),
             layout: None,
             terminal_names: Default::default(),
+            terminal_statuses: Default::default(),
             hidden_terminals: Default::default(),
             worktree_info: None,
             worktree_ids: Vec::new(),

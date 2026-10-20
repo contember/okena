@@ -307,6 +307,7 @@ mod tests {
             show_in_overview: true,
             layout,
             terminal_names,
+            terminal_statuses: Default::default(),
             terminal_agent_status: std::collections::HashMap::new(),
             git_status: None,
             folder_color: FolderColor::Default,

@@ -202,6 +202,13 @@ pub struct ProjectData {
     pub layout: Option<LayoutNode>,
     #[serde(default)]
     pub terminal_names: HashMap<String, String>,
+    /// User-set status per terminal (terminal id → board column id). A manual
+    /// label, independent of the agent status the terminal reports itself.
+    /// Column ids resolve against the global board columns in settings; an
+    /// id with no column renders as unassigned. Empty for every project that
+    /// never had a status set.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub terminal_statuses: HashMap<String, String>,
     #[serde(default)]
     pub hidden_terminals: HashMap<String, bool>,
     /// Optional worktree metadata (only set for worktree projects)
@@ -348,6 +355,7 @@ mod tests {
             path: path.to_string(),
             layout: None,
             terminal_names: HashMap::new(),
+            terminal_statuses: Default::default(),
             hidden_terminals: HashMap::new(),
             worktree_info: None,
             worktree_ids: Vec::new(),
@@ -470,6 +478,29 @@ mod tests {
 
         assert_eq!(project.id, "p1");
         assert_eq!(project.connection_id.as_deref(), Some("c1"));
+    }
+
+    #[test]
+    fn terminal_statuses_default_empty_and_serialize_only_when_set() {
+        // A workspace.json written before statuses existed loads with none.
+        let json = r#"{"id": "p1", "name": "Test", "path": "/tmp/test", "layout": null}"#;
+        let project: ProjectData = serde_json::from_str(json).unwrap();
+        assert!(project.terminal_statuses.is_empty());
+
+        // And saving it back does not grow the file for users who never set one.
+        let out = serde_json::to_string(&project).unwrap();
+        assert!(!out.contains("terminal_statuses"));
+
+        let mut project = make_project("/tmp/test");
+        project
+            .terminal_statuses
+            .insert("t1".to_string(), "review".to_string());
+        let out = serde_json::to_string(&project).unwrap();
+        let back: ProjectData = serde_json::from_str(&out).unwrap();
+        assert_eq!(
+            back.terminal_statuses.get("t1").map(String::as_str),
+            Some("review")
+        );
     }
 
     #[test]

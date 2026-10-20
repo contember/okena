@@ -100,6 +100,7 @@ mod tests {
             path: std::env::temp_dir().to_string_lossy().into_owned(),
             layout: None,
             terminal_names: HashMap::from([(terminal_id.into(), "Before remove".into())]),
+            terminal_statuses: Default::default(),
             hidden_terminals: Default::default(),
             worktree_info: None,
             worktree_ids: Vec::new(),

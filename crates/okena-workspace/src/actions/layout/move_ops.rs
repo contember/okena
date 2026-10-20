@@ -251,6 +251,7 @@ impl Workspace {
 
         // Migrate metadata from source to target
         let terminal_name = src_project.terminal_names.remove(source_terminal_id);
+        let terminal_status = src_project.terminal_statuses.remove(source_terminal_id);
         let hidden_state = src_project.hidden_terminals.remove(source_terminal_id);
         // The agent keeps running in the moved pane, so its session identity
         // has to follow it — the map is per project.
@@ -273,6 +274,9 @@ impl Workspace {
         src_project
             .agent_sessions
             .retain(|id, _| src_layout_ids.contains(id));
+        src_project
+            .terminal_statuses
+            .retain(|id, _| src_layout_ids.contains(id));
 
         // --- Insert into target ---
         let tgt_project = &mut self.data.projects[tgt_idx];
@@ -281,6 +285,11 @@ impl Workspace {
             tgt_project
                 .terminal_names
                 .insert(source_terminal_id.to_string(), name);
+        }
+        if let Some(status) = terminal_status {
+            tgt_project
+                .terminal_statuses
+                .insert(source_terminal_id.to_string(), status);
         }
         if let Some(hidden) = hidden_state {
             tgt_project
@@ -630,6 +639,7 @@ impl Workspace {
 
         // Migrate metadata
         let terminal_name = src_project.terminal_names.remove(terminal_id);
+        let terminal_status = src_project.terminal_statuses.remove(terminal_id);
         let hidden_state = src_project.hidden_terminals.remove(terminal_id);
         // The agent keeps running in the moved pane, so its session identity
         // has to follow it — the map is per project.
@@ -652,6 +662,9 @@ impl Workspace {
         src_project
             .agent_sessions
             .retain(|id, _| src_layout_ids.contains(id));
+        src_project
+            .terminal_statuses
+            .retain(|id, _| src_layout_ids.contains(id));
 
         // --- Insert into target ---
         let tgt_project = &mut self.data.projects[tgt_idx];
@@ -660,6 +673,11 @@ impl Workspace {
             tgt_project
                 .terminal_names
                 .insert(terminal_id.to_string(), name);
+        }
+        if let Some(status) = terminal_status {
+            tgt_project
+                .terminal_statuses
+                .insert(terminal_id.to_string(), status);
         }
         if let Some(hidden) = hidden_state {
             tgt_project
@@ -743,6 +761,7 @@ mod tests {
             path: "/tmp/test".to_string(),
             layout: Some(layout),
             terminal_names: HashMap::new(),
+            terminal_statuses: Default::default(),
             hidden_terminals: HashMap::new(),
             worktree_info: None,
             worktree_ids: Vec::new(),
