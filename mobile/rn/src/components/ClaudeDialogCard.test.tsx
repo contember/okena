@@ -132,4 +132,12 @@ describe('claude dialog card', () => {
     rerender(QUESTION, { status: 'sending' });
     expect(buttons()).toEqual({ Submit: true });
   });
+
+  it('offers only Deny for questions it cannot read', () => {
+    render({ ...QUESTION, tool_input: { questions: 'Which?' } }, undefined);
+    expect(buttons()).toEqual({ Deny: false });
+    press('Deny');
+    press('Deny');
+    expect(onDecide).toHaveBeenCalledWith({ decision: 'deny' });
+  });
 });

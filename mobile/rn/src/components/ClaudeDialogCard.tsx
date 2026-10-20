@@ -61,6 +61,16 @@ export const ClaudeDialogCard: React.FC<ClaudeDialogCardProps> = ({
           onDecide={onDecide}
         />
       );
+    // Allow would send the question back with no answers.
+    return (
+      <PermissionCard
+        dialog={dialog}
+        answer={answer}
+        onDecide={onDecide}
+        onRevealStep={onRevealStep}
+        denyOnly
+      />
+    );
   }
   if (dialog.tool_name === 'ExitPlanMode') {
     return (
@@ -84,12 +94,12 @@ export const ClaudeDialogCard: React.FC<ClaudeDialogCardProps> = ({
 
 // ── default tool: allow / always allow / deny ────────────────────────────────
 
-const PermissionCard: React.FC<ClaudeDialogCardProps> = ({
-  dialog,
-  answer,
-  onDecide,
-  onRevealStep,
-}) => {
+const PermissionCard: React.FC<
+  ClaudeDialogCardProps & {
+    /** The dialog cannot be answered here; only Deny is offered. */
+    denyOnly?: boolean;
+  }
+> = ({ dialog, answer, onDecide, onRevealStep, denyOnly = false }) => {
   const [denying, setDenying] = useState(false);
   const sending = answer?.status === 'sending';
   return (
@@ -99,6 +109,11 @@ const PermissionCard: React.FC<ClaudeDialogCardProps> = ({
           {previewClaudeToolInput(dialog.tool_input)}
         </Text>
       </ScrollView>
+      {denyOnly ? (
+        <Text style={styles.muted}>
+          These questions cannot be shown here. Answer them in the terminal.
+        </Text>
+      ) : null}
       {denying ? (
         <MessageStep
           placeholder="Tell Claude why (optional)"
@@ -117,19 +132,21 @@ const PermissionCard: React.FC<ClaudeDialogCardProps> = ({
             disabled={sending}
             onPress={() => setDenying(true)}
           />
-          {dialog.permission_suggestions.length > 0 ? (
+          {!denyOnly && dialog.permission_suggestions.length > 0 ? (
             <CardButton
               label="Always"
               disabled={sending}
               onPress={() => onDecide({ decision: 'allow', always: true })}
             />
           ) : null}
-          <CardButton
-            label="Allow"
-            primary
-            disabled={sending}
-            onPress={() => onDecide({ decision: 'allow' })}
-          />
+          {!denyOnly ? (
+            <CardButton
+              label="Allow"
+              primary
+              disabled={sending}
+              onPress={() => onDecide({ decision: 'allow' })}
+            />
+          ) : null}
         </View>
       )}
     </Card>
