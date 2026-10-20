@@ -14,6 +14,7 @@ mod settings;
 mod status;
 #[cfg(feature = "gpui-ui")]
 mod update_checker;
+pub mod whats_new;
 
 #[cfg(feature = "gpui-ui")]
 use gpui::AppContext as _;

@@ -241,6 +241,44 @@ pub struct Okena {
 
 /// Serialize the settings this client mirrors to the daemon. On failure the
 /// baseline becomes `Null`, which makes the next delta the full settings.
+/// Post the post-update toast, or record the running version — see
+/// `okena_ext_updater::whats_new::whats_new_nudge` for the rules.
+fn nudge_whats_new_in(cx: &mut App) {
+    use crate::workspace::toast::{Toast, ToastAction, ToastActionStyle, ToastManager};
+    use okena_ext_updater::whats_new::{Nudge, whats_new_nudge};
+
+    let Some(running) = cx
+        .try_global::<okena_ext_updater::GlobalUpdateInfo>()
+        .map(|global| global.0.app_version())
+    else {
+        return;
+    };
+    let settings = crate::settings::settings_entity(cx);
+    let (seen, enabled) = {
+        let settings = &settings.read(cx).settings;
+        (
+            settings.whats_new_seen_version.clone(),
+            settings.show_whats_new_after_update,
+        )
+    };
+    match whats_new_nudge(seen.as_deref(), &running, enabled) {
+        Nudge::RecordOnly => settings.update(cx, |state, cx| {
+            state.set_whats_new_seen_version(Some(running), cx);
+        }),
+        Nudge::Toast => ToastManager::post(
+            Toast::info(format!("Okena v{running} — see what's new"))
+                .with_ttl(Duration::from_secs(30))
+                .with_actions(vec![ToastAction::new(
+                    crate::soft_close::WHATS_NEW_OPEN_ACTION,
+                    "What's new",
+                    ToastActionStyle::Primary,
+                )]),
+            cx,
+        ),
+        Nudge::Nothing => {}
+    }
+}
+
 fn mirrored_settings(settings: &crate::workspace::persistence::AppSettings) -> serde_json::Value {
     okena_app_core::remote_config::shared_settings_value(settings).unwrap_or_else(|error| {
         log::error!("Failed to encode settings update: {error}");
@@ -249,6 +287,10 @@ fn mirrored_settings(settings: &crate::workspace::persistence::AppSettings) -> s
 }
 
 impl Okena {
+    fn nudge_whats_new(cx: &mut Context<Self>) {
+        nudge_whats_new_in(cx);
+    }
+
     pub fn new(
         workspace_data: WorkspaceData,
         client_project_layouts: HashMap<String, crate::workspace::state::LayoutNode>,
@@ -408,6 +450,13 @@ impl Okena {
             })
             .detach();
         }
+
+        // Once per process: the first start after an update gets a toast that
+        // opens What's New; a fresh install only records the running version.
+        // Placed after the settings subscription above so the recorded version
+        // reaches the daemon (the action queue holds it until the loopback
+        // connection is up).
+        Self::nudge_whats_new(cx);
 
         cx.subscribe(&remote_manager, |this, _rm, event, cx| match event {
             RemoteManagerEvent::TerminalActivity(terminal_ids) => {

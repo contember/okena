@@ -674,7 +674,23 @@ impl OverlayManager {
     // ========================================================================
 
     pub fn toggle_about(&mut self, cx: &mut Context<Self>) {
-        toggle_overlay!(self, cx, AboutModal, AboutModalEvent, AboutModal::new);
+        if self.is_modal::<AboutModal>() {
+            self.close_modal(cx);
+            return;
+        }
+        let entity = cx.new(AboutModal::new);
+        cx.subscribe(
+            &entity,
+            |this, _, event: &AboutModalEvent, cx| match event {
+                AboutModalEvent::Close => this.close_modal(cx),
+                AboutModalEvent::ShowWhatsNew => {
+                    this.close_modal(cx);
+                    this.toggle_whats_new(cx);
+                }
+            },
+        )
+        .detach();
+        self.open_modal(entity, cx);
     }
 
     /// Toggle add project dialog overlay.
@@ -722,7 +738,18 @@ impl OverlayManager {
     }
 
     /// Toggle the What's New overlay (release notes from GitHub via the daemon).
+    /// Opening it records the running version as seen, which retires the
+    /// post-update toast.
     pub fn toggle_whats_new(&mut self, cx: &mut Context<Self>) {
+        if !self.is_modal::<WhatsNewModal>()
+            && let Some(running) = cx
+                .try_global::<okena_ext_updater::GlobalUpdateInfo>()
+                .map(|global| global.0.app_version())
+        {
+            crate::settings::settings_entity(cx).update(cx, |state, cx| {
+                state.set_whats_new_seen_version(Some(running), cx);
+            });
+        }
         toggle_overlay!(self, cx, WhatsNewModal, WhatsNewEvent, WhatsNewModal::new);
     }
 

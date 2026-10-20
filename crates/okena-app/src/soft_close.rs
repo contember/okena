@@ -27,3 +27,6 @@ pub const RESTART_DAEMON_TOAST_ID: &str = "restart-daemon-confirm";
 pub const RESTART_DAEMON_CONFIRM_PREFIX: &str = "restart_daemon_confirm";
 /// Action id for the "Cancel" button on the restart-daemon confirm toast.
 pub const RESTART_DAEMON_CANCEL_PREFIX: &str = "restart_daemon_cancel";
+
+/// Action id for the button on the post-update "see what's new" toast.
+pub const WHATS_NEW_OPEN_ACTION: &str = "whats-new:open";

@@ -260,3 +260,42 @@ One commit per WU (`feat(whats-new): ...`). After WU3, update
 ## Run log
 
 <!-- Append as you work: discoveries, deviations, blockers. -->
+
+- **2026-10-20 WU1.** GitHub field names confirmed with the `curl` from
+  "Verify first" (`tag_name`, `published_at`, `html_url`, `body`, `draft`,
+  `prerelease`). `routes/mod.rs:222` had drifted to `:253`, same route table.
+  The management-route test list in `routes/mod.rs` gained the new route so
+  loopback-without-token stays rejected. The fixture has six releases (a
+  draft, a prerelease, 0.35 … 0.32) rather than five: every acceptance case
+  needs 0.35 present. `RevertRelease` untouched.
+- **2026-10-20 WU2.** `views/overlays/markdown_renderer/` exists but is not
+  declared in `overlays/mod.rs` (dead re-export) — the overlay uses
+  `okena_markdown` directly. `okena-markdown` renders links as plain text (no
+  click handler), accepted per the plan. The theme flip re-highlights lazily
+  in `render` by comparing `ThemeColors::is_dark()` with the last highlight,
+  no global observer. The `#[gpui::test]`s assert the modal's state
+  (`section_headers`, `error`) rather than drawn elements — the crate's test
+  harness opens no window.
+- **2026-10-20 WU3.** A fifth registration site the plan missed:
+  `WindowView::handle_app_menu_action` (title-bar menu dispatch) is an
+  exhaustive match over `AppMenuAction`. The startup hook lives in
+  `Okena::new` right after the settings→daemon subscription, not in
+  `update_checker.rs` (the background update check runs in the daemon);
+  `send_action` queues until the loopback connection is up, so the recorded
+  version reaches the daemon. The pure `whats_new_nudge` lives in
+  `okena-ext-updater::whats_new` because `semver` is a dependency there and
+  not of `okena-app`. Toast TTL 30 s. `AboutModal::render_link` now takes a
+  click handler and an icon (the What's new link emits
+  `AboutModalEvent::ShowWhatsNew` instead of opening a URL).
+- **Gates.** `cargo build` ✔, `cargo clippy` on the touched crates ✔,
+  `cargo tree -i gpui -p okena-daemon` empty ✔. `cargo test --workspace`
+  (excluding `okena-mobile-ffi`, whose deps cannot be fetched here): one
+  failure in untouched `okena-remote-client`
+  (`action_queue_waits_for_each_response_before_sending_the_next_action`,
+  `manager.rs:1340`), byte-identical to `main`; `okena-files` failed once and
+  passed on rerun. Port-binding and cargo-registry steps had to run outside
+  the sandbox.
+- **Not verified by hand.** The daemon route with a real token (`curl` against
+  the local socket), the overlay on screen (scroll, GitHub link, dark/light
+  re-highlight), and the toast after a real update — see the WU3 manual
+  check (`whats_new_seen_version: "0.33.0"` in `settings.json`).
