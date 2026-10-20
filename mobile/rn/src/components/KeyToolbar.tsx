@@ -3,9 +3,10 @@
  *
  * Layout (see `PRIMARY_KEYS` / `MORE_ROWS` in `keyInput.ts`):
  *   - one always-visible row of eight equal keys tuned for driving Claude Code:
- *     esc · ^C · tab · shift+tab · up · down · return · more,
+ *     esc · ^C · tab · edit · up · down · return · more. "edit" opens the
+ *     compose sheet, a native text field with autocorrect and dictation,
  *   - "more" expands a three-row panel above it (same 8-column grid) with
- *     paste/compose/select text, `/ @ | ~ \ \``, ctrl/alt modifiers, ^D ^Z ^R, paging,
+ *     paste/shift+tab/select text, `/ @ | ~ \ \``, ctrl/alt modifiers, ^D ^Z ^R, paging,
  *     home/end, `- _`, left/right, forward delete and the keyboard toggle.
  *     The panel stays open until "more" is tapped again, so repeated keys
  *     (arrows) don't need reopening.
@@ -443,16 +444,14 @@ const ComposeSheet: React.FC<{
             onChangeText={setText}
             autoFocus
             multiline
-            autoCapitalize="none"
-            autoCorrect={false}
-            spellCheck={false}
+            // Unlike the terminal's own field: this is where prose is written.
+            autoCapitalize="sentences"
+            autoCorrect
+            spellCheck
             autoComplete="off"
             importantForAutofill="no"
             keyboardAppearance="dark"
-            keyboardType={
-              Platform.OS === 'android' ? 'visible-password' : 'ascii-capable'
-            }
-            placeholder="Command, path, or multiline input"
+            placeholder="Prompt, command, or multiline input"
             placeholderTextColor={OkenaColors.textTertiary}
           />
           <View style={styles.composeActions}>

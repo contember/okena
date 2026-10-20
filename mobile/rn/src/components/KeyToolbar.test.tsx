@@ -96,6 +96,7 @@ describe('KeyToolbar', () => {
 
   it('sends Shift+Tab as CSI Z text', () => {
     const t = setup();
+    t.tap('More keys');
     t.tap('Shift Tab');
     expect(t.native.sendText).toHaveBeenCalledWith('c1', 't1', '\x1b[Z');
     act(() => t.renderer.unmount());
@@ -164,7 +165,17 @@ describe('KeyToolbar', () => {
     act(() => shown.renderer.unmount());
   });
 
-  it('opens the select text mode without sending input', () => {
+  it('opens compose from the primary row with autocorrect on', () => {
+    const t = setup();
+    t.tap('Compose input');
+    const field = t.renderer.root.findByProps({ multiline: true });
+    expect(field.props.autoCorrect).toBe(true);
+    expect(field.props.autoCapitalize).toBe('sentences');
+    expect(t.native.sendText).not.toHaveBeenCalled();
+    act(() => t.renderer.unmount());
+  });
+
+    it('opens the select text mode without sending input', () => {
     const t = setup();
     t.tap('More keys');
     t.tap('Select text');
