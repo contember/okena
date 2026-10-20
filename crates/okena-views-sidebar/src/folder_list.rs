@@ -372,7 +372,7 @@ impl Sidebar {
             })
             .child({
                 // Project color dot
-                let folder_color = t.get_folder_color(project.display_color(cx));
+                let folder_color = t.get_folder_color(project.folder_color);
                 let project_id = project.id.clone();
                 sidebar_color_indicator(
                     ElementId::Name(format!("fp-folder-icon-{}", project.id).into()),

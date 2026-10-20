@@ -41,11 +41,11 @@ The columns live in Settings > General > **Status Columns**
 Each column has a stable `id`, a display `name` and an optional colour. A
 fresh install starts with `todo`, `in-progress`, `review`, `done`.
 
-- A colour (the same palette as projects) becomes the project's colour
-  wherever it is drawn while the status is set: the sidebar dot or ring, the
-  column header dot, the tinted terminal background (with "Color Tinted
-  Background" on), the pill, the lane caption and the sidebar caption. Clear
-  the status and the project's own colour returns.
+- A colour (the same palette as projects) marks the status, never the
+  project: it tints the pill, the lane caption, the sidebar caption and,
+  with "Color Tinted Background" on, the terminal background of a project
+  that has the status. The project's own dot and ring keep the project
+  colour, so a worktree still reads as its parent's.
 - Renaming a column keeps its id, so every project keeps its status.
 - Removing a column leaves its projects' status ids in place; they render as
   *No status* until the id comes back or you re-sort them. Nothing is

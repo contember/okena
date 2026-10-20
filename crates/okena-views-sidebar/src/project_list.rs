@@ -106,7 +106,7 @@ impl Sidebar {
             // 2. Color dot
             .child(match style {
                 ProjectRowStyle::Project => {
-                    let folder_color = t.get_folder_color(project.display_color(cx));
+                    let folder_color = t.get_folder_color(project.folder_color);
                     let pid = project.id.clone();
                     sidebar_color_indicator(
                         ElementId::Name(format!("{}-icon-{}", id_prefix, project.id).into()),
@@ -122,7 +122,7 @@ impl Sidebar {
                     .into_any_element()
                 }
                 ProjectRowStyle::Worktree { is_orphan, .. } => {
-                    let folder_color = t.get_folder_color(project.display_color(cx));
+                    let folder_color = t.get_folder_color(project.folder_color);
                     let dot_color = if *is_orphan { t.warning } else { folder_color };
                     let pid = project.id.clone();
                     sidebar_color_indicator(
@@ -139,7 +139,7 @@ impl Sidebar {
                     .into_any_element()
                 }
                 ProjectRowStyle::GroupChild => {
-                    let folder_color = t.get_folder_color(project.display_color(cx));
+                    let folder_color = t.get_folder_color(project.folder_color);
                     let pid = project.id.clone();
                     sidebar_color_indicator(
                         ElementId::Name(format!("{}-icon-{}", id_prefix, project.id).into()),
@@ -997,7 +997,7 @@ impl Sidebar {
             })),
         )
         .child({
-            let folder_color = t.get_folder_color(project.display_color(cx));
+            let folder_color = t.get_folder_color(project.folder_color);
             let project_id = project.id.clone();
             sidebar_color_indicator(
                 ElementId::Name(format!("{}-icon-{}", id_prefix, project.id).into()),

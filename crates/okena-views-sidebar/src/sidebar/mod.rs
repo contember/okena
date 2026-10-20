@@ -999,12 +999,6 @@ pub struct SidebarProjectInfo {
 }
 
 impl SidebarProjectInfo {
-    /// The colour this row draws with: the status colour when the board is
-    /// on and the project's status column has one, else the project colour.
-    pub fn display_color(&self, cx: &App) -> FolderColor {
-        okena_ui::board::status_color(self.status.as_deref(), cx).unwrap_or(self.folder_color)
-    }
-
     /// Build a sidebar projection of a project.
     ///
     /// `show_in_overview` on the projection is derived from
