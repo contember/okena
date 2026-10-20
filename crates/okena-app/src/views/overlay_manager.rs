@@ -1439,6 +1439,11 @@ impl OverlayManager {
             .workspace
             .read(cx)
             .terminal_name_overlay_enabled(&project_id, &terminal_id);
+        let current_status = self
+            .workspace
+            .read(cx)
+            .project(&project_id)
+            .and_then(|p| p.terminal_statuses.get(&terminal_id).cloned());
         let menu = cx.new(|cx| {
             TerminalMenu::new(
                 terminal_id,
@@ -1450,6 +1455,7 @@ impl OverlayManager {
                 can_export_buffer,
                 has_bell,
                 show_name_when_inactive,
+                current_status,
                 invocation,
                 cx,
             )
@@ -1538,6 +1544,21 @@ impl OverlayManager {
                         project_id: project_id.clone(),
                         terminal_id: terminal_id.clone(),
                         enabled: *enabled,
+                    },
+                    cx,
+                );
+            }
+            TerminalMenuEvent::SetStatus {
+                project_id,
+                terminal_id,
+                status,
+            } => {
+                self.emit_project_action(
+                    project_id,
+                    ActionRequest::SetTerminalStatus {
+                        project_id: project_id.clone(),
+                        terminal_id: terminal_id.clone(),
+                        status: status.clone(),
                     },
                     cx,
                 );
