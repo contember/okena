@@ -77,3 +77,53 @@ fn from_project_show_in_overview_reads_from_workspace_hidden_set() {
         "project absent from hidden set must project as visible (legacy field is ignored)"
     );
 }
+
+fn make_worktree(id: &str, parent: &str, color_override: Option<FolderColor>) -> ProjectData {
+    let mut wt = make_project(id);
+    wt.worktree_info = Some(okena_workspace::state::WorktreeMetadata {
+        parent_project_id: parent.to_string(),
+        color_override,
+        main_repo_path: String::new(),
+        worktree_path: String::new(),
+        branch_name: String::new(),
+    });
+    wt
+}
+
+#[test]
+fn from_project_resolves_worktree_colour_through_override_then_parent() {
+    // The terminal area and the project column colour a worktree by its own
+    // override, else by its parent. The sidebar used to copy the parent's
+    // colour over every child, so a recoloured worktree looked unchanged
+    // in the sidebar while its panes already showed the new colour.
+    let mut parent = make_project("main");
+    parent.folder_color = FolderColor::Blue;
+    parent.worktree_ids = vec!["wt-plain".to_string(), "wt-red".to_string()];
+    let plain = make_worktree("wt-plain", "main", None);
+    let red = make_worktree("wt-red", "main", Some(FolderColor::Red));
+
+    let workspace = Workspace::new(WorkspaceData {
+        agent_session_history: Default::default(),
+        version: 1,
+        projects: vec![parent, plain, red],
+        project_order: vec!["main".to_string()],
+        service_panel_heights: HashMap::new(),
+        hook_panel_heights: HashMap::new(),
+        folders: vec![],
+        main_window: WindowState::default(),
+        extra_windows: Vec::new(),
+    });
+
+    let plain_info = SidebarProjectInfo::from_project(
+        workspace.project("wt-plain").unwrap(),
+        &workspace,
+        WindowId::Main,
+    );
+    let red_info = SidebarProjectInfo::from_project(
+        workspace.project("wt-red").unwrap(),
+        &workspace,
+        WindowId::Main,
+    );
+    assert_eq!(plain_info.folder_color, FolderColor::Blue);
+    assert_eq!(red_info.folder_color, FolderColor::Red);
+}

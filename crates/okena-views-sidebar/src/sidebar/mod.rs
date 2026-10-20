@@ -906,7 +906,9 @@ impl SidebarProjectInfo {
             id: project.id.clone(),
             name,
             show_in_overview: !workspace.is_project_hidden(window_id, &project.id),
-            folder_color: project.folder_color,
+            // A worktree's own override, else its parent's colour — the same
+            // rule the terminal area and project column use.
+            folder_color: workspace.effective_folder_color(project),
             has_layout: layout.is_some(),
             terminal_ids: layout
                 .map(|l| {

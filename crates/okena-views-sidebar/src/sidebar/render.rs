@@ -799,8 +799,6 @@ impl Render for Sidebar {
                         let mut info =
                             SidebarProjectInfo::from_project(p, workspace, self.window_id);
                         info.is_closing = p.is_closing || workspace.is_project_closing(&p.id);
-                        // Inherit parent project's color for visual association
-                        info.folder_color = parent.folder_color;
                         children.push(info);
                     }
                 }
