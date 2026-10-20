@@ -47,6 +47,7 @@ use crate::views::overlays::settings_panel::{SettingsPanel, SettingsPanelEvent};
 use crate::views::overlays::tab_context_menu::{TabContextMenu, TabContextMenuEvent};
 use crate::views::overlays::terminal_menu::{TerminalMenu, TerminalMenuEvent};
 use crate::views::overlays::theme_selector::{ThemeSelector, ThemeSelectorEvent};
+use crate::views::overlays::whats_new::{WhatsNewEvent, WhatsNewModal};
 use crate::views::overlays::worktree_dialog::{WorktreeDialog, WorktreeDialogEvent};
 use crate::views::overlays::{
     ProjectSwitcher, ProjectSwitcherEvent, ShellSelectorOverlay, ShellSelectorOverlayEvent,
@@ -81,6 +82,11 @@ impl CloseEvent for AboutModalEvent {
     }
 }
 impl CloseEvent for KeybindingsHelpEvent {
+    fn is_close(&self) -> bool {
+        matches!(self, Self::Close)
+    }
+}
+impl CloseEvent for WhatsNewEvent {
     fn is_close(&self) -> bool {
         matches!(self, Self::Close)
     }
@@ -713,6 +719,11 @@ impl OverlayManager {
             .detach();
             self.open_modal(entity, cx);
         }
+    }
+
+    /// Toggle the What's New overlay (release notes from GitHub via the daemon).
+    pub fn toggle_whats_new(&mut self, cx: &mut Context<Self>) {
+        toggle_overlay!(self, cx, WhatsNewModal, WhatsNewEvent, WhatsNewModal::new);
     }
 
     /// Toggle theme selector overlay.

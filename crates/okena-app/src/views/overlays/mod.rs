@@ -8,6 +8,7 @@
 //! - File search
 //! - File viewer
 //! - Keybindings help
+//! - What's New (release notes)
 //! - Session manager
 //! - Settings panel
 //! - Shell selector
@@ -47,6 +48,7 @@ pub mod tab_context_menu;
 pub mod terminal_menu;
 pub mod terminal_overlay_utils;
 pub mod theme_selector;
+pub mod whats_new;
 pub mod worktree_dialog;
 
 pub use project_switcher::{ProjectSwitcher, ProjectSwitcherEvent};
