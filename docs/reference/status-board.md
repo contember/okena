@@ -29,9 +29,12 @@ as it did before.
   divider between two columns only exists inside a lane. With no status
   among the visible columns the grid is flat, lanes or not.
 - **Sidebar**: once any worktree of a parent has a status, the parent's
-  worktree rows split under small captions, one per non-empty column in the
-  columns' order, then *No status*. Keyboard navigation walks the rows in
-  the same order.
+  worktree rows split under small captions (a dot and the name in the
+  column's colour), one per non-empty column in the columns' order, then
+  *No status*. A thin guide in the parent's colour runs down the left of
+  the expanded family, so a worktree still reads as its parent's while the
+  captions say where it stands. Keyboard navigation walks the rows in the
+  same order.
 
 ## Columns
 

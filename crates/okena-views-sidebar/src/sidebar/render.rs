@@ -1083,6 +1083,7 @@ impl Render for Sidebar {
 
                         let is_expanded = self.is_project_expanded(&project.id, true);
                         if is_expanded {
+                            let guide_start = flat_elements.len();
                             // Main project as first child — highlights when focused individual
                             let is_cursor = cursor_index == Some(flat_idx);
                             let is_focused_project = focused_project_id.as_ref()
@@ -1162,6 +1163,11 @@ impl Render for Sidebar {
                                         cx,
                                     );
                                 }
+                                super::status_groups::add_tree_guide(
+                                    &mut flat_elements[guide_start..],
+                                    12.0,
+                                    t.get_folder_color(project.folder_color),
+                                );
                             }
                         }
                     } else {
@@ -1291,6 +1297,7 @@ impl Render for Sidebar {
 
                                 let is_expanded = self.is_project_expanded(&fp.id, true);
                                 if is_expanded {
+                                    let guide_start = flat_elements.len();
                                     // Main project as first child
                                     let is_cursor = cursor_index == Some(flat_idx);
                                     let is_focused_project = focused_project_id.as_ref()
@@ -1375,6 +1382,11 @@ impl Render for Sidebar {
                                             }
                                         }
                                     }
+                                    super::status_groups::add_tree_guide(
+                                        &mut flat_elements[guide_start..],
+                                        28.0,
+                                        t.get_folder_color(fp.folder_color),
+                                    );
                                 }
                             } else {
                                 // No worktrees or orphan — standard folder project rendering

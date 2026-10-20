@@ -8,7 +8,9 @@
 //! grouped order (`cursor.rs`), and the captions are folded into the cursor's
 //! scroll-index map with [`fold_extra_rows`].
 
-use gpui::{App, Context, Div, FontWeight, ParentElement, Styled, div, px, rgb};
+use gpui::{
+    AnyElement, App, Context, Div, FontWeight, IntoElement, ParentElement, Styled, div, px, rgb,
+};
 use okena_core::theme::FolderColor;
 use okena_ui::theme::theme;
 use okena_ui::tokens::ui_text_xs;
@@ -66,6 +68,32 @@ pub(crate) fn fold_extra_rows(scroll_indices: &mut [usize], extra_rows: &[usize]
     }
 }
 
+/// Draw a thin tree guide in the parent's colour down the left of every
+/// row of an expanded family (main checkout, captions, worktrees and their
+/// expanded children). Each row is wrapped so consecutive rows join into one
+/// continuous line at `x`; the row itself is untouched.
+pub(crate) fn add_tree_guide(rows: &mut [AnyElement], x: f32, color: u32) {
+    let mut line = rgb(color);
+    line.a = 0.55;
+    for row in rows.iter_mut() {
+        let inner = std::mem::replace(row, div().into_any_element());
+        *row = div()
+            .relative()
+            .w_full()
+            .child(inner)
+            .child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .bottom_0()
+                    .left(px(x))
+                    .w(px(1.5))
+                    .bg(line),
+            )
+            .into_any_element();
+    }
+}
+
 impl Sidebar {
     /// Small caption between worktree rows: `TO DO`, `REVIEW`, … in the
     /// column's colour (muted when it has none).
@@ -87,6 +115,14 @@ impl Sidebar {
             .pr(px(8.0))
             .flex()
             .items_center()
+            .gap(px(5.0))
+            .child(
+                div()
+                    .size(px(6.0))
+                    .rounded_full()
+                    .bg(rgb(text_color))
+                    .flex_shrink_0(),
+            )
             .child(
                 div()
                     .text_size(ui_text_xs(cx))
