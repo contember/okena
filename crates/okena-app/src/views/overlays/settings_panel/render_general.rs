@@ -29,7 +29,11 @@ impl SettingsPanel {
             .child(self.render_header_density_row(s.header_density, cx))
             .child(self.render_status_bar_style_row(s.status_bar.style, cx))
             .child(self.render_toggle(
-                "status-bar-graphs", "Status Bar CPU/Memory Graph", s.status_bar.metrics_graph, true,
+                "status-bar-metrics", "Status Bar CPU/Memory", s.status_bar.show_metrics, true,
+                |state, val, cx| state.set_status_bar_show_metrics(val, cx), cx,
+            ))
+            .child(self.render_toggle(
+                "status-bar-graphs", "Status Bar CPU/Memory Graph", s.status_bar.metrics_graph, s.status_bar.show_metrics,
                 |state, val, cx| state.set_status_bar_metrics_graph(val, cx), cx,
             ))
             .child(self.render_toggle(

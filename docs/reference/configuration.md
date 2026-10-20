@@ -181,6 +181,14 @@ If the file contains invalid JSON, Okena recovers as many fields as possible and
 | `sidebar.remote_layout` | string | `"mixed"` | `"mixed"` keeps remote projects in the one list; `"separate"` shows a LOCAL section first and one REMOTE section per connected host, each with its own `+` to add a project there |
 | `sidebar.host_stats` | string | `"off"` | CPU and memory of the local machine and each remote host in the sidebar: `"off"`, `"text"` (`CPU 41%  MEM 72%` in the status bar's colours) or `"gauge"` (labels with a small vertical gauge each). Shown on the LOCAL row and each host row in `separate`, on the REMOTE connection rows otherwise |
 
+#### Status Bar
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `status_bar.style` | string | `"detailed"` | `"detailed"` spells values out, `"minimal"` keeps only bars/graphs |
+| `status_bar.show_metrics` | bool | `true` | Show the CPU and memory readout in the status bar |
+| `status_bar.metrics_graph` | bool | `true` | Draw CPU and memory as short history graphs instead of single-value bars |
+
 #### File Opener
 
 | Key | Type | Default | Description |

@@ -138,6 +138,12 @@ impl SettingsState {
         self.save_and_notify(cx);
     }
 
+    /// Show or hide the CPU/MEM readout in the status bar.
+    pub fn set_status_bar_show_metrics(&mut self, value: bool, cx: &mut Context<Self>) {
+        self.settings.status_bar.show_metrics = value;
+        self.save_and_notify(cx);
+    }
+
     setting_setter!(set_cursor_blink, cursor_blink, bool);
     setting_setter!(set_scrollback_lines, scrollback_lines, u32, 100, 100000);
     setting_setter!(

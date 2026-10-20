@@ -292,6 +292,9 @@ pub struct StatusBarSettings {
     /// Draw CPU/MEM as a short history graph instead of a single-value bar.
     #[serde(default = "default_status_bar_metrics_graph")]
     pub metrics_graph: bool,
+    /// Show the CPU/MEM readout in the status bar at all.
+    #[serde(default = "default_status_bar_show_metrics")]
+    pub show_metrics: bool,
 }
 
 impl Default for StatusBarSettings {
@@ -299,8 +302,13 @@ impl Default for StatusBarSettings {
         Self {
             style: StatusBarStyle::default(),
             metrics_graph: default_status_bar_metrics_graph(),
+            show_metrics: default_status_bar_show_metrics(),
         }
     }
+}
+
+fn default_status_bar_show_metrics() -> bool {
+    true
 }
 
 fn default_status_bar_metrics_graph() -> bool {

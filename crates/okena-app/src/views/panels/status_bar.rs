@@ -718,6 +718,7 @@ impl Render for StatusBar {
         let status_bar = settings_entity(cx).read(cx).settings.status_bar.clone();
         let bar_style = status_bar.style;
         let graphs = status_bar.metrics_graph;
+        let show_metrics = status_bar.show_metrics;
 
         let cpu_metric = SystemMetric {
             id: "cpu-status-metric",
@@ -790,17 +791,23 @@ impl Render for StatusBar {
                                     window.dispatch_action(Box::new(ToggleSidebar), cx);
                                 }),
                         )
-                    })
-                    .child(Self::render_system_metric(
-                        cpu_metric, bar_style, graphs, &t, cx,
-                    ))
-                    .child(Self::render_system_metric(
-                        memory_metric,
-                        bar_style,
-                        graphs,
-                        &t,
-                        cx,
-                    ));
+                    });
+
+                // The CPU / MEM readout is optional; the remote popover still
+                // reports per-host load when it is hidden.
+                if show_metrics {
+                    left = left
+                        .child(Self::render_system_metric(
+                            cpu_metric, bar_style, graphs, &t, cx,
+                        ))
+                        .child(Self::render_system_metric(
+                            memory_metric,
+                            bar_style,
+                            graphs,
+                            &t,
+                            cx,
+                        ));
+                }
 
                 // Left-side extension widgets
                 for widgets in &left_widgets {
