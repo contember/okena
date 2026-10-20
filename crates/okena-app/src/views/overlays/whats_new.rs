@@ -26,11 +26,21 @@ struct Section {
     doc: MarkdownDocument,
 }
 
+/// One row of the virtualised list: a release header or one Markdown
+/// block of a release.
+#[derive(Clone, Copy)]
+enum Row {
+    Header(usize),
+    Block { section: usize, node: usize },
+}
+
 enum NotesState {
     Loading,
     Loaded {
         current_version: String,
         sections: Vec<Section>,
+        rows: Vec<Row>,
+        list: ListState,
     },
     Failed(String),
 }
@@ -75,9 +85,8 @@ impl WhatsNewModal {
     /// Take the daemon's answer (or its failure).
     pub fn apply(&mut self, result: Result<ReleaseNotes, String>, cx: &mut Context<Self>) {
         self.state = match result {
-            Ok(notes) => NotesState::Loaded {
-                current_version: notes.current_version,
-                sections: notes
+            Ok(notes) => {
+                let sections: Vec<Section> = notes
                     .releases
                     .into_iter()
                     .map(|note| Section {
@@ -85,8 +94,27 @@ impl WhatsNewModal {
                         doc: MarkdownDocument::parse(&note.body),
                         note,
                     })
-                    .collect(),
-            },
+                    .collect();
+                let rows: Vec<Row> = sections
+                    .iter()
+                    .enumerate()
+                    .flat_map(|(section, s)| {
+                        std::iter::once(Row::Header(section)).chain(
+                            (0..s.doc.node_count()).map(move |node| Row::Block { section, node }),
+                        )
+                    })
+                    .collect();
+                // Only the rows on screen (plus the overdraw) are laid out per
+                // frame; twenty releases of Markdown would otherwise be
+                // re-measured on every scroll tick.
+                let list = ListState::new(rows.len(), ListAlignment::Top, px(400.0));
+                NotesState::Loaded {
+                    current_version: notes.current_version,
+                    sections,
+                    rows,
+                    list,
+                }
+            }
             Err(error) => NotesState::Failed(error),
         };
         // Freshly parsed documents carry no highlighting yet.
@@ -128,37 +156,56 @@ impl WhatsNewModal {
         self.highlighted_dark = Some(is_dark);
     }
 
-    fn render_markdown(doc: &MarkdownDocument, t: &ThemeColors, cx: &App) -> Vec<AnyElement> {
-        (0..doc.node_count())
-            .filter_map(|idx| {
-                let (above, below) = doc.node_spacing(idx);
-                let body = match doc.render_node(idx, t, cx, None)? {
-                    RenderedNode::Simple { div, .. } => div.into_any_element(),
-                    RenderedNode::CodeBlock { language, lines } => {
-                        code_block_container(language.as_deref(), t, cx)
-                            .child(
-                                div()
-                                    .px(px(14.0))
-                                    .py(px(10.0))
-                                    .flex()
-                                    .flex_col()
-                                    .children(lines.into_iter().map(|line| line.div)),
-                            )
-                            .into_any_element()
-                    }
-                    RenderedNode::Table { header, rows } => div()
-                        .flex()
-                        .flex_col()
-                        .children(header.map(|h| h.div))
-                        .children(rows.into_iter().map(|row| row.div))
-                        .into_any_element(),
-                };
-                Some(div().pt(above).pb(below).child(body).into_any_element())
-            })
-            .collect()
+    fn render_block(doc: &MarkdownDocument, idx: usize, t: &ThemeColors, cx: &App) -> AnyElement {
+        let (above, below) = doc.node_spacing(idx);
+        let body = match doc.render_node(idx, t, cx, None) {
+            Some(RenderedNode::Simple { div, .. }) => div.into_any_element(),
+            Some(RenderedNode::CodeBlock { language, lines }) => {
+                code_block_container(language.as_deref(), t, cx)
+                    .child(
+                        div()
+                            .px(px(14.0))
+                            .py(px(10.0))
+                            .flex()
+                            .flex_col()
+                            .children(lines.into_iter().map(|line| line.div)),
+                    )
+                    .into_any_element()
+            }
+            Some(RenderedNode::Table { header, rows }) => div()
+                .flex()
+                .flex_col()
+                .children(header.map(|h| h.div))
+                .children(rows.into_iter().map(|row| row.div))
+                .into_any_element(),
+            None => div().into_any_element(),
+        };
+        div()
+            .px(px(20.0))
+            .pt(above)
+            .pb(below)
+            .child(body)
+            .into_any_element()
     }
 
-    fn render_section(
+    /// One list row, by index into `rows`.
+    fn render_row(&self, idx: usize, cx: &mut Context<Self>) -> AnyElement {
+        let t = theme(cx);
+        let NotesState::Loaded { sections, rows, .. } = &self.state else {
+            return div().into_any_element();
+        };
+        match rows.get(idx) {
+            Some(Row::Header(section)) => {
+                self.render_section_header(*section, &sections[*section], &t, cx)
+            }
+            Some(Row::Block { section, node }) => {
+                Self::render_block(&sections[*section].doc, *node, &t, cx)
+            }
+            None => div().into_any_element(),
+        }
+    }
+
+    fn render_section_header(
         &self,
         index: usize,
         section: &Section,
@@ -185,20 +232,19 @@ impl WhatsNewModal {
             .on_click(move |_, _, _| okena_core::process::open_url(&url));
 
         div()
-            .flex()
-            .flex_col()
-            .when(index > 0, |d| {
-                d.mt(px(20.0))
-                    .pt(px(20.0))
-                    .border_t_1()
-                    .border_color(rgb(t.border))
-            })
+            .px(px(20.0))
+            .pt(px(16.0))
+            .pb(px(4.0))
+            .when(index > 0, |d| d.mt(px(16.0)))
             .child(
                 div()
                     .flex()
                     .items_center()
                     .justify_between()
                     .gap(px(12.0))
+                    .when(index > 0, |d| {
+                        d.pt(px(20.0)).border_t_1().border_color(rgb(t.border))
+                    })
                     .child(
                         div()
                             .text_size(ui_text_md(cx))
@@ -207,12 +253,6 @@ impl WhatsNewModal {
                             .child(section.header.clone()),
                     )
                     .when(!section.note.release_url.is_empty(), |d| d.child(link)),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .children(Self::render_markdown(&section.doc, t, cx)),
             )
             .into_any_element()
     }
@@ -316,20 +356,29 @@ impl Render for WhatsNewModal {
             _ => "Release notes for recent Okena versions".to_string(),
         };
 
-        let body: Vec<AnyElement> = match &self.state {
-            NotesState::Loading => vec![self.render_message("Loading release notes…", &t, cx)],
-            NotesState::Failed(error) => vec![self.render_failure(error, &t, cx)],
-            NotesState::Loaded { sections, .. } if sections.is_empty() => {
-                vec![self.render_message("No release notes yet", &t, cx)]
-            }
-            NotesState::Loaded { sections, .. } => sections
-                .iter()
-                .enumerate()
-                .map(|(index, section)| self.render_section(index, section, &t, cx))
-                .collect(),
-        };
-
         let max_height = window.viewport_size().height * 0.7;
+
+        // A list needs a definite height to scroll in, so the modal takes
+        // its full height once there is something to scroll; the short
+        // states stay as tall as their message.
+        let (body, fixed_height): (AnyElement, bool) = match &self.state {
+            NotesState::Loading => (self.render_message("Loading release notes…", &t, cx), false),
+            NotesState::Failed(error) => (self.render_failure(error, &t, cx), false),
+            NotesState::Loaded { sections, .. } if sections.is_empty() => {
+                (self.render_message("No release notes yet", &t, cx), false)
+            }
+            NotesState::Loaded {
+                list: list_state, ..
+            } => {
+                let view = cx.entity().clone();
+                let rows = list(list_state.clone(), move |idx, _window, cx| {
+                    view.update(cx, |this, cx| this.render_row(idx, cx))
+                })
+                .size_full()
+                .into_any_element();
+                (rows, true)
+            }
+        };
 
         modal_backdrop("whats-new-backdrop", &t)
             .track_focus(&focus_handle)
@@ -344,6 +393,7 @@ impl Render for WhatsNewModal {
                 modal_content("whats-new-modal", &t)
                     .w(px(560.0))
                     .max_h(max_height)
+                    .when(fixed_height, |d| d.h(max_height))
                     .child(modal_header(
                         "What's New",
                         Some(subtitle),
@@ -351,16 +401,7 @@ impl Render for WhatsNewModal {
                         cx,
                         cx.listener(|this, _, _, cx| this.close(cx)),
                     ))
-                    .child(
-                        div()
-                            .id("whats-new-scroll")
-                            .flex_1()
-                            .min_h_0()
-                            .overflow_y_scroll()
-                            .px(px(20.0))
-                            .py(px(16.0))
-                            .children(body),
-                    ),
+                    .child(div().flex_1().min_h_0().pb(px(8.0)).child(body)),
             )
     }
 }
