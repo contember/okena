@@ -26,8 +26,12 @@ pub(crate) struct WorktreeRow {
 /// The order to draw `statuses.len()` worktree rows in: grouped by status
 /// when any resolves to a column, as given otherwise.
 pub(crate) fn worktree_rows(statuses: &[Option<&str>], cx: &App) -> Vec<WorktreeRow> {
-    let columns = okena_ui::board::board_columns(cx);
-    match grouped_rows(statuses, &columns) {
+    let grouped = if okena_ui::board::status_board_enabled(cx) {
+        grouped_rows(statuses, &okena_ui::board::board_columns(cx))
+    } else {
+        None
+    };
+    match grouped {
         Some(rows) => rows
             .into_iter()
             .map(|GroupedRow { index, caption }| WorktreeRow {

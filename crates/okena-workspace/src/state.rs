@@ -1497,6 +1497,18 @@ impl Workspace {
         }
     }
 
+    /// Flip the status-lanes view for a window. Persisted via `notify_data`.
+    pub fn toggle_status_lanes(&mut self, window_id: WindowId, cx: &mut impl WorkspaceCx) {
+        if self.data.toggle_status_lanes(window_id).is_some() {
+            self.notify_data(cx);
+        }
+    }
+
+    /// Whether a window groups its project columns into status lanes.
+    pub fn status_lanes(&self, window_id: WindowId) -> bool {
+        self.data.window(window_id).is_some_and(|w| w.status_lanes)
+    }
+
     /// Toggle whether a project is pinned to the top of the activity-sorted
     /// view. No-op for an unknown project id. Persisted via `notify_data`.
     pub fn toggle_project_pinned(&mut self, project_id: &str, cx: &mut impl WorkspaceCx) {

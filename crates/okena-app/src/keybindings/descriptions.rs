@@ -11,10 +11,10 @@ use super::{
     ScrollDown, ScrollUp, Search, SearchNext, SearchPrev, SendEscape, ShowBranchSwitcher,
     ShowCommandPalette, ShowContentSearch, ShowDiffViewer, ShowFileSearch, ShowHookLog,
     ShowKeybindings, ShowLogConsole, ShowProfileManager, ShowProjectSwitcher, ShowSessionManager,
-    ShowSettings, ShowStatusBoard, ShowStatusBoardAll, ShowThemeSelector, SplitHorizontal,
-    SplitVertical, StartAllServices, StopAllServices, ToggleFullscreen, TogglePaneSwitcher,
-    ToggleProjectLayout, ToggleProjectVisibility, ToggleSidebar, ToggleSidebarAutoHide,
-    ToggleUnread, ZoomIn, ZoomOut,
+    ShowSettings, ShowThemeSelector, SplitHorizontal, SplitVertical, StartAllServices,
+    StopAllServices, ToggleFullscreen, TogglePaneSwitcher, ToggleProjectLayout,
+    ToggleProjectVisibility, ToggleSidebar, ToggleSidebarAutoHide, ToggleStatusLanes, ToggleUnread,
+    ZoomIn, ZoomOut,
 };
 
 /// Get human-readable descriptions for all actions
@@ -563,22 +563,12 @@ pub fn get_action_descriptions() -> HashMap<&'static str, ActionDescription> {
     );
 
     map.insert(
-        "ShowStatusBoard",
+        "ToggleStatusLanes",
         ActionDescription {
-            name: "Status Board",
-            description: "Kanban of the focused project and its worktrees by status",
+            name: "Toggle Status Lanes",
+            description: "Group this window's project columns by status (needs the status board enabled in settings)",
             category: "Global",
-            factory: || Box::new(ShowStatusBoard),
-        },
-    );
-
-    map.insert(
-        "ShowStatusBoardAll",
-        ActionDescription {
-            name: "Status Board (All Projects)",
-            description: "Kanban of every project and worktree by status",
-            category: "Global",
-            factory: || Box::new(ShowStatusBoardAll),
+            factory: || Box::new(ToggleStatusLanes),
         },
     );
 

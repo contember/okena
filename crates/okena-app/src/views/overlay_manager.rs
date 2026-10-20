@@ -116,11 +116,8 @@ impl CloseEvent for PairingDialogEvent {
 /// actions that need access to WindowView's state (terminals, PTY manager, etc.)
 #[derive(Clone)]
 pub enum OverlayManagerEvent {
-    /// The project context menu asked for the status board. The host owns the
-    /// terminal registry the board reads agent statuses from, so it opens it.
-    ShowStatusBoard {
-        project_id: String,
-    },
+    /// The status picker asked for the columns editor (Settings > General).
+    EditStatusColumns,
     /// Session manager requested a session/workspace action (load/save/import/
     /// export). The host dispatches it to the local daemon, which owns session
     /// files + the authoritative workspace.
@@ -446,6 +443,7 @@ pub struct OverlayManager {
     // Positioned popovers (like context menus, rendered at WindowView level)
     worktree_list: OverlaySlot<WorktreeListPopover>,
     color_picker: OverlaySlot<ColorPickerPopover>,
+    status_picker: OverlaySlot<okena_views_sidebar::StatusPickerPopover>,
 
     /// Cached project inspectors preserve file tabs across close/reopen.
     cached_project_inspectors: std::collections::HashMap<String, Entity<ProjectInspector>>,
@@ -477,6 +475,7 @@ impl OverlayManager {
             send_composer: OverlaySlot::new(),
             worktree_list: OverlaySlot::new(),
             color_picker: OverlaySlot::new(),
+            status_picker: OverlaySlot::new(),
         }
     }
 
@@ -778,42 +777,6 @@ impl OverlayManager {
     /// Toggle hook log overlay.
     pub fn toggle_hook_log(&mut self, cx: &mut Context<Self>) {
         toggle_overlay!(self, cx, HookLog, HookLogEvent, HookLog::new);
-    }
-
-    /// Toggle the terminal status board, scoped to `project_id` or to every
-    /// project. A drop on a column dispatches `SetProjectStatus` through the
-    /// project's dispatcher; the board itself writes nothing.
-    pub fn toggle_status_board(
-        &mut self,
-        project_id: Option<String>,
-        terminals: okena_terminal::TerminalsRegistry,
-        cx: &mut Context<Self>,
-    ) {
-        use crate::views::overlays::status_board::{StatusBoard, StatusBoardEvent};
-        if self.is_modal::<StatusBoard>() {
-            self.close_modal(cx);
-            return;
-        }
-        let workspace = self.workspace.clone();
-        let focus_manager = self.focus_manager.clone();
-        let board =
-            cx.new(|cx| StatusBoard::new(workspace, focus_manager, terminals, project_id, cx));
-        cx.subscribe(
-            &board,
-            |this, _, event: &StatusBoardEvent, cx| match event {
-                StatusBoardEvent::Close => this.close_modal(cx),
-                StatusBoardEvent::SetStatus { project_id, status } => this.emit_project_action(
-                    project_id,
-                    ActionRequest::SetProjectStatus {
-                        project_id: project_id.clone(),
-                        status: status.clone(),
-                    },
-                    cx,
-                ),
-            },
-        )
-        .detach();
-        self.open_modal(board, cx);
     }
 
     /// Toggle the log console overlay (live in-app log viewer).
@@ -1171,12 +1134,6 @@ impl OverlayManager {
                         },
                         cx,
                     );
-                }
-                ContextMenuEvent::ShowStatusBoard { project_id } => {
-                    this.hide_context_menu(cx);
-                    cx.emit(OverlayManagerEvent::ShowStatusBoard {
-                        project_id: project_id.clone(),
-                    });
                 }
                 ContextMenuEvent::RenameProject {
                     project_id,
@@ -2036,6 +1993,55 @@ impl OverlayManager {
 
         self.color_picker.set(popover);
         cx.notify();
+    }
+
+    // ========================================================================
+    // Status picker popover (positioned popup)
+    // ========================================================================
+
+    pub fn has_status_picker(&self) -> bool {
+        self.status_picker.is_open()
+    }
+
+    /// Show the status picker for a project under its column header pill.
+    pub fn show_status_picker(
+        &mut self,
+        project_id: String,
+        position: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        use okena_views_sidebar::{StatusPickerEvent, StatusPickerPopover};
+        self.close_all_context_menus(cx);
+        let workspace = self.workspace.clone();
+        let popover = cx.new(|cx| StatusPickerPopover::new(workspace, project_id, position, cx));
+        cx.subscribe(
+            &popover,
+            |this, _, event: &StatusPickerEvent, cx| match event {
+                StatusPickerEvent::Close => this.hide_status_picker(cx),
+                StatusPickerEvent::StatusChanged { project_id, status } => this
+                    .emit_project_action(
+                        project_id,
+                        ActionRequest::SetProjectStatus {
+                            project_id: project_id.clone(),
+                            status: status.clone(),
+                        },
+                        cx,
+                    ),
+                StatusPickerEvent::EditColumns => cx.emit(OverlayManagerEvent::EditStatusColumns),
+            },
+        )
+        .detach();
+        self.status_picker.set(popover);
+        cx.notify();
+    }
+
+    pub fn hide_status_picker(&mut self, cx: &mut Context<Self>) {
+        self.status_picker.close();
+        cx.notify();
+    }
+
+    pub fn render_status_picker(&self) -> Option<Entity<okena_views_sidebar::StatusPickerPopover>> {
+        self.status_picker.render()
     }
 
     /// Hide color picker popover.

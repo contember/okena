@@ -731,6 +731,13 @@ fn main() {
 
         // Terminal status board columns, read by the sidebar groups and the
         // board overlay.
+        cx.set_global(okena_ui::board::GlobalStatusBoardEnabled(|cx| {
+            settings::settings_entity(cx)
+                .read(cx)
+                .settings
+                .status_board
+                .enabled
+        }));
         cx.set_global(okena_ui::board::GlobalBoardColumns(|cx| {
             settings::settings_entity(cx)
                 .read(cx)

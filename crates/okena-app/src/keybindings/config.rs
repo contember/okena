@@ -108,7 +108,7 @@ impl KeybindingConfig {
             ],
         );
         bindings.insert(
-            "ShowStatusBoard".to_string(),
+            "ToggleStatusLanes".to_string(),
             vec![
                 KeybindingEntry::new("cmd-shift-k", None),
                 KeybindingEntry::new("ctrl-shift-k", None),

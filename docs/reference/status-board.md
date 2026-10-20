@@ -3,46 +3,45 @@
 A **status** is a label you put on a project or a worktree to sort it: *To
 do*, *Review*, *Done*, … It is yours to set and clear; nothing sets it for
 you. The typical use is a parent project with several worktrees: each
-worktree gets a status, the sidebar groups them under it, and a kanban
-**board** over the parent shows where every worktree stands. The board can
-also cover every project.
+worktree gets a status, and the main area can stand the family's columns in
+**lanes** by status, so you see where each worktree is and what runs in it
+at the same time.
 
-Nothing changes until you set the first status: a project without statuses
-renders exactly as it always did, and the board is only ever opened on
-demand.
+The whole feature is behind one switch, Settings > General > **Status
+Board**, off by default. Off, nothing below exists and Okena looks exactly
+as it did before.
 
-## What you see
+## What you see (with the board enabled)
 
+- **Status pill** in a project column's header, after the name: the
+  column's name in its colour. A project without a status shows a muted
+  *Status* affordance while the header is hovered. Click opens the picker:
+  the columns, *No status*, and *Edit columns…* (opens settings).
 - **Project menu → Status** (right-click a project or worktree row in the
-  sidebar): a flyout with the columns; the current one is ticked, *No
-  status* is last and ticked when the project has none. Picking a column
-  sets the status, *No status* clears it.
+  sidebar): the same choices as a flyout; the current one is ticked.
+- **Lanes** (sidebar View menu → *Status lanes*, or `Cmd+Shift+K` /
+  `Ctrl+Shift+K`, per window): the main area's project columns stand in
+  lanes, one per board column that has a member, *No status* last, each
+  under a thin caption (dot in the column's colour, name, hairline).
+  Focus a parent to see its worktrees sorted; the Overview sorts every
+  visible project. Columns stay live terminals and resize as before; the
+  divider between two columns only exists inside a lane. With no status
+  among the visible columns the grid is flat, lanes or not.
 - **Sidebar**: once any worktree of a parent has a status, the parent's
   worktree rows split under small captions, one per non-empty column in the
-  columns' order, then *No status*. Worktrees keep their order inside a
-  group. Keyboard navigation walks the rows in the same order.
-- **Status board** (the kanban button in a project's header, `Cmd+Shift+K` /
-  `Ctrl+Shift+K` for the focused project, project context menu → *Status
-  Board…*, or the command palette: *Status Board* / *Status Board (All
-  Projects)*): one column per board column plus *No status*, one card per
-  project. Opened from a worktree, the board covers its parent's family —
-  the parent and all its worktrees. A card shows the project's name and
-  colour, how many terminals it holds, in the all-projects scope its parent,
-  and the most urgent agent status its terminals report (blocked beats done
-  beats working). Click a card to focus that project. Drag a card onto a
-  column to set its status; a board opened for a family can switch to *All
-  projects* and back.
+  columns' order, then *No status*. Keyboard navigation walks the rows in
+  the same order.
 
 ## Columns
 
 The columns live in Settings > General > **Status Columns**
 (`status_board.columns` in `settings.json`, see
-[configuration.md](configuration.md)). Each column has a stable `id`, a
-display `name` and an optional colour. A fresh install starts with `todo`,
-`in-progress`, `review`, `done`.
+[configuration.md](configuration.md)), shown once the board is enabled.
+Each column has a stable `id`, a display `name` and an optional colour. A
+fresh install starts with `todo`, `in-progress`, `review`, `done`.
 
-- A colour (the same palette as projects) tints the sidebar caption and the
-  board column header.
+- A colour (the same palette as projects) tints the pill, the lane caption
+  and the sidebar caption.
 - Renaming a column keeps its id, so every project keeps its status.
 - Removing a column leaves its projects' status ids in place; they render as
   *No status* until the id comes back or you re-sort them. Nothing is
@@ -54,14 +53,15 @@ display `name` and an optional colour. A fresh install starts with `todo`,
 
 [Agent status](agent-status.md) is what the agent in a pane reports about
 itself (`working`, `blocked`, `done`, `idle`) and changes on its own. A
-project status is a manual label and never changes on its own. The two are
-independent and both are shown: a card in *Review* still carries its
-terminals' most urgent agent dot and text.
+project status is a manual label and never changes on its own. Both show at
+once: a column in the *Review* lane still carries its tabs' agent
+indicators.
 
 ## Where it is stored
 
-The daemon owns it: `status` on the project in `workspace.json` (a column
-id), omitted when unset. Clients set it through the `set_project_status`
-action and read it from `status` on each project in `GET /v1/state`
-([remote.md](remote.md)); web and mobile receive the field but have no UI for
-it yet.
+The daemon owns the status: `status` on the project in `workspace.json` (a
+column id), omitted when unset. Clients set it through the
+`set_project_status` action and read it from `status` on each project in
+`GET /v1/state` ([remote.md](remote.md)); web and mobile receive the field
+but have no UI for it yet. The lanes view is per window
+(`status_lanes` on the window in `workspace.json`), like the sort mode.

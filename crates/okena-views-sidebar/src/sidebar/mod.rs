@@ -777,6 +777,8 @@ impl Sidebar {
                     .data()
                     .window(window_id)
                     .is_some_and(|window| window.show_attention_section);
+                let status_board = okena_ui::board::status_board_enabled(cx);
+                let status_lanes = self.workspace.read(cx).status_lanes(window_id);
                 context_menu_panel("project-view-menu", &t)
                     .min_w(px(200.0))
                     .on_mouse_down_out(cx.listener(|this, _, _, cx| {
@@ -830,6 +832,29 @@ impl Sidebar {
                             },
                         )),
                     )
+                    .when(status_board, |panel| {
+                        panel.child(menu_separator(&t)).child(
+                            menu_item(
+                                "status-lanes-toggle",
+                                if status_lanes {
+                                    "icons/check.svg"
+                                } else {
+                                    "icons/tabs.svg"
+                                },
+                                "Status lanes",
+                                &t,
+                            )
+                            .on_click(cx.listener(
+                                move |this, _, _window, cx| {
+                                    this.header_menu = None;
+                                    this.workspace.update(cx, |ws, cx| {
+                                        ws.toggle_status_lanes(window_id, cx);
+                                    });
+                                    cx.notify();
+                                },
+                            )),
+                        )
+                    })
                     .when(!activity_mode, |panel| {
                         panel.child(menu_separator(&t)).child(
                             menu_item(

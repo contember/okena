@@ -306,3 +306,14 @@ sidebar follows.
   `status_board`. The per-terminal carry code (runtime slots, moves, close
   pruning) went away with the map. Plan sections above describe the
   original terminal-level design.
+- 2026-10-20 **Second review: no modal board.** A kanban as a modal
+  duplicated the columns that already live in the main area, and five
+  entry points were too many. Replaced by *lanes*: a per-window view
+  (`WindowState.status_lanes`, sidebar View menu → Status lanes,
+  `Cmd+Shift+K`) that stands the main area's live project columns in lanes
+  by status under thin captions; the status is set from a pill in the
+  column header (`StatusPickerPopover`) or the project menu. The modal
+  overlay, the header kanban button, the "Status Board…" menu item and the
+  two Show* actions are gone. Everything sits behind
+  `status_board.enabled` (default off) so an existing install sees no
+  change until it opts in.

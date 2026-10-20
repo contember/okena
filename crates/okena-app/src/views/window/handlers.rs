@@ -879,11 +879,10 @@ impl WindowView {
                     terminal.clear();
                 }
             }
-            OverlayManagerEvent::ShowStatusBoard { project_id } => {
-                let terminals = self.terminals.clone();
-                let project_id = project_id.clone();
+            OverlayManagerEvent::EditStatusColumns => {
+                let endpoint = self.local_daemon_endpoint(cx);
                 self.overlay_manager.update(cx, |om, cx| {
-                    om.toggle_status_board(Some(project_id), terminals, cx);
+                    om.toggle_settings_panel(endpoint, cx);
                 });
             }
             OverlayManagerEvent::TerminalToggleUnread { terminal_id } => {
@@ -1411,6 +1410,11 @@ impl WindowView {
                     } => {
                         self.open_terminal_path(&project_id, &terminal_id, path, line, column, cx);
                     }
+                    ProjectOverlayKind::StatusPicker { position } => {
+                        self.overlay_manager.update(cx, |om, cx| {
+                            om.show_status_picker(project_id, position, cx);
+                        });
+                    }
                     ProjectOverlayKind::ColorPicker { position } => {
                         self.overlay_manager.update(cx, |om, cx| {
                             om.show_color_picker(
@@ -1468,12 +1472,6 @@ impl WindowView {
                     let rm = self.remote_manager.clone();
                     self.overlay_manager.update(cx, |om, cx| {
                         om.toggle_add_project_dialog(rm, target_connection_id, cx);
-                    });
-                }
-                OverlayRequest::StatusBoard { project_id } => {
-                    let terminals = self.terminals.clone();
-                    self.overlay_manager.update(cx, |om, cx| {
-                        om.toggle_status_board(project_id, terminals, cx);
                     });
                 }
                 OverlayRequest::RemoteConnect => {

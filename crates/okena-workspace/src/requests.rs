@@ -120,6 +120,10 @@ pub enum ProjectOverlayKind {
     WorktreeList {
         position: gpui::Point<gpui::Pixels>,
     },
+    /// The status picker under a column header's status pill.
+    StatusPicker {
+        position: gpui::Point<gpui::Pixels>,
+    },
 }
 
 /// Folder-scoped overlay request. Carries a `folder_id` once;
@@ -156,10 +160,6 @@ pub enum OverlayRequest {
     /// remote host (`None` keeps the local target).
     AddProjectDialog {
         target_connection_id: Option<String>,
-    },
-    /// Open the terminal status board for one project, or for all (`None`).
-    StatusBoard {
-        project_id: Option<String>,
     },
     RemoteConnect,
     RemoteConnectionContextMenu {

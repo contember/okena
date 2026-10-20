@@ -78,10 +78,6 @@ pub enum ContextMenuEvent {
         project_id: String,
         project_name: String,
     },
-    /// Open the status board scoped to this project (its family).
-    ShowStatusBoard {
-        project_id: String,
-    },
     /// Sort the project into a status board column (`None` = unassigned).
     SetStatus {
         project_id: String,
@@ -410,6 +406,7 @@ impl Render for ContextMenu {
             Some(column) => format!("Status: {}", column.name),
             None => "Status".to_string(),
         };
+        let status_board = okena_ui::board::status_board_enabled(cx);
         let status_group = okena_ui::submenu::Submenu::new(
             "context-menu-status",
             "icons/arrow-up-down.svg",
@@ -609,22 +606,7 @@ impl Render for ContextMenu {
                         })
                         // Separator (only if worktree items above were shown)
                         .when(is_git_repo && !is_worktree, |d| d.child(menu_separator(&t)))
-                        .child(status_group)
-                        .child(
-                            menu_item(
-                                "context-menu-status-board",
-                                "icons/kanban.svg",
-                                "Status Board…",
-                                &t,
-                            )
-                            .on_click(cx.listener(
-                                |this, _, _window, cx| {
-                                    cx.emit(ContextMenuEvent::ShowStatusBoard {
-                                        project_id: this.request.project_id.clone(),
-                                    });
-                                },
-                            )),
-                        )
+                        .when(status_board, |menu| menu.child(status_group))
                         // Rename option
                         .child(
                             menu_item(

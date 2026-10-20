@@ -327,6 +327,12 @@ impl SettingsState {
         self.save_and_notify(cx);
     }
 
+    /// Switch the status board feature on or off.
+    pub fn set_status_board_enabled(&mut self, value: bool, cx: &mut Context<Self>) {
+        self.settings.status_board.enabled = value;
+        self.save_and_notify(cx);
+    }
+
     /// Replace the terminal status board columns wholesale.
     pub fn set_status_board_columns(
         &mut self,

@@ -318,6 +318,11 @@ fn default_status_bar_metrics_graph() -> bool {
 /// Terminal status board: the columns a terminal can be sorted into.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct StatusBoardSettings {
+    /// Master switch. Off (the default) hides every status surface: the
+    /// Lanes view, the pill in column headers, the Status entry in the
+    /// project menu, the sidebar captions and the columns editor.
+    #[serde(default)]
+    pub enabled: bool,
     /// Ordered columns. Ids are stable; names are free to change.
     #[serde(default = "default_board_columns")]
     pub columns: Vec<BoardColumn>,
@@ -326,6 +331,7 @@ pub struct StatusBoardSettings {
 impl Default for StatusBoardSettings {
     fn default() -> Self {
         Self {
+            enabled: false,
             columns: default_board_columns(),
         }
     }
@@ -1095,6 +1101,7 @@ mod tests {
         // A settings.json from before the board existed gets the default
         // columns; one that names its own keeps them verbatim, ids included.
         let settings: AppSettings = serde_json::from_str("{}").unwrap();
+        assert!(!settings.status_board.enabled, "the board is opt-in");
         let ids: Vec<&str> = settings
             .status_board
             .columns

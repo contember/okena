@@ -617,6 +617,83 @@ impl ProjectColumn {
             })
     }
 
+    /// The status pill after the project name: the column's name in its
+    /// colour when a status is set, a muted "Status" affordance while the
+    /// header is hovered otherwise. Click opens the status picker. Nothing
+    /// while the status board is off in settings.
+    fn render_status_pill(
+        &self,
+        project: &ProjectData,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        if !okena_ui::board::status_board_enabled(cx) {
+            return None;
+        }
+        let t = theme(cx);
+        let columns = okena_ui::board::board_columns(cx);
+        let column = project
+            .status
+            .as_deref()
+            .and_then(|id| columns.iter().find(|c| c.id == id));
+        let (label, color) = match column {
+            Some(column) => (
+                column.name.clone(),
+                match column.color {
+                    okena_core::theme::FolderColor::Default => t.text_secondary,
+                    color => t.get_folder_color(color),
+                },
+            ),
+            None if self.header_hovered => ("Status".to_string(), t.text_muted),
+            None => return None,
+        };
+        let project_id = self.project_id.clone();
+        let request_broker = self.request_broker.clone();
+        Some(
+            div()
+                .id("project-status-pill")
+                .flex_shrink_0()
+                .h(px(16.0))
+                .px(px(6.0))
+                .rounded(px(8.0))
+                .bg(rgb(t.bg_hover))
+                .flex()
+                .items_center()
+                .gap(px(4.0))
+                .cursor_pointer()
+                .hover(|s| s.bg(rgb(t.border)))
+                .child(
+                    div()
+                        .size(px(6.0))
+                        .rounded_full()
+                        .bg(rgb(color))
+                        .flex_shrink_0(),
+                )
+                .child(
+                    div()
+                        .text_size(ui_text_sm(cx))
+                        .text_color(rgb(color))
+                        .whitespace_nowrap()
+                        .child(label),
+                )
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_click(move |_, window, cx| {
+                    request_broker.update(cx, |broker, cx| {
+                        broker.push_overlay_request(
+                            OverlayRequest::Project(ProjectOverlay {
+                                project_id: project_id.clone(),
+                                kind: ProjectOverlayKind::StatusPicker {
+                                    position: window.mouse_position(),
+                                },
+                            }),
+                            cx,
+                        );
+                    });
+                    cx.stop_propagation();
+                })
+                .into_any_element(),
+        )
+    }
+
     fn render_header(&self, project: &ProjectData, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
         let workspace = self.workspace.clone();
@@ -682,6 +759,9 @@ impl ProjectColumn {
                 .bg(rgb(folder_color))
                 .into_any_element()
         };
+
+        let status_pill_a = self.render_status_pill(project, cx);
+        let status_pill_b = self.render_status_pill(project, cx);
 
         let project_name_el = {
             let display_name = project_header_display_name(project);
@@ -870,31 +950,6 @@ impl ProjectColumn {
             .into_any_element()
         });
 
-        let status_board_button = {
-            use okena_ui::header_buttons::{ButtonSize, HeaderAction, header_button_base};
-            let request_broker = self.request_broker.clone();
-            let project_id = self.project_id.clone();
-            header_button_base(
-                HeaderAction::StatusBoard,
-                &self.project_id,
-                ButtonSize::COMPACT,
-                &t,
-                None,
-                None,
-            )
-            .on_click(move |_, _window, cx| {
-                request_broker.update(cx, |broker, cx| {
-                    broker.push_overlay_request(
-                        crate::workspace::requests::OverlayRequest::StatusBoard {
-                            project_id: Some(project_id.clone()),
-                        },
-                        cx,
-                    );
-                });
-                cx.stop_propagation();
-            })
-        };
-
         let right_controls = h_flex()
             .gap(px(8.0))
             .child(self.render_hidden_taskbar(project, t, cx))
@@ -902,7 +957,6 @@ impl ProjectColumn {
                 h_flex()
                     .gap(px(2.0))
                     .when_some(header_reveal, |d, controls| d.child(controls))
-                    .child(status_board_button)
                     .child({
                         self.hook_panel
                             .update(cx, |hp, cx| hp.render_hook_indicator(&t, cx))
@@ -971,7 +1025,8 @@ impl ProjectColumn {
                                 .gap(px(6.0))
                                 .overflow_hidden()
                                 .child(worktree_dot)
-                                .child(project_name_el),
+                                .child(project_name_el)
+                                .children(status_pill_a),
                         )
                         .child(right_controls),
                 )
@@ -1014,6 +1069,7 @@ impl ProjectColumn {
                         .overflow_hidden()
                         .child(worktree_dot)
                         .child(project_name_el)
+                        .children(status_pill_b)
                         .child(git_status_el),
                 )
                 .child(right_controls)

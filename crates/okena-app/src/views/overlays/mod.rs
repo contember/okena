@@ -43,7 +43,6 @@ pub mod send_composer;
 pub mod session_manager;
 pub mod settings_panel;
 pub mod shell_selector_overlay;
-pub mod status_board;
 pub mod tab_context_menu;
 pub mod terminal_menu;
 pub mod terminal_overlay_utils;

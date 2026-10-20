@@ -193,7 +193,8 @@ If the file contains invalid JSON, Okena recovers as many fields as possible and
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `status_board.columns` | array | `[{"id":"todo","name":"To do"}, {"id":"in-progress","name":"In progress"}, {"id":"review","name":"Review"}, {"id":"done","name":"Done"}]` | Ordered columns a project or worktree can be sorted into (project menu → Status; the status board). `id` is the stable key stored on projects, `name` is what you see, optional `color` (`red`, `orange`, `yellow`, `lime`, `green`, `teal`, `cyan`, `blue`, `indigo`, `purple`, `pink`) tints the caption and column header. Rename freely; removing a column leaves its projects unassigned. See [status-board.md](status-board.md). |
+| `status_board.enabled` | bool | `false` | Master switch for the status board (status pill in column headers, Status in the project menu, lanes, sidebar captions, the columns editor). Off, nothing of it renders. |
+| `status_board.columns` | array | `[{"id":"todo","name":"To do"}, {"id":"in-progress","name":"In progress"}, {"id":"review","name":"Review"}, {"id":"done","name":"Done"}]` | Ordered columns a project or worktree can be sorted into (status pill, project menu → Status, lanes). `id` is the stable key stored on projects, `name` is what you see, optional `color` (`red`, `orange`, `yellow`, `lime`, `green`, `teal`, `cyan`, `blue`, `indigo`, `purple`, `pink`) tints the caption and column header. Rename freely; removing a column leaves its projects unassigned. See [status-board.md](status-board.md). |
 
 #### File Opener
 

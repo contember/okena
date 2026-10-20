@@ -5,13 +5,12 @@ use crate::keybindings::{
     RestartDaemon, ReviewChanges, ShowBranchSwitcher, ShowCommandPalette, ShowContentSearch,
     ShowDiffViewer, ShowFileSearch, ShowHookLog, ShowKeybindings, ShowLogConsole,
     ShowPairingDialog, ShowProfileManager, ShowProjectSwitcher, ShowSessionManager, ShowSettings,
-    ShowStatusBoard, ShowStatusBoardAll, ShowThemeSelector, StartAllServices, StopAllServices,
-    TogglePaneSwitcher, ToggleProjectLayout, ToggleProjectVisibility, ToggleSidebar,
-    ToggleSidebarAutoHide,
+    ShowThemeSelector, StartAllServices, StopAllServices, TogglePaneSwitcher, ToggleProjectLayout,
+    ToggleProjectVisibility, ToggleSidebar, ToggleSidebarAutoHide, ToggleStatusLanes,
 };
 use crate::settings::{open_settings_file, settings_entity};
 use crate::theme::theme;
-use crate::ui::tokens::{ui_text_md, ui_text_xl};
+use crate::ui::tokens::{ui_text_md, ui_text_xl, ui_text_xs};
 use crate::views::layout::navigation::{get_pane_map, prune_pane_map};
 use crate::views::layout::split_pane::{
     DragState, compute_resize, project_pixel_widths, render_project_divider, render_sidebar_divider,
@@ -258,6 +257,49 @@ impl WindowView {
             }
         };
 
+        // Status lanes: when on, the columns stand in lanes by status. The
+        // visible list is reordered lane by lane so every index below (widths,
+        // dividers) keeps pointing at the column it is next to.
+        let lane_groups: Option<Vec<okena_workspace::status_board::Lane>> = {
+            let workspace = self.workspace.read(cx);
+            if okena_ui::board::status_board_enabled(cx) && workspace.status_lanes(self.window_id) {
+                let statuses: Vec<Option<String>> = visible_projects
+                    .iter()
+                    .map(|id| workspace.project(id).and_then(|p| p.status.clone()))
+                    .collect();
+                let refs: Vec<Option<&str>> = statuses.iter().map(|s| s.as_deref()).collect();
+                okena_workspace::status_board::lanes(&refs, &okena_ui::board::board_columns(cx))
+            } else {
+                None
+            }
+        };
+        let visible_projects: Vec<String> = match &lane_groups {
+            Some(lanes) => lanes
+                .iter()
+                .flat_map(|lane| lane.indices.iter().map(|&i| visible_projects[i].clone()))
+                .collect(),
+            None => visible_projects,
+        };
+        // Spans into the (reordered) visible list, one per lane; a single
+        // caption-less span is today's flat grid.
+        let spans: Vec<(
+            Option<Option<okena_core::types::BoardColumn>>,
+            std::ops::Range<usize>,
+        )> = match &lane_groups {
+            Some(lanes) => {
+                let mut start = 0;
+                lanes
+                    .iter()
+                    .map(|lane| {
+                        let range = start..start + lane.indices.len();
+                        start = range.end;
+                        (Some(lane.column.clone()), range)
+                    })
+                    .collect()
+            }
+            None => vec![(None, 0..visible_projects.len())],
+        };
+
         let num_projects = visible_projects.len();
 
         // Evict stale pane map entries for projects no longer rendered
@@ -395,49 +437,113 @@ impl WindowView {
         // Build interleaved columns and dividers
         let mut elements: Vec<AnyElement> = Vec::new();
 
-        for (i, project_id) in visible_projects.iter().enumerate() {
-            let pixel_size = pixel_widths.get(i).copied().unwrap_or(200.0);
+        for (caption, span) in spans {
+            let mut inner: Vec<AnyElement> = Vec::new();
+            let span_end = span.end;
+            for i in span {
+                let project_id = &visible_projects[i];
+                let pixel_size = pixel_widths.get(i).copied().unwrap_or(200.0);
 
-            if let Some(col) = self.project_columns.get(project_id).cloned() {
-                let is_hovered = hovered_project.as_deref() == Some(project_id.as_str());
-                let col_element = div()
-                    // Fixed size along the grid axis, stretch on the cross axis.
-                    .when(is_rows, |d| d.h(px(pixel_size)).w_full())
-                    .when(!is_rows, |d| d.w(px(pixel_size)).h_full())
-                    .flex_shrink_0()
-                    .relative()
-                    .child(AnyView::from(col).cached(StyleRefinement::default().size_full()))
-                    // Accent ring drawn as a non-occluding overlay so it adds no
-                    // layout shift and does not intercept clicks on the panel.
-                    .when(is_hovered, |d| {
-                        d.child(
+                if let Some(col) = self.project_columns.get(project_id).cloned() {
+                    let is_hovered = hovered_project.as_deref() == Some(project_id.as_str());
+                    let col_element = div()
+                        // Fixed size along the grid axis, stretch on the cross axis.
+                        .when(is_rows, |d| d.h(px(pixel_size)).w_full())
+                        .when(!is_rows, |d| d.w(px(pixel_size)).h_full())
+                        .flex_shrink_0()
+                        .relative()
+                        .child(AnyView::from(col).cached(StyleRefinement::default().size_full()))
+                        // Accent ring drawn as a non-occluding overlay so it adds no
+                        // layout shift and does not intercept clicks on the panel.
+                        .when(is_hovered, |d| {
+                            d.child(
+                                div()
+                                    .absolute()
+                                    .inset_0()
+                                    .border_2()
+                                    .border_color(rgb(ring_color))
+                                    .rounded(px(4.0)),
+                            )
+                        })
+                        .into_any_element();
+
+                    inner.push(col_element);
+
+                    // Add divider after each project except the last
+                    if i + 1 < span_end {
+                        let min_col_width = settings_entity(cx).read(cx).settings.min_column_width;
+                        let divider = render_project_divider(
+                            self.window_id,
+                            self.workspace.clone(),
+                            i,
+                            visible_projects.clone(),
+                            container_bounds.clone(),
+                            &self.active_drag,
+                            min_col_width,
+                            is_rows,
+                            cx,
+                        );
+                        inner.push(divider.into_any_element());
+                    }
+                }
+            }
+            match caption {
+                None => elements.extend(inner),
+                Some(column) => {
+                    let lane_t = theme(cx);
+                    let accent = match column.as_ref().map(|c| c.color) {
+                        Some(okena_core::theme::FolderColor::Default) | None => None,
+                        Some(color) => Some(lane_t.get_folder_color(color)),
+                    };
+                    let label =
+                        okena_workspace::status_board::caption_label(&column).to_uppercase();
+                    let strip = div()
+                        .h(px(22.0))
+                        .px(px(6.0))
+                        .flex()
+                        .items_center()
+                        .gap(px(8.0))
+                        .flex_shrink_0()
+                        .children(accent.map(|hex| {
                             div()
-                                .absolute()
-                                .inset_0()
-                                .border_2()
-                                .border_color(rgb(ring_color))
-                                .rounded(px(4.0)),
+                                .size(px(7.0))
+                                .rounded_full()
+                                .bg(rgb(hex))
+                                .flex_shrink_0()
+                        }))
+                        .child(
+                            div()
+                                .text_size(ui_text_xs(cx))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(rgb(accent.unwrap_or(lane_t.text_secondary)))
+                                .whitespace_nowrap()
+                                .child(label),
                         )
-                    })
-                    .into_any_element();
-
-                elements.push(col_element);
-
-                // Add divider after each project except the last
-                if i < num_projects - 1 {
-                    let min_col_width = settings_entity(cx).read(cx).settings.min_column_width;
-                    let divider = render_project_divider(
-                        self.window_id,
-                        self.workspace.clone(),
-                        i,
-                        visible_projects.clone(),
-                        container_bounds.clone(),
-                        &self.active_drag,
-                        min_col_width,
-                        is_rows,
-                        cx,
+                        .child(
+                            div()
+                                .flex_1()
+                                .h(px(1.0))
+                                .bg(okena_ui::metrics::metric_track_color(&lane_t)),
+                        );
+                    elements.push(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .flex_shrink_0()
+                            .when(is_rows, |d| d.w_full())
+                            .when(!is_rows, |d| d.h_full().mr(px(16.0)))
+                            .child(strip)
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_1()
+                                    .min_h_0()
+                                    .min_w_0()
+                                    .when(is_rows, |d| d.flex_col())
+                                    .children(inner),
+                            )
+                            .into_any_element(),
                     );
-                    elements.push(divider.into_any_element());
                 }
             }
         }
@@ -677,6 +783,7 @@ impl Render for WindowView {
         let has_send_composer = om.has_send_composer();
         let has_worktree_list = om.has_worktree_list();
         let has_color_picker = om.has_color_picker();
+        let has_status_picker = om.has_status_picker();
 
         // Get active drag for global mouse handling
         let active_drag = self.active_drag.clone();
@@ -1133,24 +1240,11 @@ impl Render for WindowView {
                     overlay_manager.update(cx, |om, cx| om.toggle_hook_log(cx));
                 }
             }))
-            // Terminal status board: the focused project, or everything.
-            .on_action(cx.listener({
-                let overlay_manager = overlay_manager.clone();
-                move |this, _: &ShowStatusBoard, _window, cx| {
-                    let project_id = this.focus_manager.read(cx).focused_project_id().cloned();
-                    let terminals = this.terminals.clone();
-                    overlay_manager.update(cx, |om, cx| {
-                        om.toggle_status_board(project_id, terminals, cx)
-                    });
-                }
-            }))
-            .on_action(cx.listener({
-                let overlay_manager = overlay_manager.clone();
-                move |this, _: &ShowStatusBoardAll, _window, cx| {
-                    let terminals = this.terminals.clone();
-                    overlay_manager
-                        .update(cx, |om, cx| om.toggle_status_board(None, terminals, cx));
-                }
+            // Status lanes: regroup this window's columns by status.
+            .on_action(cx.listener(|this, _: &ToggleStatusLanes, _window, cx| {
+                let window_id = this.window_id;
+                this.workspace
+                    .update(cx, |ws, cx| ws.toggle_status_lanes(window_id, cx));
             }))
             // Handle show log console action
             .on_action(cx.listener({
@@ -1541,6 +1635,9 @@ impl Render for WindowView {
             // Color picker popover (positioned popup, rendered at root for full-window backdrop)
             .when(has_color_picker, |d| {
                 d.children(self.overlay_manager.read(cx).render_color_picker())
+            })
+            .when(has_status_picker, |d| {
+                d.children(self.overlay_manager.read(cx).render_status_picker())
             })
             // Worktree list popover (positioned popup, rendered at root for full-window backdrop)
             .when(has_worktree_list, |d| {
