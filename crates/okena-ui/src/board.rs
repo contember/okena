@@ -53,7 +53,7 @@ impl Default for SidebarLook {
     fn default() -> Self {
         Self {
             worktree_marker: okena_core::types::WorktreeMarker::Project,
-            worktree_guide: true,
+            worktree_guide: false,
         }
     }
 }

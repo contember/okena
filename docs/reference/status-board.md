@@ -31,12 +31,13 @@ as it did before.
 - **Sidebar**: once any worktree of a parent has a status, the parent's
   worktree rows split under small captions (a dot and the name in the
   column's colour), one per non-empty column in the columns' order, then
-  *No status*. A thin guide in the parent's colour runs down the left of
-  the expanded family (Settings > General > *Sidebar Family Guide*), so a
-  worktree still reads as its parent's while the captions say where it
-  stands. The ring before each worktree can show the project colour (the
-  default), the status colour, or nothing (*Sidebar Worktree Marker*).
-  Keyboard navigation walks the rows in the same order.
+  *No status*. Settings > General > *Sidebar Family Guide* (off by
+  default, independent of the board) draws a thin guide in the parent's
+  colour down the expanded family, so a worktree still reads as its
+  parent's while the captions say where it stands. With the board on, the
+  ring before each worktree can show the project colour (the default) or
+  the status colour (*Sidebar Worktree Marker*). Keyboard navigation walks
+  the rows in the same order.
 
 ## Columns
 

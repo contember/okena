@@ -275,8 +275,7 @@ pub struct SidebarSettings {
     #[serde(default)]
     pub worktree_marker: WorktreeMarker,
     /// Draw a thin guide in the parent's colour down an expanded family.
-    /// Only drawn while the status board is enabled.
-    #[serde(default = "default_true")]
+    #[serde(default)]
     pub worktree_guide: bool,
 }
 
@@ -289,7 +288,7 @@ impl Default for SidebarSettings {
             remote_layout: RemoteSidebarLayout::default(),
             host_stats: HostStatsStyle::default(),
             worktree_marker: WorktreeMarker::default(),
-            worktree_guide: true,
+            worktree_guide: false,
         }
     }
 }

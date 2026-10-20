@@ -47,13 +47,13 @@ impl SettingsPanel {
                 |state, val, cx| state.set_status_board_enabled(val, cx), cx,
             ))
             .when(s.status_board.enabled, |d| {
-                d.child(self.render_toggle(
-                    "sidebar-worktree-guide", "Sidebar Family Guide", s.sidebar.worktree_guide, true,
-                    |state, val, cx| state.set_sidebar_worktree_guide(val, cx), cx,
-                ))
-                .child(self.render_board_columns(cx))
+                d.child(self.render_worktree_marker_row(s.sidebar.worktree_marker, cx))
+                    .child(self.render_board_columns(cx))
             })
-            .child(self.render_worktree_marker_row(s.sidebar.worktree_marker, cx))
+            .child(self.render_toggle(
+                "sidebar-worktree-guide", "Sidebar Family Guide", s.sidebar.worktree_guide, true,
+                |state, val, cx| state.set_sidebar_worktree_guide(val, cx), cx,
+            ))
             .child(self.render_toggle(
                 "remote-server", "Remote Server", s.remote_server_enabled, true,
                 |state, val, cx| state.set_remote_server_enabled(val, cx), cx,

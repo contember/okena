@@ -77,8 +77,6 @@ pub enum WorktreeMarker {
     /// The colour of the worktree's status column; the project colour when
     /// it has none.
     Status,
-    /// No ring; the chevron and the name stay.
-    None,
 }
 
 impl WorktreeMarker {
@@ -86,16 +84,11 @@ impl WorktreeMarker {
         match self {
             WorktreeMarker::Project => "Project colour",
             WorktreeMarker::Status => "Status colour",
-            WorktreeMarker::None => "None",
         }
     }
 
     pub fn all_variants() -> &'static [WorktreeMarker] {
-        &[
-            WorktreeMarker::Project,
-            WorktreeMarker::Status,
-            WorktreeMarker::None,
-        ]
+        &[WorktreeMarker::Project, WorktreeMarker::Status]
     }
 }
 

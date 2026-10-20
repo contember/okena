@@ -73,9 +73,7 @@ pub(crate) fn fold_extra_rows(scroll_indices: &mut [usize], extra_rows: &[usize]
 /// expanded children). Each row is wrapped so consecutive rows join into one
 /// continuous line at `x`; the row itself is untouched.
 pub(crate) fn add_tree_guide(rows: &mut [AnyElement], x: f32, color: u32, cx: &App) {
-    if !(okena_ui::board::status_board_enabled(cx)
-        && okena_ui::board::sidebar_look(cx).worktree_guide)
-    {
+    if !okena_ui::board::sidebar_look(cx).worktree_guide {
         return;
     }
     let mut line = rgb(color);

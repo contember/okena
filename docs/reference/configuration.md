@@ -180,8 +180,8 @@ If the file contains invalid JSON, Okena recovers as many fields as possible and
 | `sidebar.width` | float | `250` | Sidebar width in pixels (150 - 500) |
 | `sidebar.remote_layout` | string | `"mixed"` | `"mixed"` keeps remote projects in the one list; `"separate"` shows a LOCAL section first and one REMOTE section per connected host, each with its own `+` to add a project there |
 | `sidebar.host_stats` | string | `"off"` | CPU and memory of the local machine and each remote host in the sidebar: `"off"`, `"text"` (`CPU 41%  MEM 72%` in the status bar's colours) or `"gauge"` (labels with a small vertical gauge each). Shown on the LOCAL row and each host row in `separate`, on the REMOTE connection rows otherwise |
-| `sidebar.worktree_marker` | string | `"project"` | The ring before a worktree row: `"project"` (the project colour), `"status"` (its status column's colour, needs the status board), `"none"` (no ring; chevron and name stay) |
-| `sidebar.worktree_guide` | bool | `true` | Thin guide in the parent's colour down an expanded family. Drawn only while the status board is enabled |
+| `sidebar.worktree_marker` | string | `"project"` | The ring before a worktree row: `"project"` (the project colour) or `"status"` (its status column's colour). Shown in settings while the status board is enabled |
+| `sidebar.worktree_guide` | bool | `false` | Thin guide in the parent's colour down an expanded family |
 
 #### Status Bar
 

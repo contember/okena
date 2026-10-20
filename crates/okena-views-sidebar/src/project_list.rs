@@ -134,24 +134,18 @@ impl Sidebar {
                     let folder_color = t.get_folder_color(base_color);
                     let dot_color = if *is_orphan { t.warning } else { folder_color };
                     let pid = project.id.clone();
-                    if marker == WorktreeMarker::None && !*is_orphan {
-                        // No ring; keep the slot so names stay aligned with
-                        // the main checkout's row.
-                        div().w(px(8.0)).flex_shrink_0().into_any_element()
-                    } else {
-                        sidebar_color_indicator(
-                            ElementId::Name(format!("{}-icon-{}", id_prefix, project.id).into()),
-                            color_dot(dot_color, true),
-                        )
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
-                                this.show_color_picker(pid.clone(), event.position, cx);
-                                cx.stop_propagation();
-                            }),
-                        )
-                        .into_any_element()
-                    }
+                    sidebar_color_indicator(
+                        ElementId::Name(format!("{}-icon-{}", id_prefix, project.id).into()),
+                        color_dot(dot_color, true),
+                    )
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
+                            this.show_color_picker(pid.clone(), event.position, cx);
+                            cx.stop_propagation();
+                        }),
+                    )
+                    .into_any_element()
                 }
                 ProjectRowStyle::GroupChild => {
                     let folder_color = t.get_folder_color(project.folder_color);
