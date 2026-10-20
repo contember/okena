@@ -2744,6 +2744,7 @@ mod workspace_tests {
                         .iter()
                         .map(|(k, v)| (k.to_string(), v.to_string()))
                         .collect(),
+                    status: None,
                     git_status: None,
                     terminal_agent_status: HashMap::new(),
                     folder_color,
