@@ -672,15 +672,24 @@ impl OverlayManager {
     }
 
     /// Toggle add project dialog overlay.
+    /// `target_connection_id` preselects a remote host in the dialog's target
+    /// selector (`None` = local).
     pub fn toggle_add_project_dialog(
         &mut self,
         remote_manager: Option<Entity<RemoteConnectionManager>>,
+        target_connection_id: Option<String>,
         cx: &mut Context<Self>,
     ) {
         let workspace = self.workspace.clone();
         let window_id = self.window_id;
         toggle_overlay!(self, cx, AddProjectDialog, AddProjectDialogEvent, |cx| {
-            AddProjectDialog::new(workspace, remote_manager, window_id, cx)
+            AddProjectDialog::new(
+                workspace,
+                remote_manager,
+                window_id,
+                target_connection_id,
+                cx,
+            )
         });
     }
 

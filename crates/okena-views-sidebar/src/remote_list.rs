@@ -1,3 +1,4 @@
+use gpui::prelude::FluentBuilder;
 use gpui::*;
 use okena_transport::client::{
     ConnectionStatus, LOCAL_DAEMON_CONNECTION_ID, RemoteConnectionConfig,
@@ -7,17 +8,22 @@ use okena_ui::tokens::{ui_text_md, ui_text_ms, ui_text_sm, ui_text_xl};
 use okena_workspace::requests::OverlayRequest;
 
 use crate::sidebar::Sidebar;
+use crate::sidebar::sections::{format_host_stats, host_stats_widget, status_label};
 
 /// Owned snapshot of a single connection for rendering.
 struct ConnectionSnapshot {
     config: RemoteConnectionConfig,
     status: ConnectionStatus,
+    /// Host CPU / memory, present only while the sidebar setting is on.
+    stats: Option<okena_core::api::ApiSystemStats>,
 }
 
 impl Sidebar {
-    /// Render the REMOTE section (header + connection status headers + add button).
-    /// Remote projects are now rendered as regular workspace projects inside auto-created folders,
-    /// so this section only needs connection management UI.
+    /// Render the REMOTE section at the bottom of the sidebar: connection
+    /// management (status rows + "Add Connection"). Remote projects render as
+    /// ordinary workspace projects above. In the Separate remote layout the
+    /// hosts already have their own rows up there (status, stats and the
+    /// connection menu included), so only the "Add Connection" button is left.
     pub fn render_remote_section(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let has_remote = self.get_remote_connections.is_some();
 
@@ -25,11 +31,20 @@ impl Sidebar {
             return div().into_any_element();
         }
 
+        let settings = self.sidebar_settings(cx);
+        if settings.remote_layout.is_separate() {
+            return div()
+                .mt(px(4.0))
+                .child(self.render_add_connection_button(cx))
+                .into_any_element();
+        }
+
         // Snapshot connection data via callback. The implicit loopback
         // connection to the local daemon (`--daemon-client` mode) is not a
         // user-managed remote — its projects already render as ordinary
         // workspace projects — so it is hidden from this REMOTE management
         // section. Real remote daemons still appear here.
+        let stats_style = settings.host_stats;
         let snapshots: Vec<ConnectionSnapshot> =
             if let Some(ref get_connections) = self.get_remote_connections {
                 (get_connections)(cx)
@@ -38,6 +53,7 @@ impl Sidebar {
                     .map(|s| ConnectionSnapshot {
                         config: s.config,
                         status: s.status,
+                        stats: s.system_stats.filter(|_| stats_style.is_on()),
                     })
                     .collect()
             } else {
@@ -56,8 +72,14 @@ impl Sidebar {
 
         for snap in &snapshots {
             children.push(
-                self.render_connection_header(&snap.config, &snap.status, false, cx)
-                    .into_any_element(),
+                self.render_connection_header(
+                    &snap.config,
+                    &snap.status,
+                    snap.stats.as_ref(),
+                    stats_style,
+                    cx,
+                )
+                .into_any_element(),
             );
         }
 
@@ -87,12 +109,15 @@ impl Sidebar {
         &self,
         config: &RemoteConnectionConfig,
         status: &ConnectionStatus,
-        _is_collapsed: bool,
+        stats: Option<&okena_core::api::ApiSystemStats>,
+        stats_style: okena_workspace::settings::HostStatsStyle,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let t = theme(cx);
         let name = config.name.clone();
         let host_port = format!("{}:{}", config.host, config.port);
+        let stats_widget = stats.and_then(|stats| host_stats_widget(stats_style, stats, &t, cx));
+        let stats_tooltip = stats.map(format_host_stats);
 
         // Status dot color
         let status_color = match status {
@@ -103,15 +128,7 @@ impl Sidebar {
             ConnectionStatus::Disconnected => t.text_muted,
             ConnectionStatus::Error(_) => t.term_red,
         };
-
-        let status_text = match status {
-            ConnectionStatus::Connecting => "Connecting...",
-            ConnectionStatus::Pairing => "Pairing...",
-            ConnectionStatus::Reconnecting { .. } => "Reconnecting...",
-            ConnectionStatus::Disconnected => "Disconnected",
-            ConnectionStatus::Error(_) => "Error",
-            ConnectionStatus::Connected => "Connected",
-        };
+        let status_text = status_label(status);
 
         let conn_id_for_ctx = config.id.clone();
         let conn_name_for_ctx = config.name.clone();
@@ -132,20 +149,25 @@ impl Sidebar {
             .gap(px(6.0))
             .cursor_pointer()
             .hover(|s| s.bg(rgb(t.bg_hover)))
+            .when_some(stats_tooltip, |d, tooltip| {
+                d.tooltip(move |window, cx| {
+                    gpui_component::tooltip::Tooltip::new(tooltip.clone()).build(window, cx)
+                })
+            })
             .on_mouse_down(
                 MouseButton::Right,
                 cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
                     this.request_broker.update(cx, |broker, cx| {
                         broker.push_overlay_request(
-                        okena_workspace::requests::OverlayRequest::RemoteConnectionContextMenu {
-                            connection_id: conn_id_for_ctx.clone(),
-                            connection_name: conn_name_for_ctx.clone(),
-                            is_pairing,
-                            tls: conn_tls,
-                            position: event.position,
-                        },
-                        cx,
-                    );
+                            okena_workspace::requests::OverlayRequest::RemoteConnectionContextMenu {
+                                connection_id: conn_id_for_ctx.clone(),
+                                connection_name: conn_name_for_ctx.clone(),
+                                is_pairing,
+                                tls: conn_tls,
+                                position: event.position,
+                            },
+                            cx,
+                        );
                     });
                     cx.stop_propagation();
                 }),
@@ -171,6 +193,7 @@ impl Sidebar {
                     .text_color(rgb(t.text_muted))
                     .child(format!("{} — {}", host_port, status_text)),
             )
+            .children(stats_widget)
             // Warning badge for unencrypted connections (right-click → Upgrade).
             .children(insecure.then(|| {
                 div()

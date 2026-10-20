@@ -14,6 +14,13 @@ use okena_workspace::requests::SidebarRequest;
 use okena_workspace::state::{ProjectData, Workspace};
 use std::collections::{HashMap, HashSet};
 
+/// One step of the manual walk: a host section header or a `project_order`
+/// entry as `(merged_index, id)`.
+enum SectionEntry {
+    Header(super::sections::SidebarSectionInfo),
+    Order((usize, String)),
+}
+
 impl Sidebar {
     /// Build the `project_id -> services` map from the local `ServiceManager`
     /// plus remote project snapshots. Shared by the manual and activity render
@@ -813,9 +820,25 @@ impl Render for Sidebar {
         // Collect services (local ServiceManager + remote snapshots) for all projects
         let mut project_services = self.collect_project_services(workspace, cx);
 
-        // Build sidebar items from project_order
+        // Build sidebar items from project_order, regrouped into host sections
+        // when the Separate remote layout is on (a single headerless section
+        // otherwise). `top_index` stays the merged `project_order` index so
+        // drop targets keep dispatching valid reorder positions.
         let mut items: Vec<SidebarItem> = Vec::new();
-        for (top_index, id) in workspace.data().project_order.iter().enumerate() {
+        let sections = self.ordered_sections(workspace, cx);
+        let section_entries = sections.into_iter().flat_map(|section| {
+            let header = section.info.map(SectionEntry::Header).into_iter();
+            header.chain(section.entries.into_iter().map(SectionEntry::Order))
+        });
+        for entry in section_entries {
+            let (top_index, id) = match entry {
+                SectionEntry::Header(section) => {
+                    items.push(SidebarItem::SectionHeader { section });
+                    continue;
+                }
+                SectionEntry::Order(pair) => pair,
+            };
+            let id = &id;
             // Check if this is a folder
             if let Some(folder) = workspace.data().folders.iter().find(|f| &f.id == id) {
                 let mut folder_projects: Vec<SidebarProjectInfo> = folder
@@ -926,16 +949,19 @@ impl Render for Sidebar {
         // Map each cursor index to its scroll-child index. Manual rows are 1:1
         // with cursor items, offset by the leading drop zone (1) plus the
         // attention section (header + one row per attention project + a trailing
-        // divider, when shown).
+        // divider, when shown). Host section headers (Separate remote layout)
+        // are extra non-cursor scroll children; they are collected while the
+        // rows are emitted below and folded in afterwards.
         let attention_section_len = if attention_infos.is_empty() {
             0
         } else {
             1 + attention_infos.len() + 1
         };
         let cursor_scroll_base = 1 + attention_section_len;
-        self.cursor_scroll_indices = (0..cursor_items.len())
-            .map(|i| cursor_scroll_base + i)
-            .collect();
+        let cursor_item_count = cursor_items.len();
+        // `flat_idx` at which each section header was pushed: a header at
+        // position `h` precedes every cursor item `i >= h`.
+        let mut section_header_positions: Vec<usize> = Vec::new();
 
         // Determine which project is focused — only highlight when explicitly focused via sidebar click
         let (focused_project_id, focus_individual) = {
@@ -1019,6 +1045,10 @@ impl Render for Sidebar {
 
         for item in items {
             match item {
+                SidebarItem::SectionHeader { section } => {
+                    section_header_positions.push(flat_idx);
+                    flat_elements.push(self.render_section_header(&section, cx));
+                }
                 SidebarItem::Project {
                     project,
                     index,
@@ -1366,6 +1396,13 @@ impl Render for Sidebar {
                 }
             }
         }
+
+        self.cursor_scroll_indices = (0..cursor_item_count)
+            .map(|i| {
+                let headers_before = section_header_positions.iter().filter(|&&h| h <= i).count();
+                cursor_scroll_base + i + headers_before
+            })
+            .collect();
 
         // Trailing drop zone so items can be dropped after the last entry
         flat_elements.push(

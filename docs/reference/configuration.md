@@ -112,7 +112,9 @@ If the file contains invalid JSON, Okena recovers as many fields as possible and
   "sidebar": {
     "is_open": false,
     "auto_hide": false,
-    "width": 250
+    "width": 250,
+    "remote_layout": "mixed",
+    "host_stats": "off"
   },
   "remote_server_enabled": false,
   "remote_listen_address": "127.0.0.1",
@@ -176,6 +178,8 @@ If the file contains invalid JSON, Okena recovers as many fields as possible and
 | `sidebar.is_open` | bool | `false` | Whether the sidebar starts open |
 | `sidebar.auto_hide` | bool | `false` | Auto-hide the sidebar when focus leaves it |
 | `sidebar.width` | float | `250` | Sidebar width in pixels (150 - 500) |
+| `sidebar.remote_layout` | string | `"mixed"` | `"mixed"` keeps remote projects in the one list; `"separate"` shows a LOCAL section first and one REMOTE section per connected host, each with its own `+` to add a project there |
+| `sidebar.host_stats` | string | `"off"` | CPU and memory of the local machine and each remote host in the sidebar: `"off"`, `"text"` (`CPU 41%  MEM 72%` in the status bar's colours) or `"gauge"` (labels with a small vertical gauge each). Shown on the LOCAL row and each host row in `separate`, on the REMOTE connection rows otherwise |
 
 #### File Opener
 

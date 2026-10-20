@@ -597,15 +597,27 @@ impl WindowView {
                 sidebar.set_remote_connections(Box::new(move |cx| {
                     rm_for_connections
                         .read(cx)
-                        .connections()
-                        .iter()
-                        .map(|(config, status, _state)| {
+                        .connections_with_system_stats()
+                        .into_iter()
+                        .map(|(config, status, _state, system_stats)| {
                             okena_views_sidebar::RemoteConnectionSnapshot {
-                                config: (*config).clone(),
-                                status: (*status).clone(),
+                                config: config.clone(),
+                                status: status.clone(),
+                                system_stats: system_stats.cloned(),
                             }
                         })
                         .collect()
+                }));
+
+                // Settings the sidebar renders from (remote layout, host stats).
+                sidebar.set_get_settings(Box::new(|cx| {
+                    let s = settings(cx);
+                    okena_views_sidebar::SidebarSettings {
+                        worktree_path_template: String::new(),
+                        hooks: s.hooks.clone(),
+                        remote_layout: s.sidebar.remote_layout,
+                        host_stats: s.sidebar.host_stats,
+                    }
                 }));
 
                 // Send remote action callback

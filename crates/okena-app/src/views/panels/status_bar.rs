@@ -376,23 +376,11 @@ impl StatusBar {
     }
 
     fn cpu_metric_color(cpu_usage: f32, t: &okena_core::theme::ThemeColors) -> u32 {
-        if cpu_usage > 80.0 {
-            t.metric_critical
-        } else if cpu_usage > 50.0 {
-            t.metric_warning
-        } else {
-            t.metric_normal
-        }
+        crate::ui::metrics::cpu_metric_color(cpu_usage, t)
     }
 
     fn memory_metric_color(memory_percent: u64, t: &okena_core::theme::ThemeColors) -> u32 {
-        if memory_percent > 80 {
-            t.metric_critical
-        } else if memory_percent > 60 {
-            t.metric_warning
-        } else {
-            t.metric_normal
-        }
+        crate::ui::metrics::memory_metric_color(memory_percent, t)
     }
 
     fn memory_percent_from_bytes(stats: &ApiSystemStats) -> u64 {

@@ -108,7 +108,10 @@ impl Sidebar {
 
         let mut cursor_items = Vec::new();
 
-        for id in &workspace.data().project_order {
+        // Same host-section order as the render path (see `sections.rs`), so
+        // cursor index `i` always lands on the `i`-th rendered row.
+        let ordered_ids = self.ordered_project_ids(workspace, cx);
+        for id in &ordered_ids {
             // Check if this is a folder
             if let Some(folder) = workspace.data().folders.iter().find(|f| &f.id == id) {
                 cursor_items.push(SidebarCursorItem::Folder {

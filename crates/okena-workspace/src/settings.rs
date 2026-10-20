@@ -188,6 +188,68 @@ pub struct FileFinderSettings {
     pub show_ignored: bool,
 }
 
+/// How the sidebar lays out projects that live on remote daemons.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RemoteSidebarLayout {
+    /// One list: remote projects interleave with local ones in `project_order`.
+    #[default]
+    Mixed,
+    /// A LOCAL section first, then one section per connected remote host.
+    Separate,
+}
+
+impl RemoteSidebarLayout {
+    pub fn display_name(self) -> &'static str {
+        match self {
+            RemoteSidebarLayout::Mixed => "Mixed",
+            RemoteSidebarLayout::Separate => "Separate",
+        }
+    }
+
+    pub fn all_variants() -> &'static [RemoteSidebarLayout] {
+        &[RemoteSidebarLayout::Mixed, RemoteSidebarLayout::Separate]
+    }
+
+    pub fn is_separate(self) -> bool {
+        self == RemoteSidebarLayout::Separate
+    }
+}
+
+/// How (whether) the sidebar shows each host's CPU / memory.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum HostStatsStyle {
+    #[default]
+    Off,
+    /// `CPU 41%  MEM 72%` in the status bar's colours.
+    Text,
+    /// `CPU` / `MEM` labels with a small vertical gauge each.
+    Gauge,
+}
+
+impl HostStatsStyle {
+    pub fn display_name(self) -> &'static str {
+        match self {
+            HostStatsStyle::Off => "Off",
+            HostStatsStyle::Text => "Text",
+            HostStatsStyle::Gauge => "Gauge",
+        }
+    }
+
+    pub fn all_variants() -> &'static [HostStatsStyle] {
+        &[
+            HostStatsStyle::Off,
+            HostStatsStyle::Text,
+            HostStatsStyle::Gauge,
+        ]
+    }
+
+    pub fn is_on(self) -> bool {
+        self != HostStatsStyle::Off
+    }
+}
+
 /// Sidebar settings
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SidebarSettings {
@@ -200,6 +262,13 @@ pub struct SidebarSettings {
     /// Sidebar width in pixels
     #[serde(default = "default_sidebar_width")]
     pub width: f32,
+    /// Mixed (default) or one section per host — see [`RemoteSidebarLayout`].
+    #[serde(default)]
+    pub remote_layout: RemoteSidebarLayout,
+    /// CPU / memory of the local machine and each remote host in the sidebar
+    /// (host rows in Separate layout, connection rows otherwise).
+    #[serde(default)]
+    pub host_stats: HostStatsStyle,
 }
 
 impl Default for SidebarSettings {
@@ -208,6 +277,8 @@ impl Default for SidebarSettings {
             is_open: false,
             auto_hide: false,
             width: DEFAULT_SIDEBAR_WIDTH,
+            remote_layout: RemoteSidebarLayout::default(),
+            host_stats: HostStatsStyle::default(),
         }
     }
 }

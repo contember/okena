@@ -299,6 +299,26 @@ impl SettingsState {
         self.save_and_notify(cx);
     }
 
+    /// Set how remote projects are laid out in the sidebar.
+    pub fn set_sidebar_remote_layout(
+        &mut self,
+        value: crate::workspace::settings::RemoteSidebarLayout,
+        cx: &mut Context<Self>,
+    ) {
+        self.settings.sidebar.remote_layout = value;
+        self.save_and_notify(cx);
+    }
+
+    /// Set how the sidebar shows host CPU / memory.
+    pub fn set_sidebar_host_stats(
+        &mut self,
+        value: crate::workspace::settings::HostStatsStyle,
+        cx: &mut Context<Self>,
+    ) {
+        self.settings.sidebar.host_stats = value;
+        self.save_and_notify(cx);
+    }
+
     /// Set sidebar width (clamped to min/max bounds)
     pub fn set_sidebar_width(&mut self, value: f32, cx: &mut Context<Self>) {
         use crate::workspace::persistence::{MAX_SIDEBAR_WIDTH, MIN_SIDEBAR_WIDTH};

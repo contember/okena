@@ -10,6 +10,8 @@
 mod cursor;
 mod renames;
 mod render;
+pub(crate) mod section_header;
+pub(crate) mod sections;
 mod worktree;
 
 #[cfg(test)]
@@ -44,12 +46,18 @@ pub type GetSettingsFn = Box<dyn Fn(&App) -> SidebarSettings>;
 pub struct SidebarSettings {
     pub worktree_path_template: String,
     pub hooks: okena_workspace::settings::HooksConfig,
+    /// Mixed list or one section per host.
+    pub remote_layout: okena_workspace::settings::RemoteSidebarLayout,
+    /// How CPU / memory per host is drawn, if at all.
+    pub host_stats: okena_workspace::settings::HostStatsStyle,
 }
 
 /// Snapshot of a remote connection for rendering.
 pub struct RemoteConnectionSnapshot {
     pub config: RemoteConnectionConfig,
     pub status: ConnectionStatus,
+    /// Latest `system_stats_changed` push from that daemon, if any.
+    pub system_stats: Option<okena_core::api::ApiSystemStats>,
 }
 
 /// Callback to get remote connection snapshots for rendering.
@@ -189,6 +197,8 @@ pub struct Sidebar {
     pub(crate) creating_worktree: HashSet<String>,
     /// Callback to get remote connections
     pub(crate) get_remote_connections: Option<GetRemoteConnectionsFn>,
+    /// Callback to read the app settings the sidebar depends on
+    pub(crate) get_settings: Option<GetSettingsFn>,
     /// Callback to send remote actions
     pub(crate) send_remote_action: Option<SendRemoteActionFn>,
     /// Callback to dispatch a folder-scoped / workspace-global action to a
@@ -259,6 +269,25 @@ impl Sidebar {
         cx.observe(&workspace, |_this, _ws, cx| cx.notify())
             .detach();
 
+        // Host CPU / memory arrives as a WS push that stores the value without
+        // notifying anyone (the status bar repaints on its own timer). While
+        // the sidebar shows those stats, poll at the same cadence so headers
+        // and connection rows stay fresh; otherwise this loop is a no-op.
+        cx.spawn(async move |this: WeakEntity<Sidebar>, cx| {
+            loop {
+                smol::Timer::after(std::time::Duration::from_secs(2)).await;
+                let result = this.update(cx, |this, cx| {
+                    if this.sidebar_settings(cx).host_stats.is_on() {
+                        cx.notify();
+                    }
+                });
+                if result.is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
+
         // Hook terminals are displayed in the dedicated HookPanel, so we no
         // longer auto-expand the sidebar project when hooks appear.
 
@@ -287,6 +316,7 @@ impl Sidebar {
             collapsed_groups: HashSet::new(),
             creating_worktree: HashSet::new(),
             get_remote_connections: None,
+            get_settings: None,
             send_remote_action: None,
             dispatch_for_connection: None,
             get_remote_folder: None,
@@ -324,6 +354,28 @@ impl Sidebar {
     /// Set the remote connections callback.
     pub fn set_remote_connections(&mut self, f: GetRemoteConnectionsFn) {
         self.get_remote_connections = Some(f);
+    }
+
+    /// Set the settings callback.
+    pub fn set_get_settings(&mut self, f: GetSettingsFn) {
+        self.get_settings = Some(f);
+    }
+
+    /// Current sidebar-relevant settings (defaults when no callback is wired,
+    /// e.g. in tests).
+    pub(crate) fn sidebar_settings(&self, cx: &App) -> SidebarSettings {
+        self.get_settings
+            .as_ref()
+            .map(|f| (f)(cx))
+            .unwrap_or_default()
+    }
+
+    /// Owned snapshots of every connection, loopback included.
+    pub(crate) fn remote_connection_snapshots(&self, cx: &App) -> Vec<RemoteConnectionSnapshot> {
+        self.get_remote_connections
+            .as_ref()
+            .map(|f| (f)(cx))
+            .unwrap_or_default()
     }
 
     /// Set the send remote action callback.
@@ -695,7 +747,9 @@ impl Sidebar {
                         this.header_menu = None;
                         this.request_broker.update(cx, |broker, cx| {
                             broker.push_overlay_request(
-                                okena_workspace::requests::OverlayRequest::AddProjectDialog,
+                                okena_workspace::requests::OverlayRequest::AddProjectDialog {
+                                    target_connection_id: None,
+                                },
                                 cx,
                             );
                         });
@@ -955,8 +1009,13 @@ impl SidebarProjectInfo {
     }
 }
 
-/// An item in the sidebar's top-level ordering: either a project or a folder
+/// An item in the sidebar's top-level ordering: a project, a folder, or (in
+/// the Separate remote layout) a host section header. Headers are not cursor
+/// targets.
 pub(crate) enum SidebarItem {
+    SectionHeader {
+        section: sections::SidebarSectionInfo,
+    },
     Project {
         project: SidebarProjectInfo,
         index: usize,
