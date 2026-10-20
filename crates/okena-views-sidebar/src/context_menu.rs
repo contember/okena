@@ -83,8 +83,10 @@ pub enum ContextMenuEvent {
         project_id: String,
         status: Option<String>,
     },
-    /// Flip this window's status-lanes view.
-    ToggleStatusLanes,
+    /// Flip the status-lanes view of this project's family in this window.
+    ToggleStatusLanes {
+        project_id: String,
+    },
     RenameDirectory {
         project_id: String,
         project_path: String,
@@ -409,7 +411,7 @@ impl Render for ContextMenu {
             None => "Status".to_string(),
         };
         let status_board = okena_ui::board::status_board_enabled(cx);
-        let lanes_on = ws.status_lanes(self.window_id);
+        let lanes_on = ws.status_lanes(self.window_id, &self.request.project_id);
         let status_group = okena_ui::submenu::Submenu::new(
             "context-menu-status",
             "icons/arrow-up-down.svg",
@@ -622,8 +624,10 @@ impl Render for ContextMenu {
                                     &t,
                                 )
                                 .on_click(cx.listener(
-                                    |_this, _, _window, cx| {
-                                        cx.emit(ContextMenuEvent::ToggleStatusLanes);
+                                    |this, _, _window, cx| {
+                                        cx.emit(ContextMenuEvent::ToggleStatusLanes {
+                                            project_id: this.request.project_id.clone(),
+                                        });
                                     },
                                 )),
                             )

@@ -1124,11 +1124,13 @@ impl OverlayManager {
                         project_id: project_id.clone(),
                     });
                 }
-                ContextMenuEvent::ToggleStatusLanes => {
+                ContextMenuEvent::ToggleStatusLanes { project_id } => {
                     this.hide_context_menu(cx);
                     let window_id = this.window_id;
-                    this.workspace
-                        .update(cx, |ws, cx| ws.toggle_status_lanes(window_id, cx));
+                    let project_id = project_id.clone();
+                    this.workspace.update(cx, |ws, cx| {
+                        ws.toggle_status_lanes(window_id, &project_id, cx)
+                    });
                 }
                 ContextMenuEvent::SetStatus { project_id, status } => {
                     this.hide_context_menu(cx);

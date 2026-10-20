@@ -19,13 +19,12 @@ as it did before.
   the columns, *No status*, and *Edit columns…* (opens settings).
 - **Project menu → Status** (right-click a project or worktree row in the
   sidebar): the same choices as a flyout; the current one is ticked.
-- **Lanes** (the lanes button next to *View* at the top of the sidebar,
-  the project menu → *Status lanes*, the View menu, or `Cmd+Shift+K` /
-  `Ctrl+Shift+K`; per window): the main area's project columns stand in
-  lanes, one per board column that has a member, *No status* last, each
-  under a thin caption (dot in the column's colour, name, hairline).
-  Focus a parent to see its worktrees sorted; the Overview sorts every
-  visible project. Columns stay live terminals and resize as before; the
+- **Lanes** (right-click a project or one of its worktrees → *Status
+  lanes*, or `Cmd+Shift+K` / `Ctrl+Shift+K` for the focused project;
+  remembered per window and project): while that family is focused, its
+  columns stand in lanes, one per board column that has a member, *No
+  status* last, each under a thin caption (dot in the column's colour,
+  name, hairline). Columns stay live terminals and resize as before; the
   divider between two columns only exists inside a lane. With no status
   among the visible columns, or a single focused column, the grid is flat,
   lanes or not.

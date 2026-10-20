@@ -1497,16 +1497,36 @@ impl Workspace {
         }
     }
 
-    /// Flip the status-lanes view for a window. Persisted via `notify_data`.
-    pub fn toggle_status_lanes(&mut self, window_id: WindowId, cx: &mut impl WorkspaceCx) {
-        if self.data.toggle_status_lanes(window_id).is_some() {
+    /// The project whose family a lanes toggle addresses: a worktree stands
+    /// for its parent, so the whole family flips together.
+    pub fn status_lanes_root(&self, project_id: &str) -> String {
+        self.project(project_id)
+            .and_then(|p| p.worktree_info.as_ref())
+            .map(|wt| wt.parent_project_id.clone())
+            .filter(|parent| self.project(parent).is_some())
+            .unwrap_or_else(|| project_id.to_string())
+    }
+
+    /// Flip the status-lanes view of a project's family in a window.
+    /// Persisted via `notify_data`.
+    pub fn toggle_status_lanes(
+        &mut self,
+        window_id: WindowId,
+        project_id: &str,
+        cx: &mut impl WorkspaceCx,
+    ) {
+        let root = self.status_lanes_root(project_id);
+        if self.data.toggle_status_lanes(window_id, &root).is_some() {
             self.notify_data(cx);
         }
     }
 
-    /// Whether a window groups its project columns into status lanes.
-    pub fn status_lanes(&self, window_id: WindowId) -> bool {
-        self.data.window(window_id).is_some_and(|w| w.status_lanes)
+    /// Whether a window shows a project's family in status lanes.
+    pub fn status_lanes(&self, window_id: WindowId, project_id: &str) -> bool {
+        let root = self.status_lanes_root(project_id);
+        self.data
+            .window(window_id)
+            .is_some_and(|w| w.status_lanes_projects.contains(&root))
     }
 
     /// Toggle whether a project is pinned to the top of the activity-sorted

@@ -614,47 +614,6 @@ impl Sidebar {
                             .flex()
                             .items_center()
                             .gap(px(4.0))
-                            // Status lanes toggle (only with the status board enabled):
-                            // lit while this window groups its columns by status.
-                            .when(okena_ui::board::status_board_enabled(cx), |row| {
-                                let lanes_on = self.workspace.read(cx).status_lanes(window_id);
-                                row.child(
-                                    div()
-                                        .id("status-lanes-btn")
-                                        .cursor_pointer()
-                                        .size(px(24.0))
-                                        .rounded(px(4.0))
-                                        .when(lanes_on, |b| b.bg(rgb(t.bg_hover)))
-                                        .hover(|s| s.bg(rgb(t.bg_hover)))
-                                        .flex()
-                                        .items_center()
-                                        .justify_center()
-                                        .child(
-                                            svg()
-                                                .path("icons/kanban.svg")
-                                                .size(px(13.0))
-                                                .text_color(rgb(if lanes_on {
-                                                    t.border_active
-                                                } else {
-                                                    t.text_secondary
-                                                })),
-                                        )
-                                        .tooltip(move |window, cx| {
-                                            Tooltip::new(if lanes_on {
-                                                "Status lanes on"
-                                            } else {
-                                                "Status lanes"
-                                            })
-                                            .build(window, cx)
-                                        })
-                                        .on_click(cx.listener(move |this, _, _window, cx| {
-                                            this.workspace.update(cx, |ws, cx| {
-                                                ws.toggle_status_lanes(window_id, cx);
-                                            });
-                                            cx.notify();
-                                        })),
-                                )
-                            })
                             .child(
                                 div()
                                     .id("project-view-menu-btn")
@@ -818,8 +777,6 @@ impl Sidebar {
                     .data()
                     .window(window_id)
                     .is_some_and(|window| window.show_attention_section);
-                let status_board = okena_ui::board::status_board_enabled(cx);
-                let status_lanes = self.workspace.read(cx).status_lanes(window_id);
                 context_menu_panel("project-view-menu", &t)
                     .min_w(px(200.0))
                     .on_mouse_down_out(cx.listener(|this, _, _, cx| {
@@ -873,29 +830,6 @@ impl Sidebar {
                             },
                         )),
                     )
-                    .when(status_board, |panel| {
-                        panel.child(menu_separator(&t)).child(
-                            menu_item(
-                                "status-lanes-toggle",
-                                if status_lanes {
-                                    "icons/check.svg"
-                                } else {
-                                    "icons/tabs.svg"
-                                },
-                                "Status lanes",
-                                &t,
-                            )
-                            .on_click(cx.listener(
-                                move |this, _, _window, cx| {
-                                    this.header_menu = None;
-                                    this.workspace.update(cx, |ws, cx| {
-                                        ws.toggle_status_lanes(window_id, cx);
-                                    });
-                                    cx.notify();
-                                },
-                            )),
-                        )
-                    })
                     .when(!activity_mode, |panel| {
                         panel.child(menu_separator(&t)).child(
                             menu_item(

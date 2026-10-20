@@ -262,10 +262,13 @@ impl WindowView {
         // dividers) keeps pointing at the column it is next to.
         let lane_groups: Option<Vec<okena_workspace::status_board::Lane>> = {
             let workspace = self.workspace.read(cx);
-            // A single focused column needs no lane caption: lanes only sort
-            // a set of columns against each other.
+            // Lanes belong to a focused family whose parent has them on; a
+            // single focused column needs no caption either way.
+            let lanes_root = self.focus_manager.read(cx).focused_project_id().cloned();
             if okena_ui::board::status_board_enabled(cx)
-                && workspace.status_lanes(self.window_id)
+                && lanes_root
+                    .as_deref()
+                    .is_some_and(|root| workspace.status_lanes(self.window_id, root))
                 && visible_projects.len() > 1
             {
                 let statuses: Vec<Option<String>> = visible_projects
@@ -1248,8 +1251,13 @@ impl Render for WindowView {
             // Status lanes: regroup this window's columns by status.
             .on_action(cx.listener(|this, _: &ToggleStatusLanes, _window, cx| {
                 let window_id = this.window_id;
-                this.workspace
-                    .update(cx, |ws, cx| ws.toggle_status_lanes(window_id, cx));
+                let Some(project_id) = this.focus_manager.read(cx).focused_project_id().cloned()
+                else {
+                    return;
+                };
+                this.workspace.update(cx, |ws, cx| {
+                    ws.toggle_status_lanes(window_id, &project_id, cx)
+                });
             }))
             // Handle show log console action
             .on_action(cx.listener({
