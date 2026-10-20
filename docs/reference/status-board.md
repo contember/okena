@@ -27,7 +27,8 @@ as it did before.
   Focus a parent to see its worktrees sorted; the Overview sorts every
   visible project. Columns stay live terminals and resize as before; the
   divider between two columns only exists inside a lane. With no status
-  among the visible columns the grid is flat, lanes or not.
+  among the visible columns, or a single focused column, the grid is flat,
+  lanes or not.
 - **Sidebar**: once any worktree of a parent has a status, the parent's
   worktree rows split under small captions (a dot and the name in the
   column's colour), one per non-empty column in the columns' order, then

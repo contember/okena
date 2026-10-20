@@ -262,7 +262,12 @@ impl WindowView {
         // dividers) keeps pointing at the column it is next to.
         let lane_groups: Option<Vec<okena_workspace::status_board::Lane>> = {
             let workspace = self.workspace.read(cx);
-            if okena_ui::board::status_board_enabled(cx) && workspace.status_lanes(self.window_id) {
+            // A single focused column needs no lane caption: lanes only sort
+            // a set of columns against each other.
+            if okena_ui::board::status_board_enabled(cx)
+                && workspace.status_lanes(self.window_id)
+                && visible_projects.len() > 1
+            {
                 let statuses: Vec<Option<String>> = visible_projects
                     .iter()
                     .map(|id| workspace.project(id).and_then(|p| p.status.clone()))
