@@ -933,7 +933,7 @@ mod tests {
             show_in_overview: true,
             layout: Some(layout),
             terminal_names: HashMap::new(),
-            terminal_statuses: Default::default(),
+            status: None,
             terminal_agent_status: HashMap::new(),
             git_status: None,
             folder_color: Default::default(),

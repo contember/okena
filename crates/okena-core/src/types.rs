@@ -68,7 +68,7 @@ impl StatusBarStyle {
 }
 
 /// One column of the terminal status board. `id` is the stable key that
-/// `ProjectData::terminal_statuses` stores; `name` is what the user sees and
+/// `ProjectData::status` stores; `name` is what the user sees and
 /// may rename without touching any terminal.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BoardColumn {

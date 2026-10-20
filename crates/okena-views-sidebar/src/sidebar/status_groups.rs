@@ -1,43 +1,51 @@
-//! Status groups inside an expanded project's Terminals list.
+//! Status groups among a parent project's worktrees in the sidebar.
 //!
-//! When at least one of a project's terminals carries a status that resolves
-//! to a board column, its terminal rows are split under small non-cursor
-//! headers (one per non-empty column, then "No status"). A project without
-//! statuses renders the flat list exactly as before. The grouping itself is
-//! `okena_workspace::terminal_board`; the keyboard cursor walks the same
-//! grouped order (`cursor.rs`), and the headers are folded into the cursor's
+//! When at least one worktree of a parent carries a status that resolves to
+//! a board column, the worktree rows are split under small non-cursor
+//! captions (one per non-empty column, then "No status"). A parent without
+//! statuses renders its worktrees exactly as before. The grouping itself is
+//! `okena_workspace::status_board`; the keyboard cursor walks the same
+//! grouped order (`cursor.rs`), and the captions are folded into the cursor's
 //! scroll-index map with [`fold_extra_rows`].
 
 use gpui::{App, Context, Div, FontWeight, ParentElement, Styled, div, px, rgb};
+use okena_core::theme::FolderColor;
 use okena_ui::theme::theme;
 use okena_ui::tokens::ui_text_xs;
-use okena_workspace::terminal_board::{StatusGroup, group_terminals_by_status, has_status_groups};
-use std::collections::HashMap;
+use okena_workspace::status_board::{GroupedRow, caption_label, grouped_rows};
 
 use super::Sidebar;
 
-/// The status groups to draw for a project's terminals, or `None` when the
-/// project has no resolvable status and renders flat.
-pub(crate) fn terminal_status_groups(
-    terminal_ids: &[String],
-    statuses: &HashMap<String, String>,
-    cx: &App,
-) -> Option<Vec<StatusGroup>> {
-    let columns = okena_ui::board::board_columns(cx);
-    has_status_groups(terminal_ids, statuses, &columns)
-        .then(|| group_terminals_by_status(terminal_ids, statuses, &columns))
+/// One worktree row to draw: its index into the children list and, on the
+/// first row of a group, the caption (label, colour) to draw above it.
+pub(crate) struct WorktreeRow {
+    pub index: usize,
+    pub caption: Option<(String, FolderColor)>,
 }
 
-/// Terminal ids in the order the sidebar draws them: grouped when the project
-/// has statuses, as given otherwise.
-pub(crate) fn ordered_terminal_ids(
-    terminal_ids: &[String],
-    statuses: &HashMap<String, String>,
-    cx: &App,
-) -> Vec<String> {
-    match terminal_status_groups(terminal_ids, statuses, cx) {
-        Some(groups) => groups.into_iter().flat_map(|g| g.terminal_ids).collect(),
-        None => terminal_ids.to_vec(),
+/// The order to draw `statuses.len()` worktree rows in: grouped by status
+/// when any resolves to a column, as given otherwise.
+pub(crate) fn worktree_rows(statuses: &[Option<&str>], cx: &App) -> Vec<WorktreeRow> {
+    let columns = okena_ui::board::board_columns(cx);
+    match grouped_rows(statuses, &columns) {
+        Some(rows) => rows
+            .into_iter()
+            .map(|GroupedRow { index, caption }| WorktreeRow {
+                index,
+                caption: caption.map(|column| {
+                    (
+                        caption_label(&column).to_string(),
+                        column.map(|c| c.color).unwrap_or_default(),
+                    )
+                }),
+            })
+            .collect(),
+        None => (0..statuses.len())
+            .map(|index| WorktreeRow {
+                index,
+                caption: None,
+            })
+            .collect(),
     }
 }
 
@@ -55,17 +63,18 @@ pub(crate) fn fold_extra_rows(scroll_indices: &mut [usize], extra_rows: &[usize]
 }
 
 impl Sidebar {
-    /// Small muted caption between terminal rows: `TO DO`, `REVIEW`, …
+    /// Small caption between worktree rows: `TO DO`, `REVIEW`, … in the
+    /// column's colour (muted when it has none).
     pub(crate) fn render_status_group_header(
         &self,
         label: &str,
-        color: okena_core::theme::FolderColor,
+        color: FolderColor,
         left_padding: f32,
         cx: &mut Context<Self>,
     ) -> Div {
         let t = theme(cx);
         let text_color = match color {
-            okena_core::theme::FolderColor::Default => t.text_muted,
+            FolderColor::Default => t.text_muted,
             color => t.get_folder_color(color),
         };
         div()

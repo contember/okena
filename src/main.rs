@@ -735,7 +735,7 @@ fn main() {
             settings::settings_entity(cx)
                 .read(cx)
                 .settings
-                .terminal_board
+                .status_board
                 .columns
                 .clone()
         }));

@@ -97,28 +97,6 @@ impl Workspace {
         });
     }
 
-    /// Set or clear a terminal's user status (board column id). `None` clears.
-    /// A no-op when nothing changes, so a repeated menu click does not bump
-    /// `data_version`.
-    pub fn set_terminal_status(
-        &mut self,
-        project_id: &str,
-        terminal_id: &str,
-        status: Option<String>,
-        cx: &mut impl WorkspaceCx,
-    ) {
-        let terminal_id = terminal_id.to_string();
-        self.with_project(project_id, cx, |project| match status {
-            Some(status) => {
-                project
-                    .terminal_statuses
-                    .insert(terminal_id, status.clone())
-                    != Some(status)
-            }
-            None => project.terminal_statuses.remove(&terminal_id).is_some(),
-        });
-    }
-
     pub fn set_terminal_name_overlay(
         &mut self,
         project_id: &str,

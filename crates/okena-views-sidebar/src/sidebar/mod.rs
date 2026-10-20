@@ -901,8 +901,8 @@ pub struct SidebarProjectInfo {
     pub has_layout: bool,
     pub terminal_ids: Vec<String>,
     pub terminal_names: HashMap<String, String>,
-    /// User-set board status per terminal (terminal id → column id).
-    pub terminal_statuses: HashMap<String, String>,
+    /// User-set board status of this project (a column id).
+    pub status: Option<String>,
     /// Terminal IDs that are behind a non-active tab (not currently visible)
     pub inactive_tab_terminals: HashSet<String>,
     /// Terminal IDs that belong to a tab group (Tabs node with 2+ children)
@@ -982,7 +982,7 @@ impl SidebarProjectInfo {
                 .map(|l| l.collect_tab_group_terminal_ids())
                 .unwrap_or_default(),
             terminal_names: project.terminal_names.clone(),
-            terminal_statuses: project.terminal_statuses.clone(),
+            status: project.status.clone(),
             is_orphan: false,
             worktree_count: 0,
             parent_project_id: project

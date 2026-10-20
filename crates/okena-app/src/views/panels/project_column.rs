@@ -885,7 +885,7 @@ impl ProjectColumn {
             .on_click(move |_, _window, cx| {
                 request_broker.update(cx, |broker, cx| {
                     broker.push_overlay_request(
-                        crate::workspace::requests::OverlayRequest::TerminalBoard {
+                        crate::workspace::requests::OverlayRequest::StatusBoard {
                             project_id: Some(project_id.clone()),
                         },
                         cx,
@@ -1424,7 +1424,7 @@ mod tests {
             path: "/tmp/repo-worktree".to_string(),
             layout: None,
             terminal_names: HashMap::new(),
-            terminal_statuses: Default::default(),
+            status: None,
             hidden_terminals: HashMap::new(),
             worktree_info: None,
             worktree_ids: Vec::new(),

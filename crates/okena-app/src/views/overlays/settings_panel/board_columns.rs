@@ -1,7 +1,7 @@
-//! Settings > General > "Terminal Status Columns": a small list editor for
-//! the terminal status board columns (rename in place, move up / down,
+//! Settings > General > "Status Columns": a small list editor for
+//! the status board columns (rename in place, move up / down,
 //! remove, add). Ids never change here, only names and order, so every
-//! terminal keeps its status through an edit.
+//! project keeps its status through an edit.
 
 use crate::settings::settings_entity;
 use crate::theme::theme;
@@ -49,7 +49,7 @@ impl SettingsPanel {
                     cx.subscribe(&input, move |_this, entity, _: &InputChangedEvent, cx| {
                         let name = entity.read(cx).value().to_string();
                         settings_entity(cx).update(cx, |state, cx| {
-                            state.rename_terminal_board_column(&id, name, cx);
+                            state.rename_status_board_column(&id, name, cx);
                         });
                     })
                     .detach();
@@ -65,7 +65,7 @@ impl SettingsPanel {
         let columns = settings_entity(cx)
             .read(cx)
             .settings
-            .terminal_board
+            .status_board
             .columns
             .clone();
         self.sync_board_column_inputs(&columns, cx);
@@ -102,7 +102,7 @@ impl SettingsPanel {
                             .hover(|s| s.opacity(0.8))
                             .on_click(cx.listener(move |_this, _, _window, cx| {
                                 settings_entity(cx).update(cx, |state, cx| {
-                                    state.set_terminal_board_column_color(&id_color, color, cx);
+                                    state.set_status_board_column_color(&id_color, color, cx);
                                 });
                             }))
                             .into_any_element()
@@ -129,7 +129,7 @@ impl SettingsPanel {
                         .on_click(cx.listener(
                             move |_this, _, _window, cx| {
                                 settings_entity(cx).update(cx, |state, cx| {
-                                    state.move_terminal_board_column(&id_up, -1, cx);
+                                    state.move_status_board_column(&id_up, -1, cx);
                                 });
                             },
                         )),
@@ -144,7 +144,7 @@ impl SettingsPanel {
                         .on_click(cx.listener(
                             move |_this, _, _window, cx| {
                                 settings_entity(cx).update(cx, |state, cx| {
-                                    state.move_terminal_board_column(&id_down, 1, cx);
+                                    state.move_status_board_column(&id_down, 1, cx);
                                 });
                             },
                         )),
@@ -158,7 +158,7 @@ impl SettingsPanel {
                         .on_click(cx.listener(
                             move |_this, _, _window, cx| {
                                 settings_entity(cx).update(cx, |state, cx| {
-                                    state.remove_terminal_board_column(&id_remove, cx);
+                                    state.remove_status_board_column(&id_remove, cx);
                                 });
                             },
                         )),
@@ -169,8 +169,8 @@ impl SettingsPanel {
 
         settings_input_row(
             "terminal-board-columns",
-            "Terminal Status Columns",
-            "Statuses a terminal can be sorted into (terminal menu → Status, and the status board). Renaming keeps every terminal's status; removing a column leaves its terminals unassigned.",
+            "Status Columns",
+            "Statuses a project or worktree can be sorted into (project menu → Status, and the status board). Renaming keeps every status; removing a column leaves its projects unassigned.",
             &t,
             cx,
             true,
@@ -181,7 +181,7 @@ impl SettingsPanel {
                 button("terminal-board-add-column", "+ Add column", &t).on_click(cx.listener(
                     |_this, _, _window, cx| {
                         settings_entity(cx).update(cx, |state, cx| {
-                            state.add_terminal_board_column("New column", cx);
+                            state.add_status_board_column("New column", cx);
                         });
                     },
                 )),

@@ -58,7 +58,7 @@ pub fn build_api_project(
         show_in_overview: api_project_visibility(&p.id, hidden_project_ids),
         layout: p.layout.as_ref().map(|l| l.to_api_with_sizes(size_map)),
         terminal_names: p.terminal_names.clone(),
-        terminal_statuses: p.terminal_statuses.clone(),
+        status: p.status.clone(),
         terminal_agent_status: p
             .layout
             .as_ref()

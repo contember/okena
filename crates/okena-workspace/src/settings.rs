@@ -317,13 +317,13 @@ fn default_status_bar_metrics_graph() -> bool {
 
 /// Terminal status board: the columns a terminal can be sorted into.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct TerminalBoardSettings {
+pub struct StatusBoardSettings {
     /// Ordered columns. Ids are stable; names are free to change.
     #[serde(default = "default_board_columns")]
     pub columns: Vec<BoardColumn>,
 }
 
-impl Default for TerminalBoardSettings {
+impl Default for StatusBoardSettings {
     fn default() -> Self {
         Self {
             columns: default_board_columns(),
@@ -331,7 +331,7 @@ impl Default for TerminalBoardSettings {
     }
 }
 
-impl TerminalBoardSettings {
+impl StatusBoardSettings {
     /// The column a status id refers to, if it still exists.
     pub fn column(&self, id: &str) -> Option<&BoardColumn> {
         self.columns.iter().find(|c| c.id == id)
@@ -361,7 +361,7 @@ pub struct AppSettings {
     pub sidebar: SidebarSettings,
     /// Terminal status board columns.
     #[serde(default)]
-    pub terminal_board: TerminalBoardSettings,
+    pub status_board: StatusBoardSettings,
     /// Whether to show border around focused terminal
     #[serde(default = "default_show_focused_border")]
     pub show_focused_border: bool,
@@ -607,7 +607,7 @@ impl Default for AppSettings {
             theme_mode: ThemeMode::default(),
             active_session: None,
             sidebar: SidebarSettings::default(),
-            terminal_board: TerminalBoardSettings::default(),
+            status_board: StatusBoardSettings::default(),
             show_focused_border: default_show_focused_border(),
             color_tinted_background: false,
             font_size: default_font_size(),
@@ -1091,12 +1091,12 @@ mod tests {
     }
 
     #[test]
-    fn terminal_board_defaults_when_absent_and_keeps_custom_columns() {
+    fn status_board_defaults_when_absent_and_keeps_custom_columns() {
         // A settings.json from before the board existed gets the default
         // columns; one that names its own keeps them verbatim, ids included.
         let settings: AppSettings = serde_json::from_str("{}").unwrap();
         let ids: Vec<&str> = settings
-            .terminal_board
+            .status_board
             .columns
             .iter()
             .map(|c| c.id.as_str())
@@ -1104,17 +1104,17 @@ mod tests {
         assert_eq!(ids, vec!["todo", "in-progress", "review", "done"]);
         assert_eq!(
             settings
-                .terminal_board
+                .status_board
                 .column("review")
                 .map(|c| c.name.as_str()),
             Some("Review")
         );
-        assert!(settings.terminal_board.column("missing").is_none());
+        assert!(settings.status_board.column("missing").is_none());
 
-        let json = r#"{"terminal_board":{"columns":[{"id":"qa","name":"QA"}]}}"#;
+        let json = r#"{"status_board":{"columns":[{"id":"qa","name":"QA"}]}}"#;
         let settings: AppSettings = serde_json::from_str(json).unwrap();
         assert_eq!(
-            settings.terminal_board.columns,
+            settings.status_board.columns,
             vec![BoardColumn::new("qa", "QA")]
         );
     }

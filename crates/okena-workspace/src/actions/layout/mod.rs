@@ -62,11 +62,6 @@ impl Workspace {
         project
             .agent_sessions
             .retain(|id, _| layout_ids.contains(id) || exempt.contains(id));
-        // Same shape as the sessions: a status may exist on a pane that was
-        // never renamed, so it cannot ride on `orphaned`.
-        project
-            .terminal_statuses
-            .retain(|id, _| layout_ids.contains(id) || exempt.contains(id));
 
         orphaned
     }

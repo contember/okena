@@ -547,7 +547,6 @@ pub fn finish_workspace_replacement(
         for project in &mut ws.data.projects {
             if project.hook_terminals.remove(terminal_id).is_some() {
                 project.terminal_names.remove(terminal_id);
-                project.terminal_statuses.remove(terminal_id);
                 project.hidden_terminals.remove(terminal_id);
                 project.agent_sessions.remove(terminal_id);
                 break;
@@ -993,7 +992,7 @@ mod tests {
             path: std::env::temp_dir().to_string_lossy().into_owned(),
             layout: None,
             terminal_names: HashMap::from([(hook_id.to_string(), "old hook".to_string())]),
-            terminal_statuses: Default::default(),
+            status: None,
             hidden_terminals: HashMap::new(),
             worktree_info: None,
             worktree_ids: Vec::new(),

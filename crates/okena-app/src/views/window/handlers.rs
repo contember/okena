@@ -879,11 +879,11 @@ impl WindowView {
                     terminal.clear();
                 }
             }
-            OverlayManagerEvent::ShowTerminalBoard { project_id } => {
+            OverlayManagerEvent::ShowStatusBoard { project_id } => {
                 let terminals = self.terminals.clone();
                 let project_id = project_id.clone();
                 self.overlay_manager.update(cx, |om, cx| {
-                    om.toggle_terminal_board(Some(project_id), terminals, cx);
+                    om.toggle_status_board(Some(project_id), terminals, cx);
                 });
             }
             OverlayManagerEvent::TerminalToggleUnread { terminal_id } => {
@@ -1470,10 +1470,10 @@ impl WindowView {
                         om.toggle_add_project_dialog(rm, target_connection_id, cx);
                     });
                 }
-                OverlayRequest::TerminalBoard { project_id } => {
+                OverlayRequest::StatusBoard { project_id } => {
                     let terminals = self.terminals.clone();
                     self.overlay_manager.update(cx, |om, cx| {
-                        om.toggle_terminal_board(project_id, terminals, cx);
+                        om.toggle_status_board(project_id, terminals, cx);
                     });
                 }
                 OverlayRequest::RemoteConnect => {

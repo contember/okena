@@ -118,7 +118,7 @@ impl CloseEvent for PairingDialogEvent {
 pub enum OverlayManagerEvent {
     /// The project context menu asked for the status board. The host owns the
     /// terminal registry the board reads agent statuses from, so it opens it.
-    ShowTerminalBoard {
+    ShowStatusBoard {
         project_id: String,
     },
     /// Session manager requested a session/workspace action (load/save/import/
@@ -781,45 +781,31 @@ impl OverlayManager {
     }
 
     /// Toggle the terminal status board, scoped to `project_id` or to every
-    /// project. A drop on a column dispatches `SetTerminalStatus` through the
+    /// project. A drop on a column dispatches `SetProjectStatus` through the
     /// project's dispatcher; the board itself writes nothing.
-    pub fn toggle_terminal_board(
+    pub fn toggle_status_board(
         &mut self,
         project_id: Option<String>,
         terminals: okena_terminal::TerminalsRegistry,
         cx: &mut Context<Self>,
     ) {
-        use crate::views::overlays::terminal_board::{TerminalBoard, TerminalBoardEvent};
-        if self.is_modal::<TerminalBoard>() {
+        use crate::views::overlays::status_board::{StatusBoard, StatusBoardEvent};
+        if self.is_modal::<StatusBoard>() {
             self.close_modal(cx);
             return;
         }
         let workspace = self.workspace.clone();
         let focus_manager = self.focus_manager.clone();
-        let window_id = self.window_id;
-        let board = cx.new(|cx| {
-            TerminalBoard::new(
-                workspace,
-                focus_manager,
-                window_id,
-                terminals,
-                project_id,
-                cx,
-            )
-        });
+        let board =
+            cx.new(|cx| StatusBoard::new(workspace, focus_manager, terminals, project_id, cx));
         cx.subscribe(
             &board,
-            |this, _, event: &TerminalBoardEvent, cx| match event {
-                TerminalBoardEvent::Close => this.close_modal(cx),
-                TerminalBoardEvent::SetStatus {
+            |this, _, event: &StatusBoardEvent, cx| match event {
+                StatusBoardEvent::Close => this.close_modal(cx),
+                StatusBoardEvent::SetStatus { project_id, status } => this.emit_project_action(
                     project_id,
-                    terminal_id,
-                    status,
-                } => this.emit_project_action(
-                    project_id,
-                    ActionRequest::SetTerminalStatus {
+                    ActionRequest::SetProjectStatus {
                         project_id: project_id.clone(),
-                        terminal_id: terminal_id.clone(),
                         status: status.clone(),
                     },
                     cx,
@@ -1175,9 +1161,20 @@ impl OverlayManager {
                         project_id: project_id.clone(),
                     });
                 }
+                ContextMenuEvent::SetStatus { project_id, status } => {
+                    this.hide_context_menu(cx);
+                    this.emit_project_action(
+                        project_id,
+                        ActionRequest::SetProjectStatus {
+                            project_id: project_id.clone(),
+                            status: status.clone(),
+                        },
+                        cx,
+                    );
+                }
                 ContextMenuEvent::ShowStatusBoard { project_id } => {
                     this.hide_context_menu(cx);
-                    cx.emit(OverlayManagerEvent::ShowTerminalBoard {
+                    cx.emit(OverlayManagerEvent::ShowStatusBoard {
                         project_id: project_id.clone(),
                     });
                 }
@@ -1500,11 +1497,6 @@ impl OverlayManager {
             .workspace
             .read(cx)
             .terminal_name_overlay_enabled(&project_id, &terminal_id);
-        let current_status = self
-            .workspace
-            .read(cx)
-            .project(&project_id)
-            .and_then(|p| p.terminal_statuses.get(&terminal_id).cloned());
         let menu = cx.new(|cx| {
             TerminalMenu::new(
                 terminal_id,
@@ -1516,7 +1508,6 @@ impl OverlayManager {
                 can_export_buffer,
                 has_bell,
                 show_name_when_inactive,
-                current_status,
                 invocation,
                 cx,
             )
@@ -1605,21 +1596,6 @@ impl OverlayManager {
                         project_id: project_id.clone(),
                         terminal_id: terminal_id.clone(),
                         enabled: *enabled,
-                    },
-                    cx,
-                );
-            }
-            TerminalMenuEvent::SetStatus {
-                project_id,
-                terminal_id,
-                status,
-            } => {
-                self.emit_project_action(
-                    project_id,
-                    ActionRequest::SetTerminalStatus {
-                        project_id: project_id.clone(),
-                        terminal_id: terminal_id.clone(),
-                        status: status.clone(),
                     },
                     cx,
                 );

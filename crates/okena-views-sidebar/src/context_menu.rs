@@ -78,9 +78,14 @@ pub enum ContextMenuEvent {
         project_id: String,
         project_name: String,
     },
-    /// Open the terminal status board scoped to this project.
+    /// Open the status board scoped to this project (its family).
     ShowStatusBoard {
         project_id: String,
+    },
+    /// Sort the project into a status board column (`None` = unassigned).
+    SetStatus {
+        project_id: String,
+        status: Option<String>,
     },
     RenameDirectory {
         project_id: String,
@@ -145,6 +150,13 @@ pub struct ContextMenu {
     workspace: Entity<Workspace>,
     request: ContextMenuRequest,
     focus_handle: FocusHandle,
+    submenus: okena_ui::submenu::SubmenuState,
+}
+
+impl okena_ui::submenu::SubmenuHost for ContextMenu {
+    fn submenu_state(&mut self) -> &mut okena_ui::submenu::SubmenuState {
+        &mut self.submenus
+    }
 }
 
 impl ContextMenu {
@@ -160,6 +172,7 @@ impl ContextMenu {
             workspace,
             request,
             focus_handle,
+            submenus: okena_ui::submenu::SubmenuState::default(),
         }
     }
 
@@ -345,6 +358,65 @@ impl Render for ContextMenu {
         } else {
             "icons/eye-off.svg"
         };
+        let current_status = project.and_then(|p| p.status.clone());
+
+        // Status board column: the current one ticked, "No status" last and
+        // ticked when the project has none (or a column that no longer exists).
+        let board_columns = okena_ui::board::board_columns(cx);
+        let known = current_status
+            .as_deref()
+            .is_some_and(|s| board_columns.iter().any(|c| c.id == s));
+        let mut status_items: Vec<okena_ui::submenu::SubmenuItem> = board_columns
+            .iter()
+            .map(|column| {
+                let selected = current_status.as_deref() == Some(column.id.as_str());
+                let status = Some(column.id.clone());
+                okena_ui::submenu::SubmenuItem::new(
+                    format!("context-menu-status-{}", column.id),
+                    if selected {
+                        "icons/check.svg"
+                    } else {
+                        "icons/focus.svg"
+                    },
+                    column.name.clone(),
+                    cx.listener(move |this: &mut Self, _, _window, cx| {
+                        cx.emit(ContextMenuEvent::SetStatus {
+                            project_id: this.request.project_id.clone(),
+                            status: status.clone(),
+                        });
+                    }),
+                )
+            })
+            .collect();
+        status_items.push(okena_ui::submenu::SubmenuItem::new(
+            "context-menu-status-none",
+            if known {
+                "icons/focus.svg"
+            } else {
+                "icons/check.svg"
+            },
+            "No status",
+            cx.listener(|this: &mut Self, _, _window, cx| {
+                cx.emit(ContextMenuEvent::SetStatus {
+                    project_id: this.request.project_id.clone(),
+                    status: None,
+                });
+            }),
+        ));
+        let status_label = match current_status
+            .as_deref()
+            .and_then(|id| board_columns.iter().find(|c| c.id == id))
+        {
+            Some(column) => format!("Status: {}", column.name),
+            None => "Status".to_string(),
+        };
+        let status_group = okena_ui::submenu::Submenu::new(
+            "context-menu-status",
+            "icons/arrow-up-down.svg",
+            status_label,
+        )
+        .items(status_items)
+        .render(&mut self.submenus, &t, window, cx);
 
         div()
             .track_focus(&self.focus_handle)
@@ -537,10 +609,11 @@ impl Render for ContextMenu {
                         })
                         // Separator (only if worktree items above were shown)
                         .when(is_git_repo && !is_worktree, |d| d.child(menu_separator(&t)))
+                        .child(status_group)
                         .child(
                             menu_item(
                                 "context-menu-status-board",
-                                "icons/tabs.svg",
+                                "icons/kanban.svg",
                                 "Status Board…",
                                 &t,
                             )

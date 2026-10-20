@@ -311,7 +311,7 @@ impl Sidebar {
                     project_id: id.clone(),
                 });
                 if self.expanded_projects.contains(id) {
-                    self.push_activity_group_cursor_items(info, &mut cursor_items, cx);
+                    self.push_activity_group_cursor_items(info, &mut cursor_items);
                 }
                 // No tier header falls between a project and its children, so
                 // `headers_before` is constant across this project's run.
@@ -329,8 +329,6 @@ impl Sidebar {
         // `flat_idx` counts cursor-navigable rows (not tier headers), matching
         // the index space of `cursor_items` built above so `is_cursor` lines up.
         let mut flat_idx: usize = 0;
-        // Non-cursor rows (status captions) by the cursor index they precede.
-        let mut extra_rows: Vec<usize> = Vec::new();
         let mut last_tier: Option<ActivityTier> = None;
         for (tier, id) in ordering {
             if last_tier != Some(tier) {
@@ -358,12 +356,10 @@ impl Sidebar {
                     cursor_index,
                     &mut flat_idx,
                     &mut flat_elements,
-                    &mut extra_rows,
                     cx,
                 );
             }
         }
-        super::status_groups::fold_extra_rows(&mut self.cursor_scroll_indices, &extra_rows);
         flat_elements
     }
 
@@ -380,7 +376,6 @@ impl Sidebar {
         &self,
         info: &SidebarProjectInfo,
         cursor_items: &mut Vec<SidebarCursorItem>,
-        cx: &App,
     ) {
         // Terminals group
         if !info.terminal_ids.is_empty() {
@@ -389,14 +384,10 @@ impl Sidebar {
                 group: GroupKind::Terminals,
             });
             if !self.is_group_collapsed(&info.id, &GroupKind::Terminals) {
-                for tid in super::status_groups::ordered_terminal_ids(
-                    &info.terminal_ids,
-                    &info.terminal_statuses,
-                    cx,
-                ) {
+                for tid in &info.terminal_ids {
                     cursor_items.push(SidebarCursorItem::Terminal {
                         project_id: info.id.clone(),
-                        terminal_id: tid,
+                        terminal_id: tid.clone(),
                     });
                 }
             }
@@ -597,7 +588,6 @@ impl Sidebar {
         cursor_index: Option<usize>,
         flat_idx: &mut usize,
         flat_elements: &mut Vec<AnyElement>,
-        extra_rows: &mut Vec<usize>,
         cx: &mut Context<Self>,
     ) {
         let t = theme(cx);
@@ -627,63 +617,34 @@ impl Sidebar {
             *flat_idx += 1;
 
             if !is_collapsed {
-                // Status groups (board columns) split the rows under small
-                // non-cursor captions; a project without statuses is one
-                // caption-less group in layout order, i.e. unchanged.
-                let groups = super::status_groups::terminal_status_groups(
-                    &project.terminal_ids,
-                    &project.terminal_statuses,
-                    cx,
-                );
-                let captioned = groups.is_some();
-                let groups = groups.unwrap_or_else(|| {
-                    vec![okena_workspace::terminal_board::StatusGroup {
-                        column: None,
-                        terminal_ids: project.terminal_ids.clone(),
-                    }]
-                });
-                for group in &groups {
-                    if captioned {
-                        extra_rows.push(*flat_idx);
-                        flat_elements.push(
-                            self.render_status_group_header(
-                                group.label(),
-                                group.column.as_ref().map(|c| c.color).unwrap_or_default(),
-                                group_items_padding,
-                                cx,
-                            )
-                            .into_any_element(),
-                        );
-                    }
-                    let minimized_states: Vec<(String, bool)> = {
-                        let ws = self.workspace.read(cx);
-                        group
-                            .terminal_ids
-                            .iter()
-                            .map(|id| (id.clone(), ws.is_terminal_minimized(&project.id, id)))
-                            .collect()
-                    };
-                    for (tid, is_minimized) in &minimized_states {
-                        let is_cursor = cursor_index == Some(*flat_idx);
-                        let is_inactive_tab = project.inactive_tab_terminals.contains(tid.as_str());
-                        let is_in_tab_group = project.tab_group_terminals.contains(tid.as_str());
-                        flat_elements.push(
-                            self.render_terminal_item(
-                                &project.id,
-                                tid,
-                                &project.terminal_names,
-                                *is_minimized,
-                                is_inactive_tab,
-                                is_in_tab_group,
-                                group_items_padding,
-                                id_prefix,
-                                is_cursor,
-                                cx,
-                            )
-                            .into_any_element(),
-                        );
-                        *flat_idx += 1;
-                    }
+                let minimized_states: Vec<(String, bool)> = {
+                    let ws = self.workspace.read(cx);
+                    project
+                        .terminal_ids
+                        .iter()
+                        .map(|id| (id.clone(), ws.is_terminal_minimized(&project.id, id)))
+                        .collect()
+                };
+                for (tid, is_minimized) in &minimized_states {
+                    let is_cursor = cursor_index == Some(*flat_idx);
+                    let is_inactive_tab = project.inactive_tab_terminals.contains(tid.as_str());
+                    let is_in_tab_group = project.tab_group_terminals.contains(tid.as_str());
+                    flat_elements.push(
+                        self.render_terminal_item(
+                            &project.id,
+                            tid,
+                            &project.terminal_names,
+                            *is_minimized,
+                            is_inactive_tab,
+                            is_in_tab_group,
+                            group_items_padding,
+                            id_prefix,
+                            is_cursor,
+                            cx,
+                        )
+                        .into_any_element(),
+                    );
+                    *flat_idx += 1;
                 }
             }
         }
@@ -1151,13 +1112,27 @@ impl Render for Sidebar {
                                     cursor_index,
                                     &mut flat_idx,
                                     &mut flat_elements,
-                                    &mut extra_rows,
                                     cx,
                                 );
                             }
 
                             // Worktree children as siblings
-                            for (wt_idx, child) in worktree_children.iter().enumerate() {
+                            for row in super::status_groups::worktree_rows(
+                                &worktree_children
+                                    .iter()
+                                    .map(|c| c.status.as_deref())
+                                    .collect::<Vec<_>>(),
+                                cx,
+                            ) {
+                                if let Some((label, color)) = row.caption {
+                                    extra_rows.push(flat_idx);
+                                    flat_elements.push(
+                                        self.render_status_group_header(&label, color, 20.0, cx)
+                                            .into_any_element(),
+                                    );
+                                }
+                                let wt_idx = row.index;
+                                let child = &worktree_children[wt_idx];
                                 let is_cursor = cursor_index == Some(flat_idx);
                                 let is_focused_project =
                                     focused_project_id.as_ref() == Some(&child.id);
@@ -1184,7 +1159,6 @@ impl Render for Sidebar {
                                         cursor_index,
                                         &mut flat_idx,
                                         &mut flat_elements,
-                                        &mut extra_rows,
                                         cx,
                                     );
                                 }
@@ -1232,7 +1206,6 @@ impl Render for Sidebar {
                                 cursor_index,
                                 &mut flat_idx,
                                 &mut flat_elements,
-                                &mut extra_rows,
                                 cx,
                             );
                         }
@@ -1347,14 +1320,30 @@ impl Render for Sidebar {
                                             cursor_index,
                                             &mut flat_idx,
                                             &mut flat_elements,
-                                            &mut extra_rows,
                                             cx,
                                         );
                                     }
 
                                     // Worktree children as siblings
                                     if let Some(wt_children) = fp_wt_children {
-                                        for (wt_idx, child) in wt_children.iter().enumerate() {
+                                        for row in super::status_groups::worktree_rows(
+                                            &wt_children
+                                                .iter()
+                                                .map(|c| c.status.as_deref())
+                                                .collect::<Vec<_>>(),
+                                            cx,
+                                        ) {
+                                            if let Some((label, color)) = row.caption {
+                                                extra_rows.push(flat_idx);
+                                                flat_elements.push(
+                                                    self.render_status_group_header(
+                                                        &label, color, 36.0, cx,
+                                                    )
+                                                    .into_any_element(),
+                                                );
+                                            }
+                                            let wt_idx = row.index;
+                                            let child = &wt_children[wt_idx];
                                             let is_cursor = cursor_index == Some(flat_idx);
                                             let is_focused_project =
                                                 focused_project_id.as_ref() == Some(&child.id);
@@ -1381,7 +1370,6 @@ impl Render for Sidebar {
                                                     cursor_index,
                                                     &mut flat_idx,
                                                     &mut flat_elements,
-                                                    &mut extra_rows,
                                                     cx,
                                                 );
                                             }
@@ -1431,7 +1419,6 @@ impl Render for Sidebar {
                                         cursor_index,
                                         &mut flat_idx,
                                         &mut flat_elements,
-                                        &mut extra_rows,
                                         cx,
                                     );
                                 }

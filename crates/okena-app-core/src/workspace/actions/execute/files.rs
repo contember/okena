@@ -966,7 +966,7 @@ mod entry_mutation_tests {
             path: path.to_string_lossy().into_owned(),
             layout: None,
             terminal_names: HashMap::new(),
-            terminal_statuses: Default::default(),
+            status: None,
             hidden_terminals: HashMap::new(),
             worktree_info: None,
             worktree_ids: Vec::new(),

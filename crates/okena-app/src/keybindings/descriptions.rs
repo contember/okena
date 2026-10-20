@@ -11,7 +11,7 @@ use super::{
     ScrollDown, ScrollUp, Search, SearchNext, SearchPrev, SendEscape, ShowBranchSwitcher,
     ShowCommandPalette, ShowContentSearch, ShowDiffViewer, ShowFileSearch, ShowHookLog,
     ShowKeybindings, ShowLogConsole, ShowProfileManager, ShowProjectSwitcher, ShowSessionManager,
-    ShowSettings, ShowTerminalBoard, ShowTerminalBoardAll, ShowThemeSelector, SplitHorizontal,
+    ShowSettings, ShowStatusBoard, ShowStatusBoardAll, ShowThemeSelector, SplitHorizontal,
     SplitVertical, StartAllServices, StopAllServices, ToggleFullscreen, TogglePaneSwitcher,
     ToggleProjectLayout, ToggleProjectVisibility, ToggleSidebar, ToggleSidebarAutoHide,
     ToggleUnread, ZoomIn, ZoomOut,
@@ -563,22 +563,22 @@ pub fn get_action_descriptions() -> HashMap<&'static str, ActionDescription> {
     );
 
     map.insert(
-        "ShowTerminalBoard",
+        "ShowStatusBoard",
         ActionDescription {
             name: "Status Board",
-            description: "Kanban of the focused project's terminals by status",
+            description: "Kanban of the focused project and its worktrees by status",
             category: "Global",
-            factory: || Box::new(ShowTerminalBoard),
+            factory: || Box::new(ShowStatusBoard),
         },
     );
 
     map.insert(
-        "ShowTerminalBoardAll",
+        "ShowStatusBoardAll",
         ActionDescription {
             name: "Status Board (All Projects)",
-            description: "Kanban of every terminal by status",
+            description: "Kanban of every project and worktree by status",
             category: "Global",
-            factory: || Box::new(ShowTerminalBoardAll),
+            factory: || Box::new(ShowStatusBoardAll),
         },
     );
 

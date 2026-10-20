@@ -328,18 +328,18 @@ impl SettingsState {
     }
 
     /// Replace the terminal status board columns wholesale.
-    pub fn set_terminal_board_columns(
+    pub fn set_status_board_columns(
         &mut self,
         columns: Vec<crate::workspace::settings::BoardColumn>,
         cx: &mut Context<Self>,
     ) {
-        self.settings.terminal_board.columns = columns;
+        self.settings.status_board.columns = columns;
         self.save_and_notify(cx);
     }
 
     /// Append a column named `name` and return its id.
-    pub fn add_terminal_board_column(&mut self, name: &str, cx: &mut Context<Self>) -> String {
-        let columns = &mut self.settings.terminal_board.columns;
+    pub fn add_status_board_column(&mut self, name: &str, cx: &mut Context<Self>) -> String {
+        let columns = &mut self.settings.status_board.columns;
         let id = okena_core::types::board_column_id(name, columns);
         columns.push(crate::workspace::settings::BoardColumn::new(
             id.clone(),
@@ -350,10 +350,10 @@ impl SettingsState {
     }
 
     /// Rename a column, keeping its id (and every terminal's status).
-    pub fn rename_terminal_board_column(&mut self, id: &str, name: String, cx: &mut Context<Self>) {
+    pub fn rename_status_board_column(&mut self, id: &str, name: String, cx: &mut Context<Self>) {
         let Some(column) = self
             .settings
-            .terminal_board
+            .status_board
             .columns
             .iter_mut()
             .find(|c| c.id == id)
@@ -368,7 +368,7 @@ impl SettingsState {
     }
 
     /// Recolour a column.
-    pub fn set_terminal_board_column_color(
+    pub fn set_status_board_column_color(
         &mut self,
         id: &str,
         color: okena_core::theme::FolderColor,
@@ -376,7 +376,7 @@ impl SettingsState {
     ) {
         let Some(column) = self
             .settings
-            .terminal_board
+            .status_board
             .columns
             .iter_mut()
             .find(|c| c.id == id)
@@ -392,8 +392,8 @@ impl SettingsState {
 
     /// Remove a column. Terminals in it keep their status id and render as
     /// unassigned until the id comes back or they are re-sorted.
-    pub fn remove_terminal_board_column(&mut self, id: &str, cx: &mut Context<Self>) {
-        let columns = &mut self.settings.terminal_board.columns;
+    pub fn remove_status_board_column(&mut self, id: &str, cx: &mut Context<Self>) {
+        let columns = &mut self.settings.status_board.columns;
         let before = columns.len();
         columns.retain(|c| c.id != id);
         if columns.len() != before {
@@ -402,8 +402,8 @@ impl SettingsState {
     }
 
     /// Move a column one step up (`-1`) or down (`1`).
-    pub fn move_terminal_board_column(&mut self, id: &str, delta: i32, cx: &mut Context<Self>) {
-        let columns = &mut self.settings.terminal_board.columns;
+    pub fn move_status_board_column(&mut self, id: &str, delta: i32, cx: &mut Context<Self>) {
+        let columns = &mut self.settings.status_board.columns;
         let Some(index) = columns.iter().position(|c| c.id == id) else {
             return;
         };

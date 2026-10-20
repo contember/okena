@@ -125,12 +125,12 @@ sidebar follows.
   for the nested-group pattern; `grep -n "settings_input_row" crates/okena-app/src/views/overlays/settings_panel/*.rs`
   for the input row helper.
 - **Scope.**
-  1. `AppSettings.terminal_board: TerminalBoardSettings { columns: Vec<BoardColumn { id: String, name: String }> }`,
+  1. `AppSettings.status_board: StatusBoardSettings { columns: Vec<BoardColumn { id: String, name: String }> }`,
      default `todo / in-progress / review / done` ("To do", "In progress",
      "Review", "Done"). Ids are stable slugs; renaming keeps the id so
      existing statuses survive. A status whose column no longer exists
      renders as unassigned (never deleted).
-  2. Setters: `set_terminal_board_columns(Vec<BoardColumn>)`.
+  2. Setters: `set_status_board_columns(Vec<BoardColumn>)`.
   3. Settings > General > "Terminal Status Columns": a small list editor
      (name input per row, remove, add, move up/down). Reuses `SimpleInput`
      and the existing row/toggle components.
@@ -138,7 +138,7 @@ sidebar follows.
      bridge (`okena_views_sidebar::SidebarSettings`) and a `GlobalBoardColumns`
      fn pointer in `okena-ui` for the overlay, mirroring `GlobalStatusBarStyle`
      (`crates/okena-ui/src/metrics.rs:27-36`).
-- **Acceptance / witness.** Serde test: missing `terminal_board` → defaults;
+- **Acceptance / witness.** Serde test: missing `status_board` → defaults;
   a 1.x `settings.json` loads unchanged. Unit test for the pure
   `resolve_column(columns, status_id) -> Option<&BoardColumn>`.
 - **Touch points.** `crates/okena-workspace/src/settings.rs`,
@@ -196,7 +196,7 @@ sidebar follows.
   `HookLog` key context at `keybindings/mod.rs:193`). How `ProjectDrag`
   renders its ghost (`drag.rs`).
 - **Scope.**
-  1. `crates/okena-app/src/views/overlays/terminal_board.rs`: a modal overlay
+  1. `crates/okena-app/src/views/overlays/status_board.rs`: a modal overlay
      with a header (scope switch *This project / All projects*, close), one
      column per settings column plus *Unassigned*, cards per terminal: name
      (`terminal_display_name`), project name + colour dot when in
@@ -207,8 +207,8 @@ sidebar follows.
      → `ActionRequest::SetTerminalStatus` via the project's dispatcher. The
      board observes the workspace so the daemon's snapshot moves the card;
      no optimistic local write (daemon authority, `okena-app/src/CLAUDE.md`).
-  3. Entry points: `ShowTerminalBoard` (focused project) and
-     `ShowTerminalBoardAll` global actions (command palette, no default
+  3. Entry points: `ShowStatusBoard` (focused project) and
+     `ShowStatusBoardAll` global actions (command palette, no default
      keybinding); "Status board…" in the project context menu
      (`crates/okena-views-sidebar/src/context_menu.rs` near "Rename Project").
   4. Scope defaults to the project it was opened from; the all-projects mode
@@ -219,14 +219,14 @@ sidebar follows.
   Manual: drag across columns updates `workspace.json` and the sidebar
   group; opening from a project pre-selects it; all-projects shows project
   names.
-- **Touch points.** new `crates/okena-app/src/views/overlays/terminal_board.rs`
+- **Touch points.** new `crates/okena-app/src/views/overlays/status_board.rs`
   (+ `overlays/mod.rs`), `overlay_manager.rs`, `keybindings/{mod.rs,descriptions.rs}`,
   `views/window/render.rs` (action handlers),
   `crates/okena-views-sidebar/src/context_menu.rs`.
 
 ### WU6 — Docs (effort S)
 
-- **Scope.** `docs/reference/terminal-board.md` (what a status is, where it
+- **Scope.** `docs/reference/status-board.md` (what a status is, where it
   shows, how it relates to agent status, the setting), a settings row in
   `docs/reference/configuration.md`, a cross-reference from
   `docs/reference/agent-status.md`, `docs/reference/remote.md` gains
@@ -295,3 +295,14 @@ sidebar follows.
   them onto one when both are in.
 - 2026-10-20 WU5: no per-terminal activity timestamp exists, so the card
   carries no "last activity" (the plan listed it); only the project has one.
+- 2026-10-20 **Pivot after the first review:** the unit is the project /
+  worktree, not the terminal. "I have several worktrees of one project and
+  want to see where each of them stands." Replaced `terminal_statuses` with
+  `ProjectData.status`, `SetTerminalStatus` with `SetProjectStatus`, the
+  terminal-menu flyout with a Status flyout on the project context menu,
+  the terminal groups in the sidebar with worktree groups under the parent,
+  and the board's cards with projects (opened from a worktree it covers the
+  parent's family). Everything named `terminal_board` became
+  `status_board`. The per-terminal carry code (runtime slots, moves, close
+  pruning) went away with the map. Plan sections above describe the
+  original terminal-level design.

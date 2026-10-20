@@ -189,11 +189,11 @@ If the file contains invalid JSON, Okena recovers as many fields as possible and
 | `status_bar.show_metrics` | bool | `true` | Show the CPU and memory readout in the status bar |
 | `status_bar.metrics_graph` | bool | `true` | Draw CPU and memory as short history graphs instead of single-value bars |
 
-#### Terminal Status Board
+#### Status Board
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `terminal_board.columns` | array | `[{"id":"todo","name":"To do"}, {"id":"in-progress","name":"In progress"}, {"id":"review","name":"Review"}, {"id":"done","name":"Done"}]` | Ordered columns a terminal can be sorted into (terminal menu → Status; the status board). `id` is the stable key stored on terminals, `name` is what you see, optional `color` (`red`, `orange`, `yellow`, `lime`, `green`, `teal`, `cyan`, `blue`, `indigo`, `purple`, `pink`) tints the caption and column header. Rename freely; removing a column leaves its terminals unassigned. See [terminal-board.md](terminal-board.md). |
+| `status_board.columns` | array | `[{"id":"todo","name":"To do"}, {"id":"in-progress","name":"In progress"}, {"id":"review","name":"Review"}, {"id":"done","name":"Done"}]` | Ordered columns a project or worktree can be sorted into (project menu → Status; the status board). `id` is the stable key stored on projects, `name` is what you see, optional `color` (`red`, `orange`, `yellow`, `lime`, `green`, `teal`, `cyan`, `blue`, `indigo`, `purple`, `pink`) tints the caption and column header. Rename freely; removing a column leaves its projects unassigned. See [status-board.md](status-board.md). |
 
 #### File Opener
 

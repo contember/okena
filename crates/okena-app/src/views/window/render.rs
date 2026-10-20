@@ -5,7 +5,7 @@ use crate::keybindings::{
     RestartDaemon, ReviewChanges, ShowBranchSwitcher, ShowCommandPalette, ShowContentSearch,
     ShowDiffViewer, ShowFileSearch, ShowHookLog, ShowKeybindings, ShowLogConsole,
     ShowPairingDialog, ShowProfileManager, ShowProjectSwitcher, ShowSessionManager, ShowSettings,
-    ShowTerminalBoard, ShowTerminalBoardAll, ShowThemeSelector, StartAllServices, StopAllServices,
+    ShowStatusBoard, ShowStatusBoardAll, ShowThemeSelector, StartAllServices, StopAllServices,
     TogglePaneSwitcher, ToggleProjectLayout, ToggleProjectVisibility, ToggleSidebar,
     ToggleSidebarAutoHide,
 };
@@ -1136,20 +1136,20 @@ impl Render for WindowView {
             // Terminal status board: the focused project, or everything.
             .on_action(cx.listener({
                 let overlay_manager = overlay_manager.clone();
-                move |this, _: &ShowTerminalBoard, _window, cx| {
+                move |this, _: &ShowStatusBoard, _window, cx| {
                     let project_id = this.focus_manager.read(cx).focused_project_id().cloned();
                     let terminals = this.terminals.clone();
                     overlay_manager.update(cx, |om, cx| {
-                        om.toggle_terminal_board(project_id, terminals, cx)
+                        om.toggle_status_board(project_id, terminals, cx)
                     });
                 }
             }))
             .on_action(cx.listener({
                 let overlay_manager = overlay_manager.clone();
-                move |this, _: &ShowTerminalBoardAll, _window, cx| {
+                move |this, _: &ShowStatusBoardAll, _window, cx| {
                     let terminals = this.terminals.clone();
                     overlay_manager
-                        .update(cx, |om, cx| om.toggle_terminal_board(None, terminals, cx));
+                        .update(cx, |om, cx| om.toggle_status_board(None, terminals, cx));
                 }
             }))
             // Handle show log console action

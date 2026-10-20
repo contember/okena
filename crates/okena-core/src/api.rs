@@ -420,10 +420,10 @@ pub struct ApiProject {
     pub show_in_overview: bool,
     pub layout: Option<ApiLayoutNode>,
     pub terminal_names: std::collections::HashMap<String, String>,
-    /// User-set status per terminal (terminal id → board column id). Omitted
-    /// when no terminal in the project has one.
-    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
-    pub terminal_statuses: std::collections::HashMap<String, String>,
+    /// User-set status of the project / worktree (a board column id).
+    /// Omitted when unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
     /// Per-terminal agent status (`OSC 9001`) for terminals in this project that
     /// currently have one. Lets remote / mobile clients show the same agent
     /// indicators as the desktop. Runtime-only; omitted when empty.
@@ -827,10 +827,9 @@ pub enum ActionRequest {
         terminal_id: String,
         name: String,
     },
-    /// Set (`Some(column id)`) or clear (`None`) a terminal's user status.
-    SetTerminalStatus {
+    /// Set (`Some(column id)`) or clear (`None`) a project's user status.
+    SetProjectStatus {
         project_id: String,
-        terminal_id: String,
         #[serde(default)]
         status: Option<String>,
     },
@@ -1477,20 +1476,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn set_terminal_status_action_tolerates_a_missing_status() {
+    fn set_project_status_action_tolerates_a_missing_status() {
         // An old client that sends no `status` clears, like an explicit null.
-        let json = r#"{"action":"set_terminal_status","project_id":"p1","terminal_id":"t1"}"#;
+        let json = r#"{"action":"set_project_status","project_id":"p1"}"#;
         let parsed: ActionRequest = serde_json::from_str(json).unwrap();
         assert!(matches!(
             parsed,
-            ActionRequest::SetTerminalStatus { ref project_id, ref terminal_id, status: None }
-                if project_id == "p1" && terminal_id == "t1"
+            ActionRequest::SetProjectStatus { ref project_id, status: None } if project_id == "p1"
         ));
-        let json = r#"{"action":"set_terminal_status","project_id":"p1","terminal_id":"t1","status":"review"}"#;
+        let json = r#"{"action":"set_project_status","project_id":"p1","status":"review"}"#;
         let parsed: ActionRequest = serde_json::from_str(json).unwrap();
         assert!(matches!(
             parsed,
-            ActionRequest::SetTerminalStatus { status: Some(ref s), .. } if s == "review"
+            ActionRequest::SetProjectStatus { status: Some(ref s), .. } if s == "review"
         ));
     }
 
@@ -1531,7 +1529,7 @@ mod tests {
                     ],
                 }),
                 terminal_names: [("t1".into(), "bash".into())].into_iter().collect(),
-                terminal_statuses: Default::default(),
+                status: None,
                 terminal_agent_status: [(
                     "t1".to_string(),
                     crate::agent_status::AgentStatus {

@@ -193,11 +193,10 @@ pub fn execute_action(
             terminal_id,
             name,
         } => terminal::rename(ws, project_id, terminal_id, name, cx),
-        ActionRequest::SetTerminalStatus {
-            project_id,
-            terminal_id,
-            status,
-        } => terminal::set_status(ws, project_id, terminal_id, status, cx),
+        ActionRequest::SetProjectStatus { project_id, status } => {
+            ws.set_project_status(&project_id, status, cx);
+            ActionResult::Ok(None)
+        }
         ActionRequest::SetTerminalNameOverlay {
             project_id,
             terminal_id,
@@ -1375,7 +1374,7 @@ mod reconnect_shell_tests {
                 show_name_when_inactive: false,
             }),
             terminal_names: HashMap::new(),
-            terminal_statuses: Default::default(),
+            status: None,
             hidden_terminals: HashMap::new(),
             worktree_info: None,
             worktree_ids: Vec::new(),

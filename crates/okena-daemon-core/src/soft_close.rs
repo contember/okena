@@ -151,7 +151,7 @@ mod tests {
                 show_name_when_inactive: false,
             }),
             terminal_names: Default::default(),
-            terminal_statuses: Default::default(),
+            status: None,
             hidden_terminals: Default::default(),
             worktree_info: None,
             worktree_ids: Vec::new(),

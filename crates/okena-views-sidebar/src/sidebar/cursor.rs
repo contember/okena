@@ -198,13 +198,16 @@ impl Sidebar {
                         service_names,
                         hook_terminal_ids,
                         cursor_items,
-                        cx,
                     );
                 }
 
                 // Worktree children as siblings
                 if let Some(children) = worktree_children_map.get(&project.id) {
-                    for child in children {
+                    // Same grouped order the rows are drawn in.
+                    let statuses: Vec<Option<&str>> =
+                        children.iter().map(|c| c.status.as_deref()).collect();
+                    for row in super::status_groups::worktree_rows(&statuses, cx) {
+                        let child = children[row.index];
                         cursor_items.push(SidebarCursorItem::WorktreeProject {
                             project_id: child.id.clone(),
                         });
@@ -214,7 +217,6 @@ impl Sidebar {
                                 service_names,
                                 hook_terminal_ids,
                                 cursor_items,
-                                cx,
                             );
                         }
                     }
@@ -232,7 +234,6 @@ impl Sidebar {
                     service_names,
                     hook_terminal_ids,
                     cursor_items,
-                    cx,
                 );
             }
         }
@@ -245,7 +246,6 @@ impl Sidebar {
         service_names: &HashMap<String, Vec<String>>,
         hook_terminal_ids: &HashMap<String, Vec<String>>,
         cursor_items: &mut Vec<SidebarCursorItem>,
-        cx: &App,
     ) {
         let project_id = project.id.as_str();
         // Terminals group
@@ -258,12 +258,7 @@ impl Sidebar {
                 });
 
                 if !self.is_group_collapsed(project_id, &GroupKind::Terminals) {
-                    // Same grouped order the rows are drawn in.
-                    for tid in super::status_groups::ordered_terminal_ids(
-                        &terminal_ids,
-                        &project.terminal_statuses,
-                        cx,
-                    ) {
+                    for tid in terminal_ids {
                         cursor_items.push(SidebarCursorItem::Terminal {
                             project_id: project_id.to_string(),
                             terminal_id: tid,

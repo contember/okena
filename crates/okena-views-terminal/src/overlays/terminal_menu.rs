@@ -48,12 +48,6 @@ pub enum TerminalMenuEvent {
         terminal_id: String,
         enabled: bool,
     },
-    /// Sort the terminal into a status board column (`None` = unassigned).
-    SetStatus {
-        project_id: String,
-        terminal_id: String,
-        status: Option<String>,
-    },
     ChangeShell {
         project_id: String,
         terminal_id: String,
@@ -119,41 +113,8 @@ pub struct TerminalMenu {
     /// Read once on open — the settings lookup is a serde round-trip, and this view
     /// re-renders for the life of the menu.
     show_shell_selector: bool,
-    /// The terminal's current board status (column id), if any.
-    current_status: Option<String>,
-    /// Board columns, read once on open like the settings above.
-    board_columns: Vec<okena_ui::board::BoardColumn>,
     focus_handle: FocusHandle,
     submenus: SubmenuState,
-}
-
-/// One row of the Status flyout: the column (or `None` for "no status") and
-/// whether it is the terminal's current one. "No status" is last, so the
-/// columns keep their settings order at the top.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct StatusChoice {
-    pub column: Option<okena_ui::board::BoardColumn>,
-    pub current: bool,
-}
-
-pub(crate) fn status_choices(
-    columns: &[okena_ui::board::BoardColumn],
-    current: Option<&str>,
-) -> Vec<StatusChoice> {
-    let mut choices: Vec<StatusChoice> = columns
-        .iter()
-        .map(|column| StatusChoice {
-            current: current == Some(column.id.as_str()),
-            column: Some(column.clone()),
-        })
-        .collect();
-    // A status whose column was removed counts as unassigned.
-    let known = choices.iter().any(|c| c.current);
-    choices.push(StatusChoice {
-        column: None,
-        current: !known,
-    });
-    choices
 }
 
 impl TerminalMenu {
@@ -169,13 +130,11 @@ impl TerminalMenu {
         can_export_buffer: bool,
         has_bell: bool,
         show_name_when_inactive: bool,
-        current_status: Option<String>,
         invocation: TerminalMenuInvocation,
         cx: &mut Context<Self>,
     ) -> Self {
         let focus_handle = cx.focus_handle();
         let show_shell_selector = crate::terminal_view_settings(cx).show_shell_selector;
-        let board_columns = okena_ui::board::board_columns(cx);
         Self {
             terminal_id,
             project_id,
@@ -188,8 +147,6 @@ impl TerminalMenu {
             show_name_when_inactive,
             invocation,
             show_shell_selector,
-            current_status,
-            board_columns,
             focus_handle,
             submenus: SubmenuState::default(),
         }
@@ -306,59 +263,6 @@ impl Render for TerminalMenu {
             .items(buffer_items)
             .render(&mut self.submenus, &t, window, cx);
 
-        // Status board column. The current choice is ticked; "No status" is
-        // last and ticked when the terminal has none (or a column that no
-        // longer exists).
-        let status_items: Vec<SubmenuItem> =
-            status_choices(&self.board_columns, self.current_status.as_deref())
-                .into_iter()
-                .map(|choice| {
-                    let (id, label) = match &choice.column {
-                        Some(column) => (
-                            format!("terminal-menu-status-{}", column.id),
-                            column.name.clone(),
-                        ),
-                        None => (
-                            "terminal-menu-status-none".to_string(),
-                            "No status".to_string(),
-                        ),
-                    };
-                    let icon = if choice.current {
-                        "icons/check.svg"
-                    } else {
-                        "icons/focus.svg"
-                    };
-                    let status = choice.column.map(|c| c.id);
-                    SubmenuItem::new(
-                        id,
-                        icon,
-                        label,
-                        cx.listener(move |this: &mut Self, _, _window, cx| {
-                            cx.emit(TerminalMenuEvent::SetStatus {
-                                project_id: this.project_id.clone(),
-                                terminal_id: this.terminal_id.clone(),
-                                status: status.clone(),
-                            });
-                        }),
-                    )
-                })
-                .collect();
-        let status_label = match self
-            .current_status
-            .as_deref()
-            .and_then(|id| self.board_columns.iter().find(|c| c.id == id))
-        {
-            Some(column) => format!("Status: {}", column.name),
-            None => "Status".to_string(),
-        };
-        let status_group = Submenu::new(
-            "terminal-menu-status",
-            "icons/arrow-up-down.svg",
-            status_label,
-        )
-        .items(status_items)
-        .render(&mut self.submenus, &t, window, cx);
-
         div()
             .track_focus(&self.focus_handle)
             .key_context("TerminalMenu")
@@ -449,7 +353,6 @@ impl Render for TerminalMenu {
                                 },
                             )),
                         )
-                        .child(status_group)
                         .child(menu_separator(&t))
                         .when(include_content_actions, |menu| {
                             menu.when_some(link_url, |menu, url| {
@@ -724,40 +627,6 @@ impl Render for TerminalMenu {
 impl gpui::Focusable for TerminalMenu {
     fn focus_handle(&self, _cx: &gpui::App) -> gpui::FocusHandle {
         self.focus_handle.clone()
-    }
-}
-
-#[cfg(test)]
-mod status_tests {
-    use super::status_choices;
-    use okena_ui::board::BoardColumn;
-
-    fn columns() -> Vec<BoardColumn> {
-        vec![
-            BoardColumn::new("todo", "To do"),
-            BoardColumn::new("done", "Done"),
-        ]
-    }
-
-    #[test]
-    fn ticks_the_current_column_and_lists_no_status_last() {
-        let choices = status_choices(&columns(), Some("done"));
-        let labels: Vec<Option<&str>> = choices
-            .iter()
-            .map(|c| c.column.as_ref().map(|c| c.id.as_str()))
-            .collect();
-        assert_eq!(labels, vec![Some("todo"), Some("done"), None]);
-        let ticked: Vec<bool> = choices.iter().map(|c| c.current).collect();
-        assert_eq!(ticked, vec![false, true, false]);
-    }
-
-    #[test]
-    fn no_status_is_ticked_when_unset_or_when_the_column_is_gone() {
-        let unset = status_choices(&columns(), None);
-        assert!(unset.last().unwrap().current);
-        let gone = status_choices(&columns(), Some("review"));
-        assert!(gone.last().unwrap().current);
-        assert!(gone.iter().filter(|c| c.current).count() == 1);
     }
 }
 

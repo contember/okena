@@ -19,7 +19,7 @@ fn make_project(id: &str) -> ProjectData {
         path: "/tmp/test".to_string(),
         layout: Some(LayoutNode::new_terminal()),
         terminal_names: HashMap::new(),
-        terminal_statuses: Default::default(),
+        status: None,
         hidden_terminals: HashMap::new(),
         worktree_info: None,
         worktree_ids: Vec::new(),
