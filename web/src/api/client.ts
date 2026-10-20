@@ -1,4 +1,13 @@
-import type { StateResponse, PairResponse, ActionRequest } from "./types";
+import type {
+  StateResponse,
+  PairResponse,
+  ActionRequest,
+  ApiClaudeSession,
+  ApiClaudeTranscriptPage,
+  ApiClaudeDecision,
+  ApiClaudePromptRequest,
+  ApiClaudePromptResponse,
+} from "./types";
 import { loadToken, saveToken } from "../auth/token";
 
 export class AuthError extends Error {
@@ -64,4 +73,80 @@ export async function refresh(): Promise<void> {
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   const data: PairResponse = await res.json();
   saveToken(data.token, data.expires_in);
+}
+
+function claudeTerminalUrl(terminalId: string): string {
+  return `${baseUrl()}/v1/claude/terminals/${encodeURIComponent(terminalId)}`;
+}
+
+async function errorText(res: Response): Promise<string> {
+  const text = (await res.text().catch(() => "")).trim();
+  return text || `HTTP ${res.status}`;
+}
+
+export async function getClaudeSession(terminalId: string): Promise<ApiClaudeSession> {
+  const res = await fetch(claudeTerminalUrl(terminalId), { headers: authHeaders() });
+  if (res.status === 401) throw new AuthError(res.status);
+  if (!res.ok) throw new Error(await errorText(res));
+  return res.json();
+}
+
+/** Resolves to `null` when the pane has no readable transcript (404). */
+export async function getClaudeTranscript(
+  terminalId: string,
+  cursor: number | null,
+  sessionId: string | null,
+): Promise<ApiClaudeTranscriptPage | null> {
+  const params = new URLSearchParams();
+  if (cursor !== null) params.set("cursor", String(cursor));
+  if (sessionId !== null) params.set("session_id", sessionId);
+  const queryString = params.toString();
+  const query = queryString ? `?${queryString}` : "";
+  const res = await fetch(`${claudeTerminalUrl(terminalId)}/transcript${query}`, {
+    headers: authHeaders(),
+  });
+  if (res.status === 401) throw new AuthError(res.status);
+  if (res.status === 404) return null;
+  if (!res.ok) throw new Error(await errorText(res));
+  return res.json();
+}
+
+export type ClaudePromptResult =
+  | { status: "accepted"; response: ApiClaudePromptResponse }
+  | { status: "rejected"; reason: string };
+
+/** A 400/409 is a normal outcome (empty text, Claude busy) and comes back as `rejected`. */
+export async function postClaudePrompt(terminalId: string, text: string): Promise<ClaudePromptResult> {
+  const body: ApiClaudePromptRequest = { text };
+  const res = await fetch(`${claudeTerminalUrl(terminalId)}/prompt`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...authHeaders() },
+    body: JSON.stringify(body),
+  });
+  if (res.status === 401) throw new AuthError(res.status);
+  if (res.status === 400 || res.status === 409) {
+    return { status: "rejected", reason: await errorText(res) };
+  }
+  if (!res.ok) throw new Error(await errorText(res));
+  return { status: "accepted", response: await res.json() };
+}
+
+/** Resolves to `"gone"` when the dialog is no longer open (answered elsewhere). */
+export async function postClaudeDecision(
+  terminalId: string,
+  dialogId: string,
+  decision: ApiClaudeDecision,
+): Promise<"answered" | "gone"> {
+  const res = await fetch(
+    `${claudeTerminalUrl(terminalId)}/dialogs/${encodeURIComponent(dialogId)}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...authHeaders() },
+      body: JSON.stringify(decision),
+    },
+  );
+  if (res.status === 401) throw new AuthError(res.status);
+  if (res.status === 404) return "gone";
+  if (!res.ok) throw new Error(await errorText(res));
+  return "answered";
 }

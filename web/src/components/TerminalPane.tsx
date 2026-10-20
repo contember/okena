@@ -4,6 +4,7 @@ import { FitAddon } from "@xterm/addon-fit";
 import { WebglAddon } from "@xterm/addon-webgl";
 import { postAction } from "../api/client";
 import { useApp } from "../state/store";
+import { ClaudeBadge } from "./ClaudeBadge";
 
 /** Minimum container dimensions (px) required for fit() to produce usable results. */
 const MIN_FIT_WIDTH = 40;
@@ -205,6 +206,7 @@ export function TerminalPane({
           {name ?? "Terminal"}
         </span>
         <div className="flex items-center gap-0.5 ml-2">
+          <ClaudeBadge terminalId={terminalId} projectId={projectId} />
           {!hideSplitActions && (
             <>
               <button

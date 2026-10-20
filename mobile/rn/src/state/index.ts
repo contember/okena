@@ -29,6 +29,7 @@ export {
   configureWorkspaceStore,
   WORKSPACE_POLL_MS,
   type WorkspaceState,
+  type TerminalViewMode,
   type WorkspaceDeps,
 } from './workspaceStore';
 
@@ -43,6 +44,13 @@ export {
   type SessionMemory,
   type ServerSession,
 } from './sessionStore';
+
+export {
+  useClaudeStore,
+  configureClaudeStore,
+  type ClaudeState,
+  type ClaudeDialogAnswer,
+} from './claudeStore';
 
 export {
   asyncStoragePersistence,

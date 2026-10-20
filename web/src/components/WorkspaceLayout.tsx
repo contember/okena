@@ -10,10 +10,16 @@ import { TerminalPane } from "./TerminalPane";
 import { StatusBar } from "./StatusBar";
 import { GitPanel } from "./GitPanel";
 import { FileViewerModal } from "./FileViewerModal";
+import { ClaudePanelHost } from "./ClaudePanel";
 
 export function WorkspaceLayout() {
   const isMobile = useIsMobile();
-  return isMobile ? <MobileLayout /> : <DesktopLayout />;
+  return (
+    <>
+      {isMobile ? <MobileLayout /> : <DesktopLayout />}
+      <ClaudePanelHost />
+    </>
+  );
 }
 
 function DesktopLayout() {

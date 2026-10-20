@@ -34,6 +34,7 @@ logic lives in `crates/okena-remote-client/` (desktop) and `okena-transport`
 | `bridge.rs` | `RemoteCommand` enum, `BridgeMessage` — channel factory connecting axum handlers to the daemon reactor. |
 | `pty_broadcaster.rs` | tokio broadcast channel for PTY output fan-out to WebSocket clients. |
 | `types.rs` | API request/response DTOs. |
+| `claude_remote/` | `ClaudeRemoteHub`: open permission dialogs (hook long-polls), prompt delivery (MCP channel / PTY / queue until `Stop`), session state from hook events, incremental JSONL transcript reader. Routes in `routes/claude.rs`; see `docs/reference/claude-remote.md`. |
 | `routes/` | axum route handlers: health, pair, state, actions, stream, refresh, tokens. |
 
 ## Key Patterns

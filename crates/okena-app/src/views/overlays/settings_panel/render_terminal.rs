@@ -7,6 +7,9 @@ use gpui::*;
 use super::SettingsPanel;
 use super::components::*;
 
+/// Left indent of a setting that only applies while the toggle above it is on.
+const NESTED_SETTING_INDENT: Pixels = px(16.0);
+
 impl SettingsPanel {
     pub(super) fn render_terminal(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
@@ -27,6 +30,33 @@ impl SettingsPanel {
                     |state, val, cx| state.set_auto_resume_agent_sessions(val, cx),
                     cx,
                 ))
+                // Hidden where the daemon cannot apply it: the preload is Unix only.
+                .when(cfg!(unix), |el| {
+                    el.child(Self::render_toggle_with_desc(
+                        "claude-remote",
+                        "Claude Remote",
+                        "Lets phone and web clients follow and answer claude started in new panes",
+                        s.claude_remote,
+                        true,
+                        |state, val, cx| state.set_claude_remote(val, cx),
+                        cx,
+                    ))
+                })
+                .when(cfg!(unix) && s.claude_remote, |el| {
+                    el.child(
+                        div()
+                            .pl(NESTED_SETTING_INDENT)
+                            .child(Self::render_toggle_with_desc(
+                                "claude-remote-channel",
+                                "Use MCP Channel for Prompts",
+                                "Claude asks for confirmation at start",
+                                s.claude_remote_channel,
+                                false,
+                                |state, val, cx| state.set_claude_remote_channel(val, cx),
+                                cx,
+                            )),
+                    )
+                })
                 .child(self.render_toggle(
                     "show-shell-selector",
                     "Show Shell Selector",

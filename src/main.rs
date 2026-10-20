@@ -253,6 +253,23 @@ fn main() {
             }
         });
 
+    // `claude-remote` runs as a Claude Code hook on every tool call, often
+    // several at once: resolve the profile read-only and skip the start-up
+    // bookkeeping below, which rewrites profile and version files.
+    if args
+        .get(1)
+        .is_some_and(|arg| arg == okena_cli::CLAUDE_REMOTE_SUBCOMMAND)
+    {
+        match profiles::resolve_existing_profile(profile_flag) {
+            Ok(paths) => profiles::init_profile(paths),
+            Err(e) => {
+                eprintln!("{e}");
+                std::process::exit(0);
+            }
+        }
+        std::process::exit(okena_cli::try_handle_cli().unwrap_or(0));
+    }
+
     // If --new-profile was given, create the profile first then launch with it
     let effective_flag = if let Some(name) = new_profile_name {
         match profiles::create_profile(&name) {

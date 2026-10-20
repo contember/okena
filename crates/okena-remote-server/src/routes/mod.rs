@@ -1,5 +1,6 @@
 pub mod actions;
 pub mod auth_reload;
+mod claude;
 pub mod download;
 pub mod health;
 pub mod pair;
@@ -41,6 +42,7 @@ struct WebAssets;
 #[derive(Clone)]
 pub struct AppState {
     pub bridge_tx: BridgeSender,
+    pub claude_hub: Arc<crate::claude_remote::ClaudeRemoteHub>,
     pub auth_store: Arc<AuthStore>,
     pub broadcaster: Arc<PtyBroadcaster>,
     pub state_version: Arc<tokio::sync::watch::Sender<u64>>,
@@ -126,6 +128,7 @@ fn request_is_unix_socket(req: &Request) -> bool {
 #[allow(clippy::too_many_arguments)]
 pub fn build_router(
     bridge_tx: BridgeSender,
+    claude_hub: Arc<crate::claude_remote::ClaudeRemoteHub>,
     auth_store: Arc<AuthStore>,
     broadcaster: Arc<PtyBroadcaster>,
     state_version: Arc<tokio::sync::watch::Sender<u64>>,
@@ -146,6 +149,7 @@ pub fn build_router(
 ) -> Router {
     let state = AppState {
         bridge_tx,
+        claude_hub,
         auth_store,
         broadcaster,
         state_version,
@@ -169,6 +173,22 @@ pub fn build_router(
     // Routes that require auth
     let protected = Router::new()
         .route("/v1/state", axum::routing::get(state::get_state))
+        .route(
+            "/v1/claude/terminals/{terminal_id}",
+            axum::routing::get(claude::get_session),
+        )
+        .route(
+            "/v1/claude/terminals/{terminal_id}/transcript",
+            axum::routing::get(claude::get_transcript),
+        )
+        .route(
+            "/v1/claude/terminals/{terminal_id}/prompt",
+            axum::routing::post(claude::post_prompt),
+        )
+        .route(
+            "/v1/claude/terminals/{terminal_id}/dialogs/{dialog_id}",
+            axum::routing::post(claude::post_dialog_decision),
+        )
         .route("/v1/actions", axum::routing::post(actions::post_actions))
         .route(
             "/v1/files/download",
@@ -217,6 +237,19 @@ pub fn build_router(
         )
         .route("/v1/restart", axum::routing::post(restart::post_restart))
         .route("/v1/shutdown", axum::routing::post(shutdown::post_shutdown))
+        .route(
+            "/v1/claude/hook/permission",
+            axum::routing::post(claude::post_hook_permission)
+                .layer(DefaultBodyLimit::max(claude::HOOK_PERMISSION_BODY_LIMIT)),
+        )
+        .route(
+            "/v1/claude/hook/event",
+            axum::routing::post(claude::post_hook_event),
+        )
+        .route(
+            "/v1/claude/channel/poll",
+            axum::routing::get(claude::get_channel_poll),
+        )
         .route("/v1/update/status", axum::routing::get(update::get_status))
         .route(
             "/v1/update/releases",
@@ -390,8 +423,13 @@ mod tests {
         // Dropping the bridge receiver makes authorized calls fail at the
         // bridge instead of hanging on a reply that never comes.
         let (bridge_tx, _) = crate::bridge::bridge_channel();
+        let claude_hub = crate::claude_remote::ClaudeRemoteHub::new(
+            bridge_tx.clone(),
+            Arc::new(tokio::sync::watch::channel(0).0),
+        );
         build_router(
             bridge_tx,
+            claude_hub,
             auth_store,
             Arc::new(PtyBroadcaster::new()),
             Arc::new(tokio::sync::watch::channel(0).0),

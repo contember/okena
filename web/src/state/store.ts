@@ -55,6 +55,8 @@ export interface AppState {
   wsStatus: WsStatus;
   /** terminalId → streamId mapping from WS subscribe */
   streamMappings: Record<string, number>;
+  /** Terminal whose Claude chat panel is open, if any. */
+  claudePanelTerminalId: string | null;
 }
 
 export type AppAction =
@@ -64,7 +66,9 @@ export type AppAction =
   | { type: "set_sidebar_open"; open: boolean }
   | { type: "set_ws_status"; status: WsStatus }
   | { type: "set_stream_mappings"; mappings: Record<string, number> }
-  | { type: "clear_stream_mappings" };
+  | { type: "clear_stream_mappings" }
+  | { type: "open_claude_panel"; terminalId: string }
+  | { type: "close_claude_panel" };
 
 export function appReducer(state: AppState, action: AppAction): AppState {
   switch (action.type) {
@@ -82,6 +86,10 @@ export function appReducer(state: AppState, action: AppAction): AppState {
       return { ...state, streamMappings: { ...state.streamMappings, ...action.mappings } };
     case "clear_stream_mappings":
       return { ...state, streamMappings: {} };
+    case "open_claude_panel":
+      return { ...state, claudePanelTerminalId: action.terminalId };
+    case "close_claude_panel":
+      return { ...state, claudePanelTerminalId: null };
   }
 }
 
@@ -92,6 +100,7 @@ export const initialState: AppState = {
   sidebarOpen: false,
   wsStatus: "disconnected",
   streamMappings: {},
+  claudePanelTerminalId: null,
 };
 
 // ── Context ─────────────────────────────────────────────────────────────────

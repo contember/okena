@@ -16,6 +16,10 @@ export interface StateResponse {
   project_order?: string[];
   folders?: ApiFolder[];
   windows?: ApiWindow[];
+  /** Open Claude remote dialogs per terminal id; terminals without one are absent. */
+  claude_dialogs?: Record<string, number>;
+  /** Terminals whose `claude` is connected to Claude remote. */
+  claude_sessions?: string[];
 }
 
 export interface ApiProject {
@@ -25,6 +29,7 @@ export interface ApiProject {
   show_in_overview: boolean;
   layout: ApiLayoutNode | null;
   terminal_names: Record<string, string>;
+  terminal_agent_status?: Record<string, AgentStatus>;
   git_status?: ApiGitStatus | null;
   folder_color?: string;
   services?: ApiServiceInfo[];
@@ -35,6 +40,15 @@ export interface ApiProject {
   default_shell?: ShellType | null;
   hook_terminals?: ApiHookTerminalEntry[];
   hooks?: ApiHooksConfig;
+}
+
+// serde(rename_all = "snake_case")
+export type AgentLifecycle = "working" | "blocked" | "done" | "idle";
+
+export interface AgentStatus {
+  lifecycle: AgentLifecycle;
+  custom?: string;
+  labels?: Record<string, string>;
 }
 
 export interface ApiFolder {
@@ -384,6 +398,63 @@ export type ActionRequest =
   | { action: "save_custom_theme"; id: string; config: JsonValue; activate?: boolean }
   | { action: "list_actions" }
   | { action: "invoke_action"; action_name: string; window?: string | null };
+
+// ── Claude remote (okena-core claude_remote.rs) ────────────────────────────
+
+export interface ApiClaudeSession {
+  terminal_id: string;
+  session_id?: string;
+  has_transcript: boolean;
+  hooks_attached: boolean;
+  channel_attached: boolean;
+  /** Absent when unknown. */
+  busy?: boolean;
+  queued_prompts: number;
+  /** Oldest first. */
+  dialogs: ApiClaudeDialog[];
+}
+
+export interface ApiClaudeDialog {
+  id: string;
+  tool_name: string;
+  tool_input: JsonValue;
+  permission_suggestions: JsonValue[];
+  created_at_ms: number;
+}
+
+// serde(tag = "decision", rename_all = "snake_case")
+export type ApiClaudeDecision =
+  | { decision: "allow"; always?: boolean }
+  | { decision: "deny"; message?: string }
+  | { decision: "answer"; answers: Record<string, string> };
+
+export interface ApiClaudePromptRequest {
+  text: string;
+}
+
+// serde(rename_all = "snake_case")
+export type ApiClaudePromptDelivery = "channel" | "pty" | "queued";
+
+export interface ApiClaudePromptResponse {
+  delivery: ApiClaudePromptDelivery;
+}
+
+export interface ApiClaudeTranscriptPage {
+  session_id?: string;
+  entries: ApiClaudeEntry[];
+  cursor: number;
+  reset: boolean;
+}
+
+// serde(rename_all = "snake_case")
+export type ApiClaudePromptOrigin = "terminal" | "channel";
+
+// serde(tag = "kind", rename_all = "snake_case")
+export type ApiClaudeEntry =
+  | { kind: "user"; uuid: string; text: string; origin: ApiClaudePromptOrigin }
+  | { kind: "assistant"; uuid: string; text: string }
+  | { kind: "tool_use"; uuid: string; tool_use_id: string; name: string; summary: string }
+  | { kind: "tool_result"; uuid: string; tool_use_id: string; text: string; is_error: boolean };
 
 export interface PairRequest {
   code: string;

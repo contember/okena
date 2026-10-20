@@ -1,3 +1,4 @@
+pub mod claude_remote;
 pub mod commands;
 pub mod parser;
 pub mod register;
@@ -8,11 +9,14 @@ use okena_core::process::is_process_alive;
 use okena_transport::client::{LocalEndpoint, RemoteConnectionConfig};
 use okena_workspace::persistence::config_dir;
 use parser::{
-    Cli, Command, FolderCmd, PaletteCmd, ProjectCmd, ServiceCmd, SettingsCmd, SkillCmd, TermCmd,
-    ThemeCmd, UpdateCmd, WorktreeCmd,
+    ClaudeHookCmd, ClaudeRemoteCmd, Cli, Command, FolderCmd, PaletteCmd, ProjectCmd, ServiceCmd,
+    SettingsCmd, SkillCmd, TermCmd, ThemeCmd, UpdateCmd, WorktreeCmd,
 };
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+
+/// Top-level subcommand Claude Code runs as hooks and as an MCP channel server.
+pub const CLAUDE_REMOTE_SUBCOMMAND: &str = "claude-remote";
 
 /// CLI config stored in `~/.config/okena/cli.json`.
 #[derive(Serialize, Deserialize)]
@@ -223,6 +227,13 @@ fn dispatch(cli: Cli) -> i32 {
                 json,
             } => commands::cli_update_revert(&version, keep_config, dry_run, yes, restart, json),
         },
+        Command::ClaudeRemote { cmd } => match cmd {
+            ClaudeRemoteCmd::Hook { cmd } => match cmd {
+                ClaudeHookCmd::Permission => claude_remote::cli_hook_permission(),
+                ClaudeHookCmd::Event => claude_remote::cli_hook_event(),
+            },
+            ClaudeRemoteCmd::Channel => claude_remote::cli_channel(),
+        },
     }
 }
 
@@ -265,6 +276,12 @@ pub(crate) struct DiscoveredServer {
 }
 
 impl DiscoveredServer {
+    /// Whether [`Self::client_and_url`] connects over the same-user Unix
+    /// socket, which the server authorizes without a bearer token.
+    pub fn uses_unix_socket(&self) -> bool {
+        cfg!(unix) && matches!(self.local_endpoint, Some(LocalEndpoint::UnixSocket { .. }))
+    }
+
     pub fn client_and_url(
         &self,
         path: &str,

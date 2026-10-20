@@ -1,5 +1,6 @@
 pub mod auth;
 pub mod bridge;
+pub mod claude_remote;
 pub mod local;
 pub mod pty_broadcaster;
 pub mod routes;
