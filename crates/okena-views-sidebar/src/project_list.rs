@@ -4,6 +4,7 @@ use gpui::prelude::*;
 use gpui::*;
 use gpui_component::tooltip::Tooltip;
 use okena_core::api::ActionRequest;
+use okena_core::types::WorktreeMarker;
 use okena_ui::color_dot::color_dot;
 use okena_ui::icon_button::icon_button;
 use okena_ui::rename_state::is_renaming;
@@ -13,6 +14,7 @@ use okena_views_terminal::actions::{MinimizeTerminal, ToggleFullscreen};
 
 use crate::drag::{FolderDrag, ProjectDrag, ProjectDragView, WorktreeDrag, WorktreeDragView};
 use crate::item_widgets::*;
+use crate::sidebar::status_groups::status_group;
 use crate::sidebar::{Sidebar, SidebarProjectInfo};
 use std::collections::HashMap;
 
@@ -34,6 +36,7 @@ pub enum ProjectRowStyle {
         is_orphan: bool,
         is_busy: bool,
         busy_label: String,
+        marker: WorktreeMarker,
     },
     /// Child under a group header: plain solid dot, no rename.
     GroupChild,
@@ -121,8 +124,17 @@ impl Sidebar {
                     )
                     .into_any_element()
                 }
-                ProjectRowStyle::Worktree { is_orphan, .. } => {
-                    let folder_color = t.get_folder_color(project.folder_color);
+                ProjectRowStyle::Worktree {
+                    is_orphan, marker, ..
+                } => {
+                    let base_color = match marker {
+                        WorktreeMarker::Status => {
+                            okena_ui::board::status_color(project.status.as_deref(), cx)
+                                .unwrap_or(project.folder_color)
+                        }
+                        _ => project.folder_color,
+                    };
+                    let folder_color = t.get_folder_color(base_color);
                     let dot_color = if *is_orphan { t.warning } else { folder_color };
                     let pid = project.id.clone();
                     sidebar_color_indicator(
@@ -399,6 +411,7 @@ impl Sidebar {
         worktree_index: usize,
         is_cursor: bool,
         is_focused_project: bool,
+        marker: WorktreeMarker,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
@@ -448,6 +461,24 @@ impl Sidebar {
             })
             .drag_over::<WorktreeDrag>(move |style, _, _, _| {
                 style.border_t_2().border_color(rgb(t.border_active))
+            })
+            // `worktree_index` is the data order; inside one status group that
+            // matches the drawn order, across groups the drop would be invisible.
+            .can_drop({
+                let workspace = self.workspace.clone();
+                let target_status = project.status.clone();
+                move |dragged, _window, cx| {
+                    let Some(drag) = dragged.downcast_ref::<WorktreeDrag>() else {
+                        return true;
+                    };
+                    let board = okena_ui::board::status_board(cx);
+                    let dragged_status = workspace
+                        .read(cx)
+                        .project(&drag.worktree_id)
+                        .and_then(|p| p.status.as_deref());
+                    status_group(dragged_status, board)
+                        == status_group(target_status.as_deref(), board)
+                }
             })
             .on_drop(cx.listener({
                 let project_id = project_id.clone();
@@ -509,6 +540,7 @@ impl Sidebar {
                 is_orphan: project.is_orphan,
                 is_busy,
                 busy_label,
+                marker,
             },
             cx,
         )

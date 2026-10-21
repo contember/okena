@@ -1179,6 +1179,7 @@ mod tests {
                 zoom_level: 1.0,
             }),
             terminal_names: HashMap::new(),
+            status: None,
             hidden_terminals: HashMap::new(),
             worktree_info: None,
             worktree_ids: Vec::new(),

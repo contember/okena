@@ -3,6 +3,7 @@
 
 use super::{
     GroupKind, Sidebar, SidebarCursorItem, SidebarItem, SidebarProjectInfo, SidebarServiceInfo,
+    SidebarSettings,
 };
 use crate::activity_order::{ActivityEntry, ActivityTier, order_by_activity};
 use crate::drag::{FolderDrag, ProjectDrag};
@@ -919,7 +920,7 @@ impl Render for Sidebar {
                     project_info.services = services;
                 }
                 items.push(SidebarItem::Project {
-                    project: project_info,
+                    project: Box::new(project_info),
                     index: top_index,
                     worktree_children: wt_children,
                 });
@@ -967,9 +968,17 @@ impl Render for Sidebar {
             (fm.focused_project_id().cloned(), fm.is_focus_individual())
         };
 
+        let SidebarSettings {
+            worktree_marker,
+            worktree_guide,
+            ..
+        } = self.sidebar_settings(cx);
+
         // Build flat elements with cursor tracking
         let mut flat_elements: Vec<AnyElement> = Vec::new();
         let mut flat_idx: usize = 0;
+        // Non-cursor rows (status captions) by the cursor index they precede.
+        let mut extra_rows: Vec<usize> = Vec::new();
 
         // Leading drop zone so items can be dropped before the first entry
         flat_elements.push(
@@ -1081,6 +1090,7 @@ impl Render for Sidebar {
 
                         let is_expanded = self.is_project_expanded(&project.id, true);
                         if is_expanded {
+                            let guide_start = flat_elements.len();
                             // Main project as first child — highlights when focused individual
                             let is_cursor = cursor_index == Some(flat_idx);
                             let is_focused_project = focused_project_id.as_ref()
@@ -1115,7 +1125,22 @@ impl Render for Sidebar {
                             }
 
                             // Worktree children as siblings
-                            for (wt_idx, child) in worktree_children.iter().enumerate() {
+                            for row in super::status_groups::worktree_rows(
+                                &worktree_children
+                                    .iter()
+                                    .map(|c| c.status.as_deref())
+                                    .collect::<Vec<_>>(),
+                                cx,
+                            ) {
+                                if let Some((label, color)) = row.caption {
+                                    extra_rows.push(flat_idx);
+                                    flat_elements.push(
+                                        self.render_status_group_header(&label, color, 20.0, cx)
+                                            .into_any_element(),
+                                    );
+                                }
+                                let wt_idx = row.index;
+                                let child = &worktree_children[wt_idx];
                                 let is_cursor = cursor_index == Some(flat_idx);
                                 let is_focused_project =
                                     focused_project_id.as_ref() == Some(&child.id);
@@ -1126,6 +1151,7 @@ impl Render for Sidebar {
                                         wt_idx,
                                         is_cursor,
                                         is_focused_project,
+                                        worktree_marker,
                                         window,
                                         cx,
                                     )
@@ -1146,6 +1172,13 @@ impl Render for Sidebar {
                                     );
                                 }
                             }
+                            if worktree_guide {
+                                super::status_groups::add_tree_guide(
+                                    &mut flat_elements[guide_start..],
+                                    12.0,
+                                    t.get_folder_color(project.folder_color),
+                                );
+                            }
                         }
                     } else {
                         // No worktrees or orphan — standard rendering
@@ -1159,6 +1192,7 @@ impl Render for Sidebar {
                                     0,
                                     is_cursor,
                                     is_focused_project,
+                                    worktree_marker,
                                     window,
                                     cx,
                                 )
@@ -1274,6 +1308,7 @@ impl Render for Sidebar {
 
                                 let is_expanded = self.is_project_expanded(&fp.id, true);
                                 if is_expanded {
+                                    let guide_start = flat_elements.len();
                                     // Main project as first child
                                     let is_cursor = cursor_index == Some(flat_idx);
                                     let is_focused_project = focused_project_id.as_ref()
@@ -1309,7 +1344,24 @@ impl Render for Sidebar {
 
                                     // Worktree children as siblings
                                     if let Some(wt_children) = fp_wt_children {
-                                        for (wt_idx, child) in wt_children.iter().enumerate() {
+                                        for row in super::status_groups::worktree_rows(
+                                            &wt_children
+                                                .iter()
+                                                .map(|c| c.status.as_deref())
+                                                .collect::<Vec<_>>(),
+                                            cx,
+                                        ) {
+                                            if let Some((label, color)) = row.caption {
+                                                extra_rows.push(flat_idx);
+                                                flat_elements.push(
+                                                    self.render_status_group_header(
+                                                        &label, color, 36.0, cx,
+                                                    )
+                                                    .into_any_element(),
+                                                );
+                                            }
+                                            let wt_idx = row.index;
+                                            let child = &wt_children[wt_idx];
                                             let is_cursor = cursor_index == Some(flat_idx);
                                             let is_focused_project =
                                                 focused_project_id.as_ref() == Some(&child.id);
@@ -1320,6 +1372,7 @@ impl Render for Sidebar {
                                                     wt_idx,
                                                     is_cursor,
                                                     is_focused_project,
+                                                    worktree_marker,
                                                     window,
                                                     cx,
                                                 )
@@ -1341,6 +1394,13 @@ impl Render for Sidebar {
                                             }
                                         }
                                     }
+                                    if worktree_guide {
+                                        super::status_groups::add_tree_guide(
+                                            &mut flat_elements[guide_start..],
+                                            28.0,
+                                            t.get_folder_color(fp.folder_color),
+                                        );
+                                    }
                                 }
                             } else {
                                 // No worktrees or orphan — standard folder project rendering
@@ -1355,6 +1415,7 @@ impl Render for Sidebar {
                                             0,
                                             is_cursor,
                                             is_focused_project,
+                                            worktree_marker,
                                             window,
                                             cx,
                                         )
@@ -1401,6 +1462,7 @@ impl Render for Sidebar {
                 cursor_scroll_base + i + headers_before
             })
             .collect();
+        super::status_groups::fold_extra_rows(&mut self.cursor_scroll_indices, &extra_rows);
 
         // Trailing drop zone so items can be dropped after the last entry
         flat_elements.push(

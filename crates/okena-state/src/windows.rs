@@ -299,6 +299,19 @@ impl WorkspaceData {
         Some(w.show_attention_section)
     }
 
+    /// Flip the status-lanes view of `project_id`'s family in the targeted
+    /// window and return the new value. Unknown extra ids are a silent
+    /// no-op (`None`).
+    pub fn toggle_status_lanes(&mut self, id: WindowId, project_id: &str) -> Option<bool> {
+        let w = self.window_mut(id)?;
+        if w.status_lanes_projects.remove(project_id) {
+            Some(false)
+        } else {
+            w.status_lanes_projects.insert(project_id.to_string());
+            Some(true)
+        }
+    }
+
     /// Append a fresh extra window onto `extra_windows` and return its id.
     ///
     /// Snapshots the current set of project IDs into the new window's

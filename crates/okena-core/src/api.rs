@@ -431,6 +431,10 @@ pub struct ApiProject {
     pub show_in_overview: bool,
     pub layout: Option<ApiLayoutNode>,
     pub terminal_names: std::collections::HashMap<String, String>,
+    /// User-set status of the project / worktree (a board column id).
+    /// Omitted when unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
     /// Per-terminal agent status (`OSC 9001`) for terminals in this project that
     /// currently have one. Lets remote / mobile clients show the same agent
     /// indicators as the desktop. Runtime-only; omitted when empty.
@@ -831,6 +835,12 @@ pub enum ActionRequest {
         project_id: String,
         terminal_id: String,
         name: String,
+    },
+    /// Set (`Some(column id)`) or clear (`None`) a project's user status.
+    SetProjectStatus {
+        project_id: String,
+        #[serde(default)]
+        status: Option<String>,
     },
     /// Switch the shell of an existing terminal: the daemon kills the old PTY
     /// and respawns at the same layout path with `shell` (resolving Default →
@@ -1477,6 +1487,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn set_project_status_action_tolerates_a_missing_status() {
+        // An old client that sends no `status` clears, like an explicit null.
+        let json = r#"{"action":"set_project_status","project_id":"p1"}"#;
+        let parsed: ActionRequest = serde_json::from_str(json).unwrap();
+        assert!(matches!(
+            parsed,
+            ActionRequest::SetProjectStatus { ref project_id, status: None } if project_id == "p1"
+        ));
+        let json = r#"{"action":"set_project_status","project_id":"p1","status":"review"}"#;
+        let parsed: ActionRequest = serde_json::from_str(json).unwrap();
+        assert!(matches!(
+            parsed,
+            ActionRequest::SetProjectStatus { status: Some(ref s), .. } if s == "review"
+        ));
+    }
+
+    #[test]
     fn state_response_round_trip() {
         let resp = StateResponse {
             state_version: 42,
@@ -1511,6 +1538,7 @@ mod tests {
                     ],
                 }),
                 terminal_names: [("t1".into(), "bash".into())].into_iter().collect(),
+                status: None,
                 terminal_agent_status: [(
                     "t1".to_string(),
                     crate::agent_status::AgentStatus {

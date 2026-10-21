@@ -185,6 +185,8 @@ If the file contains invalid JSON, Okena recovers as many fields as possible and
 | `sidebar.width` | float | `250` | Sidebar width in pixels (150 - 500) |
 | `sidebar.remote_layout` | string | `"mixed"` | `"mixed"` keeps remote projects in the one list; `"separate"` shows a LOCAL section first and one REMOTE section per connected host, each with its own `+` to add a project there |
 | `sidebar.host_stats` | string | `"off"` | CPU and memory of the local machine and each remote host in the sidebar: `"off"`, `"text"` (`CPU 41%  MEM 72%` in the status bar's colours) or `"gauge"` (labels with a small vertical gauge each). Shown on the LOCAL row and each host row in `separate`, on the REMOTE connection rows otherwise |
+| `sidebar.worktree_marker` | string | `"project"` | The ring before a worktree row: `"project"` (the project colour) or `"status"` (its status column's colour). Shown in settings while the status board is enabled |
+| `sidebar.worktree_guide` | bool | `false` | Thin guide in the parent's colour down an expanded family |
 
 #### Status Bar
 
@@ -193,6 +195,13 @@ If the file contains invalid JSON, Okena recovers as many fields as possible and
 | `status_bar.style` | string | `"detailed"` | `"detailed"` spells values out, `"minimal"` keeps only bars/graphs |
 | `status_bar.show_metrics` | bool | `true` | Show the CPU and memory readout in the status bar |
 | `status_bar.metrics_graph` | bool | `true` | Draw CPU and memory as short history graphs instead of single-value bars |
+
+#### Status Board
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `status_board.enabled` | bool | `false` | Master switch for the status board (status pill in column headers, Status in the project menu, lanes, sidebar captions, the columns editor). Off, nothing of it renders. |
+| `status_board.columns` | array | `[{"id":"todo","name":"To do"}, {"id":"in-progress","name":"In progress"}, {"id":"review","name":"Review"}, {"id":"done","name":"Done"}]` | Ordered columns a project or worktree can be sorted into (status pill, project menu → Status, lanes). `id` is the stable key stored on projects, `name` is what you see, optional `color` (`red`, `orange`, `yellow`, `lime`, `green`, `teal`, `cyan`, `blue`, `indigo`, `purple`, `pink`) tints the caption and column header. Rename freely; removing a column leaves its projects unassigned. See [status-board.md](status-board.md). |
 
 #### File Opener
 
