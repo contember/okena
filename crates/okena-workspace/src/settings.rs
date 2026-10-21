@@ -1202,6 +1202,16 @@ mod tests {
     }
 
     #[test]
+    fn inactive_terminal_name_overlay_is_opt_in() {
+        let defaults = AppSettings::default();
+        assert!(!defaults.show_terminal_name_when_inactive);
+
+        let loaded: AppSettings =
+            serde_json::from_str(r#"{"show_terminal_name_when_inactive":true}"#).unwrap();
+        assert!(loaded.show_terminal_name_when_inactive);
+    }
+
+    #[test]
     fn option_as_meta_is_opt_in() {
         assert!(!AppSettings::default().terminal_option_as_meta);
 
