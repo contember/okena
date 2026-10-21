@@ -104,6 +104,7 @@ fn sweep_candidates(workspace: &Workspace) -> Vec<(String, PathBuf)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::plain_project;
     use okena_state::{ProjectData, WorktreeMetadata};
 
     fn worktree_project(id: &str, path: &str) -> ProjectData {
@@ -122,32 +123,6 @@ mod tests {
                 branch_name: String::new(),
             }),
             ..plain_project(id, path)
-        }
-    }
-
-    fn plain_project(id: &str, path: &str) -> ProjectData {
-        ProjectData {
-            id: id.to_string(),
-            name: id.to_string(),
-            path: path.to_string(),
-            layout: None,
-            terminal_names: Default::default(),
-            status: None,
-            hidden_terminals: Default::default(),
-            worktree_info: None,
-            worktree_ids: Vec::new(),
-            folder_color: Default::default(),
-            hooks: Default::default(),
-            connection_id: None,
-            service_terminals: Default::default(),
-            agent_sessions: Default::default(),
-            default_shell: None,
-            hook_terminals: Default::default(),
-            pinned: false,
-            last_activity_at: None,
-            is_creating: false,
-            is_closing: false,
-            creating_progress: None,
         }
     }
 

@@ -11,6 +11,89 @@ use crate::state::{LayoutNode, PendingWorktreeClose, ProjectData, WindowId, Work
 use okena_core::theme::FolderColor;
 use std::collections::{HashMap, HashSet};
 
+/// A linked worktree found on disk, placed under the parent project it will
+/// be tracked as a child of.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DiscoveredWorktree {
+    pub worktree_path: String,
+    pub branch: String,
+    /// The worktree's counterpart of the parent's path: the same subdirectory
+    /// inside the checkout for a monorepo parent, else the checkout itself.
+    pub project_path: String,
+    main_repo_path: String,
+}
+
+impl DiscoveredWorktree {
+    /// `git_root` and `subdir` are the parent project's, as
+    /// [`okena_git::resolve_git_root_and_subdir`] returns them.
+    pub fn new(
+        worktree_path: &str,
+        branch: &str,
+        git_root: &std::path::Path,
+        subdir: &std::path::Path,
+    ) -> Self {
+        Self {
+            worktree_path: worktree_path.to_string(),
+            branch: branch.to_string(),
+            project_path: okena_git::repository::project_path_in_worktree(worktree_path, subdir),
+            main_repo_path: git_root.to_string_lossy().into_owned(),
+        }
+    }
+}
+
+/// The linked checkout a project leaves on disk when its row is deleted,
+/// resolved for the project's paths at one moment. Resolving reads the
+/// repository, so the daemon does it before taking the workspace lock and
+/// [`Self::is_current`] tells whether the project still has those paths.
+#[derive(Clone, Debug)]
+pub struct LinkedCheckout {
+    project_path: String,
+    recorded_checkout: Option<String>,
+    root: Option<String>,
+}
+
+impl LinkedCheckout {
+    pub fn resolve(project: &ProjectData) -> Self {
+        let recorded_checkout = recorded_checkout(project);
+        Self {
+            root: linked_checkout_root(&project.path, recorded_checkout.as_deref()),
+            project_path: project.path.clone(),
+            recorded_checkout,
+        }
+    }
+
+    pub fn is_current(&self, project: &ProjectData) -> bool {
+        self.project_path == project.path && self.recorded_checkout == recorded_checkout(project)
+    }
+
+    /// The checkout root, or `None` when the project is not in a linked worktree.
+    pub fn root(&self) -> Option<&str> {
+        self.root.as_deref()
+    }
+}
+
+fn recorded_checkout(project: &ProjectData) -> Option<String> {
+    project
+        .worktree_info
+        .as_ref()
+        .map(|metadata| metadata.worktree_path.clone())
+}
+
+/// Root of the linked worktree checkout a project lives in, if any: the
+/// checkout a worktree row recorded, else the repository root of the project
+/// path when that is a linked worktree. The second case covers a linked
+/// worktree added as a plain project, and an older worktree row that never
+/// recorded its checkout. Reads the repository from disk.
+pub fn linked_checkout_root(project_path: &str, recorded_checkout: Option<&str>) -> Option<String> {
+    if let Some(recorded) = recorded_checkout.filter(|recorded| !recorded.is_empty()) {
+        return Some(recorded.to_string());
+    }
+    let root = okena_git::repository::get_repo_root(std::path::Path::new(project_path))?;
+    root.join(".git")
+        .is_file()
+        .then(|| root.to_string_lossy().into_owned())
+}
+
 /// Captured inputs for a two-phase worktree removal. [`Workspace::begin_worktree_removal`]
 /// snapshots everything the finalize step needs (branch, paths, hooks) BEFORE the
 /// git worktree checkout is deleted, so the daemon can run the slow, blocking
@@ -775,31 +858,26 @@ impl Workspace {
     /// opt-in -- mirroring the user-initiated add path. Single-window
     /// users (zero extras) see the prior "default hidden" behavior since
     /// `WindowId::Main` with no extras degenerates to a no-op.
-    ///
-    /// `with_terminal` false adds the row as a bookmark with no layout: it
-    /// shows the Start Terminal button instead of a pane waiting for a PTY.
     pub fn add_discovered_worktree(
         &mut self,
         wt_path: &str,
         branch: &str,
         parent_id: &str,
         window_id: WindowId,
-        with_terminal: bool,
     ) -> Result<String, String> {
-        // For monorepo projects, resolve the subdirectory offset so the
-        // project path points to the right place inside the worktree.
         let parent_path = self
             .project(parent_id)
             .map(|p| p.path.clone())
             .ok_or_else(|| "Parent project not found".to_string())?;
         let (git_root, subdir) =
             okena_git::resolve_git_root_and_subdir(std::path::Path::new(&parent_path));
-        let project_path = okena_git::repository::project_path_in_worktree(wt_path, &subdir);
+        let found = DiscoveredWorktree::new(wt_path, branch, &git_root, &subdir);
 
         self.ensure_worktree_target_claim_allowed(std::path::Path::new(wt_path))?;
-        self.ensure_project_path_claim_allowed(std::path::Path::new(&project_path))?;
+        self.ensure_project_path_claim_allowed(std::path::Path::new(&found.project_path))?;
 
-        let project_identity = Self::physical_path_identity(std::path::Path::new(&project_path));
+        let project_identity =
+            Self::physical_path_identity(std::path::Path::new(&found.project_path));
         let worktree_identity = Self::physical_path_identity(std::path::Path::new(wt_path));
         if self.data.projects.iter().any(|project| {
             let existing = Self::physical_path_identity(std::path::Path::new(&project.path));
@@ -808,17 +886,32 @@ impl Workspace {
             return Err(format!("A worktree for '{branch}' already exists"));
         }
 
-        let dir_name = std::path::Path::new(wt_path)
+        Ok(self.insert_discovered_worktree(found, parent_id, window_id, true))
+    }
+
+    /// Add the row for a discovered worktree the caller has already checked
+    /// against path claims and existing projects. Reads nothing from disk.
+    ///
+    /// `with_terminal` false adds the row as a bookmark with no layout: it
+    /// shows the Start Terminal button instead of a pane waiting for a PTY.
+    pub fn insert_discovered_worktree(
+        &mut self,
+        found: DiscoveredWorktree,
+        parent_id: &str,
+        window_id: WindowId,
+        with_terminal: bool,
+    ) -> String {
+        let dir_name = std::path::Path::new(&found.worktree_path)
             .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or("worktree");
-        let project_name = format!("{} ({})", dir_name, branch);
+        let project_name = format!("{} ({})", dir_name, found.branch);
         let id = uuid::Uuid::new_v4().to_string();
 
         let project = ProjectData {
             id: id.clone(),
             name: project_name,
-            path: project_path,
+            path: found.project_path,
             layout: with_terminal.then(LayoutNode::new_terminal),
             terminal_names: HashMap::new(),
             status: None,
@@ -826,9 +919,9 @@ impl Workspace {
             worktree_info: Some(crate::state::WorktreeMetadata {
                 parent_project_id: parent_id.to_string(),
                 color_override: None,
-                main_repo_path: git_root.to_string_lossy().into_owned(),
-                worktree_path: wt_path.to_string(),
-                branch_name: branch.to_string(),
+                main_repo_path: found.main_repo_path,
+                worktree_path: found.worktree_path,
+                branch_name: found.branch,
             }),
             worktree_ids: Vec::new(),
             default_shell: None,
@@ -867,7 +960,7 @@ impl Workspace {
             self.data.project_order.push(id.clone());
         }
         // Note: caller is responsible for calling notify_data
-        Ok(id)
+        id
     }
 
     /// Add a worktree project ID to its parent's worktree_ids list (deduped).
@@ -1541,6 +1634,10 @@ impl Workspace {
     /// Drop the given dismissals. Discovery passes the ones whose checkout is
     /// gone, so a later worktree at the same path is tracked like a new one.
     /// Returns whether any was dropped.
+    ///
+    /// Matches entries verbatim, not by path identity: `paths` are entries read
+    /// from this list, and resolving identities here would read the disk under
+    /// the workspace lock.
     pub fn forget_dismissed_worktrees(&mut self, paths: &[String]) -> bool {
         let before = self.data.dismissed_worktree_paths.len();
         self.data
