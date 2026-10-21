@@ -5,8 +5,8 @@ use crate::keybindings::{
     RestartDaemon, ReviewChanges, ShowBranchSwitcher, ShowCommandPalette, ShowContentSearch,
     ShowDiffViewer, ShowFileSearch, ShowHookLog, ShowKeybindings, ShowLogConsole,
     ShowPairingDialog, ShowProfileManager, ShowProjectSwitcher, ShowSessionManager, ShowSettings,
-    ShowThemeSelector, StartAllServices, StopAllServices, TogglePaneSwitcher, ToggleProjectLayout,
-    ToggleProjectVisibility, ToggleSidebar, ToggleSidebarAutoHide,
+    ShowThemeSelector, ShowWhatsNew, StartAllServices, StopAllServices, TogglePaneSwitcher,
+    ToggleProjectLayout, ToggleProjectVisibility, ToggleSidebar, ToggleSidebarAutoHide,
 };
 use crate::settings::{open_settings_file, settings_entity};
 use crate::theme::theme;
@@ -54,6 +54,10 @@ impl WindowView {
             AppMenuAction::Keybindings => {
                 self.overlay_manager
                     .update(cx, |manager, cx| manager.toggle_keybindings_help(cx));
+            }
+            AppMenuAction::WhatsNew => {
+                self.overlay_manager
+                    .update(cx, |manager, cx| manager.toggle_whats_new(cx));
             }
             AppMenuAction::NewWindow => {
                 let bounds = window.window_bounds().get_bounds();
@@ -1081,6 +1085,12 @@ impl Render for WindowView {
                 let overlay_manager = overlay_manager.clone();
                 move |_this, _: &ShowKeybindings, _window, cx| {
                     overlay_manager.update(cx, |om, cx| om.toggle_keybindings_help(cx));
+                }
+            }))
+            .on_action(cx.listener({
+                let overlay_manager = overlay_manager.clone();
+                move |_this, _: &ShowWhatsNew, _window, cx| {
+                    overlay_manager.update(cx, |om, cx| om.toggle_whats_new(cx));
                 }
             }))
             .on_action(cx.listener({

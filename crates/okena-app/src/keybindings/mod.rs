@@ -26,6 +26,7 @@ actions!(
         CloseWindow,
         FocusActiveProject,
         ShowKeybindings,
+        ShowWhatsNew,
         ShowSessionManager,
         ShowThemeSelector,
         ShowCommandPalette,
@@ -447,6 +448,7 @@ fn create_keybinding(action: &str, keystroke: &str, context: Option<&str>) -> Op
         }
         "CloseSearch" => Some(KeyBinding::new(keystroke, CloseSearch, context)),
         "ShowKeybindings" => Some(KeyBinding::new(keystroke, ShowKeybindings, context)),
+        "ShowWhatsNew" => Some(KeyBinding::new(keystroke, ShowWhatsNew, context)),
         "ShowSessionManager" => Some(KeyBinding::new(keystroke, ShowSessionManager, context)),
         "ShowThemeSelector" => Some(KeyBinding::new(keystroke, ShowThemeSelector, context)),
         "ShowCommandPalette" => Some(KeyBinding::new(keystroke, ShowCommandPalette, context)),

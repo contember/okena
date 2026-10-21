@@ -88,6 +88,7 @@ pub struct UpdateInfo {
     inner: Arc<Mutex<UpdateInfoInner>>,
     cancel_token: Arc<AtomicU64>,
     app_version: Arc<String>,
+    release_notes: crate::checker::ReleaseNotesCache,
 }
 
 impl UpdateInfo {
@@ -101,11 +102,16 @@ impl UpdateInfo {
             })),
             cancel_token: Arc::new(AtomicU64::new(0)),
             app_version: Arc::new(app_version),
+            release_notes: Default::default(),
         }
     }
 
     pub fn app_version(&self) -> String {
         (*self.app_version).clone()
+    }
+
+    pub fn release_notes_cache(&self) -> &crate::checker::ReleaseNotesCache {
+        &self.release_notes
     }
 
     pub fn status(&self) -> UpdateStatus {
