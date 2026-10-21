@@ -663,6 +663,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn release_notes_reject_a_missing_or_unparsable_version() {
+        let store = Arc::new(AuthStore::with_secret(vec![7u8; 32]));
+        let mut router = test_router(store);
+
+        for uri in [
+            "/v1/update/release-notes",
+            "/v1/update/release-notes?version=garbage",
+        ] {
+            assert_eq!(
+                Call::get(uri)
+                    .via_peer(PeerInfo::Local)
+                    .status(&mut router)
+                    .await,
+                StatusCode::BAD_REQUEST,
+                "{uri}"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn management_routes_stay_closed_to_off_host_callers() {
         let store = Arc::new(AuthStore::with_secret(vec![7u8; 32]));
         let token = paired_token(&store);

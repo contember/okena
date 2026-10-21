@@ -101,16 +101,13 @@ pub fn fetch_releases() -> Result<ReleaseCatalog> {
         .context("failed to decode release history")
 }
 
-/// Release notes up to the running version; only those after `since` when given.
-pub fn fetch_release_notes(since: Option<&str>) -> Result<ReleaseNotes> {
-    let path = match since {
-        Some(since) => format!("/v1/update/release-notes?since={since}"),
-        None => "/v1/update/release-notes".to_string(),
-    };
-    let endpoint = local_update_endpoint(&path)?;
+/// Release notes up to and including `version`, the caller's running version.
+pub fn fetch_release_notes(version: &str) -> Result<ReleaseNotes> {
+    let endpoint = local_update_endpoint("/v1/update/release-notes")?;
     endpoint
         .client
         .get(&endpoint.url)
+        .query(&[("version", version)])
         .timeout(Duration::from_secs(20))
         .send()
         .context("failed to fetch release notes")?

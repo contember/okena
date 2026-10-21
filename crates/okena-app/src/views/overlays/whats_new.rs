@@ -1,8 +1,8 @@
 //! What's New: the published release notes, rendered in the app.
 //!
 //! The notes come from GitHub Releases through the local daemon
-//! (`daemon_client::fetch_release_notes`), newest first, up to the running
-//! version. Each body is Markdown and is parsed once; fenced code blocks are
+//! (`daemon_client::fetch_release_notes`), newest first, up to this desktop's
+//! version — the same one the post-update toast names. Each body is Markdown and is parsed once; fenced code blocks are
 //! re-highlighted when the theme flips between dark and light.
 
 use crate::keybindings::Cancel;
@@ -70,13 +70,21 @@ impl WhatsNewModal {
     }
 
     fn load(&mut self, cx: &mut Context<Self>) {
+        let Some(running) = cx
+            .try_global::<okena_ext_updater::GlobalUpdateInfo>()
+            .map(|global| global.0.app_version())
+        else {
+            self.apply(Err("The running version is unknown".to_string()), cx);
+            return;
+        };
         self.state = NotesState::Loading;
         cx.notify();
         cx.spawn(async move |this, cx| {
-            let result =
-                smol::unblock(|| okena_ext_updater::daemon_client::fetch_release_notes(None))
-                    .await
-                    .map_err(|error| error.to_string());
+            let result = smol::unblock(move || {
+                okena_ext_updater::daemon_client::fetch_release_notes(&running)
+            })
+            .await
+            .map_err(|error| error.to_string());
             let _ = this.update(cx, |this, cx| this.apply(result, cx));
         })
         .detach();
