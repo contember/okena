@@ -65,6 +65,15 @@ impl Address {
     }
 }
 
+impl std::fmt::Display for Address {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        #[cfg(unix)]
+        return write!(formatter, "{}", self.socket.display());
+        #[cfg(windows)]
+        return write!(formatter, "{}", self.pipe);
+    }
+}
+
 #[cfg(windows)]
 mod pipe {
     use okena_core::owner_only::OwnerOnly;

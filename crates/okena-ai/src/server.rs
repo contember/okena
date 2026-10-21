@@ -8,6 +8,7 @@ use axum::body::Body;
 use axum::extract::{Request, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
+use anyhow::Context;
 use fs2::FileExt;
 use okena_core::ai_proxy::{
     AiProxyCommand, PROJECT_SEGMENT, ProxyEndpoint, ensure_management_key, is_routable_project_id,
@@ -129,8 +130,10 @@ pub async fn serve(
     let management_key = ensure_management_key(&profile_root)?;
     // Bound after the endpoint is final: a daemon that reaches management reads
     // the port new shells get.
-    let management_listener =
-        crate::management::Address::new(&profile_root, &management_key).bind()?;
+    let management_address = crate::management::Address::new(&profile_root, &management_key);
+    let management_listener = management_address
+        .bind()
+        .with_context(|| format!("cannot listen on {management_address}"))?;
     let http = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(30))
         // Bounds header and per-chunk waits, so a stalled upstream cannot hold an
