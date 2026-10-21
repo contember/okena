@@ -260,9 +260,8 @@ or empty / `{}` for all. Returns the `ApiUsage` snapshot as soon as the daemon h
 request (at most ~2 s): a requested provider with `fetching: true` is being
 refetched, otherwise the request was ignored. The fetch result arrives as
 `usage_changed`. Ignored per provider when its last attempt is under 60 s old,
-it is fetching, rate limited, disabled, or in an error backoff after two or
-more consecutive failures whose next attempt is over 60 s away (a single
-failure can be retried). Unknown fields or providers → `400`, so a daemon
+it is fetching, rate limited (`rate_limited_until`) or disabled. An error
+backoff does not block it: it only spaces the automatic poll. Unknown fields or providers → `400`, so a daemon
 older than Grok support rejects `{"provider": "grok"}`.
 
 ### `WS /v1/stream`

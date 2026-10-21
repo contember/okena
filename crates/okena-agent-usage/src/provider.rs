@@ -19,10 +19,6 @@ pub const MAX_RETRY_DELAY: Duration = Duration::from_secs(3600);
 pub const DEFAULT_RATE_LIMIT_DELAY: Duration = Duration::from_secs(600);
 /// Minimum spacing between client-requested refreshes of one provider.
 pub const REFRESH_THROTTLE: Duration = Duration::from_secs(60);
-/// During an error backoff, a client refresh may still pull the next attempt
-/// forward when it was planned at most this far ahead (see
-/// [`ProviderTracker::refresh_allowed`]).
-pub const REFRESH_BACKOFF_SLACK: Duration = Duration::from_secs(60);
 
 /// Parsed usage of one provider, before history is attached.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -78,8 +74,6 @@ pub fn rate_limit_delay(retry_after: Option<Duration>, failures: u32) -> Duratio
 pub struct ProviderTracker {
     entry: ApiProviderUsage,
     last_attempt: Option<Instant>,
-    /// When the next scheduled attempt is due after the last completion.
-    next_attempt: Option<Instant>,
     rate_limited_until: Option<Instant>,
 }
 
@@ -88,7 +82,6 @@ impl ProviderTracker {
         Self {
             entry: ApiProviderUsage::empty(provider, ApiUsageStatus::Disabled),
             last_attempt: None,
-            next_attempt: None,
             rate_limited_until: None,
         }
     }
@@ -145,27 +138,14 @@ impl ProviderTracker {
     }
 
     /// Whether a client-requested refresh should start a fetch now: the
-    /// provider is enabled, idle, not rate limited, its last attempt is at
-    /// least [`REFRESH_THROTTLE`] old, and it is not deep in an error backoff.
-    ///
-    /// Error backoff rule: after a single failure (30 s backoff) a refresh may
-    /// retry right away. From the second consecutive failure on, a refresh
-    /// only pulls the attempt forward when it was due within
-    /// [`REFRESH_BACKOFF_SLACK`] anyway, so hovering a widget cannot turn a
-    /// long backoff into one request a minute.
+    /// provider is enabled, idle, not rate limited, and its last attempt is at
+    /// least [`REFRESH_THROTTLE`] old. The error backoff only spaces the
+    /// automatic poll: a user asking after an outage gets a fresh attempt.
     pub fn refresh_allowed(&self, now: Instant) -> bool {
         if self.is_disabled() || self.entry.fetching {
             return false;
         }
         if self.rate_limited_until.is_some_and(|until| now < until) {
-            return false;
-        }
-        if self.entry.status == ApiUsageStatus::Error
-            && self.entry.consecutive_failures >= 2
-            && self
-                .next_attempt
-                .is_some_and(|next| next > now + REFRESH_BACKOFF_SLACK)
-        {
             return false;
         }
         self.last_attempt
@@ -219,7 +199,6 @@ impl ProviderTracker {
             }
         };
         self.entry.next_attempt_at = Some(now_epoch + delay.as_secs_f64());
-        self.next_attempt = Some(now + delay);
         delay
     }
 }
@@ -353,30 +332,22 @@ mod tests {
     }
 
     #[test]
-    fn refresh_respects_long_error_backoff_but_retries_a_first_failure() {
+    fn refresh_ignores_the_error_backoff() {
         let now = Instant::now();
         let mut tracker = ProviderTracker::new(ApiUsageProvider::Codex);
         tracker.reset_pending();
-        let failed = |tracker: &mut ProviderTracker, at: Instant| {
-            tracker.begin_attempt(at, 0.0);
-            tracker.complete(FetchOutcome::Failed("HTTP 500".into()), at, 0.0)
-        };
-
-        // First failure: 30 s backoff, a refresh after the 60 s throttle works.
-        failed(&mut tracker, now);
-        assert!(tracker.refresh_allowed(now + REFRESH_THROTTLE));
-
-        // Several failures in a row: the next attempt is far away, refreshes
-        // wait until it is within the slack.
         let mut at = now;
-        for _ in 0..5 {
+        for _ in 0..8 {
             at += REFRESH_THROTTLE;
-            failed(&mut tracker, at);
+            tracker.begin_attempt(at, 0.0);
+            tracker.complete(FetchOutcome::Failed("HTTP 500".into()), at, 0.0);
         }
-        let backoff = failure_backoff(tracker.entry().consecutive_failures);
-        assert!(backoff > REFRESH_THROTTLE + REFRESH_BACKOFF_SLACK);
-        assert!(!tracker.refresh_allowed(at + REFRESH_THROTTLE));
-        assert!(tracker.refresh_allowed(at + backoff - REFRESH_BACKOFF_SLACK));
+        assert_eq!(
+            failure_backoff(tracker.entry().consecutive_failures),
+            MAX_RETRY_DELAY
+        );
+        assert!(!tracker.refresh_allowed(at + Duration::from_secs(59)));
+        assert!(tracker.refresh_allowed(at + REFRESH_THROTTLE));
     }
 
     #[test]

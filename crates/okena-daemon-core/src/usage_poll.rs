@@ -13,9 +13,9 @@
 //! after a success; exponential backoff from 30 s to 1 h after failures; a 429
 //! waits for `retry-after` (at least the backoff). Missing credentials are not
 //! a failure — they are re-checked every 5 min without any HTTP request.
-//! Client refreshes (`POST /v1/usage/refresh`) start a fetch only when the
-//! provider's last attempt is ≥ 60 s old, it is not rate limited, and it is
-//! not deep in an error backoff (see `ProviderTracker::refresh_allowed`). The
+//! Client refreshes (`POST /v1/usage/refresh`) start a fetch when the
+//! provider's last attempt is ≥ 60 s old and it is not rate limited, also
+//! during an error backoff (see `ProviderTracker::refresh_allowed`). The
 //! request is acked after the resulting snapshot is published, so the POST
 //! answers with an accurate `fetching` flag.
 //!

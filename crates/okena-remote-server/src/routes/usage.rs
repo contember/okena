@@ -21,8 +21,7 @@ pub async fn get_usage(State(state): State<AppState>) -> Json<ApiUsage> {
 /// being refetched, otherwise the request was throttled. The fetch result
 /// arrives as a `usage_changed` WS message (or on the next `GET /v1/usage`).
 /// The daemon ignores the request for a provider fetched less than 60 s ago,
-/// currently fetching, rate limited (`rate_limited_until`), deep in an error
-/// backoff, or disabled.
+/// currently fetching, rate limited (`rate_limited_until`), or disabled.
 pub async fn post_refresh(State(state): State<AppState>, body: Bytes) -> Response {
     let request = if body.iter().all(u8::is_ascii_whitespace) {
         UsageRefreshRequest::default()
