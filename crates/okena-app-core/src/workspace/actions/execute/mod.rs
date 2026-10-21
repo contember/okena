@@ -27,12 +27,13 @@ use okena_terminal::TerminalsRegistry;
 use okena_terminal::backend::{TerminalBackend, TerminalLaunchPlan};
 use okena_terminal::shell_config::ShellType;
 use okena_terminal::terminal::{Terminal, TerminalSize};
+use okena_workspace::actions::worktree::LinkedCheckout;
 use okena_workspace::context::WorkspaceCx;
 use std::collections::HashMap;
 use std::sync::Arc;
 
 pub use project::{
-    MAX_FINISHED_HOOK_TERMINALS, evict_stale_hook_terminals, teardown_hook_terminal,
+    MAX_FINISHED_HOOK_TERMINALS, delete_project, evict_stale_hook_terminals, teardown_hook_terminal,
 };
 
 pub use files::{
@@ -546,7 +547,9 @@ pub fn execute_action(
             new_path,
         } => project::change_project_path(ws, project_id, new_path, cx),
         ActionRequest::DeleteProject { project_id } => {
-            project::delete_project(ws, focus_manager, project_id, settings, cx)
+            // The daemon resolves this off the lock and calls `delete_project` itself.
+            let checkout = ws.project(&project_id).map(LinkedCheckout::resolve);
+            project::delete_project(ws, focus_manager, project_id, checkout, settings, cx)
         }
         ActionRequest::SetProjectShowInOverview {
             project_id,

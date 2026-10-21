@@ -13,7 +13,7 @@ use okena_core::theme::FolderColor;
 use okena_terminal::TerminalsRegistry;
 use okena_terminal::backend::{TerminalBackend, TerminalLaunchPlan};
 use okena_terminal::terminal::{Terminal, TerminalSize};
-use okena_workspace::actions::worktree::linked_checkout_root;
+use okena_workspace::actions::worktree::LinkedCheckout;
 use okena_workspace::context::WorkspaceCx;
 use okena_workspace::hook_monitor::HookStatus;
 use std::sync::Arc;
@@ -230,16 +230,21 @@ pub(super) fn change_project_path(
     }
 }
 
-pub(super) fn delete_project(
+/// Delete a project row. `checkout` is the project's [`LinkedCheckout`],
+/// resolved by the caller before it took the workspace lock; `None` when the
+/// project was not found then.
+pub fn delete_project(
     ws: &mut Workspace,
     focus_manager: &mut FocusManager,
     project_id: String,
+    checkout: Option<LinkedCheckout>,
     settings: &AppSettings,
     cx: &mut impl WorkspaceCx,
 ) -> ActionResult {
-    if ws.project(&project_id).is_none() {
+    let Some(project) = ws.project(&project_id) else {
         return project_not_found(&project_id);
-    }
+    };
+    let checkout = checkout.filter(|checkout| checkout.is_current(project));
     // Reject while the worktree is still being created: the optimistic create
     // registers the row and returns before its background `git worktree add`
     // finishes, so dropping the row now would race the in-flight checkout and
@@ -254,20 +259,16 @@ pub(super) fn delete_project(
     if ws.is_project_closing(&project_id) {
         return ActionResult::Err("project is already being closed".to_string());
     }
+    let Some(checkout) = checkout else {
+        return ActionResult::Err("project changed while it was being deleted".to_string());
+    };
     // Deleting a worktree row leaves its checkout alone. Remember that, or
     // worktree discovery would add the row straight back on its next scan.
-    let dismissed_checkout = ws.project(&project_id).and_then(|project| {
-        let recorded = project.worktree_info.as_ref();
-        linked_checkout_root(
-            &project.path,
-            recorded.map(|metadata| metadata.worktree_path.as_str()),
-        )
-    });
+    if let Some(root) = checkout.root() {
+        ws.dismiss_worktree(root);
+    }
     let global_hooks = settings.hooks.clone();
     ws.delete_project(focus_manager, &project_id, &global_hooks, cx);
-    if let Some(checkout) = dismissed_checkout {
-        ws.dismiss_worktree(&checkout);
-    }
     ActionResult::Ok(None)
 }
 
@@ -741,6 +742,7 @@ mod hook_action_tests {
     use okena_terminal::backend::{TerminalBackend, TerminalLaunchPlan};
     use okena_terminal::shell_config::ShellType;
     use okena_terminal::terminal::TerminalTransport;
+    use okena_workspace::actions::worktree::LinkedCheckout;
     use okena_workspace::context::WorkspaceCx;
     use okena_workspace::hook_monitor::{HookMonitor, HookStatus};
     use okena_workspace::hooks::HookRunner;
@@ -1117,10 +1119,12 @@ mod hook_action_tests {
         let monitor = HookMonitor::new();
         let mut cx = TestCx { monitor };
 
+        let checkout = workspace.project("p1").map(LinkedCheckout::resolve);
         let result = delete_project(
             &mut workspace,
             &mut focus_manager,
             "p1".to_string(),
+            checkout,
             &AppSettings::default(),
             &mut cx,
         );
@@ -1145,6 +1149,38 @@ mod hook_action_tests {
         let mut workspace = workspace_with_hook("hook-1");
 
         assert!(matches!(delete_p1(&mut workspace), ActionResult::Ok(_)));
+        assert!(workspace.data().dismissed_worktree_paths.is_empty());
+    }
+
+    #[test]
+    fn a_checkout_resolved_for_an_older_path_is_refused() {
+        let workspace = workspace_with_worktree_hook("hook-1");
+        let checkout = workspace.project("p1").map(LinkedCheckout::resolve);
+        let mut data = workspace.data().clone();
+        data.projects[0]
+            .worktree_info
+            .as_mut()
+            .unwrap()
+            .worktree_path = "/tmp/moved".into();
+        let mut workspace = Workspace::new(data);
+        let mut cx = TestCx {
+            monitor: HookMonitor::new(),
+        };
+
+        let result = delete_project(
+            &mut workspace,
+            &mut FocusManager::default(),
+            "p1".to_string(),
+            checkout,
+            &AppSettings::default(),
+            &mut cx,
+        );
+
+        assert!(matches!(
+            result,
+            ActionResult::Err(message) if message == "project changed while it was being deleted"
+        ));
+        assert!(workspace.project("p1").is_some());
         assert!(workspace.data().dismissed_worktree_paths.is_empty());
     }
 
@@ -1186,10 +1222,12 @@ mod hook_action_tests {
         let mut cx = TestCx {
             monitor: HookMonitor::new(),
         };
+        let checkout = workspace.project("p1").map(LinkedCheckout::resolve);
         delete_project(
             workspace,
             &mut FocusManager::default(),
             "p1".to_string(),
+            checkout,
             &AppSettings::default(),
             &mut cx,
         )

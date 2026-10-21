@@ -41,6 +41,44 @@ impl DiscoveredWorktree {
     }
 }
 
+/// The linked checkout a project leaves on disk when its row is deleted,
+/// resolved for the project's paths at one moment. Resolving reads the
+/// repository, so the daemon does it before taking the workspace lock and
+/// [`Self::is_current`] tells whether the project still has those paths.
+#[derive(Clone, Debug)]
+pub struct LinkedCheckout {
+    project_path: String,
+    recorded_checkout: Option<String>,
+    root: Option<String>,
+}
+
+impl LinkedCheckout {
+    pub fn resolve(project: &ProjectData) -> Self {
+        let recorded_checkout = recorded_checkout(project);
+        Self {
+            root: linked_checkout_root(&project.path, recorded_checkout.as_deref()),
+            project_path: project.path.clone(),
+            recorded_checkout,
+        }
+    }
+
+    pub fn is_current(&self, project: &ProjectData) -> bool {
+        self.project_path == project.path && self.recorded_checkout == recorded_checkout(project)
+    }
+
+    /// The checkout root, or `None` when the project is not in a linked worktree.
+    pub fn root(&self) -> Option<&str> {
+        self.root.as_deref()
+    }
+}
+
+fn recorded_checkout(project: &ProjectData) -> Option<String> {
+    project
+        .worktree_info
+        .as_ref()
+        .map(|metadata| metadata.worktree_path.clone())
+}
+
 /// Root of the linked worktree checkout a project lives in, if any: the
 /// checkout a worktree row recorded, else the repository root of the project
 /// path when that is a linked worktree. The second case covers a linked

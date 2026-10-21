@@ -51,7 +51,7 @@ use okena_app_core::remote_snapshot::build_state_response;
 use okena_app_core::workspace::actions::execute::apply_loaded_session;
 use okena_app_core::workspace::actions::execute::{
     PreparedContentSearch, begin_workspace_replacement, cleanup_stale_prepared_terminal_launches,
-    cleanup_stale_workspace_replacement, clear_failed_terminal_launch_reservations,
+    cleanup_stale_workspace_replacement, clear_failed_terminal_launch_reservations, delete_project,
     ensure_terminal, ensure_workspace_replacement_allowed, execute_action,
     execute_prepared_content_search_with_cancellation, fail_workspace_replacement,
     finish_workspace_replacement, import_workspace_data, load_session_data_for_shell,
@@ -76,7 +76,7 @@ use okena_workspace::actions::project::ProjectDirectoryRenamePlan;
 use okena_workspace::actions::soft_close::{
     begin_soft_close_flow, close_now_flow, probe_busy, undo_soft_close_flow,
 };
-use okena_workspace::actions::worktree::WorktreeRemovalPlan;
+use okena_workspace::actions::worktree::{LinkedCheckout, WorktreeRemovalPlan};
 use okena_workspace::context::WorkspaceCx;
 use okena_workspace::focus::FocusManager;
 use okena_workspace::persistence::AppSettings;
@@ -4159,6 +4159,24 @@ pub async fn daemon_command_loop(
                         continue;
                     }
 
+                    // ── Delete project: resolve its checkout off the lock ────────
+                    ActionRequest::DeleteProject { project_id } => {
+                        let app_settings = settings.lock().clone();
+                        delete_project_resolved_off_lock(
+                            project_id,
+                            &workspace,
+                            &mut focus_manager,
+                            &backend,
+                            &terminals,
+                            &app_settings,
+                            &workspace_tick,
+                            &hook_runner,
+                            &hook_monitor,
+                            &runtime,
+                        )
+                        .await
+                    }
+
                     // ── Default: workspace-scoped action ─────────────────────────
                     action => {
                         let git_poll_trigger = git_poll_trigger_for_action(&action);
@@ -4887,21 +4905,84 @@ fn run_main_workspace_action(
     hook_runner: &Option<okena_hooks::HookRunner>,
     hook_monitor: &Option<okena_hooks::HookMonitor>,
 ) -> CommandResult {
+    run_main_workspace_mutation(
+        workspace,
+        backend,
+        terminals,
+        workspace_tick,
+        hook_runner,
+        hook_monitor,
+        |ws, deferred_backend, cx| {
+            execute_action(
+                action,
+                ws,
+                WindowId::Main,
+                focus_manager,
+                deferred_backend,
+                terminals,
+                app_settings,
+                cx,
+            )
+            .into_command_result()
+        },
+    )
+}
+
+/// Delete a project, resolving the linked checkout it leaves for worktree
+/// discovery to skip before taking the workspace lock: that reads the
+/// repository. `delete_project` refuses the result if the project's paths
+/// changed in between.
+#[allow(clippy::too_many_arguments)]
+async fn delete_project_resolved_off_lock(
+    project_id: String,
+    workspace: &Arc<Mutex<Workspace>>,
+    focus_manager: &mut FocusManager,
+    backend: &Arc<dyn TerminalBackend>,
+    terminals: &TerminalsRegistry,
+    app_settings: &AppSettings,
+    workspace_tick: &watch::Sender<u64>,
+    hook_runner: &Option<okena_hooks::HookRunner>,
+    hook_monitor: &Option<okena_hooks::HookMonitor>,
+    runtime: &tokio::runtime::Handle,
+) -> CommandResult {
+    let project = workspace.lock().project(&project_id).cloned();
+    let checkout = match project {
+        Some(project) => runtime
+            .spawn_blocking(move || LinkedCheckout::resolve(&project))
+            .await
+            .ok(),
+        None => None,
+    };
+    run_main_workspace_mutation(
+        workspace,
+        backend,
+        terminals,
+        workspace_tick,
+        hook_runner,
+        hook_monitor,
+        |ws, _backend, cx| {
+            delete_project(ws, focus_manager, project_id, checkout, app_settings, cx)
+                .into_command_result()
+        },
+    )
+}
+
+/// Run `mutate` under the workspace lock, then tear down the terminals it
+/// closed once the lock is released.
+fn run_main_workspace_mutation(
+    workspace: &Arc<Mutex<Workspace>>,
+    backend: &Arc<dyn TerminalBackend>,
+    terminals: &TerminalsRegistry,
+    workspace_tick: &watch::Sender<u64>,
+    hook_runner: &Option<okena_hooks::HookRunner>,
+    hook_monitor: &Option<okena_hooks::HookMonitor>,
+    mutate: impl FnOnce(&mut Workspace, &DeferredKillBackend, &mut DaemonWorkspaceCx) -> CommandResult,
+) -> CommandResult {
     let deferred_backend = DeferredKillBackend::new(&**backend);
     let (result, queued_terminal_ids) = {
         let mut cx = DaemonWorkspaceCx::new(workspace_tick, hook_runner, hook_monitor);
         let mut ws = workspace.lock();
-        let result = execute_action(
-            action,
-            &mut ws,
-            WindowId::Main,
-            focus_manager,
-            &deferred_backend,
-            terminals,
-            app_settings,
-            &mut cx,
-        )
-        .into_command_result();
+        let result = mutate(&mut ws, &deferred_backend, &mut cx);
         (result, ws.drain_pending_terminal_kills())
     };
 
@@ -8510,6 +8591,45 @@ mod tests {
             &vec!["t1".to_string()],
             "the deleted project's terminal PTY was killed, not leaked"
         );
+    }
+
+    #[tokio::test]
+    async fn delete_project_dismisses_the_checkout_and_kills_its_terminals() {
+        let killed = Arc::new(Mutex::new(Vec::new()));
+        let backend: Arc<dyn TerminalBackend> = Arc::new(RecordingBackend {
+            killed: killed.clone(),
+        });
+        let terminals: TerminalsRegistry = Arc::new(Mutex::new(Default::default()));
+        let mut data = workspace_with_initialized_terminal("t1");
+        data.projects[0].worktree_info = Some(okena_state::WorktreeMetadata {
+            parent_project_id: "parent".to_string(),
+            color_override: None,
+            main_repo_path: String::new(),
+            worktree_path: "/tmp/okena-checkout".to_string(),
+            branch_name: "topic".to_string(),
+        });
+        let workspace = Arc::new(Mutex::new(Workspace::new(data)));
+        let (workspace_tick, _wtrx) = watch::channel(0u64);
+
+        let result = delete_project_resolved_off_lock(
+            "p1".to_string(),
+            &workspace,
+            &mut FocusManager::new(),
+            &backend,
+            &terminals,
+            &default_settings(),
+            &workspace_tick,
+            &None,
+            &None,
+            &tokio::runtime::Handle::current(),
+        )
+        .await;
+
+        assert!(matches!(result, CommandResult::Ok(_)), "{result:?}");
+        let workspace = workspace.lock();
+        assert!(workspace.project("p1").is_none());
+        assert!(workspace.is_worktree_dismissed(std::path::Path::new("/tmp/okena-checkout")));
+        assert_eq!(&*killed.lock(), &vec!["t1".to_string()]);
     }
 
     #[test]
