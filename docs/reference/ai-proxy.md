@@ -255,6 +255,12 @@ proxy and shows nothing.
   (`/_okena/…`: health, commands, shutdown) is not served on the TCP port. It
   listens on `ai-proxy/management.sock` (Unix), or on Windows on a named pipe
   that only the current user can open, named after a hash of `management.key`.
+  When the socket path would not fit the platform limit (104 bytes on macOS,
+  108 on Linux), the socket is `okena-ai-<hash>/management.sock` under
+  `$XDG_RUNTIME_DIR`, else `$TMPDIR`, else `/tmp`; the hash is of the proxy
+  directory's path. The proxy and the daemon create that directory with mode
+  0700 and refuse to use it when it is not a directory owned by the current
+  user with mode 0700.
   It also needs `management.key` as a bearer token, and only the daemon sends
   it. Any process of the same OS user can still read the key file; the key
   keeps management out of reach of anything that only has the URL from a
@@ -326,9 +332,10 @@ headers. Response diagnostics additionally allow `x-ratelimit-*`,
   Shells started with that URL then send their path token, the request (prompt
   included), and their own `claude` OAuth token to whatever listens there. The
   path token alone gives no management access.
-- The management socket path must fit the platform limit (104 bytes on macOS,
-  108 on Linux). With a longer profile path the proxy does not start, and
-  `proxy.log` names the socket.
+- With a long profile path the management socket lives in the runtime
+  directory. If the system removes that directory (on Linux at logout without
+  lingering), the daemon cannot reach the running proxy until it restarts, and a
+  proxy it starts meanwhile exits after waiting 45 seconds for the lock.
 - A corrupt `routing.json` stops the proxy from starting rather than dropping
   the policies.
 

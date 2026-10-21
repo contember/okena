@@ -15,6 +15,7 @@ behaviour.
 - [`hooks.md`](hooks.md) — lifecycle hooks: events, config shape, execution.
 - [`agent-status.md`](agent-status.md) — agent lifecycle, conversation identities, Claude Code hooks and resume.
 - [`ai-proxy.md`](ai-proxy.md) — Claude account pool proxy: setup, routing, lifecycle, files.
+- [`status-board.md`](status-board.md) — manual per-project / per-worktree statuses: status pill, sidebar groups, status lanes in the main area, the columns setting.
 - [`services.md`](services.md) — Docker Compose integration and port detection.
 - [`worktrees.md`](worktrees.md) — git worktree projects: create, close, parent linkage.
 - [`remote.md`](remote.md) — remote control server: pairing, HTTP/WS API, TLS.

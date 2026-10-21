@@ -16,6 +16,7 @@ pub mod remote_list;
 pub mod rename_directory_dialog;
 pub mod service_list;
 pub mod sidebar;
+pub mod status_picker;
 pub mod worktree_list;
 
 pub use sidebar::Sidebar;
@@ -37,6 +38,7 @@ pub use rename_directory_dialog::{RenameDirectoryDialog, RenameDirectoryDialogEv
 
 // Re-export popover types
 pub use color_picker::{ColorPickerPopover, ColorPickerPopoverEvent, ColorPickerTarget};
+pub use status_picker::{StatusPickerEvent, StatusPickerPopover};
 pub use worktree_list::{WorktreeListPopover, WorktreeListPopoverEvent};
 
 gpui::actions!(

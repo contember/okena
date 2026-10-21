@@ -635,6 +635,7 @@ impl Workspace {
                 None
             },
             terminal_names: HashMap::new(),
+            status: None,
             hidden_terminals: HashMap::new(),
             worktree_info: Some(crate::state::WorktreeMetadata {
                 parent_project_id: parent_project_id.to_string(),
@@ -816,6 +817,7 @@ impl Workspace {
             path: project_path,
             layout: Some(LayoutNode::new_terminal()),
             terminal_names: HashMap::new(),
+            status: None,
             hidden_terminals: HashMap::new(),
             worktree_info: Some(crate::state::WorktreeMetadata {
                 parent_project_id: parent_id.to_string(),

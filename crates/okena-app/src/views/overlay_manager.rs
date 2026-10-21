@@ -123,6 +123,8 @@ impl CloseEvent for PairingDialogEvent {
 /// actions that need access to WindowView's state (terminals, PTY manager, etc.)
 #[derive(Clone)]
 pub enum OverlayManagerEvent {
+    /// The status picker asked for the columns editor (Settings > General).
+    EditStatusColumns,
     /// Session manager requested a session/workspace action (load/save/import/
     /// export). The host dispatches it to the local daemon, which owns session
     /// files + the authoritative workspace.
@@ -448,6 +450,7 @@ pub struct OverlayManager {
     // Positioned popovers (like context menus, rendered at WindowView level)
     worktree_list: OverlaySlot<WorktreeListPopover>,
     color_picker: OverlaySlot<ColorPickerPopover>,
+    status_picker: OverlaySlot<okena_views_sidebar::StatusPickerPopover>,
 
     /// Cached project inspectors preserve file tabs across close/reopen.
     cached_project_inspectors: std::collections::HashMap<String, Entity<ProjectInspector>>,
@@ -479,6 +482,7 @@ impl OverlayManager {
             send_composer: OverlaySlot::new(),
             worktree_list: OverlaySlot::new(),
             color_picker: OverlaySlot::new(),
+            status_picker: OverlaySlot::new(),
         }
     }
 
@@ -1179,6 +1183,25 @@ impl OverlayManager {
                     cx.emit(OverlayManagerEvent::CreateWorktree {
                         project_id: project_id.clone(),
                     });
+                }
+                ContextMenuEvent::ToggleStatusLanes { project_id } => {
+                    this.hide_context_menu(cx);
+                    let window_id = this.window_id;
+                    let project_id = project_id.clone();
+                    this.workspace.update(cx, |ws, cx| {
+                        ws.toggle_status_lanes(window_id, &project_id, cx)
+                    });
+                }
+                ContextMenuEvent::SetStatus { project_id, status } => {
+                    this.hide_context_menu(cx);
+                    this.emit_project_action(
+                        project_id,
+                        ActionRequest::SetProjectStatus {
+                            project_id: project_id.clone(),
+                            status: status.clone(),
+                        },
+                        cx,
+                    );
                 }
                 ContextMenuEvent::RenameProject {
                     project_id,
@@ -2018,6 +2041,55 @@ impl OverlayManager {
 
         self.color_picker.set(popover);
         cx.notify();
+    }
+
+    // ========================================================================
+    // Status picker popover (positioned popup)
+    // ========================================================================
+
+    pub fn has_status_picker(&self) -> bool {
+        self.status_picker.is_open()
+    }
+
+    /// Show the status picker for a project under its column header pill.
+    pub fn show_status_picker(
+        &mut self,
+        project_id: String,
+        position: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        use okena_views_sidebar::{StatusPickerEvent, StatusPickerPopover};
+        self.close_all_context_menus(cx);
+        let workspace = self.workspace.clone();
+        let popover = cx.new(|cx| StatusPickerPopover::new(workspace, project_id, position, cx));
+        cx.subscribe(
+            &popover,
+            |this, _, event: &StatusPickerEvent, cx| match event {
+                StatusPickerEvent::Close => this.hide_status_picker(cx),
+                StatusPickerEvent::StatusChanged { project_id, status } => this
+                    .emit_project_action(
+                        project_id,
+                        ActionRequest::SetProjectStatus {
+                            project_id: project_id.clone(),
+                            status: status.clone(),
+                        },
+                        cx,
+                    ),
+                StatusPickerEvent::EditColumns => cx.emit(OverlayManagerEvent::EditStatusColumns),
+            },
+        )
+        .detach();
+        self.status_picker.set(popover);
+        cx.notify();
+    }
+
+    pub fn hide_status_picker(&mut self, cx: &mut Context<Self>) {
+        self.status_picker.close();
+        cx.notify();
+    }
+
+    pub fn render_status_picker(&self) -> Option<Entity<okena_views_sidebar::StatusPickerPopover>> {
+        self.status_picker.render()
     }
 
     /// Hide color picker popover.

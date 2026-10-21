@@ -14,7 +14,7 @@ use super::{
     ShowSessionManager, ShowSettings, ShowThemeSelector, ShowWhatsNew, SplitHorizontal,
     SplitVertical, StartAllServices, StopAllServices, ToggleFullscreen, TogglePaneSwitcher,
     ToggleProjectLayout, ToggleProjectVisibility, ToggleSidebar, ToggleSidebarAutoHide,
-    ToggleUnread, ZoomIn, ZoomOut,
+    ToggleStatusLanes, ToggleUnread, ZoomIn, ZoomOut,
 };
 
 /// Get human-readable descriptions for all actions
@@ -568,6 +568,16 @@ pub fn get_action_descriptions() -> HashMap<&'static str, ActionDescription> {
             description: "Stop all services for the focused project",
             category: "Services",
             factory: || Box::new(StopAllServices),
+        },
+    );
+
+    map.insert(
+        "ToggleStatusLanes",
+        ActionDescription {
+            name: "Toggle Status Lanes",
+            description: "Group this window's project columns by status (needs the status board enabled in settings)",
+            category: "Global",
+            factory: || Box::new(ToggleStatusLanes),
         },
     );
 

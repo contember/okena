@@ -67,6 +67,68 @@ impl StatusBarStyle {
     }
 }
 
+/// What the small ring before a worktree row in the sidebar shows.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum WorktreeMarker {
+    /// The project's colour (inherited from the parent unless overridden).
+    #[default]
+    Project,
+    /// The colour of the worktree's status column; the project colour when
+    /// it has none.
+    Status,
+}
+
+impl WorktreeMarker {
+    pub fn display_name(self) -> &'static str {
+        match self {
+            WorktreeMarker::Project => "Project colour",
+            WorktreeMarker::Status => "Status colour",
+        }
+    }
+
+    pub fn all_variants() -> &'static [WorktreeMarker] {
+        &[WorktreeMarker::Project, WorktreeMarker::Status]
+    }
+}
+
+/// One column of the status board. `id` is the stable key that
+/// `ProjectData::status` stores; `name` is what the user sees and
+/// may rename without touching any project's status.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BoardColumn {
+    pub id: String,
+    pub name: String,
+    /// Accent for the column's caption and header; `Default` means none.
+    #[serde(default)]
+    pub color: crate::theme::FolderColor,
+}
+
+impl BoardColumn {
+    pub fn new(id: impl Into<String>, name: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            name: name.into(),
+            color: crate::theme::FolderColor::Default,
+        }
+    }
+
+    pub fn with_color(mut self, color: crate::theme::FolderColor) -> Self {
+        self.color = color;
+        self
+    }
+}
+
+/// The columns a fresh install starts with.
+pub fn default_board_columns() -> Vec<BoardColumn> {
+    vec![
+        BoardColumn::new("todo", "To do"),
+        BoardColumn::new("in-progress", "In progress"),
+        BoardColumn::new("review", "Review"),
+        BoardColumn::new("done", "Done"),
+    ]
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DiffMode {

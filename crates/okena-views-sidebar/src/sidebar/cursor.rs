@@ -133,6 +133,7 @@ impl Sidebar {
                                 &service_names,
                                 &hook_terminal_ids,
                                 &mut cursor_items,
+                                cx,
                             );
                         }
                     }
@@ -155,6 +156,7 @@ impl Sidebar {
                     &service_names,
                     &hook_terminal_ids,
                     &mut cursor_items,
+                    cx,
                 );
             }
         }
@@ -170,6 +172,7 @@ impl Sidebar {
         service_names: &HashMap<String, Vec<String>>,
         hook_terminal_ids: &HashMap<String, Vec<String>>,
         cursor_items: &mut Vec<SidebarCursorItem>,
+        cx: &App,
     ) {
         let has_worktrees = worktree_children_map
             .get(&project.id)
@@ -191,8 +194,7 @@ impl Sidebar {
 
                 if self.expanded_projects.contains(&project.id) {
                     self.push_group_cursor_items(
-                        &project.id,
-                        &project.layout,
+                        project,
                         service_names,
                         hook_terminal_ids,
                         cursor_items,
@@ -201,14 +203,17 @@ impl Sidebar {
 
                 // Worktree children as siblings
                 if let Some(children) = worktree_children_map.get(&project.id) {
-                    for child in children {
+                    // Same grouped order the rows are drawn in.
+                    let statuses: Vec<Option<&str>> =
+                        children.iter().map(|c| c.status.as_deref()).collect();
+                    for row in super::status_groups::worktree_rows(&statuses, cx) {
+                        let child = children[row.index];
                         cursor_items.push(SidebarCursorItem::WorktreeProject {
                             project_id: child.id.clone(),
                         });
                         if self.expanded_projects.contains(&child.id) {
                             self.push_group_cursor_items(
-                                &child.id,
-                                &child.layout,
+                                child,
                                 service_names,
                                 hook_terminal_ids,
                                 cursor_items,
@@ -225,8 +230,7 @@ impl Sidebar {
 
             if self.expanded_projects.contains(&project.id) {
                 self.push_group_cursor_items(
-                    &project.id,
-                    &project.layout,
+                    project,
                     service_names,
                     hook_terminal_ids,
                     cursor_items,
@@ -238,14 +242,14 @@ impl Sidebar {
     /// Push group headers and their child cursor items for an expanded project.
     fn push_group_cursor_items(
         &self,
-        project_id: &str,
-        layout: &Option<okena_workspace::state::LayoutNode>,
+        project: &ProjectData,
         service_names: &HashMap<String, Vec<String>>,
         hook_terminal_ids: &HashMap<String, Vec<String>>,
         cursor_items: &mut Vec<SidebarCursorItem>,
     ) {
+        let project_id = project.id.as_str();
         // Terminals group
-        if let Some(layout) = layout {
+        if let Some(layout) = &project.layout {
             let terminal_ids = layout.collect_terminal_ids();
             if !terminal_ids.is_empty() {
                 cursor_items.push(SidebarCursorItem::GroupHeader {

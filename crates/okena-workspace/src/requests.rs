@@ -120,6 +120,10 @@ pub enum ProjectOverlayKind {
     WorktreeList {
         position: gpui::Point<gpui::Pixels>,
     },
+    /// The status picker under a column header's status pill.
+    StatusPicker {
+        position: gpui::Point<gpui::Pixels>,
+    },
 }
 
 /// Folder-scoped overlay request. Carries a `folder_id` once;

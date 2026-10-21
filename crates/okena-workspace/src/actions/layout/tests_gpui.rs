@@ -23,6 +23,7 @@ fn make_project(id: &str) -> ProjectData {
             zoom_level: 1.0,
         }),
         terminal_names: HashMap::new(),
+        status: None,
         hidden_terminals: HashMap::new(),
         worktree_info: None,
         worktree_ids: Vec::new(),
@@ -508,6 +509,7 @@ fn make_project_with_layout(id: &str, layout: LayoutNode) -> ProjectData {
         path: "/tmp/test".to_string(),
         layout: Some(layout),
         terminal_names: HashMap::new(),
+        status: None,
         hidden_terminals: HashMap::new(),
         worktree_info: None,
         worktree_ids: Vec::new(),
@@ -977,6 +979,52 @@ fn test_close_terminal_cleans_metadata(cx: &mut gpui::TestAppContext) {
         assert!(!p.terminal_names.contains_key("t1"));
         assert!(p.terminal_names.contains_key("t2"));
     });
+}
+
+#[gpui::test]
+fn test_set_project_status_sets_replaces_and_clears(cx: &mut gpui::TestAppContext) {
+    let project = make_project_with_layout("p1", terminal_node_t("t1"));
+    let data = make_workspace_data(vec![project], vec!["p1"]);
+    let workspace = cx.new(|_cx| Workspace::new(data));
+    let version = |ws: &Workspace| ws.data_version();
+
+    let v0 = workspace.read_with(cx, |ws: &Workspace, _cx| version(ws));
+    workspace.update(cx, |ws: &mut Workspace, cx| {
+        ws.set_project_status("p1", Some("todo".to_string()), cx);
+    });
+    let v1 = workspace.read_with(cx, |ws: &Workspace, _cx| {
+        assert_eq!(ws.project("p1").unwrap().status.as_deref(), Some("todo"));
+        version(ws)
+    });
+    assert!(v1 > v0, "a new status is a data change");
+
+    // Same value again: no data change, so no autosave churn.
+    workspace.update(cx, |ws: &mut Workspace, cx| {
+        ws.set_project_status("p1", Some("todo".to_string()), cx);
+    });
+    let v2 = workspace.read_with(cx, |ws: &Workspace, _cx| version(ws));
+    assert_eq!(v2, v1);
+
+    workspace.update(cx, |ws: &mut Workspace, cx| {
+        ws.set_project_status("p1", Some("done".to_string()), cx);
+    });
+    workspace.read_with(cx, |ws: &Workspace, _cx| {
+        assert_eq!(ws.project("p1").unwrap().status.as_deref(), Some("done"));
+    });
+
+    workspace.update(cx, |ws: &mut Workspace, cx| {
+        ws.set_project_status("p1", None, cx);
+    });
+    let v3 = workspace.read_with(cx, |ws: &Workspace, _cx| {
+        assert!(ws.project("p1").unwrap().status.is_none());
+        version(ws)
+    });
+    // Clearing an absent status is a no-op too.
+    workspace.update(cx, |ws: &mut Workspace, cx| {
+        ws.set_project_status("p1", None, cx);
+    });
+    let v4 = workspace.read_with(cx, |ws: &Workspace, _cx| version(ws));
+    assert_eq!(v4, v3);
 }
 
 #[gpui::test]

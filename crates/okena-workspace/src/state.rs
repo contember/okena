@@ -48,6 +48,7 @@ struct ProjectPresentation {
     terminal_names: HashMap<String, String>,
     folder_color: FolderColor,
     color_override: Option<FolderColor>,
+    status: Option<String>,
 }
 
 /// The project layouts as they stood before the reconciliation numbered
@@ -1497,6 +1498,38 @@ impl Workspace {
         }
     }
 
+    /// The project whose family a lanes toggle addresses: a worktree stands
+    /// for its parent, so the whole family flips together.
+    pub fn status_lanes_root(&self, project_id: &str) -> String {
+        self.project(project_id)
+            .and_then(|p| p.worktree_info.as_ref())
+            .map(|wt| wt.parent_project_id.clone())
+            .filter(|parent| self.project(parent).is_some())
+            .unwrap_or_else(|| project_id.to_string())
+    }
+
+    /// Flip the status-lanes view of a project's family in a window.
+    /// Persisted via `notify_data`.
+    pub fn toggle_status_lanes(
+        &mut self,
+        window_id: WindowId,
+        project_id: &str,
+        cx: &mut impl WorkspaceCx,
+    ) {
+        let root = self.status_lanes_root(project_id);
+        if self.data.toggle_status_lanes(window_id, &root).is_some() {
+            self.notify_data(cx);
+        }
+    }
+
+    /// Whether a window shows a project's family in status lanes.
+    pub fn status_lanes(&self, window_id: WindowId, project_id: &str) -> bool {
+        let root = self.status_lanes_root(project_id);
+        self.data
+            .window(window_id)
+            .is_some_and(|w| w.status_lanes_projects.contains(&root))
+    }
+
     /// Toggle whether a project is pinned to the top of the activity-sorted
     /// view. No-op for an unknown project id. Persisted via `notify_data`.
     pub fn toggle_project_pinned(&mut self, project_id: &str, cx: &mut impl WorkspaceCx) {
@@ -2452,7 +2485,8 @@ impl Workspace {
     }
 
     /// What the cached terminal views draw from each project: custom terminal
-    /// names, the project colour and a worktree's colour override. Keyed by
+    /// names, the project colour, a worktree's colour override and the status
+    /// (which tints the pane). Keyed by
     /// project id, compared before and after a snapshot.
     fn project_presentation(&self) -> HashMap<String, ProjectPresentation> {
         self.data
@@ -2465,6 +2499,7 @@ impl Workspace {
                         terminal_names: p.terminal_names.clone(),
                         folder_color: p.folder_color,
                         color_override: p.worktree_info.as_ref().and_then(|wt| wt.color_override),
+                        status: p.status.clone(),
                     },
                 )
             })
@@ -2711,6 +2746,7 @@ mod workspace_tests {
                         .iter()
                         .map(|(k, v)| (k.to_string(), v.to_string()))
                         .collect(),
+                    status: None,
                     git_status: None,
                     terminal_agent_status: HashMap::new(),
                     folder_color,
@@ -2770,6 +2806,57 @@ mod workspace_tests {
             &mut cx,
         );
         assert_eq!(cx.refreshes, after_first + 1);
+    }
+
+    fn snapshot_with_status(status: Option<&str>) -> crate::remote_apply::RemoteSnapshot {
+        let mut snapshot = snapshot_with(&[], FolderColor::Default);
+        if let Some(state) = snapshot.state.as_mut() {
+            state.projects[0].status = status.map(str::to_string);
+        }
+        snapshot
+    }
+
+    #[test]
+    fn snapshot_that_changes_a_project_status_refreshes_cached_views() {
+        let mut ws = Workspace::new(make_workspace_data(vec![], vec![]));
+        let mut fm = crate::focus::FocusManager::new();
+        let mut cx = RecordingCx::default();
+
+        ws.apply_remote_snapshot(
+            &[snapshot_with_status(Some("todo"))],
+            WindowId::Main,
+            &mut fm,
+            &mut cx,
+        );
+        let after_first = cx.refreshes;
+
+        ws.apply_remote_snapshot(
+            &[snapshot_with_status(Some("todo"))],
+            WindowId::Main,
+            &mut fm,
+            &mut cx,
+        );
+        assert_eq!(
+            cx.refreshes, after_first,
+            "unchanged status must not refresh"
+        );
+
+        // The status tints the pane, so a status set elsewhere must repaint.
+        ws.apply_remote_snapshot(
+            &[snapshot_with_status(Some("review"))],
+            WindowId::Main,
+            &mut fm,
+            &mut cx,
+        );
+        assert_eq!(cx.refreshes, after_first + 1);
+
+        ws.apply_remote_snapshot(
+            &[snapshot_with_status(None)],
+            WindowId::Main,
+            &mut fm,
+            &mut cx,
+        );
+        assert_eq!(cx.refreshes, after_first + 2);
     }
 
     #[test]
@@ -3057,6 +3144,7 @@ mod workspace_tests {
                 zoom_level: 1.0,
             }),
             terminal_names: HashMap::new(),
+            status: None,
             hidden_terminals: HashMap::new(),
             worktree_info: None,
             worktree_ids: Vec::new(),
@@ -4110,6 +4198,7 @@ mod gpui_tests {
                 zoom_level: 1.0,
             }),
             terminal_names: HashMap::new(),
+            status: None,
             hidden_terminals: HashMap::new(),
             worktree_info: None,
             worktree_ids: Vec::new(),
@@ -4294,6 +4383,7 @@ mod gpui_tests {
                     show_in_overview: true,
                     layout: Some(layout),
                     terminal_names: HashMap::new(),
+                    status: None,
                     git_status: None,
                     terminal_agent_status: HashMap::new(),
                     folder_color: FolderColor::Default,

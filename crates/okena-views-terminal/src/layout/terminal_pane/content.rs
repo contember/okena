@@ -753,7 +753,8 @@ impl Render for TerminalContent {
         let bg_tint = if settings.color_tinted_background {
             let ws = self.workspace.read(cx);
             ws.project(&self.project_id).and_then(|p| {
-                let color = ws.effective_folder_color(p);
+                let color = okena_ui::board::status_color(p.status.as_deref(), cx)
+                    .unwrap_or_else(|| ws.effective_folder_color(p));
                 if color != okena_core::theme::FolderColor::Default {
                     Some(t.get_folder_color(color))
                 } else {

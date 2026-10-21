@@ -1175,6 +1175,7 @@ mod tests {
             path: main_repo.to_string_lossy().into_owned(),
             layout: None,
             terminal_names: Default::default(),
+            status: None,
             hidden_terminals: Default::default(),
             worktree_info: None,
             worktree_ids: vec!["wt1".into()],
@@ -1200,6 +1201,7 @@ mod tests {
                 hook_terminal_id.to_string(),
                 "Before remove".to_string(),
             )]),
+            status: None,
             hidden_terminals: Default::default(),
             worktree_info: Some(WorktreeMetadata {
                 parent_project_id: "parent".into(),
@@ -1268,6 +1270,7 @@ mod tests {
                 zoom_level: 1.0,
             }),
             terminal_names: HashMap::from([(terminal_id.into(), "Build shell".into())]),
+            status: None,
             hidden_terminals: Default::default(),
             worktree_info: None,
             worktree_ids: Vec::new(),

@@ -7,7 +7,7 @@ GPUI-free. Runs as `okena --ai-proxy <profile-root>` / `okena-daemon --ai-proxy 
 | File | Purpose |
 |---|---|
 | `server.rs` | Process entry (`run`): instance lock (waits up to 45 s for an instance that is shutting down), logging, loopback TCP bind with `/<token>[/p/<project>]/…` dispatch, management routes on the management address (`/_okena/health`, `/_okena/command`, `/_okena/shutdown`, bearer `management.key`), upstream silence timeout, usage poller. E2E tests against a fake provider live here. |
-| `management.rs` | Management address: `ai-proxy/management.sock` (Unix) or a current-user-only named pipe whose name derives from the management key (Windows); listener and the HTTP client for it. |
+| `management.rs` | Management address: `ai-proxy/management.sock` (Unix; a checked 0700 `okena-ai-<hash>/` under the runtime dir when that path is too long for a socket) or a current-user-only named pipe whose name derives from the management key (Windows); listener and the HTTP client for it. Proxy and daemon both resolve it through `Address::new`. |
 | `proxy.rs` | Relay: account selection per attempt, auth/`metadata.user_id` rewrite, 401 refresh-once, 429 failover, streaming with an in-flight guard, activity recording (error answers are read whole for their message). |
 | `diagnostics.rs` | Bounded provider error details and request context for relay logs; only structured error fields and selected response headers are logged. |
 | `activity.rs` | In-memory last hour of `/v1/messages` outcomes per account and the recent failover/error events, sent with every status. |
