@@ -146,23 +146,64 @@ fn classify_refresh_response(
 /// Refresh the OAuth access token using the refresh token and persist the new
 /// tokens back to `auth.json` (as the Codex CLI would).
 fn refresh_access_token(auth: &CodexAuth) -> Result<String, RefreshError> {
-    let response = okena_transport::http::send(
-        okena_transport::http::HttpRequest::post(TOKEN_URL)
-            .body(
-                "application/x-www-form-urlencoded",
-                refresh_request_body(&auth.refresh_token),
-            )
-            .timeout(Duration::from_secs(10))
-            .user_agent(USER_AGENT)
-            .label("codex.token-refresh"),
-    );
-    let tokens = classify_refresh_response(response)?;
+    refresh_access_token_with(auth, |refresh_token| {
+        classify_refresh_response(okena_transport::http::send(
+            okena_transport::http::HttpRequest::post(TOKEN_URL)
+                .body(
+                    "application/x-www-form-urlencoded",
+                    refresh_request_body(refresh_token),
+                )
+                .timeout(Duration::from_secs(10))
+                .user_agent(USER_AGENT)
+                .label("codex.token-refresh"),
+        ))
+    })
+}
+
+/// [`refresh_access_token`] with the token endpoint call injected (tests).
+///
+/// The provider rotates the refresh token, and every Okena daemon on the
+/// machine shares `auth.json`, so the exchange runs under an exclusive lock
+/// file. Whoever waited re-reads the file and uses the tokens another process
+/// stored meanwhile, including one the Codex CLI wrote, instead of spending a
+/// refresh token that is already dead.
+fn refresh_access_token_with(
+    auth: &CodexAuth,
+    exchange: impl FnOnce(&str) -> Result<RefreshedTokens, RefreshError>,
+) -> Result<String, RefreshError> {
+    let _lock = lock_refresh(&auth.auth_path)
+        .inspect_err(|error| {
+            log::warn!("[codex-usage] refreshing without the auth.json lock: {error}");
+        })
+        .ok();
+    if let Some(current) = read_auth_from(auth.auth_path.clone())
+        && (current.access_token != auth.access_token
+            || current.refresh_token != auth.refresh_token)
+    {
+        log::debug!("[codex-usage] auth.json changed meanwhile; using its tokens");
+        return Ok(current.access_token);
+    }
+    let tokens = exchange(&auth.refresh_token)?;
     if let Err(error) = persist_refreshed_tokens(&auth.auth_path, &tokens) {
         // The new token still works for this fetch; the CLI keeps its own
         // copy. Log without any token material.
         log::warn!("[codex-usage] could not write refreshed tokens to auth.json: {error}");
     }
     Ok(tokens.access_token)
+}
+
+/// Take the exclusive lock that serializes Okena's refreshes of `auth_path`.
+/// A separate file, because `auth.json` itself is replaced by rename.
+fn lock_refresh(auth_path: &std::path::Path) -> std::io::Result<std::fs::File> {
+    let lock_path = auth_path.with_file_name(".auth.json.okena.lock");
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(lock_path)?;
+    file.lock()?;
+    Ok(file)
 }
 
 /// `last_refresh` in the Codex CLI's format: RFC 3339 UTC, microseconds.
@@ -599,6 +640,52 @@ mod tests {
         let parsed = parse_reset_credits(&body).expect("reset credits should parse");
         assert_eq!(parsed.available_count, 1);
         assert_eq!(parsed.credits.len(), 1);
+    }
+
+    fn write_auth(path: &std::path::Path, access: &str, refresh: &str) {
+        let auth = serde_json::json!({
+            "tokens": { "access_token": access, "refresh_token": refresh, "account_id": "acct-1" }
+        });
+        std::fs::write(path, auth.to_string()).unwrap();
+    }
+
+    #[test]
+    fn a_refresh_uses_tokens_another_process_stored_meanwhile() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.json");
+        write_auth(&path, "old-access", "old-refresh");
+        let auth = read_auth_from(path.clone()).unwrap();
+        write_auth(&path, "their-access", "their-refresh");
+
+        let token = refresh_access_token_with(&auth, |_| panic!("refreshed a rotated token"));
+        assert_eq!(token, Ok("their-access".to_string()));
+        let written: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(written["tokens"]["refresh_token"], "their-refresh");
+    }
+
+    #[test]
+    fn a_refresh_of_unchanged_tokens_exchanges_and_stores_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.json");
+        write_auth(&path, "old-access", "old-refresh");
+        let auth = read_auth_from(path.clone()).unwrap();
+
+        let token = refresh_access_token_with(&auth, |refresh_token| {
+            assert_eq!(refresh_token, "old-refresh");
+            Ok(RefreshedTokens {
+                access_token: "new-access".into(),
+                refresh_token: Some("new-refresh".into()),
+                id_token: None,
+            })
+        });
+        assert_eq!(token, Ok("new-access".to_string()));
+        let reread = read_auth_from(path).unwrap();
+        assert_eq!(reread.access_token, "new-access");
+        assert_eq!(reread.refresh_token, "new-refresh");
+        // The lock is released with the refresh: the next one can take it.
+        let lock = std::fs::File::open(dir.path().join(".auth.json.okena.lock")).unwrap();
+        assert!(lock.try_lock().is_ok());
     }
 
     #[test]
