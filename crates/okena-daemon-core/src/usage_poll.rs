@@ -22,12 +22,13 @@
 //! Fetches are blocking HTTP (`okena-transport`) and Keychain subprocesses,
 //! so they run on tokio's blocking pool; nothing here can take the daemon
 //! down — every failure becomes provider state. At most one fetch per
-//! provider runs at a time, also across config changes (a Codex token refresh
-//! rotates the refresh token, and two concurrent rotations can sign the user
-//! out). Every step of a fetch has its own timeout (HTTP 10 s, Keychain 5 s),
-//! which also bounds how long the runtime's drop waits for a fetch at daemon
-//! shutdown; [`FETCH_DEADLINE`] is a watchdog on top that turns a fetch stuck
-//! anyway into an error instead of `fetching` forever.
+//! provider runs at a time, also across config changes and past the
+//! watchdog: a slot stays taken until its blocking call has returned (a Codex
+//! token refresh rotates the refresh token, and two concurrent rotations can
+//! sign the user out). Every step of a fetch has its own timeout (HTTP 10 s,
+//! Keychain 5 s), which also bounds how long the runtime's drop waits for a
+//! fetch at daemon shutdown; [`FETCH_DEADLINE`] is a watchdog on top that turns
+//! a fetch stuck anyway into an error instead of `fetching` forever.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -122,15 +123,14 @@ pub fn initial_usage(settings: &AppSettings) -> ApiUsage {
     )
 }
 
-/// A fetch running on the blocking pool. Outlives config changes: a new fetch
-/// for the slot only starts once this one has landed (its result discarded
-/// when the config changed meanwhile), so two Codex refresh-token rotations
-/// can never race each other.
+/// A fetch running on the blocking pool. Outlives config changes and the
+/// watchdog: a new fetch for the slot only starts once this one has landed
+/// (its result discarded when the config changed or the watchdog fired
+/// meanwhile), so two Codex refresh-token rotations can never race each other.
 struct RunningFetch {
     id: u64,
     /// Slot generation the fetch was started under.
     generation: u64,
-    started: Instant,
     /// The watchdog already turned this fetch into a failure.
     timed_out: bool,
 }
@@ -143,26 +143,6 @@ struct Slot {
     generation: u64,
     next_due: Option<Instant>,
     running: Option<RunningFetch>,
-}
-
-impl Slot {
-    /// Whether an outstanding fetch still blocks starting a new one. A fetch
-    /// stuck past [`ABANDON_AFTER`] is given up on so the provider recovers.
-    fn blocked(&mut self, now: Instant, abandon_after: Duration) -> bool {
-        let Some(running) = &self.running else {
-            return false;
-        };
-        if now.saturating_duration_since(running.started) < abandon_after {
-            return true;
-        }
-        log::warn!(
-            "[usage] {} fetch still running after {:?}; abandoning it",
-            self.tracker.entry().provider.as_str(),
-            abandon_after
-        );
-        self.running = None;
-        false
-    }
 }
 
 /// Events from the per-fetch supervisor task.
@@ -181,9 +161,8 @@ enum FetchEvent {
 /// (HTTP requests 10 s each, Keychain lookups 5 s each; Codex can chain up to
 /// four requests), so this only catches something unexpectedly stuck: the
 /// provider then shows an error and backs off instead of `fetching` forever.
+/// The fetch keeps its slot until it returns.
 const FETCH_DEADLINE: Duration = Duration::from_secs(90);
-/// After this long a stuck fetch no longer blocks new ones.
-const ABANDON_AFTER: Duration = Duration::from_secs(600);
 
 /// Run the poller forever (cancelled with the daemon's runtime).
 pub async fn run_usage_poll(
@@ -201,15 +180,7 @@ pub async fn run_usage_poll_with(
     refresh_rx: mpsc::UnboundedReceiver<UsageRefresh>,
     fetcher: UsageFetcher,
 ) {
-    run_usage_poll_inner(
-        settings,
-        hub,
-        refresh_rx,
-        fetcher,
-        FETCH_DEADLINE,
-        ABANDON_AFTER,
-    )
-    .await;
+    run_usage_poll_inner(settings, hub, refresh_rx, fetcher, FETCH_DEADLINE).await;
 }
 
 /// Resolve the Claude config dir for a fetch (settings dir →
@@ -232,7 +203,6 @@ async fn run_usage_poll_inner(
     mut refresh_rx: mpsc::UnboundedReceiver<UsageRefresh>,
     fetcher: UsageFetcher,
     fetch_deadline: Duration,
-    abandon_after: Duration,
 ) {
     let (event_tx, mut event_rx) = mpsc::unbounded_channel::<FetchEvent>();
     let mut slots: Vec<Slot> = PROVIDERS
@@ -285,7 +255,7 @@ async fn run_usage_poll_inner(
         // 2. Start due fetches.
         for (index, slot) in slots.iter_mut().enumerate() {
             let due = slot.next_due.is_some_and(|due| due <= now);
-            if !slot.config.enabled || !due || slot.blocked(now, abandon_after) {
+            if !slot.config.enabled || !due || slot.running.is_some() {
                 continue;
             }
             let provider = slot.tracker.entry().provider;
@@ -296,7 +266,6 @@ async fn run_usage_poll_inner(
             slot.running = Some(RunningFetch {
                 id,
                 generation: slot.generation,
-                started: now,
                 timed_out: false,
             });
             let fetcher = fetcher.clone();
@@ -353,7 +322,7 @@ async fn run_usage_poll_inner(
                         if target.is_some_and(|target| target != provider) {
                             continue;
                         }
-                        if slot.tracker.refresh_allowed(now) && !slot.blocked(now, abandon_after) {
+                        if slot.tracker.refresh_allowed(now) && slot.running.is_none() {
                             log::debug!("[usage] refresh requested for {}", provider.as_str());
                             slot.next_due = Some(now);
                         }
@@ -387,11 +356,9 @@ async fn run_usage_poll_inner(
                 }
                 FetchEvent::Landed { index, id, outcome } => {
                     let Some(slot) = slots.get_mut(index) else { continue };
-                    if slot.running.as_ref().is_none_or(|running| running.id != id) {
-                        // Abandoned earlier; a newer fetch owns the slot.
+                    let Some(running) = slot.running.take_if(|running| running.id == id) else {
                         continue;
-                    }
-                    let Some(running) = slot.running.take() else { continue };
+                    };
                     let provider = slot.tracker.entry().provider;
                     if running.generation != slot.generation || running.timed_out {
                         log::debug!("[usage] discarding stale {} fetch result", provider.as_str());
@@ -682,7 +649,6 @@ mod tests {
             refresh_rx,
             fetcher,
             Duration::from_millis(200),
-            ABANDON_AFTER,
         ));
         let usage = wait_for(&hub, |u| u.providers[1].status == ApiUsageStatus::Error).await;
         let codex = &usage.providers[1];
