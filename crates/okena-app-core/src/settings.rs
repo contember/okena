@@ -349,7 +349,7 @@ impl SettingsState {
         self.save_and_notify(cx);
     }
 
-    /// Replace the terminal status board columns wholesale.
+    /// Replace the status board columns wholesale.
     pub fn set_status_board_columns(
         &mut self,
         columns: Vec<crate::workspace::settings::BoardColumn>,
@@ -361,17 +361,12 @@ impl SettingsState {
 
     /// Append a column named `name` and return its id.
     pub fn add_status_board_column(&mut self, name: &str, cx: &mut Context<Self>) -> String {
-        let columns = &mut self.settings.status_board.columns;
-        let id = okena_core::types::board_column_id(name, columns);
-        columns.push(crate::workspace::settings::BoardColumn::new(
-            id.clone(),
-            name,
-        ));
+        let id = self.settings.status_board.add_column(name);
         self.save_and_notify(cx);
         id
     }
 
-    /// Rename a column, keeping its id (and every terminal's status).
+    /// Rename a column, keeping its id (and every project's status).
     pub fn rename_status_board_column(&mut self, id: &str, name: String, cx: &mut Context<Self>) {
         let Some(column) = self
             .settings
@@ -412,8 +407,8 @@ impl SettingsState {
         self.save_and_notify(cx);
     }
 
-    /// Remove a column. Terminals in it keep their status id and render as
-    /// unassigned until the id comes back or they are re-sorted.
+    /// Remove a column. Projects in it keep their status id and render as
+    /// unassigned until they are re-sorted.
     pub fn remove_status_board_column(&mut self, id: &str, cx: &mut Context<Self>) {
         let columns = &mut self.settings.status_board.columns;
         let before = columns.len();

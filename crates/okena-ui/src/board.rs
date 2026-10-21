@@ -1,4 +1,4 @@
-//! Terminal status board columns, read by views in any crate.
+//! Status board columns, read by views in any crate.
 //!
 //! The columns live in the app settings (`okena-workspace`), which this crate
 //! does not depend on. The host registers a reader at startup, the way it

@@ -92,9 +92,9 @@ impl WorktreeMarker {
     }
 }
 
-/// One column of the terminal status board. `id` is the stable key that
+/// One column of the status board. `id` is the stable key that
 /// `ProjectData::status` stores; `name` is what the user sees and
-/// may rename without touching any terminal.
+/// may rename without touching any project's status.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BoardColumn {
     pub id: String,
@@ -127,57 +127,6 @@ pub fn default_board_columns() -> Vec<BoardColumn> {
         BoardColumn::new("review", "Review"),
         BoardColumn::new("done", "Done"),
     ]
-}
-
-/// A stable id for a new column named `name`, unique among `existing`:
-/// the lower-cased name with every run of non-alphanumerics folded to one
-/// `-` (`"column"` when nothing is left), then `-2`, `-3`, … while taken.
-pub fn board_column_id(name: &str, existing: &[BoardColumn]) -> String {
-    let mut slug = String::new();
-    let mut pending_dash = false;
-    for ch in name.chars() {
-        if ch.is_alphanumeric() {
-            if pending_dash && !slug.is_empty() {
-                slug.push('-');
-            }
-            pending_dash = false;
-            slug.extend(ch.to_lowercase());
-        } else {
-            pending_dash = true;
-        }
-    }
-    if slug.is_empty() {
-        slug = "column".to_string();
-    }
-    let taken = |id: &str| existing.iter().any(|c| c.id == id);
-    if !taken(&slug) {
-        return slug;
-    }
-    let mut n = 2;
-    loop {
-        let candidate = format!("{slug}-{n}");
-        if !taken(&candidate) {
-            return candidate;
-        }
-        n += 1;
-    }
-}
-
-#[cfg(test)]
-mod board_column_tests {
-    use super::*;
-
-    #[test]
-    fn board_column_id_slugs_and_dedups() {
-        let existing = vec![BoardColumn::new("review", "Review")];
-        assert_eq!(board_column_id("In Progress", &existing), "in-progress");
-        assert_eq!(board_column_id("  Needs  QA! ", &existing), "needs-qa");
-        assert_eq!(board_column_id("Review", &existing), "review-2");
-        assert_eq!(board_column_id("???", &existing), "column");
-        let mut more = existing.clone();
-        more.push(BoardColumn::new("review-2", "Review"));
-        assert_eq!(board_column_id("review", &more), "review-3");
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]

@@ -54,10 +54,10 @@ fresh install starts with `todo`, `in-progress`, `review`, `done`.
   colour, so a worktree still reads as its parent's.
 - Renaming a column keeps its id, so every project keeps its status.
 - Removing a column leaves its projects' status ids in place; they render as
-  *No status* until the id comes back or you re-sort them. Nothing is
-  deleted on your behalf.
-- Adding a column derives its id from the name (`Needs QA` → `needs-qa`,
-  made unique with `-2`, `-3`, … if taken).
+  *No status* until you re-sort them (or restore the column's id in
+  `settings.json`). Nothing is deleted on your behalf.
+- Adding a column gives it a fresh random id (a UUID), never derived from
+  the name, so a new column never picks up the statuses of a removed one.
 
 ## Relation to agent status
 

@@ -325,7 +325,7 @@ fn default_status_bar_metrics_graph() -> bool {
     true
 }
 
-/// Terminal status board: the columns a terminal can be sorted into.
+/// Status board: the columns a project or worktree can be sorted into.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct StatusBoardSettings {
     /// Master switch. Off (the default) hides every status surface: the
@@ -351,6 +351,15 @@ impl StatusBoardSettings {
     /// The column a status id refers to, if it still exists.
     pub fn column(&self, id: &str) -> Option<&BoardColumn> {
         self.columns.iter().find(|c| c.id == id)
+    }
+
+    /// Append a column named `name` and return its id. The id is a fresh
+    /// UUID, never derived from the name: a removed column's id stays on its
+    /// projects, and a new column must not pick those statuses back up.
+    pub fn add_column(&mut self, name: &str) -> String {
+        let id = uuid::Uuid::new_v4().to_string();
+        self.columns.push(BoardColumn::new(id.clone(), name));
+        id
     }
 }
 
@@ -1133,6 +1142,24 @@ mod tests {
         assert_eq!(
             settings.status_board.columns,
             vec![BoardColumn::new("qa", "QA")]
+        );
+    }
+
+    #[test]
+    fn status_board_column_added_after_a_removal_gets_a_fresh_id() {
+        let mut board = StatusBoardSettings::default();
+        let removed = board.add_column("New column");
+        board.columns.retain(|c| c.id != removed);
+
+        let added = board.add_column("New column");
+        assert_ne!(
+            added, removed,
+            "a new column must not adopt a removed one's statuses"
+        );
+        let ids: Vec<&str> = board.columns.iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["todo", "in-progress", "review", "done", added.as_str()]
         );
     }
 

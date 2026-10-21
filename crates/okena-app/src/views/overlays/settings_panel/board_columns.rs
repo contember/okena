@@ -168,9 +168,9 @@ impl SettingsPanel {
             .collect();
 
         settings_input_row(
-            "terminal-board-columns",
+            "status-board-columns",
             "Status Columns",
-            "Statuses a project or worktree can be sorted into (project menu → Status, and the status board). Renaming keeps every status; removing a column leaves its projects unassigned.",
+            "Statuses a project or worktree can be sorted into (column header pill, project menu → Status, status lanes). Renaming keeps every status; removing a column leaves its projects unassigned.",
             &t,
             cx,
             true,
@@ -178,7 +178,7 @@ impl SettingsPanel {
         .children(rows)
         .child(
             div().child(
-                button("terminal-board-add-column", "+ Add column", &t).on_click(cx.listener(
+                button("status-board-add-column", "+ Add column", &t).on_click(cx.listener(
                     |_this, _, _window, cx| {
                         settings_entity(cx).update(cx, |state, cx| {
                             state.add_status_board_column("New column", cx);
