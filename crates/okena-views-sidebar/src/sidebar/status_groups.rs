@@ -12,6 +12,7 @@ use gpui::{
     AnyElement, App, Context, Div, FontWeight, IntoElement, ParentElement, Styled, div, px, rgb,
 };
 use okena_core::theme::FolderColor;
+use okena_ui::board::StatusBoard;
 use okena_ui::theme::theme;
 use okena_ui::tokens::ui_text_xs;
 use okena_workspace::status_board::{GroupedRow, caption_label, grouped_rows};
@@ -26,10 +27,15 @@ pub(crate) struct WorktreeRow {
 }
 
 /// The order to draw `statuses.len()` worktree rows in: grouped by status
-/// when any resolves to a column, as given otherwise.
+/// when any resolves to a column, as given otherwise. The render and the
+/// keyboard cursor both walk this order.
 pub(crate) fn worktree_rows(statuses: &[Option<&str>], cx: &App) -> Vec<WorktreeRow> {
-    let grouped = if okena_ui::board::status_board_enabled(cx) {
-        grouped_rows(statuses, okena_ui::board::board_columns(cx))
+    group_worktree_rows(statuses, okena_ui::board::status_board(cx))
+}
+
+fn group_worktree_rows(statuses: &[Option<&str>], board: StatusBoard<'_>) -> Vec<WorktreeRow> {
+    let grouped = if board.enabled {
+        grouped_rows(statuses, board.columns)
     } else {
         None
     };
@@ -53,6 +59,13 @@ pub(crate) fn worktree_rows(statuses: &[Option<&str>], cx: &App) -> Vec<Worktree
             })
             .collect(),
     }
+}
+
+/// The group a worktree with `status` is drawn in: its status when that
+/// names a column of an enabled board, `None` otherwise ("No status", or the
+/// flat list). Two worktrees can swap places only within one group.
+pub(crate) fn status_group<'a>(status: Option<&'a str>, board: StatusBoard<'_>) -> Option<&'a str> {
+    status.filter(|id| board.enabled && board.columns.iter().any(|c| c.id == *id))
 }
 
 /// Shift each cursor item's scroll-child index by the number of non-cursor
@@ -135,7 +148,67 @@ impl Sidebar {
 
 #[cfg(test)]
 mod tests {
-    use super::fold_extra_rows;
+    use super::{StatusBoard, WorktreeRow, fold_extra_rows, group_worktree_rows, status_group};
+    use okena_core::types::BoardColumn;
+
+    fn columns() -> Vec<BoardColumn> {
+        vec![
+            BoardColumn::new("todo", "To do"),
+            BoardColumn::new("done", "Done"),
+        ]
+    }
+
+    fn shape(rows: &[WorktreeRow]) -> Vec<(usize, Option<&str>)> {
+        rows.iter()
+            .map(|r| (r.index, r.caption.as_ref().map(|(label, _)| label.as_str())))
+            .collect()
+    }
+
+    #[test]
+    fn board_off_keeps_worktrees_flat_and_in_data_order() {
+        let columns = columns();
+        let board = StatusBoard {
+            enabled: false,
+            columns: &columns,
+        };
+        let rows = group_worktree_rows(&[Some("done"), None, Some("todo")], board);
+        assert_eq!(shape(&rows), vec![(0, None), (1, None), (2, None)]);
+    }
+
+    #[test]
+    fn board_on_groups_worktrees_under_captions() {
+        let columns = columns();
+        let board = StatusBoard {
+            enabled: true,
+            columns: &columns,
+        };
+        let rows = group_worktree_rows(&[Some("done"), None, Some("todo")], board);
+        assert_eq!(
+            shape(&rows),
+            vec![
+                (2, Some("To do")),
+                (0, Some("Done")),
+                (1, Some("No status"))
+            ]
+        );
+    }
+
+    #[test]
+    fn status_group_merges_unknown_into_no_status_and_ignores_a_disabled_board() {
+        let columns = columns();
+        let on = StatusBoard {
+            enabled: true,
+            columns: &columns,
+        };
+        assert_eq!(status_group(Some("todo"), on), Some("todo"));
+        assert_eq!(status_group(Some("gone"), on), None);
+        assert_eq!(status_group(None, on), None);
+        let off = StatusBoard {
+            enabled: false,
+            columns: &columns,
+        };
+        assert_eq!(status_group(Some("todo"), off), None);
+    }
 
     #[test]
     fn fold_extra_rows_counts_headers_at_or_before_each_item() {

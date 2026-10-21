@@ -14,6 +14,7 @@ use okena_views_terminal::actions::{MinimizeTerminal, ToggleFullscreen};
 
 use crate::drag::{FolderDrag, ProjectDrag, ProjectDragView, WorktreeDrag, WorktreeDragView};
 use crate::item_widgets::*;
+use crate::sidebar::status_groups::status_group;
 use crate::sidebar::{Sidebar, SidebarProjectInfo};
 use std::collections::HashMap;
 
@@ -460,6 +461,24 @@ impl Sidebar {
             })
             .drag_over::<WorktreeDrag>(move |style, _, _, _| {
                 style.border_t_2().border_color(rgb(t.border_active))
+            })
+            // `worktree_index` is the data order; inside one status group that
+            // matches the drawn order, across groups the drop would be invisible.
+            .can_drop({
+                let workspace = self.workspace.clone();
+                let target_status = project.status.clone();
+                move |dragged, _window, cx| {
+                    let Some(drag) = dragged.downcast_ref::<WorktreeDrag>() else {
+                        return true;
+                    };
+                    let board = okena_ui::board::status_board(cx);
+                    let dragged_status = workspace
+                        .read(cx)
+                        .project(&drag.worktree_id)
+                        .and_then(|p| p.status.as_deref());
+                    status_group(dragged_status, board)
+                        == status_group(target_status.as_deref(), board)
+                }
             })
             .on_drop(cx.listener({
                 let project_id = project_id.clone();
