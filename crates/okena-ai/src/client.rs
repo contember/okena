@@ -180,7 +180,9 @@ fn spawn_detached(exe: &Path, profile_root: &Path) -> anyhow::Result<Launched> {
                 });
             }
             Err(error) => {
-                log::info!("[ai-proxy] systemd-run unavailable ({error}); starting the proxy directly");
+                log::info!(
+                    "[ai-proxy] systemd-run unavailable ({error}); starting the proxy directly"
+                );
             }
         }
     }

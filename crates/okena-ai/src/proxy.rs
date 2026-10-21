@@ -193,8 +193,11 @@ impl Relay {
             let mut outgoing = body.clone();
             if let (Some(payload), Some(uuid)) = (payload.as_mut(), account.account_uuid.as_deref())
                 && rewrite_account_uuid(payload, uuid)
-                && let Some(rewritten) =
-                    with_member(&body, &["metadata", "user_id"], &payload["metadata"]["user_id"])
+                && let Some(rewritten) = with_member(
+                    &body,
+                    &["metadata", "user_id"],
+                    &payload["metadata"]["user_id"],
+                )
             {
                 outgoing = rewritten;
             }

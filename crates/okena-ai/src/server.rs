@@ -4,11 +4,11 @@ use crate::accounts::Accounts;
 use crate::activity::Activity;
 use crate::oauth::Upstream;
 use crate::proxy::{Relay, error};
+use anyhow::Context;
 use axum::body::Body;
 use axum::extract::{Request, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use anyhow::Context;
 use fs2::FileExt;
 use okena_core::ai_proxy::{
     AiProxyCommand, PROJECT_SEGMENT, ProxyEndpoint, ensure_management_key, is_routable_project_id,
@@ -228,7 +228,12 @@ async fn dispatch_management(State(service): State<Arc<Service>>, request: Reque
     if !has_management_key(request.headers(), &service.management_key) {
         return error(StatusCode::UNAUTHORIZED, "Management key required");
     }
-    let Some(path) = request.uri().path().strip_prefix("/_okena/").map(str::to_owned) else {
+    let Some(path) = request
+        .uri()
+        .path()
+        .strip_prefix("/_okena/")
+        .map(str::to_owned)
+    else {
         return error(StatusCode::NOT_FOUND, "Unknown management endpoint");
     };
     manage(&service, &path, request.into_body()).await
@@ -734,13 +739,13 @@ mod tests {
         )
         .await;
         for id in &ids[..4] {
-            h.fake.replies.lock().insert(format!("token-{id}"), vec![429]);
+            h.fake
+                .replies
+                .lock()
+                .insert(format!("token-{id}"), vec![429]);
         }
         // `a` also needs a refresh first, which must not use up `e`'s attempt.
-        h.fake
-            .replies
-            .lock()
-            .insert("token-a".into(), vec![401]);
+        h.fake.replies.lock().insert("token-a".into(), vec![401]);
         h.fake
             .replies
             .lock()
@@ -816,7 +821,10 @@ mod tests {
             &std::fs::read(proxy_dir(h._dir.path()).join("accounts.json")).unwrap(),
         )
         .unwrap();
-        assert_eq!(stored["accounts"][0]["tokens"]["access_token"], "login-access");
+        assert_eq!(
+            stored["accounts"][0]["tokens"]["access_token"],
+            "login-access"
+        );
         assert_eq!(stored["accounts"].as_array().unwrap().len(), 1);
     }
 
@@ -1140,9 +1148,16 @@ mod tests {
     async fn only_the_inference_endpoints_get_a_pool_account() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let h = harness(vec![account("a", "token-a", "uuid-a")]).await;
-        for path in ["/v1/messages?beta=true", "/v1/messages/count_tokens?beta=true"] {
+        for path in [
+            "/v1/messages?beta=true",
+            "/v1/messages/count_tokens?beta=true",
+        ] {
             let response = h.post(path).await;
-            assert_eq!(response.text().await.unwrap(), "served by token-a", "{path}");
+            assert_eq!(
+                response.text().await.unwrap(),
+                "served by token-a",
+                "{path}"
+            );
         }
         // Not an endpoint Claude Code calls, so it keeps the caller's credentials.
         assert_eq!(h.post("/v1/messages/batches").await.status(), 404);
@@ -1525,7 +1540,11 @@ mod tests {
             std::thread::sleep(Duration::from_millis(300));
             drop(old);
         });
-        assert!(lock_instance(&path, Duration::from_secs(10)).unwrap().is_some());
+        assert!(
+            lock_instance(&path, Duration::from_secs(10))
+                .unwrap()
+                .is_some()
+        );
         shutting_down.join().unwrap();
     }
 

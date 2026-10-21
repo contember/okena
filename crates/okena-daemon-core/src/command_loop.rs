@@ -3085,8 +3085,7 @@ pub async fn daemon_command_loop(
                     ActionRequest::GetSettings => daemon_config.get_settings(),
                     ActionRequest::GetSettingsSchema => get_settings_schema(),
                     ActionRequest::SetSettings { patch } => {
-                        let ai_proxy_before =
-                            crate::ai_proxy::ProxySettings::of(&settings.lock());
+                        let ai_proxy_before = crate::ai_proxy::ProxySettings::of(&settings.lock());
                         let outcome = set_settings_with_backend_migration(
                             patch,
                             &mut daemon_config,

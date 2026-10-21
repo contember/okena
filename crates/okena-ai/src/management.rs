@@ -4,9 +4,9 @@
 //! and receive the management key.
 
 use std::io;
+use std::path::Path;
 #[cfg(unix)]
 use std::path::PathBuf;
-use std::path::Path;
 
 pub(crate) struct Address {
     #[cfg(unix)]
@@ -111,7 +111,9 @@ mod pipe {
     fn create(name: &str, first: bool) -> io::Result<NamedPipeServer> {
         let security = OwnerOnly::new(false)?;
         let mut options = ServerOptions::new();
-        options.first_pipe_instance(first).reject_remote_clients(true);
+        options
+            .first_pipe_instance(first)
+            .reject_remote_clients(true);
         security.with_attributes(|attributes| {
             // SAFETY: `attributes` points at a SECURITY_ATTRIBUTES that lives
             // for the duration of this call.
