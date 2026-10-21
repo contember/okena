@@ -1,10 +1,21 @@
-<!--
-On close, prepend an OUTCOME block here, then `git mv` this file to ../archive/:
-
-> **OUTCOME — shipped YYYY-MM-DD.** <one-paragraph result.> Commit map: WU1 → <sha>,
-> WU2 → <sha>, … Verification: <the gate command + numbers>. Backlog closed:
-> <ids deleted/rescoped>. Deferred: <honest notes>.
--->
+> **OUTCOME — shipped 2026-10-21 (PR #248, squash-merged).** Shipped as
+> statuses on projects and worktrees, not terminals, with *status lanes* in
+> the main area instead of the modal kanban board, all behind
+> `status_board.enabled` (default off). The plan below describes the
+> original per-terminal design; the run log records both pivots. How it works
+> now: [status-board.md](../reference/status-board.md). Commit map (PR branch;
+> the squash replaces the hashes): WU1 → 2f44ba30f, WU2 → 453f5928e,
+> WU3 → 924bc4c9c, WU4 → bf066a75a, WU5 → d55421e34 (overlay later removed),
+> WU6 → 18f7b9123; pivot to project status → 6d14be9b1; lanes, pill and master
+> switch → e78e75351 … 0b62ea86e; review fixes → 538de871f … 61ccb7b6c.
+> Verification: `cargo test` for okena-core (152), okena-state (105),
+> okena-workspace (469), okena-ui (34), okena-app-core (81),
+> okena-views-terminal (97), okena-views-sidebar (28), okena-app (94),
+> okena-daemon-core (169), okena-mobile-ffi (68), all passing. Backlog closed:
+> none. Deferred: web and mobile read `status` but have no UI for it; clients
+> cannot tell an older remote daemon that rejects `set_project_status`; the
+> sidebar's non-cursor rows use two bookkeeping lists (`extra_rows` for status
+> captions, `section_header_positions` for host headers) that could become one.
 
 # Sprint — Terminal status board (2026-10-20)
 
@@ -282,12 +293,10 @@ sidebar follows.
   `actions/layout/move_ops.rs`, the orphan prune in `actions/layout/mod.rs`
   (which is what `close_terminal` uses) and the failed-hook cleanup in
   `execute/session.rs`. Found by the close-cleanup test failing first.
-- 2026-10-20 WU1: the presentation fingerprint (`project_presentation`) the
-  plan wanted to extend is on PR #247, not on `main` yet; add
-  `terminal_statuses` to it when the two land together.
-- 2026-10-20 WU1: `okena-mobile-ffi` got its test literal updated but was not
-  compiled here (its deps are not in the offline cache); run its tests
-  before merge.
+- 2026-10-20 WU1: status in the presentation fingerprint → done in review
+  (538de871f); see status-board.md.
+- 2026-10-20 WU1: `okena-mobile-ffi` tests not run here → ran at close, 68
+  passed.
 - 2026-10-20 WU4: the sidebar on `main` had no bookkeeping for non-cursor
   rows between terminal rows; added `fold_extra_rows` in
   `sidebar/status_groups.rs`, used by both the manual and the activity
@@ -317,3 +326,11 @@ sidebar follows.
   two Show* actions are gone. Everything sits behind
   `status_board.enabled` (default off) so an existing install sees no
   change until it opts in.
+- 2026-10-21 **Third review.** Fixes before merge: status in the snapshot
+  presentation fingerprint; opaque UUID ids for new columns (a name-derived id
+  resurrected a removed column's statuses); one `GridLayout` shared by the
+  lanes render, width budget, divider drag and scroll-to-focused; family
+  guide drawn once per family; the lanes shortcut passes through while the
+  board is off; one borrowing `GlobalStatusBoard` reader, sidebar look in
+  `SidebarSettings`; worktree drops only inside the worktree's own status
+  group; leftover terminal-row context menu removed.

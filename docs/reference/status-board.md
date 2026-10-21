@@ -21,7 +21,8 @@ as it did before.
   sidebar): the same choices as a flyout; the current one is ticked.
 - **Lanes** (right-click a project or one of its worktrees → *Status
   lanes*, or `Cmd+Shift+K` / `Ctrl+Shift+K` for the focused project;
-  remembered per window and project): while that family is focused, its
+  remembered per window and project; with the board off the shortcut
+  passes through to the terminal): while that family is focused, its
   columns stand in lanes, one per board column that has a member, *No
   status* last, each under a thin caption (dot in the column's colour,
   name, hairline). Columns stay live terminals and resize as before; the
@@ -73,5 +74,22 @@ The daemon owns the status: `status` on the project in `workspace.json` (a
 column id), omitted when unset. Clients set it through the
 `set_project_status` action and read it from `status` on each project in
 `GET /v1/state` ([remote.md](remote.md)); web and mobile receive the field
-but have no UI for it yet. The lanes view is per window
-(`status_lanes` on the window in `workspace.json`), like the sort mode.
+but have no UI for it yet. A status set from another client repaints the
+cached terminal panes like a rename or recolour does (it is part of
+`Workspace::project_presentation`). The lanes view is client presentation,
+per window: `status_lanes_projects` (the parent ids with lanes on) on each
+window in `window-layout.json`, like the sort mode.
+
+## Remote projects
+
+- **Columns are per daemon.** `status_board` lives in each daemon's
+  `settings.json`, and a client resolves every status, a remote project's
+  included, against its own daemon's columns. The default ids (`todo`,
+  `in-progress`, `review`, `done`) match on every install; a column added
+  on another machine has its own random id and shows as *No status* here.
+  Setting a status on a remote project sends this client's column id to
+  that project's daemon.
+- **Older daemons.** A daemon from before the status board does not know
+  `set_project_status` and rejects it; the status stays as it was. Clients
+  do not learn a remote daemon's version, so the pill and the menu entry
+  still show for its projects.
