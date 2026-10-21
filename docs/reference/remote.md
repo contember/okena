@@ -251,7 +251,12 @@ auth like the other `/v1` routes. Returns `ApiUsage`
   on these days.
 - Polling: every 5 min per enabled provider (`enabled_extensions` contains
   `claude-code` / `codex` / `grok`), backoff 30 s → 1 h on errors,
-  `retry-after` on 429.
+  `retry-after` on 429. Only while a client holds a `/v1/stream` WebSocket:
+  with none, a fetch that falls due waits for the next client, which gets it
+  at once. `POST /v1/usage/refresh` fetches without a client.
+- The `claude` login is polled only while no `pool` is published. With a
+  pool, new shells use the pool accounts; the login's entry keeps its last
+  data and refresh requests for it are ignored.
 
 ### `POST /v1/usage/refresh`
 

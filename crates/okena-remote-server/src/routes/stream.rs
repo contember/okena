@@ -154,7 +154,9 @@ async fn handle_ws(
     // Subscribe to daemon-originated toasts (fire-and-forget broadcast).
     let mut toast_rx = state.toast_tx.subscribe();
     let mut presentation_rx = state.presentation_tx.subscribe();
-    // Agent usage: push the current snapshot now, then every change.
+    // Agent usage: push the current snapshot now, then every change. The
+    // usage polls run while at least one client is registered.
+    let _usage_client = state.usage.register_client();
     let mut usage_rx = state.usage.subscribe();
     let mut usage_open = true;
     {

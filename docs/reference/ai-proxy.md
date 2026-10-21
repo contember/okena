@@ -208,9 +208,11 @@ proxy and shows nothing.
 
 - The daemon starts the proxy when the setting is on (at startup and when the
   setting changes) and whenever the AI Proxy settings page sends a command.
-  While the setting is on, it asks the proxy for its accounts every 15 seconds
-  and starts it again when it does not answer; after each failed start it waits
-  twice as long, up to 10 minutes.
+  While the setting is on and a client (desktop, mobile, web) is connected, it
+  asks the proxy for its accounts every 15 seconds and starts it again when it
+  does not answer; after each failed start it waits twice as long, up to 10
+  minutes. With no client connected it checks only after a management command
+  or settings change, and at once when the next client connects.
 - The proxy holds `ai-proxy/proxy.lock`; a second instance exits immediately.
 - It is never stopped by the daemon, the GUI or an update. A daemon that finds a
   proxy of another version asks it to exit only while it has no request in

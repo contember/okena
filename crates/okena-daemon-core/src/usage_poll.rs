@@ -9,6 +9,13 @@
 //! [`SETTINGS_POLL`] (cheap: one mutex lock, no I/O), so toggling an extension
 //! starts or stops polling within seconds.
 //!
+//! The `claude` login is polled only while it serves new shells: once the AI
+//! proxy's accounts poll has published a pool, those shells use the pool
+//! accounts and their usage comes from the proxy (`ai_proxy`). The automatic
+//! poll runs only while a client is connected ([`UsageHub::clients`]); a fetch
+//! that fell due meanwhile starts as soon as one connects. Refresh requests
+//! are served with no client too.
+//!
 //! Scheduling per provider (see `okena_agent_usage::provider`): every 5 min
 //! after a success; exponential backoff from 30 s to 1 h after failures; a 429
 //! waits for `retry-after` (at least the backoff). Missing credentials are not
@@ -142,7 +149,17 @@ struct Slot {
     /// is discarded when it lands.
     generation: u64,
     next_due: Option<Instant>,
+    /// A refresh request set `next_due`; it starts with no client connected.
+    requested: bool,
     running: Option<RunningFetch>,
+}
+
+impl Slot {
+    /// Whether the slot may start a fetch once it is due.
+    fn may_start(&self, watched: bool, login_in_use: bool) -> bool {
+        let paused = self.tracker.entry().provider == ApiUsageProvider::Claude && !login_in_use;
+        self.config.enabled && self.running.is_none() && !paused && (watched || self.requested)
+    }
 }
 
 /// Events from the per-fetch supervisor task.
@@ -215,9 +232,11 @@ async fn run_usage_poll_inner(
             },
             generation: 0,
             next_due: None,
+            requested: false,
             running: None,
         })
         .collect();
+    let mut clients = hub.clients();
     let mut refresh_open = true;
     let mut next_fetch_id: u64 = 0;
     // Refresh requests applied since the last publish; acked after it.
@@ -253,14 +272,17 @@ async fn run_usage_poll_inner(
         }
 
         // 2. Start due fetches.
+        let watched = *clients.borrow_and_update() > 0;
+        let login_in_use = hub.login_in_use();
         for (index, slot) in slots.iter_mut().enumerate() {
             let due = slot.next_due.is_some_and(|due| due <= now);
-            if !slot.config.enabled || !due || slot.running.is_some() {
+            if !due || !slot.may_start(watched, login_in_use) {
                 continue;
             }
             let provider = slot.tracker.entry().provider;
             slot.tracker.begin_attempt(now, now_epoch);
             slot.next_due = None;
+            slot.requested = false;
             next_fetch_id = next_fetch_id.wrapping_add(1);
             let id = next_fetch_id;
             slot.running = Some(RunningFetch {
@@ -306,25 +328,28 @@ async fn run_usage_poll_inner(
         }
 
         // 4. Sleep until the next due fetch, a settings re-check, a refresh
-        //    request, or a fetch event.
+        //    request, a client connecting, or a fetch event.
         let wake = slots
             .iter()
-            .filter(|slot| slot.config.enabled && slot.running.is_none())
+            .filter(|slot| slot.may_start(watched, login_in_use))
             .filter_map(|slot| slot.next_due)
             .fold(now + SETTINGS_POLL, Instant::min);
         tokio::select! {
             _ = tokio::time::sleep_until(wake.into()) => {}
+            Ok(()) = clients.changed() => {}
             request = refresh_rx.recv(), if refresh_open => match request {
                 Some(UsageRefresh { provider: target, applied }) => {
                     let now = Instant::now();
+                    let login_in_use = hub.login_in_use();
                     for slot in &mut slots {
                         let provider = slot.tracker.entry().provider;
                         if target.is_some_and(|target| target != provider) {
                             continue;
                         }
-                        if slot.tracker.refresh_allowed(now) && slot.running.is_none() {
+                        if slot.tracker.refresh_allowed(now) && slot.may_start(true, login_in_use) {
                             log::debug!("[usage] refresh requested for {}", provider.as_str());
                             slot.next_due = Some(now);
+                            slot.requested = true;
                         }
                     }
                     pending_acks.extend(applied);
@@ -406,6 +431,32 @@ mod tests {
         Arc::new(Mutex::new(settings))
     }
 
+    /// A hub with one client connected and no pool, as with routing off.
+    fn watched_hub(
+        settings: &Arc<Mutex<AppSettings>>,
+    ) -> (
+        UsageHub,
+        mpsc::UnboundedReceiver<UsageRefresh>,
+        okena_remote_server::usage::UsageClient,
+    ) {
+        let (hub, refresh_rx) = UsageHub::new(initial_usage(&settings.lock()));
+        hub.set_pool(None);
+        let client = hub.register_client();
+        (hub, refresh_rx, client)
+    }
+
+    fn counting_fetcher() -> (Arc<AtomicUsize>, UsageFetcher) {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let fetcher: UsageFetcher = {
+            let calls = calls.clone();
+            Arc::new(move |_, _| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                ok_outcome()
+            })
+        };
+        (calls, fetcher)
+    }
+
     fn ok_outcome() -> FetchOutcome {
         FetchOutcome::Ok(ProviderData {
             plan: Some("max".into()),
@@ -452,7 +503,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn grok_toggle_starts_and_stops_polling() {
         let settings = settings_with(&[]);
-        let (hub, refresh_rx) = UsageHub::new(initial_usage(&settings.lock()));
+        let (hub, refresh_rx, _client) = watched_hub(&settings);
         let calls = Arc::new(AtomicUsize::new(0));
         let fetcher: UsageFetcher = {
             let calls = calls.clone();
@@ -490,7 +541,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn polls_enabled_provider_throttles_refresh_and_stops_when_disabled() {
         let settings = settings_with(&["claude-code"]);
-        let (hub, refresh_rx) = UsageHub::new(initial_usage(&settings.lock()));
+        let (hub, refresh_rx, _client) = watched_hub(&settings);
         let calls = Arc::new(AtomicUsize::new(0));
         let fetcher: UsageFetcher = {
             let calls = calls.clone();
@@ -531,7 +582,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn failures_become_state_not_crashes() {
         let settings = settings_with(&["codex"]);
-        let (hub, refresh_rx) = UsageHub::new(initial_usage(&settings.lock()));
+        let (hub, refresh_rx, _client) = watched_hub(&settings);
         let fetcher: UsageFetcher =
             Arc::new(|_, _| FetchOutcome::Failed("Usage request failed: HTTP 500".into()));
         let task = tokio::spawn(run_usage_poll_with(
@@ -601,7 +652,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn config_change_waits_for_the_running_fetch_and_discards_it() {
         let settings = settings_with(&["codex"]);
-        let (hub, refresh_rx) = UsageHub::new(initial_usage(&settings.lock()));
+        let (hub, refresh_rx, _client) = watched_hub(&settings);
         let (state, release, fetcher) = gated();
         let task = tokio::spawn(run_usage_poll_with(
             settings.clone(),
@@ -641,7 +692,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn hung_fetch_becomes_an_error_without_overlapping() {
         let settings = settings_with(&["codex"]);
-        let (hub, refresh_rx) = UsageHub::new(initial_usage(&settings.lock()));
+        let (hub, refresh_rx, _client) = watched_hub(&settings);
         let (state, release, fetcher) = gated();
         let task = tokio::spawn(run_usage_poll_inner(
             settings,
@@ -662,5 +713,91 @@ mod tests {
         assert_eq!(hub.snapshot().providers[1].status, ApiUsageStatus::Error);
         assert_eq!(state.peak.load(Ordering::SeqCst), 1);
         task.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn polls_only_while_a_client_is_connected_but_serves_refreshes() {
+        let settings = settings_with(&["codex"]);
+        let (hub, refresh_rx) = UsageHub::new(initial_usage(&settings.lock()));
+        let (calls, fetcher) = counting_fetcher();
+        let task = tokio::spawn(run_usage_poll_with(
+            settings,
+            hub.clone(),
+            refresh_rx,
+            fetcher,
+        ));
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(calls.load(Ordering::SeqCst), 0, "polled with no client");
+
+        // A refresh (e.g. `okena usage` after a POST) runs without a client.
+        let answer = hub.refresh(Some(ApiUsageProvider::Codex)).await;
+        assert!(answer.providers[1].fetching);
+        wait_for(&hub, |u| u.providers[1].status == ApiUsageStatus::Ok).await;
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        task.abort();
+
+        // The first client starts the fetch that fell due meanwhile.
+        let settings = settings_with(&["codex"]);
+        let (hub, refresh_rx) = UsageHub::new(initial_usage(&settings.lock()));
+        let (calls, fetcher) = counting_fetcher();
+        let task = tokio::spawn(run_usage_poll_with(
+            settings,
+            hub.clone(),
+            refresh_rx,
+            fetcher,
+        ));
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let _client = hub.register_client();
+        wait_for(&hub, |u| u.providers[1].status == ApiUsageStatus::Ok).await;
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        task.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_login_is_not_polled_while_a_pool_is_published() {
+        let settings = settings_with(&["claude-code"]);
+        let (hub, refresh_rx) = UsageHub::new(initial_usage(&settings.lock()));
+        let _client = hub.register_client();
+        let (calls, fetcher) = counting_fetcher();
+        let task = tokio::spawn(run_usage_poll_with(
+            settings,
+            hub.clone(),
+            refresh_rx,
+            fetcher,
+        ));
+        // Before the accounts poll reported, the login waits for it.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        hub.set_pool(okena_agent_usage::pool_summary::summarize_now(
+            &[pool_account()],
+            &std::collections::HashMap::new(),
+            WorkingDays::all(),
+        ));
+        let answer = hub.refresh(Some(ApiUsageProvider::Claude)).await;
+        assert!(!answer.providers[0].fetching);
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(calls.load(Ordering::SeqCst), 0, "polled the login");
+
+        // Without the pool, the login's due fetch runs.
+        hub.set_pool(None);
+        wait_for(&hub, |u| u.providers[0].status == ApiUsageStatus::Ok).await;
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        task.abort();
+    }
+
+    fn pool_account() -> okena_core::ai_proxy::AiAccount {
+        okena_core::ai_proxy::AiAccount {
+            id: "a".into(),
+            label: "A".into(),
+            email: None,
+            plan: None,
+            rate_limit_tier: None,
+            enabled: true,
+            needs_login: false,
+            cooldown_until_ms: None,
+            five_hour: None,
+            seven_day: None,
+            requests: 0,
+            last_used_ms: None,
+        }
     }
 }

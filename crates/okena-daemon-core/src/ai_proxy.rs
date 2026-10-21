@@ -164,7 +164,9 @@ impl AiProxyAccounts {
 /// whether or not it listens, so a proxy that died is started again, and a
 /// port it moved to reaches new shells. With routing off, or the proxy
 /// unreachable, no accounts and no pool are published: the `claude` login's
-/// own usage is then the relevant one.
+/// own usage is then the relevant one. While no client is connected, only a
+/// refresh starts a pass; the next client gets one at once when the interval
+/// has passed.
 pub(crate) async fn run_accounts_poll(
     accounts: AiProxyAccounts,
     settings: Arc<Mutex<AppSettings>>,
@@ -175,6 +177,7 @@ pub(crate) async fn run_accounts_poll(
     let mut routed_endpoint: Option<ProxyEndpoint> = None;
     let mut restart = RestartBackoff::new();
     let mut histories = PoolHistories::default();
+    let mut clients = usage.clients();
     loop {
         let enabled = settings.lock().ai_proxy_enabled;
         let read = if enabled {
@@ -198,7 +201,7 @@ pub(crate) async fn run_accounts_poll(
         let Some((client, current)) = read else {
             accounts.publish(Vec::new());
             usage.set_pool(None);
-            wait_for_next_poll(&accounts).await;
+            wait_for_next_poll(&accounts, &mut clients).await;
             continue;
         };
         accounts.publish(current.clone());
@@ -226,14 +229,18 @@ pub(crate) async fn run_accounts_poll(
             }
             Err(error) => log::error!("[ai-proxy] pool summary failed: {error}"),
         }
-        wait_for_next_poll(&accounts).await;
+        wait_for_next_poll(&accounts, &mut clients).await;
     }
 }
 
-async fn wait_for_next_poll(accounts: &AiProxyAccounts) {
+async fn wait_for_next_poll(accounts: &AiProxyAccounts, clients: &mut watch::Receiver<usize>) {
+    let interval_with_a_client = async {
+        tokio::time::sleep(ACCOUNTS_POLL_INTERVAL).await;
+        let _ = clients.wait_for(|count| *count > 0).await;
+    };
     tokio::select! {
-        _ = tokio::time::sleep(ACCOUNTS_POLL_INTERVAL) => {}
-        _ = accounts.refresh.notified() => {}
+        () = interval_with_a_client => {}
+        () = accounts.refresh.notified() => {}
     }
 }
 
@@ -488,6 +495,34 @@ mod tests {
 
         assert_eq!(histories.due(&[account("b")], later), ["b"]);
         assert!(histories.by_account().is_empty());
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn the_next_poll_waits_for_a_client_unless_refreshed() {
+        let hub = UsageHub::detached();
+        let accounts = AiProxyAccounts::new(watch::channel(0).0);
+        let mut clients = hub.clients();
+        {
+            let waiting = wait_for_next_poll(&accounts, &mut clients);
+            tokio::pin!(waiting);
+            let headless = tokio::time::timeout(ACCOUNTS_POLL_INTERVAL * 10, &mut waiting).await;
+            assert!(headless.is_err(), "polled with no client");
+
+            // A client that connects after the interval gets a pass at once.
+            let _client = hub.register_client();
+            tokio::time::timeout(Duration::from_millis(1), &mut waiting)
+                .await
+                .expect("no pass for the first client");
+        }
+
+        // A refresh starts a pass with no client.
+        accounts.refresh();
+        tokio::time::timeout(
+            Duration::from_millis(1),
+            wait_for_next_poll(&accounts, &mut clients),
+        )
+        .await
+        .expect("a refresh did not start a pass");
     }
 
     #[tokio::test]

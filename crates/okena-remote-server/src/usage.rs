@@ -7,7 +7,9 @@
 //! pool into the poller's Claude entry and keeps the result in a `watch`
 //! channel; routes read the latest value and every WS stream forwards changes
 //! as `WsOutbound::UsageChanged`. Refresh requests go the other way over an
-//! unbounded channel; the poller applies the per-provider throttle.
+//! unbounded channel; the poller applies the per-provider throttle. Each WS
+//! stream registers as a client ([`UsageHub::register_client`]); both polls
+//! pause their automatic cadence while there is none.
 
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -37,11 +39,27 @@ pub struct UsageHub {
     sources: Arc<Mutex<UsageSources>>,
     state: Arc<watch::Sender<ApiUsage>>,
     refresh_tx: mpsc::UnboundedSender<UsageRefresh>,
+    /// Number of connected clients that receive `usage_changed`.
+    clients: Arc<watch::Sender<usize>>,
+}
+
+/// A connected client, counted by [`UsageHub::clients`] until dropped.
+pub struct UsageClient {
+    clients: Arc<watch::Sender<usize>>,
+}
+
+impl Drop for UsageClient {
+    fn drop(&mut self) {
+        self.clients
+            .send_modify(|count| *count = count.saturating_sub(1));
+    }
 }
 
 struct UsageSources {
     polled: ApiUsage,
     pool: Option<ApiPool>,
+    /// [`UsageHub::set_pool`] was called at least once.
+    pool_reported: bool,
 }
 
 impl UsageSources {
@@ -68,12 +86,14 @@ impl UsageHub {
         let sources = UsageSources {
             polled: initial,
             pool: None,
+            pool_reported: false,
         };
         (
             Self {
                 state: Arc::new(watch::Sender::new(sources.merged())),
                 sources: Arc::new(Mutex::new(sources)),
                 refresh_tx,
+                clients: Arc::new(watch::Sender::new(0)),
             },
             refresh_rx,
         )
@@ -92,6 +112,27 @@ impl UsageHub {
     /// Subscribe to snapshot changes. The current value counts as seen.
     pub fn subscribe(&self) -> watch::Receiver<ApiUsage> {
         self.state.subscribe()
+    }
+
+    /// Count a client as connected for as long as the returned guard lives.
+    pub fn register_client(&self) -> UsageClient {
+        self.clients.send_modify(|count| *count += 1);
+        UsageClient {
+            clients: self.clients.clone(),
+        }
+    }
+
+    /// The number of connected clients; changes when one comes or goes.
+    pub fn clients(&self) -> watch::Receiver<usize> {
+        self.clients.subscribe()
+    }
+
+    /// Whether the `claude` login's usage is the relevant one: the accounts
+    /// poll has reported and published no pool. While a pool is set, new
+    /// shells use its accounts, whose usage comes from the proxy.
+    pub fn login_in_use(&self) -> bool {
+        let sources = self.sources.lock();
+        sources.pool_reported && sources.pool.is_none()
     }
 
     /// Publish the poller's snapshot; the pool set by [`Self::set_pool`] stays.
@@ -115,6 +156,7 @@ impl UsageHub {
 
     fn set_pool_at(&self, pool: Option<ApiPool>, now: f64) -> bool {
         let mut sources = self.sources.lock();
+        sources.pool_reported = true;
         if sources.pool == pool {
             return false;
         }
@@ -321,6 +363,32 @@ mod tests {
         // Turning Claude usage back on shows the pool the proxy last gave.
         hub.publish(polled(2.0));
         assert_eq!(claude_pool(&hub.snapshot()), Some(pool(3600.0)));
+    }
+
+    #[test]
+    fn the_login_is_in_use_once_the_accounts_poll_reports_no_pool() {
+        let hub = UsageHub::detached();
+        assert!(!hub.login_in_use(), "not known before the first report");
+        hub.set_pool(None);
+        assert!(hub.login_in_use());
+        hub.set_pool(Some(pool(3600.0)));
+        assert!(!hub.login_in_use());
+        hub.set_pool(None);
+        assert!(hub.login_in_use());
+    }
+
+    #[test]
+    fn clients_are_counted_until_their_guard_drops() {
+        let hub = UsageHub::detached();
+        let clients = hub.clients();
+        assert_eq!(*clients.borrow(), 0);
+        let first = hub.register_client();
+        let second = hub.clone().register_client();
+        assert_eq!(*clients.borrow(), 2);
+        drop(first);
+        assert_eq!(*clients.borrow(), 1);
+        drop(second);
+        assert_eq!(*clients.borrow(), 0);
     }
 
     #[tokio::test]
