@@ -1237,8 +1237,13 @@ impl Render for WindowView {
             // Status lanes: regroup this window's columns by status.
             .on_action(cx.listener(|this, _: &ToggleStatusLanes, _window, cx| {
                 let window_id = this.window_id;
-                let Some(project_id) = this.focus_manager.read(cx).focused_project_id().cloned()
+                let focused = this.focus_manager.read(cx).focused_project_id().cloned();
+                // The binding has no context: with nothing to toggle, hand the
+                // keystroke on to the focused terminal instead of swallowing it.
+                let Some(project_id) =
+                    focused.filter(|_| okena_ui::board::status_board_enabled(cx))
                 else {
+                    cx.propagate();
                     return;
                 };
                 this.workspace.update(cx, |ws, cx| {
