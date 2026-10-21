@@ -743,13 +743,9 @@ pub async fn run_git_poll(
         // git status comes from gix (fast, in-process); PR/CI come from the GitHub
         // API (network, and can stall). Publishing here means a stuck request can
         // never block the branch/diff badge from appearing.
+        // No receiver-count exit: receivers exist only while clients are connected,
+        // so "none left" also means "none yet". The loop ends with the daemon's LocalSet.
         publish(&mut last, &new_statuses, &git_status_tx, &state_version);
-
-        // Stop once every external `watch` receiver is gone (the server is down).
-        if git_status_tx.is_closed() {
-            log::trace!("git poll loop exiting: no status receivers left");
-            return;
-        }
 
         // ── 4. Start GitHub PR/CI fan-out without blocking local git refreshes ─
         // Only visible projects (plus anything explicitly asked for) and only
@@ -944,37 +940,29 @@ mod tests {
     use super::*;
     use crate::test_support::empty_workspace_data;
 
-    /// With no projects and no external `watch` receiver, the first cycle does
-    /// its empty snapshot, publishes nothing (unchanged), detects the closed
-    /// channel, and the loop ends — without touching any real repository or
-    /// sleeping. Exercises the snapshot → no-change → channel-closed-detection
-    /// path.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn run_git_poll_stops_when_channel_closed() {
+    /// Regression for #236: the daemon starts before any client subscribes, so
+    /// the loop must keep running while the status channel has no receivers.
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn run_git_poll_keeps_running_without_status_receivers() {
         let workspace = Arc::new(Mutex::new(Workspace::new(empty_workspace_data())));
         let (tx, rx) = watch::channel(HashMap::<String, ApiGitStatus>::new());
-        let git_status_tx = Arc::new(tx);
-        let (state_version, _svrx) = watch::channel(0u64);
-
-        // Drop the only external receiver up front so the first `is_closed()`
-        // check returns immediately (no 5s sleep, deterministic).
         drop(rx);
-
+        let (state_version, _svrx) = watch::channel(0u64);
         let subscribed = Arc::new(RwLock::new(HashMap::new()));
         let client_visible = Arc::new(RwLock::new(HashMap::new()));
         let (_trigger_tx, trigger_rx) = mpsc::unbounded_channel();
-        run_git_poll(
-            workspace,
-            git_status_tx.clone(),
-            state_version,
-            subscribed,
-            client_visible,
-            trigger_rx,
-        )
-        .await;
 
-        // No projects → nothing was published; the channel holds the initial map.
-        assert!(git_status_tx.borrow().is_empty());
+        tokio::select! {
+            _ = run_git_poll(
+                workspace,
+                Arc::new(tx),
+                state_version,
+                subscribed,
+                client_visible,
+                trigger_rx,
+            ) => panic!("git poll loop exited while no client was subscribed"),
+            _ = tokio::time::sleep(GIT_POLL_INTERVAL * 3) => {}
+        }
     }
 
     #[test]
