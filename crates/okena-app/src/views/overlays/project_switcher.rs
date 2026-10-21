@@ -617,6 +617,7 @@ mod tests {
             path: path.to_string(),
             layout: None::<LayoutNode>,
             terminal_names: HashMap::new(),
+            status: None,
             hidden_terminals: HashMap::new(),
             worktree_info: None::<WorktreeMetadata>,
             worktree_ids: Vec::new(),

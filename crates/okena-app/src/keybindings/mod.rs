@@ -47,6 +47,7 @@ actions!(
         StopAllServices,
         ShowHookLog,
         ShowLogConsole,
+        ToggleStatusLanes,
         EqualizeLayout,
         ToggleProjectLayout,
         ToggleProjectVisibility,
@@ -483,6 +484,7 @@ fn create_keybinding(action: &str, keystroke: &str, context: Option<&str>) -> Op
         "ShowBranchSwitcher" => Some(KeyBinding::new(keystroke, ShowBranchSwitcher, context)),
         "ShowProfileManager" => Some(KeyBinding::new(keystroke, ShowProfileManager, context)),
         "ShowLogConsole" => Some(KeyBinding::new(keystroke, ShowLogConsole, context)),
+        "ToggleStatusLanes" => Some(KeyBinding::new(keystroke, ToggleStatusLanes, context)),
         "NewWindow" => Some(KeyBinding::new(keystroke, NewWindow, context)),
         _ => {
             log::warn!("Unknown action in keybinding config: {}", action);

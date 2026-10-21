@@ -148,6 +148,11 @@ pub struct WindowState {
     /// tier. Per-window so each window opts in independently.
     #[serde(default)]
     pub show_attention_section: bool,
+    /// Parent projects whose family (main checkout + worktrees) this window
+    /// shows in status lanes (one lane per board column, "No status" last)
+    /// while focused. Only honoured while the status board is enabled.
+    #[serde(default, skip_serializing_if = "HashSet::is_empty")]
+    pub status_lanes_projects: HashSet<String>,
     /// Per-folder collapsed state in this window's sidebar.
     #[serde(default)]
     pub folder_collapsed: HashMap<String, bool>,
@@ -173,6 +178,7 @@ impl Default for WindowState {
             project_layout: ProjectLayoutMode::default(),
             project_sort_mode: ProjectSortMode::default(),
             show_attention_section: false,
+            status_lanes_projects: HashSet::new(),
             folder_collapsed: HashMap::new(),
             os_bounds: None,
             sidebar_open: None,
@@ -216,6 +222,7 @@ mod tests {
             project_layout: ProjectLayoutMode::Rows,
             project_sort_mode: ProjectSortMode::Activity,
             show_attention_section: true,
+            status_lanes_projects: HashSet::new(),
             folder_collapsed: collapsed,
             os_bounds: Some(WindowBounds {
                 origin_x: 100.0,

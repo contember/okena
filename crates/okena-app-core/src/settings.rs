@@ -347,6 +347,111 @@ impl SettingsState {
         self.save_and_notify(cx);
     }
 
+    /// Set what the ring before a worktree row shows.
+    pub fn set_sidebar_worktree_marker(
+        &mut self,
+        value: crate::workspace::settings::WorktreeMarker,
+        cx: &mut Context<Self>,
+    ) {
+        self.settings.sidebar.worktree_marker = value;
+        self.save_and_notify(cx);
+    }
+
+    /// Show or hide the family guide in the sidebar.
+    pub fn set_sidebar_worktree_guide(&mut self, value: bool, cx: &mut Context<Self>) {
+        self.settings.sidebar.worktree_guide = value;
+        self.save_and_notify(cx);
+    }
+
+    /// Switch the status board feature on or off.
+    pub fn set_status_board_enabled(&mut self, value: bool, cx: &mut Context<Self>) {
+        self.settings.status_board.enabled = value;
+        self.save_and_notify(cx);
+    }
+
+    /// Replace the status board columns wholesale.
+    pub fn set_status_board_columns(
+        &mut self,
+        columns: Vec<crate::workspace::settings::BoardColumn>,
+        cx: &mut Context<Self>,
+    ) {
+        self.settings.status_board.columns = columns;
+        self.save_and_notify(cx);
+    }
+
+    /// Append a column named `name` and return its id.
+    pub fn add_status_board_column(&mut self, name: &str, cx: &mut Context<Self>) -> String {
+        let id = self.settings.status_board.add_column(name);
+        self.save_and_notify(cx);
+        id
+    }
+
+    /// Rename a column, keeping its id (and every project's status).
+    pub fn rename_status_board_column(&mut self, id: &str, name: String, cx: &mut Context<Self>) {
+        let Some(column) = self
+            .settings
+            .status_board
+            .columns
+            .iter_mut()
+            .find(|c| c.id == id)
+        else {
+            return;
+        };
+        if column.name == name {
+            return;
+        }
+        column.name = name;
+        self.save_and_notify(cx);
+    }
+
+    /// Recolour a column.
+    pub fn set_status_board_column_color(
+        &mut self,
+        id: &str,
+        color: okena_core::theme::FolderColor,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(column) = self
+            .settings
+            .status_board
+            .columns
+            .iter_mut()
+            .find(|c| c.id == id)
+        else {
+            return;
+        };
+        if column.color == color {
+            return;
+        }
+        column.color = color;
+        self.save_and_notify(cx);
+    }
+
+    /// Remove a column. Projects in it keep their status id and render as
+    /// unassigned until they are re-sorted.
+    pub fn remove_status_board_column(&mut self, id: &str, cx: &mut Context<Self>) {
+        let columns = &mut self.settings.status_board.columns;
+        let before = columns.len();
+        columns.retain(|c| c.id != id);
+        if columns.len() != before {
+            self.save_and_notify(cx);
+        }
+    }
+
+    /// Move a column one step up (`-1`) or down (`1`).
+    pub fn move_status_board_column(&mut self, id: &str, delta: i32, cx: &mut Context<Self>) {
+        let columns = &mut self.settings.status_board.columns;
+        let Some(index) = columns.iter().position(|c| c.id == id) else {
+            return;
+        };
+        let target = index as i64 + delta as i64;
+        if target < 0 || target >= columns.len() as i64 {
+            return;
+        }
+        columns.swap(index, target as usize);
+        self.save_and_notify(cx);
+    }
+
     /// Set sidebar width (clamped to min/max bounds)
     pub fn set_sidebar_width(&mut self, value: f32, cx: &mut Context<Self>) {
         use crate::workspace::persistence::{MAX_SIDEBAR_WIDTH, MIN_SIDEBAR_WIDTH};

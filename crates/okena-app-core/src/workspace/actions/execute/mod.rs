@@ -193,6 +193,10 @@ pub fn execute_action(
             terminal_id,
             name,
         } => terminal::rename(ws, project_id, terminal_id, name, cx),
+        ActionRequest::SetProjectStatus { project_id, status } => {
+            ws.set_project_status(&project_id, status, cx);
+            ActionResult::Ok(None)
+        }
         ActionRequest::SwitchTerminalShell {
             project_id,
             terminal_id,
@@ -1361,6 +1365,7 @@ mod reconnect_shell_tests {
                 zoom_level: 1.0,
             }),
             terminal_names: HashMap::new(),
+            status: None,
             hidden_terminals: HashMap::new(),
             worktree_info: None,
             worktree_ids: Vec::new(),

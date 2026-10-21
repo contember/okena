@@ -103,6 +103,7 @@ absent after a daemon restart — and a change to it bumps `state_version`.
         "detached": false
       },
       "terminal_names": {},
+      "status": "review",
       "terminal_agent_status": {
         "uuid": { "lifecycle": "working", "custom": "running tests 3/5" }
       }
@@ -141,6 +142,17 @@ Write text + newline to a terminal.
 
 ```json
 { "action": "run_command", "terminal_id": "uuid", "command": "echo hello" }
+```
+
+#### `set_project_status`
+
+Set or clear a project's user status (a board column id; see
+[status-board.md](status-board.md)). Omit `status` or send `null` to
+clear. `status` on the project reflects it in the next state; it is
+omitted while unset.
+
+```json
+{ "action": "set_project_status", "project_id": "uuid", "status": "review" }
 ```
 
 #### `send_special_key`

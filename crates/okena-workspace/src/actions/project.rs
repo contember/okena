@@ -25,6 +25,7 @@ fn new_project_row(
         path,
         layout,
         terminal_names: HashMap::new(),
+        status: None,
         hidden_terminals: HashMap::new(),
         worktree_info: None,
         worktree_ids: Vec::new(),
@@ -40,6 +41,26 @@ fn new_project_row(
         is_creating: false,
         is_closing: false,
         creating_progress: None,
+    }
+}
+
+impl Workspace {
+    /// Set or clear a project's user status (board column id). `None` clears.
+    /// A no-op when nothing changes, so a repeated menu click does not bump
+    /// `data_version`.
+    pub fn set_project_status(
+        &mut self,
+        project_id: &str,
+        status: Option<String>,
+        cx: &mut impl WorkspaceCx,
+    ) {
+        self.with_project(project_id, cx, |project| {
+            if project.status == status {
+                return false;
+            }
+            project.status = status;
+            true
+        });
     }
 }
 
@@ -1442,6 +1463,7 @@ mod worktree_rename_tests {
             path: path.to_string_lossy().into_owned(),
             layout: None,
             terminal_names: HashMap::new(),
+            status: None,
             hidden_terminals: HashMap::new(),
             worktree_info: None,
             worktree_ids: Vec::new(),
@@ -1570,6 +1592,7 @@ mod tests {
             path: "/tmp/test".to_string(),
             layout: Some(LayoutNode::new_terminal()),
             terminal_names: HashMap::new(),
+            status: None,
             hidden_terminals: HashMap::new(),
             worktree_info: None,
             worktree_ids: Vec::new(),
@@ -1907,6 +1930,7 @@ mod gpui_tests {
             path: "/tmp/test".to_string(),
             layout: Some(LayoutNode::new_terminal()),
             terminal_names: HashMap::new(),
+            status: None,
             hidden_terminals: HashMap::new(),
             worktree_info: None,
             worktree_ids: Vec::new(),

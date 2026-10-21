@@ -732,6 +732,16 @@ fn main() {
             settings::settings_entity(cx).read(cx).settings.status_bar.style
         }));
 
+        // Status board, read by the sidebar, the column headers, the lanes and
+        // the pane tint.
+        cx.set_global(okena_ui::board::GlobalStatusBoard(|cx| {
+            let board = &settings::settings_entity(cx).read(cx).settings.status_board;
+            okena_ui::board::StatusBoard {
+                enabled: board.enabled,
+                columns: &board.columns,
+            }
+        }));
+
         // NOTE: Terminal and git view settings are now served through
         // ExtensionSettingsStore (registered above) — no separate globals needed.
 

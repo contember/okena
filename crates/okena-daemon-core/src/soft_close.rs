@@ -150,6 +150,7 @@ mod tests {
                 zoom_level: 1.0,
             }),
             terminal_names: Default::default(),
+            status: None,
             hidden_terminals: Default::default(),
             worktree_info: None,
             worktree_ids: Vec::new(),

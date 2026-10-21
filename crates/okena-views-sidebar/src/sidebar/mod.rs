@@ -12,8 +12,11 @@ mod renames;
 mod render;
 pub(crate) mod section_header;
 pub(crate) mod sections;
+pub(crate) mod status_groups;
 mod worktree;
 
+#[cfg(test)]
+mod cursor_order_test;
 #[cfg(test)]
 mod from_project_test;
 
@@ -50,6 +53,10 @@ pub struct SidebarSettings {
     pub remote_layout: okena_workspace::settings::RemoteSidebarLayout,
     /// How CPU / memory per host is drawn, if at all.
     pub host_stats: okena_workspace::settings::HostStatsStyle,
+    /// What the ring before a worktree row shows.
+    pub worktree_marker: okena_workspace::settings::WorktreeMarker,
+    /// Thin guide in the parent's colour down an expanded family.
+    pub worktree_guide: bool,
 }
 
 /// Snapshot of a remote connection for rendering.
@@ -900,6 +907,8 @@ pub struct SidebarProjectInfo {
     pub has_layout: bool,
     pub terminal_ids: Vec<String>,
     pub terminal_names: HashMap<String, String>,
+    /// User-set board status of this project (a column id).
+    pub status: Option<String>,
     /// Terminal IDs that are behind a non-active tab (not currently visible)
     pub inactive_tab_terminals: HashSet<String>,
     /// Terminal IDs that belong to a tab group (Tabs node with 2+ children)
@@ -979,6 +988,7 @@ impl SidebarProjectInfo {
                 .map(|l| l.collect_tab_group_terminal_ids())
                 .unwrap_or_default(),
             terminal_names: project.terminal_names.clone(),
+            status: project.status.clone(),
             is_orphan: false,
             worktree_count: 0,
             parent_project_id: project
@@ -1019,7 +1029,7 @@ pub(crate) enum SidebarItem {
         section: sections::SidebarSectionInfo,
     },
     Project {
-        project: SidebarProjectInfo,
+        project: Box<SidebarProjectInfo>,
         index: usize,
         worktree_children: Vec<SidebarProjectInfo>,
     },

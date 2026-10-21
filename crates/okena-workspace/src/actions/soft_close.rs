@@ -622,6 +622,7 @@ mod tests {
             path: "/tmp/test".to_string(),
             layout: Some(layout),
             terminal_names: HashMap::new(),
+            status: None,
             hidden_terminals: HashMap::new(),
             worktree_info: None,
             worktree_ids: Vec::new(),

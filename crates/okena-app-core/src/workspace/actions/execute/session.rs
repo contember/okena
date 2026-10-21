@@ -992,6 +992,7 @@ mod tests {
             path: std::env::temp_dir().to_string_lossy().into_owned(),
             layout: None,
             terminal_names: HashMap::from([(hook_id.to_string(), "old hook".to_string())]),
+            status: None,
             hidden_terminals: HashMap::new(),
             worktree_info: None,
             worktree_ids: Vec::new(),

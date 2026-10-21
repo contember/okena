@@ -886,6 +886,12 @@ impl WindowView {
                     terminal.clear();
                 }
             }
+            OverlayManagerEvent::EditStatusColumns => {
+                let endpoint = self.local_daemon_endpoint(cx);
+                self.overlay_manager.update(cx, |om, cx| {
+                    om.toggle_settings_panel(endpoint, cx);
+                });
+            }
             OverlayManagerEvent::TerminalToggleUnread { terminal_id } => {
                 {
                     let terminals = self.terminals.lock();
@@ -1410,6 +1416,11 @@ impl WindowView {
                         column,
                     } => {
                         self.open_terminal_path(&project_id, &terminal_id, path, line, column, cx);
+                    }
+                    ProjectOverlayKind::StatusPicker { position } => {
+                        self.overlay_manager.update(cx, |om, cx| {
+                            om.show_status_picker(project_id, position, cx);
+                        });
                     }
                     ProjectOverlayKind::ColorPicker { position } => {
                         self.overlay_manager.update(cx, |om, cx| {

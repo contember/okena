@@ -202,6 +202,12 @@ pub struct ProjectData {
     pub layout: Option<LayoutNode>,
     #[serde(default)]
     pub terminal_names: HashMap<String, String>,
+    /// User-set status of this project / worktree: a board column id. A manual
+    /// label, independent of any agent status its terminals report. Resolves
+    /// against the global board columns in settings; an id with no column
+    /// renders as unassigned. `None` for every project that never had one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
     #[serde(default)]
     pub hidden_terminals: HashMap<String, bool>,
     /// Optional worktree metadata (only set for worktree projects)
@@ -348,6 +354,7 @@ mod tests {
             path: path.to_string(),
             layout: None,
             terminal_names: HashMap::new(),
+            status: None,
             hidden_terminals: HashMap::new(),
             worktree_info: None,
             worktree_ids: Vec::new(),
@@ -470,6 +477,24 @@ mod tests {
 
         assert_eq!(project.id, "p1");
         assert_eq!(project.connection_id.as_deref(), Some("c1"));
+    }
+
+    #[test]
+    fn project_status_defaults_to_none_and_serializes_only_when_set() {
+        // A workspace.json written before statuses existed loads with none.
+        let json = r#"{"id": "p1", "name": "Test", "path": "/tmp/test", "layout": null}"#;
+        let project: ProjectData = serde_json::from_str(json).unwrap();
+        assert!(project.status.is_none());
+
+        // And saving it back does not grow the file for users who never set one.
+        let out = serde_json::to_string(&project).unwrap();
+        assert!(!out.contains("\"status\""));
+
+        let mut project = make_project("/tmp/test");
+        project.status = Some("review".to_string());
+        let out = serde_json::to_string(&project).unwrap();
+        let back: ProjectData = serde_json::from_str(&out).unwrap();
+        assert_eq!(back.status.as_deref(), Some("review"));
     }
 
     #[test]

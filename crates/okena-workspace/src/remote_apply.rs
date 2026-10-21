@@ -204,6 +204,7 @@ pub fn apply_remote_snapshot(
                         _ => layout,
                     };
                     existing.terminal_names = terminal_names;
+                    existing.status = api_project.status.clone();
                     existing.folder_color = project_color;
                     existing.worktree_info =
                         api_project
@@ -284,6 +285,7 @@ pub fn apply_remote_snapshot(
                         path: api_project.path.clone(),
                         layout,
                         terminal_names,
+                        status: api_project.status.clone(),
                         hidden_terminals: HashMap::new(),
                         worktree_info,
                         worktree_ids,
@@ -582,6 +584,7 @@ mod tests {
             show_in_overview: true,
             layout,
             terminal_names: HashMap::new(),
+            status: None,
             terminal_agent_status: HashMap::new(),
             git_status: None,
             folder_color: FolderColor::Default,
@@ -627,6 +630,33 @@ mod tests {
             claude_dialogs: Default::default(),
             claude_sessions: Vec::new(),
         }
+    }
+
+    #[test]
+    fn project_status_is_mirrored_and_cleared() {
+        let mut data = empty_data();
+        let mut rs = RemoteSyncState::new();
+        let mut project = api_project("a", Some(terminal("ta")));
+        project.status = Some("review".to_string());
+        let snap = RemoteSnapshot {
+            config: config("c1"),
+            state: Some(state_with(vec![project], vec!["a".into()], vec![])),
+        };
+
+        apply_remote_snapshot(&mut data, &mut rs, &[snap], WindowId::Main);
+        assert_eq!(data.projects[0].status.as_deref(), Some("review"));
+
+        // A later snapshot that cleared the status clears the mirror too.
+        let snap = RemoteSnapshot {
+            config: config("c1"),
+            state: Some(state_with(
+                vec![api_project("a", Some(terminal("ta")))],
+                vec!["a".into()],
+                vec![],
+            )),
+        };
+        apply_remote_snapshot(&mut data, &mut rs, &[snap], WindowId::Main);
+        assert!(data.projects[0].status.is_none());
     }
 
     #[test]

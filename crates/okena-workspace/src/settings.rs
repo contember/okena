@@ -1,5 +1,7 @@
 use okena_core::theme::ThemeMode;
-pub use okena_core::types::{DiffViewMode, StatusBarStyle};
+pub use okena_core::types::{
+    BoardColumn, DiffViewMode, StatusBarStyle, WorktreeMarker, default_board_columns,
+};
 use okena_terminal::session_backend::SessionBackend;
 use okena_terminal::shell_config::ShellType;
 use okena_transport::client::RemoteConnectionConfig;
@@ -269,6 +271,12 @@ pub struct SidebarSettings {
     /// (host rows in Separate layout, connection rows otherwise).
     #[serde(default)]
     pub host_stats: HostStatsStyle,
+    /// What the ring before a worktree row shows — see [`WorktreeMarker`].
+    #[serde(default)]
+    pub worktree_marker: WorktreeMarker,
+    /// Draw a thin guide in the parent's colour down an expanded family.
+    #[serde(default)]
+    pub worktree_guide: bool,
 }
 
 impl Default for SidebarSettings {
@@ -279,6 +287,8 @@ impl Default for SidebarSettings {
             width: DEFAULT_SIDEBAR_WIDTH,
             remote_layout: RemoteSidebarLayout::default(),
             host_stats: HostStatsStyle::default(),
+            worktree_marker: WorktreeMarker::default(),
+            worktree_guide: false,
         }
     }
 }
@@ -315,6 +325,44 @@ fn default_status_bar_metrics_graph() -> bool {
     true
 }
 
+/// Status board: the columns a project or worktree can be sorted into.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct StatusBoardSettings {
+    /// Master switch. Off (the default) hides every status surface: the
+    /// Lanes view, the pill in column headers, the Status entry in the
+    /// project menu, the sidebar captions and the columns editor.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Ordered columns. Ids are stable; names are free to change.
+    #[serde(default = "default_board_columns")]
+    pub columns: Vec<BoardColumn>,
+}
+
+impl Default for StatusBoardSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            columns: default_board_columns(),
+        }
+    }
+}
+
+impl StatusBoardSettings {
+    /// The column a status id refers to, if it still exists.
+    pub fn column(&self, id: &str) -> Option<&BoardColumn> {
+        self.columns.iter().find(|c| c.id == id)
+    }
+
+    /// Append a column named `name` and return its id. The id is a fresh
+    /// UUID, never derived from the name: a removed column's id stays on its
+    /// projects, and a new column must not pick those statuses back up.
+    pub fn add_column(&mut self, name: &str) -> String {
+        let id = uuid::Uuid::new_v4().to_string();
+        self.columns.push(BoardColumn::new(id.clone(), name));
+        id
+    }
+}
+
 /// Current settings schema version - increment when making breaking changes
 pub const SETTINGS_VERSION: u32 = 3;
 
@@ -336,6 +384,9 @@ pub struct AppSettings {
     /// Sidebar settings
     #[serde(default)]
     pub sidebar: SidebarSettings,
+    /// Status board: master switch and columns.
+    #[serde(default)]
+    pub status_board: StatusBoardSettings,
     /// Whether to show border around focused terminal
     #[serde(default = "default_show_focused_border")]
     pub show_focused_border: bool,
@@ -592,6 +643,7 @@ impl Default for AppSettings {
             theme_mode: ThemeMode::default(),
             active_session: None,
             sidebar: SidebarSettings::default(),
+            status_board: StatusBoardSettings::default(),
             show_focused_border: default_show_focused_border(),
             whats_new_seen_version: None,
             show_whats_new_after_update: true,
@@ -1075,6 +1127,54 @@ mod tests {
         assert_eq!(config.project.on_open, Some("echo open".into()));
         assert!(config.worktree.pre_merge.is_none());
         assert!(config.worktree.after_remove.is_none());
+    }
+
+    #[test]
+    fn status_board_defaults_when_absent_and_keeps_custom_columns() {
+        // A settings.json from before the board existed gets the default
+        // columns; one that names its own keeps them verbatim, ids included.
+        let settings: AppSettings = serde_json::from_str("{}").unwrap();
+        assert!(!settings.status_board.enabled, "the board is opt-in");
+        let ids: Vec<&str> = settings
+            .status_board
+            .columns
+            .iter()
+            .map(|c| c.id.as_str())
+            .collect();
+        assert_eq!(ids, vec!["todo", "in-progress", "review", "done"]);
+        assert_eq!(
+            settings
+                .status_board
+                .column("review")
+                .map(|c| c.name.as_str()),
+            Some("Review")
+        );
+        assert!(settings.status_board.column("missing").is_none());
+
+        let json = r#"{"status_board":{"columns":[{"id":"qa","name":"QA"}]}}"#;
+        let settings: AppSettings = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            settings.status_board.columns,
+            vec![BoardColumn::new("qa", "QA")]
+        );
+    }
+
+    #[test]
+    fn status_board_column_added_after_a_removal_gets_a_fresh_id() {
+        let mut board = StatusBoardSettings::default();
+        let removed = board.add_column("New column");
+        board.columns.retain(|c| c.id != removed);
+
+        let added = board.add_column("New column");
+        assert_ne!(
+            added, removed,
+            "a new column must not adopt a removed one's statuses"
+        );
+        let ids: Vec<&str> = board.columns.iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["todo", "in-progress", "review", "done", added.as_str()]
+        );
     }
 
     #[test]
