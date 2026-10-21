@@ -16,6 +16,8 @@ pub(crate) mod status_groups;
 mod worktree;
 
 #[cfg(test)]
+mod cursor_order_test;
+#[cfg(test)]
 mod from_project_test;
 
 use gpui::prelude::FluentBuilder;
