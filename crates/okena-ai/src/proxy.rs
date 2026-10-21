@@ -1,5 +1,6 @@
-//! Request relay: `/v1/messages*` is served by a pool account; everything else
-//! (OAuth, profile, telemetry) passes through with the caller's own credentials.
+//! Request relay: `/v1/messages` and `/v1/messages/count_tokens` are served by a
+//! pool account; everything else (OAuth, profile, telemetry) passes through with
+//! the caller's own credentials.
 
 use crate::accounts::{Accounts, Selection};
 use crate::activity::Activity;
@@ -14,8 +15,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 const MAX_BODY_BYTES: usize = 64 * 1024 * 1024;
-/// Upstream attempts per request (account failover, one refresh retry).
-const MAX_ATTEMPTS: usize = 4;
 const QUOTA_PROBE_MODEL: &str = "claude-haiku-4-5-20251001";
 
 pub struct Relay {
@@ -64,6 +63,10 @@ impl Relay {
         // Judge the path the request will reach: parsing resolves `..` segments,
         // percent-encoded ones too, and a pool account must not leave inference.
         let path = target.path();
+        // An upstream may decode what parsing kept, e.g. `..%2f` into a dot segment.
+        if path.contains('%') {
+            return error(StatusCode::BAD_REQUEST, "Invalid request path");
+        }
         let url = target.as_str();
         let context = RequestContext::new(&method, path, project);
         if method != Method::POST || !is_inference_path(path) {
@@ -101,9 +104,9 @@ impl Relay {
             && let Some(payload) = payload.as_mut()
             && rewrite_quota_probe_model(payload)
         {
-            body = match serde_json::to_vec(payload) {
-                Ok(body) => Bytes::from(body),
-                Err(_) => {
+            body = match with_member(&body, &["model"], &payload["model"]) {
+                Some(body) => body,
+                None => {
                     return error(
                         StatusCode::INTERNAL_SERVER_ERROR,
                         "Could not encode quota check",
@@ -125,7 +128,11 @@ impl Relay {
         let mut refreshed: Vec<String> = Vec::new();
         let mut rate_limited: Option<ErrorResponse> = None;
         let mut selected = None;
-        for attempt in 1..=MAX_ATTEMPTS {
+        let mut attempt = 0;
+        // Each account gets one attempt, plus one more after its token refresh;
+        // an empty pool still gets the attempt that passes the caller through.
+        while attempt < self.accounts.pool_size().max(1) + refreshed.len() {
+            attempt += 1;
             let account = match selected.take() {
                 Some(account) => account,
                 None => match self
@@ -183,16 +190,17 @@ impl Relay {
                 },
             };
             let account_context = context.for_account(&account.id, attempt);
-            let outgoing = match (payload.as_mut(), account.account_uuid.as_deref()) {
-                (Some(payload), Some(uuid)) => {
-                    if rewrite_account_uuid(payload, uuid) {
-                        serde_json::to_vec(payload).map_or_else(|_| body.clone(), Bytes::from)
-                    } else {
-                        body.clone()
-                    }
-                }
-                _ => body.clone(),
-            };
+            let mut outgoing = body.clone();
+            if let (Some(payload), Some(uuid)) = (payload.as_mut(), account.account_uuid.as_deref())
+                && rewrite_account_uuid(payload, uuid)
+                && let Some(rewritten) = with_member(
+                    &body,
+                    &["metadata", "user_id"],
+                    &payload["metadata"]["user_id"],
+                )
+            {
+                outgoing = rewritten;
+            }
             let mut request_headers = forward_headers(&headers);
             request_headers.remove("x-api-key");
             request_headers.remove("authorization");
@@ -275,7 +283,7 @@ impl Relay {
             }
         }
         log::warn!(
-            "[ai-proxy] proxy_rejection {context} status=429 reason=attempts_exhausted attempts={MAX_ATTEMPTS}"
+            "[ai-proxy] proxy_rejection {context} status=429 reason=attempts_exhausted attempts={attempt}"
         );
         self.activity.event(project, AiActivityKind::AllRateLimited);
         exhausted(rate_limited, None, None)
@@ -466,9 +474,9 @@ pub fn error(status: StatusCode, message: &str) -> Response {
         .into_response()
 }
 
-/// `/v1/messages` and its sub-resources (e.g. `count_tokens`).
+/// The endpoints Claude Code sends conversations to.
 fn is_inference_path(path: &str) -> bool {
-    path == "/v1/messages" || path.starts_with("/v1/messages/")
+    matches!(path, "/v1/messages" | "/v1/messages/count_tokens")
 }
 
 fn is_hop_by_hop(name: &str) -> bool {
@@ -568,6 +576,70 @@ fn rewrite_quota_probe_model(payload: &mut serde_json::Value) -> bool {
     // its minimal request gets a bare 429 where the same probe on Haiku succeeds.
     *model = serde_json::Value::String(QUOTA_PROBE_MODEL.to_owned());
     true
+}
+
+/// `body` with the member at `path` set to `value`. Every other member keeps its
+/// place and bytes: key order in `tools` schemas is part of the prompt.
+fn with_member(body: &Bytes, path: &[&str], value: &serde_json::Value) -> Option<Bytes> {
+    let json = std::str::from_utf8(body).ok()?;
+    replace_member(json, path, value).map(Bytes::from)
+}
+
+fn replace_member(json: &str, path: &[&str], value: &serde_json::Value) -> Option<String> {
+    let (key, rest) = path.split_first()?;
+    let OrderedObject(members) = serde_json::from_str(json).ok()?;
+    let mut found = false;
+    let mut out = String::with_capacity(json.len());
+    out.push('{');
+    for (index, (name, raw)) in members.iter().enumerate() {
+        if index > 0 {
+            out.push(',');
+        }
+        out.push_str(&serde_json::to_string(name).ok()?);
+        out.push(':');
+        if name == key {
+            found = true;
+            if rest.is_empty() {
+                out.push_str(&serde_json::to_string(value).ok()?);
+            } else {
+                out.push_str(&replace_member(raw.get(), rest, value)?);
+            }
+        } else {
+            out.push_str(raw.get());
+        }
+    }
+    out.push('}');
+    found.then_some(out)
+}
+
+/// A JSON object's members in their original order, values unparsed.
+struct OrderedObject<'a>(Vec<(String, &'a serde_json::value::RawValue)>);
+
+impl<'de> serde::Deserialize<'de> for OrderedObject<'de> {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Members;
+
+        impl<'de> serde::de::Visitor<'de> for Members {
+            type Value = OrderedObject<'de>;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("a JSON object")
+            }
+
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> Result<Self::Value, A::Error> {
+                let mut members = Vec::new();
+                while let Some(member) = map.next_entry()? {
+                    members.push(member);
+                }
+                Ok(OrderedObject(members))
+            }
+        }
+
+        deserializer.deserialize_map(Members)
+    }
 }
 
 /// The conversation id Claude Code sends, used for account affinity.
@@ -706,6 +778,25 @@ mod tests {
 
         let mut absent = serde_json::json!({"model": "x"});
         assert!(!rewrite_account_uuid(&mut absent, "new"));
+    }
+
+    #[test]
+    fn replacing_a_member_keeps_the_others_in_place() {
+        let body = Bytes::from_static(
+            br#"{"tools":[{"input_schema":{"z":1, "a":2}}],"model":"m","metadata":{"z":0,"user_id":"old","a":1}}"#,
+        );
+        let model = with_member(&body, &["model"], &"haiku".into()).unwrap();
+        assert_eq!(
+            model,
+            r#"{"tools":[{"input_schema":{"z":1, "a":2}}],"model":"haiku","metadata":{"z":0,"user_id":"old","a":1}}"#
+        );
+        let user = with_member(&model, &["metadata", "user_id"], &"new".into()).unwrap();
+        assert_eq!(
+            user,
+            r#"{"tools":[{"input_schema":{"z":1, "a":2}}],"model":"haiku","metadata":{"z":0,"user_id":"new","a":1}}"#
+        );
+        assert!(with_member(&body, &["missing"], &"x".into()).is_none());
+        assert!(with_member(&Bytes::from_static(b"[1]"), &["model"], &"x".into()).is_none());
     }
 
     #[test]

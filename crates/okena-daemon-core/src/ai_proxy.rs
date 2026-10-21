@@ -11,7 +11,6 @@ use okena_agent_usage::pool_summary;
 use okena_ai::client::ProxyClient;
 use okena_core::ai_proxy::{
     AiAccount, AiProxyCommand, AiProxyState, AiProxyStatus, ProxyEndpoint, ensure_endpoint,
-    ensure_management_key, load_endpoint,
 };
 use okena_core::usage_history::Provider;
 use okena_remote_server::usage::UsageHub;
@@ -97,6 +96,58 @@ pub(crate) fn start_if_enabled(
             Err(error) => log::error!("[ai-proxy] failed to start: {error:#}"),
         }
     });
+}
+
+/// The settings this module reads: whether new shells are routed through the
+/// proxy, and the working days the pool summary is computed for.
+#[derive(PartialEq)]
+pub(crate) struct ProxySettings {
+    routed: bool,
+    working_days: Option<serde_json::Value>,
+}
+
+impl ProxySettings {
+    pub(crate) fn of(settings: &AppSettings) -> Self {
+        Self {
+            routed: settings.ai_proxy_enabled,
+            working_days: settings.extension_settings.get(USAGE_SETTINGS_KEY).cloned(),
+        }
+    }
+}
+
+/// After a committed settings change: start the proxy when routing was turned
+/// on, and re-read the pool when a setting it depends on changed. Other
+/// changes leave the proxy and the running history reads alone.
+pub(crate) fn apply_settings_change(
+    before: &ProxySettings,
+    settings: &Arc<Mutex<AppSettings>>,
+    backend: &Arc<dyn TerminalBackend>,
+    pane_env: &Arc<PaneEnv>,
+    runtime: &tokio::runtime::Handle,
+    accounts: &AiProxyAccounts,
+) {
+    let after = ProxySettings::of(&settings.lock());
+    if after.routed && !before.routed {
+        start_if_enabled(settings, backend, pane_env, runtime);
+    }
+    if after != *before {
+        accounts.refresh();
+    }
+}
+
+/// Whether `command` can change the published accounts or the pool summary.
+pub(crate) fn changes_accounts(command: &AiProxyCommand) -> bool {
+    match command {
+        AiProxyCommand::FinishLogin { .. }
+        | AiProxyCommand::RemoveAccount { .. }
+        | AiProxyCommand::SetAccountEnabled { .. } => true,
+        AiProxyCommand::Status
+        | AiProxyCommand::UsageHistory { .. }
+        | AiProxyCommand::StartLogin { .. }
+        | AiProxyCommand::CancelLogin { .. }
+        | AiProxyCommand::SetDefaultPolicy { .. }
+        | AiProxyCommand::SetProjectPolicy { .. } => false,
+    }
 }
 
 /// Run one management command against the proxy, starting it if needed.
@@ -271,8 +322,7 @@ async fn read_or_restart(
 /// Ask a running proxy for its accounts without starting one.
 async fn read_accounts() -> anyhow::Result<(ProxyClient, Vec<AiAccount>)> {
     let root = profile_root().ok_or_else(|| anyhow::anyhow!("No active profile"))?;
-    let endpoint = load_endpoint(&root)?.ok_or_else(|| anyhow::anyhow!("No proxy endpoint"))?;
-    let client = ProxyClient::new(endpoint, ensure_management_key(&root)?);
+    let client = ProxyClient::open(&root)?;
     let accounts = client.command(&AiProxyCommand::Status).await?.accounts;
     Ok((client, accounts))
 }
@@ -529,6 +579,42 @@ mod tests {
         )
         .await
         .expect("a refresh did not start a pass");
+    }
+
+    #[tokio::test]
+    async fn only_settings_the_pool_depends_on_re_read_it() {
+        let settings = Arc::new(Mutex::new(AppSettings::default()));
+        let backend: Arc<dyn TerminalBackend> = Arc::new(StubBackend);
+        let pane_env = Arc::new(PaneEnv::resolve());
+        let accounts = AiProxyAccounts::new(watch::channel(0).0);
+        let refreshed = |accounts: &AiProxyAccounts| {
+            let accounts = accounts.clone();
+            async move {
+                tokio::time::timeout(Duration::from_millis(20), accounts.refresh.notified())
+                    .await
+                    .is_ok()
+            }
+        };
+        let change = |edit: &dyn Fn(&mut AppSettings)| {
+            let before = ProxySettings::of(&settings.lock());
+            edit(&mut settings.lock());
+            apply_settings_change(
+                &before,
+                &settings,
+                &backend,
+                &pane_env,
+                &tokio::runtime::Handle::current(),
+                &accounts,
+            );
+        };
+        change(&|settings| settings.scrollback_lines += 1);
+        assert!(!refreshed(&accounts).await);
+        change(&|settings| {
+            settings
+                .extension_settings
+                .insert(USAGE_SETTINGS_KEY.into(), serde_json::json!({"days": [1]}));
+        });
+        assert!(refreshed(&accounts).await);
     }
 
     #[tokio::test]

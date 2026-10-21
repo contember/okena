@@ -21,8 +21,9 @@ terminal names its main project); other terminals get the URL without
 off leaves the proxy running for them.
 
 `claude` itself still needs its normal login (it refuses to start without one).
-That login is used only when the pool has no enabled, logged-in account: then
-the proxy forwards requests with the terminal's own credentials.
+That login is used only when the terminal's policy forbids no account and the
+pool has no enabled, logged-in account: then the proxy forwards requests with
+the terminal's own credentials.
 
 ## Project policies
 
@@ -48,9 +49,11 @@ covers accounts added later.
 
 ## How requests are routed
 
-- A `POST` to `/v1/messages` or a path under it gets a pool account. The path
-  is judged after `..` segments are resolved, so it cannot reach another
-  endpoint with the account's token. The `authorization` header is replaced
+- A `POST` to `/v1/messages` or `/v1/messages/count_tokens` (the endpoints
+  Claude Code calls) gets a pool account; no other path does. The path is
+  judged after `..` segments are resolved, and a path that still contains `%`
+  after that gets a 400, so it cannot reach another endpoint with the
+  account's token. The `authorization` header is replaced
   with that account's OAuth token and `metadata.user_id.account_uuid` is
   rewritten to the serving account. The minimal startup quota probe described
   below also has its model rewritten. Other endpoints (OAuth, profile, telemetry)
@@ -82,21 +85,24 @@ covers accounts added later.
   account with the lowest 5-hour utilization is chosen.
 - **429**: the account cools down until the provider's reset time
   (`anthropic-ratelimit-unified-reset`), else `retry-after`, else one minute,
-  and the request moves to the next permitted account. When all permitted
-  accounts are limited, the provider's 429 is returned and `claude` waits and
+  and the request moves to the next permitted account. Each permitted account
+  is tried once per request, plus once more after its token refresh. When all
+  permitted accounts are limited, the provider's 429 is returned and `claude` waits and
   retries itself; a project that must use A waits for A.
   When the proxy rejects a request locally, a known exhausted quota window
   includes the unified status, representative claim and reset headers that
   let Claude Code display the usage limit and resume time. They describe the
   blocking window of the permitted account that becomes available first.
   A cooldown alone does not produce quota headers.
-- **No account at all:** with no enabled, logged-in account the proxy forwards
-  requests with the terminal's own Claude login, unless the policy forbids an
-  account (that login may be the forbidden one). Such a project, and any
-  project whose permitted accounts are all disabled or logged out, gets a 400
-  with the reason. (400, not 403: `claude` shows the message, where a 401/403
-  can send the user to `/login`.) A request that a pool account already tried
-  never falls back to the terminal's own login; it gets a 400 instead.
+- **No account at all:** the terminal's own Claude login is used only when
+  both hold: the terminal's policy forbids no account (no account and not
+  **New Accounts** is **Never**), and no account the policy permits is enabled
+  and logged in. A policy that forbids at least one account never falls back
+  to that login, because it may be the forbidden account: when none of its
+  permitted accounts is enabled and logged in, the request gets a 400 with the
+  reason. (400, not 403: `claude` shows the message, where a 401/403 can send
+  the user to `/login`.) A request that a pool account already tried never
+  falls back to the terminal's own login either; it gets a 400 instead.
 - **401**: the access token is refreshed once and the request retried; if the
   token endpoint answers `invalid_grant` (or an error without a code) the
   account is marked *Needs login*. Other token endpoint errors are temporary.
@@ -129,10 +135,11 @@ proxy or the providers for it; the daemon is their only source.
 
 While new terminals are routed through the proxy, the daemon reads the accounts
 from it every 15 seconds while a client is connected and after each management
-command, and publishes them as `pool` in the usage channel (see below). The
-daemon then stops polling the `claude` login's own usage: those terminals use
-the pool accounts. Without a pool (routing off, the proxy unreachable or without
-accounts) it polls the login again. The Claude usage widget in the status bar
+command that changes the accounts (finishing a login, removing, enabling or
+disabling an account), and publishes them as `pool` in the usage channel (see
+below). The daemon then stops polling the `claude` login's own usage: those
+terminals use the pool accounts. Without a pool (routing off, the proxy
+unreachable or without accounts) it polls the login again. The Claude usage widget in the status bar
 shows the pool instead of the `claude` login's own usage. The Claude extension
 settings choose any combination of three items per host:
 
@@ -165,9 +172,11 @@ days, and publishes it as `pool` in the Claude entry of the usage channel
 (`GET /v1/usage`, `usage_changed`). It lists every account, with the reason
 (`blocked`) for one that does not serve requests; only serving accounts count
 in Today and Nonstop. The desktop and the mobile app only render it, for every
-connected host whose daemon publishes it. The daemon recomputes the pool on each
-15-second accounts poll and after each proxy command or settings change, and
-republishes it when it changed. The pool follows each account's live
+connected host whose daemon publishes it; a host with an older daemon shows
+only the account items. The daemon recomputes the pool on each 15-second
+accounts poll, after each proxy command that changes the accounts, and after
+the routing setting or the working days change, and republishes it when it
+changed. The pool follows each account's live
 utilization, so while Claude is in use it can republish on most polls.
 Hovering either item opens the pool popover with one section per
 limit; an (i) next to Today and Nonstop explains each value in a tooltip. The
@@ -212,14 +221,21 @@ proxy and shows nothing.
 
 ## Lifecycle
 
-- The daemon starts the proxy when the setting is on (at startup and when the
-  setting changes) and whenever the AI Proxy settings page sends a command.
+- The daemon starts the proxy when the setting is on at startup, when the
+  setting is turned on, and whenever the AI Proxy settings page sends a command.
   While the setting is on and a client (desktop, mobile, web) is connected, it
   asks the proxy for its accounts every 15 seconds and starts it again when it
   does not answer; after each failed start it waits twice as long, up to 10
   minutes. With no client connected it checks only after a management command
   or settings change, and at once when the next client connects.
-- The proxy holds `ai-proxy/proxy.lock`; a second instance exits immediately.
+- On Linux the proxy starts in its own systemd scope (`systemd-run --user
+  --scope`), so stopping or OOM-killing the app's cgroup does not stop it;
+  without `systemd-run`, or when it fails, the proxy starts in a new session
+  only. On Windows it starts outside the app's job when the job allows that.
+- The proxy holds `ai-proxy/proxy.lock`. A second instance waits up to 45
+  seconds for the lock, longer than an exiting proxy needs to finish its token
+  refreshes, and exits if it does not get it. The daemon waits that long for a
+  proxy it started to answer, and stops waiting when the process exits.
 - It is never stopped by the daemon, the GUI or an update. A daemon that finds a
   proxy of another version asks it to exit only while it has no request in
   flight, then starts its own.
@@ -231,17 +247,24 @@ proxy and shows nothing.
   port and rewrites `endpoint.json`; only new terminals get the new URL, from
   the next 15-second check on.
 - The terminal URL only sends requests through the proxy. Management
-  (`/_okena/…`: health, commands, shutdown) needs `management.key` as a bearer
-  token, and only the daemon sends it. Any process of the same OS user can still
-  read the key file; it keeps management out of reach of anything that only
-  has the URL from a shell's environment.
+  (`/_okena/…`: health, commands, shutdown) is not served on the TCP port. It
+  listens on `ai-proxy/management.sock` (Unix), or on Windows on a named pipe
+  that only the current user can open, named after a hash of `management.key`.
+  It also needs `management.key` as a bearer token, and only the daemon sends
+  it. Any process of the same OS user can still read the key file; the key
+  keeps management out of reach of anything that only has the URL from a
+  shell's environment. Why a socket: [ADR-0007](../decisions/0007-ai-proxy-management-on-a-private-socket.md).
 
 ## Files (`<profile>/ai-proxy/`, owner-only directory)
+
+The directory is mode 0700 on Unix. On Windows its access list grants the
+current user only, and the files inside inherit it.
 
 | File | Content |
 |---|---|
 | `endpoint.json` | port + path token (0600) |
 | `management.key` | bearer token for the management routes (0600) |
+| `management.sock` | management socket (Unix) |
 | `accounts.json` | accounts with OAuth access/refresh tokens (0600) |
 | `routing.json` | default and per-project policies, by account id (0600) |
 | `proxy.lock` | instance lock |
@@ -294,6 +317,13 @@ headers. Response diagnostics additionally allow `x-ratelimit-*`,
 
 - The project in the URL routes requests; it does not isolate them. A process of
   the same user can put another project's id into its URL.
+- While the proxy is down, any local user can bind the persisted loopback port.
+  Shells started with that URL then send their path token, the request (prompt
+  included), and their own `claude` OAuth token to whatever listens there. The
+  path token alone gives no management access.
+- The management socket path must fit the platform limit (104 bytes on macOS,
+  108 on Linux). With a longer profile path the proxy does not start, and
+  `proxy.log` names the socket.
 - A corrupt `routing.json` stops the proxy from starting rather than dropping
   the policies.
 

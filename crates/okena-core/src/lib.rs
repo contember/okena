@@ -9,6 +9,8 @@ pub mod claude_remote;
 pub mod git_poll;
 pub mod keys;
 pub mod latency_probe;
+#[cfg(windows)]
+pub mod owner_only;
 pub mod process;
 pub mod profiles;
 pub mod render_probe;

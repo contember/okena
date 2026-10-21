@@ -136,7 +136,8 @@ fn create_private(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
 }
 
 /// Create `dir` and keep it owner-only, so the log and usage history inside it
-/// are as private as the credential files.
+/// are as private as the credential files. On Windows the files inside inherit
+/// the directory's current-user-only access list.
 pub fn create_private_dir(dir: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(dir)?;
     #[cfg(unix)]
@@ -144,6 +145,8 @@ pub fn create_private_dir(dir: &Path) -> std::io::Result<()> {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
     }
+    #[cfg(windows)]
+    crate::owner_only::OwnerOnly::new(true)?.apply(dir)?;
     Ok(())
 }
 
