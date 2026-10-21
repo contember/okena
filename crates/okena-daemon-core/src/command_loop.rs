@@ -2911,8 +2911,8 @@ pub async fn daemon_command_loop(
         };
 
         let command = match command {
-            // Talks to the AI proxy over loopback (and may start it), so it runs
-            // off the loop.
+            // Talks to the AI proxy over its management socket (and may start
+            // it), so it runs off the loop.
             RemoteCommand::Action(ActionRequest::AiProxy { request }) => {
                 let ai_proxy_accounts = ai_proxy_accounts.clone();
                 runtime.spawn(async move {

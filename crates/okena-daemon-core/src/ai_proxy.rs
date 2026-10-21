@@ -10,7 +10,6 @@ use okena_agent_usage::pool_summary;
 use okena_ai::client::ProxyClient;
 use okena_core::ai_proxy::{
     AiAccount, AiProxyCommand, AiProxyState, AiProxyStatus, ProxyEndpoint, ensure_endpoint,
-    ensure_management_key, load_endpoint,
 };
 use okena_core::usage_history::Provider;
 use okena_remote_server::usage::UsageHub;
@@ -258,8 +257,7 @@ async fn read_or_restart(
 /// Ask a running proxy for its accounts without starting one.
 async fn read_accounts() -> anyhow::Result<(ProxyClient, Vec<AiAccount>)> {
     let root = profile_root().ok_or_else(|| anyhow::anyhow!("No active profile"))?;
-    let endpoint = load_endpoint(&root)?.ok_or_else(|| anyhow::anyhow!("No proxy endpoint"))?;
-    let client = ProxyClient::new(endpoint, ensure_management_key(&root)?)?;
+    let client = ProxyClient::open(&root)?;
     let accounts = client.command(&AiProxyCommand::Status).await?.accounts;
     Ok((client, accounts))
 }

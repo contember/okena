@@ -1,14 +1,19 @@
 //! Daemon-side access to the proxy: start it when needed and send management commands.
 
-use crate::server::Health;
+use crate::management::Address;
+use crate::server::{Health, LOCK_WAIT};
 use okena_core::ai_proxy::{
     AiProxyCommand, AiProxyStatus, ProxyEndpoint, ensure_endpoint, ensure_management_key,
     load_endpoint,
 };
 use std::path::Path;
+use std::process::Child;
 use std::time::Duration;
 
-const STARTUP_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long a proxy asked to exit may take to stop answering.
+const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
+/// A new proxy may first wait for the lock of the one it replaces.
+const STARTUP_TIMEOUT: Duration = Duration::from_secs(LOCK_WAIT.as_secs() + 10);
 
 pub struct ProxyClient {
     endpoint: ProxyEndpoint,
@@ -17,15 +22,17 @@ pub struct ProxyClient {
 }
 
 impl ProxyClient {
-    pub fn new(endpoint: ProxyEndpoint, management_key: String) -> anyhow::Result<Self> {
+    /// Client for the proxy of `profile_root`, from its endpoint and management
+    /// key. Fails when there is no endpoint yet.
+    pub fn open(profile_root: &Path) -> anyhow::Result<Self> {
+        let endpoint =
+            load_endpoint(profile_root)?.ok_or_else(|| anyhow::anyhow!("No proxy endpoint"))?;
+        let management_key = ensure_management_key(profile_root)?;
+        let http = Address::new(profile_root, &management_key).client()?;
         Ok(Self {
             endpoint,
             management_key,
-            http: reqwest::Client::builder()
-                // Loopback must never go through a configured HTTP proxy, and a
-                // default client would send the management key through one.
-                .no_proxy()
-                .build()?,
+            http,
         })
     }
 
@@ -34,11 +41,9 @@ impl ProxyClient {
     }
 
     fn management(&self, method: reqwest::Method, path: &str) -> reqwest::RequestBuilder {
+        // The host is not resolved: every request goes to the management address.
         self.http
-            .request(
-                method,
-                format!("http://127.0.0.1:{}/_okena/{path}", self.endpoint.port),
-            )
+            .request(method, format!("http://okena-ai-proxy/_okena/{path}"))
             .bearer_auth(&self.management_key)
     }
 
@@ -86,8 +91,8 @@ impl ProxyClient {
 /// when none answers. A proxy of another version is replaced only while idle, so
 /// an update never cuts a running response; otherwise the old one keeps serving.
 pub async fn ensure_running(profile_root: &Path, exe: &Path) -> anyhow::Result<ProxyClient> {
-    let management_key = ensure_management_key(profile_root)?;
-    let client = ProxyClient::new(ensure_endpoint(profile_root)?, management_key.clone())?;
+    ensure_endpoint(profile_root)?;
+    let client = ProxyClient::open(profile_root)?;
     match client.health().await {
         Ok(health) if health.version == crate::VERSION => return Ok(client),
         Ok(health) => {
@@ -103,43 +108,96 @@ pub async fn ensure_running(profile_root: &Path, exe: &Path) -> anyhow::Result<P
                 health.version,
                 crate::VERSION
             );
-            wait_until(|| async { client.health().await.is_err() }).await;
+            wait_until_stopped(&client).await;
         }
         Err(_) => {}
     }
-    spawn_detached(exe, profile_root)?;
+    let mut launched = spawn_detached(exe, profile_root)?;
     let deadline = tokio::time::Instant::now() + STARTUP_TIMEOUT;
-    while tokio::time::Instant::now() < deadline {
-        // The proxy may have moved to another port if the old one was taken.
-        if let Ok(Some(endpoint)) = load_endpoint(profile_root) {
-            let started = ProxyClient::new(endpoint, management_key.clone())?;
-            if started.health().await.is_ok() {
-                return Ok(started);
+    loop {
+        if client.health().await.is_ok() {
+            launched.reap();
+            // The proxy may have moved to another port if the old one was taken.
+            return ProxyClient::open(profile_root);
+        }
+        if let Some(status) = launched.child.try_wait()? {
+            if launched.own_scope && !status.success() {
+                log::warn!("[ai-proxy] systemd-run failed ({status}); starting the proxy directly");
+                launched = spawn_detached_here(exe, profile_root)?;
+                continue;
             }
+            anyhow::bail!("AI proxy exited ({status}); see ai-proxy/proxy.log");
+        }
+        if tokio::time::Instant::now() >= deadline {
+            launched.reap();
+            anyhow::bail!("AI proxy did not start; see ai-proxy/proxy.log");
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    anyhow::bail!("AI proxy did not start; see ai-proxy/proxy.log")
 }
 
-async fn wait_until<F, Fut>(mut ready: F)
-where
-    F: FnMut() -> Fut,
-    Fut: std::future::Future<Output = bool>,
-{
-    let deadline = tokio::time::Instant::now() + STARTUP_TIMEOUT;
+async fn wait_until_stopped(client: &ProxyClient) {
+    let deadline = tokio::time::Instant::now() + SHUTDOWN_TIMEOUT;
     while tokio::time::Instant::now() < deadline {
-        if ready().await {
+        if client.health().await.is_err() {
             return;
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
-/// Start the proxy outside the daemon's session/process group, so stopping the
-/// daemon (or its terminal) does not stop the proxy that live shells point at.
-fn spawn_detached(exe: &Path, profile_root: &Path) -> anyhow::Result<()> {
-    let mut command = std::process::Command::new(exe);
+struct Launched {
+    child: Child,
+    /// Started through `systemd-run --scope`, whose own failure looks like an exit.
+    own_scope: bool,
+}
+
+impl Launched {
+    /// Reap the child if it exits while the daemon still runs.
+    fn reap(self) {
+        let mut child = self.child;
+        std::thread::spawn(move || {
+            let _ = child.wait();
+        });
+    }
+}
+
+/// Start the proxy so that stopping the daemon, its terminal or its cgroup
+/// does not stop the proxy that live shells point at. On Linux it gets its own
+/// systemd scope, so an OOM kill of the app's cgroup spares it.
+fn spawn_detached(exe: &Path, profile_root: &Path) -> anyhow::Result<Launched> {
+    #[cfg(target_os = "linux")]
+    {
+        let mut command = std::process::Command::new("systemd-run");
+        command
+            .args(["--user", "--scope", "--quiet", "--collect", "--"])
+            .arg(exe);
+        match spawn(command, profile_root) {
+            Ok(child) => {
+                return Ok(Launched {
+                    child,
+                    own_scope: true,
+                });
+            }
+            Err(error) => {
+                log::info!("[ai-proxy] systemd-run unavailable ({error}); starting the proxy directly");
+            }
+        }
+    }
+    spawn_detached_here(exe, profile_root)
+}
+
+/// Start the proxy outside the daemon's session/process group (Unix) or
+/// console and job (Windows).
+fn spawn_detached_here(exe: &Path, profile_root: &Path) -> anyhow::Result<Launched> {
+    let child = spawn(std::process::Command::new(exe), profile_root)?;
+    Ok(Launched {
+        child,
+        own_scope: false,
+    })
+}
+
+fn spawn(mut command: std::process::Command, profile_root: &Path) -> std::io::Result<Child> {
     command
         .arg(crate::PROXY_FLAG)
         .arg(profile_root)
@@ -162,13 +220,19 @@ fn spawn_detached(exe: &Path, profile_root: &Path) -> anyhow::Result<()> {
         use std::os::windows::process::CommandExt;
         const DETACHED_PROCESS: u32 = 0x0000_0008;
         const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+        const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        command.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW);
+        const ERROR_ACCESS_DENIED: i32 = 5;
+        let detached = DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW;
+        // Outside the app's job, so closing the job does not end the proxy.
+        command.creation_flags(detached | CREATE_BREAKAWAY_FROM_JOB);
+        match command.spawn() {
+            // The job does not allow breakaway; stay in it rather than not start.
+            Err(error) if error.raw_os_error() == Some(ERROR_ACCESS_DENIED) => {
+                command.creation_flags(detached);
+            }
+            result => return result,
+        }
     }
-    let mut child = command.spawn()?;
-    // Reap the child if it exits while the daemon still runs.
-    std::thread::spawn(move || {
-        let _ = child.wait();
-    });
-    Ok(())
+    command.spawn()
 }

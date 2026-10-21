@@ -14,13 +14,18 @@ use okena_core::ai_proxy::{
     proxy_dir,
 };
 use serde::{Deserialize, Serialize};
+use std::future::IntoFuture;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::Duration;
-use tokio::sync::Notify;
+use std::time::{Duration, Instant};
+use tokio::sync::watch;
 
 const USAGE_POLL_INTERVAL: Duration = Duration::from_secs(5 * 60);
+/// How long a new instance waits for the lock. Longer than a previous
+/// instance's shutdown, which finishes running token refreshes (30 s each), so
+/// an upgrade does not leave the profile without a proxy.
+pub(crate) const LOCK_WAIT: Duration = Duration::from_secs(45);
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Health {
@@ -33,24 +38,19 @@ struct Service {
     token: String,
     management_key: String,
     relay: Relay,
-    shutdown: Notify,
+    shutdown: watch::Sender<bool>,
 }
 
-/// Entry point of the proxy process. Returns once another instance holds the
-/// profile's lock, or after a management shutdown.
+/// Entry point of the proxy process. Returns when another instance keeps the
+/// profile's lock for [`LOCK_WAIT`], or after a management shutdown.
 pub fn run(profile_root: PathBuf) -> anyhow::Result<()> {
     let dir = proxy_dir(&profile_root);
     okena_core::ai_proxy::create_private_dir(&dir)?;
     init_logging(&dir);
-    let lock = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(dir.join("proxy.lock"))?;
-    if lock.try_lock_exclusive().is_err() {
+    let Some(lock) = lock_instance(&dir.join("proxy.lock"), LOCK_WAIT)? else {
         log::info!("[ai-proxy] another instance owns {}", dir.display());
         return Ok(());
-    }
+    };
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()
@@ -64,6 +64,23 @@ pub fn run(profile_root: PathBuf) -> anyhow::Result<()> {
     }
     drop(lock);
     result
+}
+
+/// The instance lock, or `None` when another instance still holds it after `wait`.
+fn lock_instance(path: &Path, wait: Duration) -> std::io::Result<Option<std::fs::File>> {
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(path)?;
+    let deadline = Instant::now() + wait;
+    while lock.try_lock_exclusive().is_err() {
+        if Instant::now() >= deadline {
+            return Ok(None);
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    Ok(Some(lock))
 }
 
 fn init_logging(dir: &Path) {
@@ -84,8 +101,9 @@ fn init_logging(dir: &Path) {
     let _ = builder.try_init();
 }
 
-/// Bind the profile's endpoint and serve until `stop` resolves or a management
-/// shutdown arrives. The caller holds the instance lock.
+/// Bind the profile's endpoint (inference) and management address, and serve
+/// both until `stop` resolves or a management shutdown arrives. The caller
+/// holds the instance lock.
 pub async fn serve(
     profile_root: PathBuf,
     upstream: Upstream,
@@ -109,6 +127,10 @@ pub async fn serve(
         Err(error) => return Err(error.into()),
     };
     let management_key = ensure_management_key(&profile_root)?;
+    // Bound after the endpoint is final: a daemon that reaches management reads
+    // the port new shells get.
+    let management_listener =
+        crate::management::Address::new(&profile_root, &management_key).bind()?;
     let http = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(30))
         // Bounds header and per-chunk waits, so a stalled upstream cannot hold an
@@ -130,7 +152,7 @@ pub async fn serve(
             inflight: Arc::new(AtomicUsize::new(0)),
             activity: Activity::new(),
         },
-        shutdown: Notify::new(),
+        shutdown: watch::channel(false).0,
     });
     let poller_accounts = accounts.clone();
     let poller = tokio::spawn(async move {
@@ -145,35 +167,48 @@ pub async fn serve(
         crate::VERSION,
         endpoint.port
     );
-    let app = axum::Router::new()
-        .fallback(dispatch)
-        .with_state(service.clone());
-    let result = axum::serve(listener, app)
-        .with_graceful_shutdown(async move {
-            tokio::select! {
-                _ = stop => {}
-                _ = service.shutdown.notified() => {}
-            }
+    let stopper = {
+        let service = service.clone();
+        tokio::spawn(async move {
+            stop.await;
+            service.shutdown.send_replace(true);
         })
-        .await;
+    };
+    let stopped = |mut shutdown: watch::Receiver<bool>| async move {
+        let _ = shutdown.wait_for(|stopped| *stopped).await;
+    };
+    let inference = axum::serve(
+        listener,
+        axum::Router::new()
+            .fallback(dispatch)
+            .with_state(service.clone()),
+    )
+    .with_graceful_shutdown(stopped(service.shutdown.subscribe()))
+    .into_future();
+    let management = axum::serve(
+        management_listener,
+        axum::Router::new()
+            .fallback(dispatch_management)
+            .with_state(service.clone()),
+    )
+    .with_graceful_shutdown(stopped(service.shutdown.subscribe()))
+    .into_future();
+    let (inference, management) = tokio::join!(inference, management);
+    stopper.abort();
     poller.abort();
     accounts.finish_refreshes().await;
     log::info!("[ai-proxy] shut down");
-    Ok(result?)
+    inference?;
+    Ok(management?)
 }
 
+/// Inference traffic from shells. Management is not reachable here.
 async fn dispatch(State(service): State<Arc<Service>>, request: Request) -> Response {
     let target = request
         .uri()
         .path_and_query()
         .map(|target| target.as_str().to_owned())
         .unwrap_or_default();
-    if let Some(management) = target.strip_prefix("/_okena/") {
-        if !has_management_key(request.headers(), &service.management_key) {
-            return error(StatusCode::UNAUTHORIZED, "Management key required");
-        }
-        return manage(&service, management, request.into_body()).await;
-    }
     let Some((project, rest)) = strip_token(&target, &service.token).and_then(split_project) else {
         return error(StatusCode::NOT_FOUND, "Unknown endpoint");
     };
@@ -183,6 +218,17 @@ async fn dispatch(State(service): State<Arc<Service>>, request: Request) -> Resp
         .relay
         .handle(parts.method, project.as_deref(), &rest, parts.headers, body)
         .await
+}
+
+async fn dispatch_management(State(service): State<Arc<Service>>, request: Request) -> Response {
+    // Defense in depth: on Unix the socket's directory already admits only the owner.
+    if !has_management_key(request.headers(), &service.management_key) {
+        return error(StatusCode::UNAUTHORIZED, "Management key required");
+    }
+    let Some(path) = request.uri().path().strip_prefix("/_okena/").map(str::to_owned) else {
+        return error(StatusCode::NOT_FOUND, "Unknown management endpoint");
+    };
+    manage(&service, &path, request.into_body()).await
 }
 
 /// `/<token>/rest` → `/rest`.
@@ -239,7 +285,7 @@ async fn manage(service: &Service, path: &str, body: Body) -> Response {
             if inflight > 0 {
                 return error(StatusCode::CONFLICT, "Requests are in flight");
             }
-            service.shutdown.notify_one();
+            service.shutdown.send_replace(true);
             StatusCode::NO_CONTENT.into_response()
         }
         "command" => {
@@ -493,9 +539,8 @@ mod tests {
             silence_timeout,
         };
         let endpoint = okena_core::ai_proxy::ensure_endpoint(&root).unwrap();
-        let management_key = ensure_management_key(&root).unwrap();
+        let client = crate::client::ProxyClient::open(&root).unwrap();
         tokio::spawn(serve(root, upstream, std::future::pending()));
-        let client = crate::client::ProxyClient::new(endpoint.clone(), management_key).unwrap();
         for _ in 0..100 {
             if client.health().await.is_ok() {
                 break;
@@ -1212,36 +1257,53 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn management_needs_the_management_key() {
+    async fn management_is_not_served_on_the_inference_port() {
         let h = harness(vec![account("a", "token-a", "uuid-a")]).await;
         let remove = AiProxyCommand::RemoveAccount {
             account_id: "a".into(),
         };
-        let response = h
-            .http
-            .post(format!("{}/_okena/command", h.base_url))
-            .json(&remove)
-            .send()
-            .await
+        let key = ensure_management_key(h._dir.path()).unwrap();
+        for prefix in [h.origin.as_str(), h.base_url.as_str()] {
+            for path in ["health", "command", "shutdown"] {
+                let url = format!("{prefix}/_okena/{path}");
+                let with_key = h
+                    .http
+                    .post(&url)
+                    .bearer_auth(&key)
+                    .json(&remove)
+                    .send()
+                    .await
+                    .unwrap();
+                assert!(!with_key.status().is_success(), "{url}");
+            }
+        }
+        let status = h.client.command(&AiProxyCommand::Status).await.unwrap();
+        assert_eq!(status.accounts.len(), 1);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn management_socket_needs_the_management_key() {
+        let h = harness(vec![account("a", "token-a", "uuid-a")]).await;
+        let socket = proxy_dir(h._dir.path()).join("management.sock");
+        let http = reqwest::Client::builder()
+            .unix_socket(socket.as_path())
+            .build()
             .unwrap();
-        assert!(!response.status().is_success());
         let shell_token = h.base_url.rsplit_once('/').unwrap().1;
         for path in ["health", "command", "shutdown"] {
-            let url = format!("{}/_okena/{path}", h.origin);
-            let anonymous = h.http.post(&url).json(&remove).send().await.unwrap();
+            let url = format!("http://okena-ai-proxy/_okena/{path}");
+            let anonymous = http.post(&url).send().await.unwrap();
             assert_eq!(anonymous.status(), 401, "{path}");
-            let with_shell_token = h
-                .http
+            let with_shell_token = http
                 .post(&url)
                 .bearer_auth(shell_token)
-                .json(&remove)
                 .send()
                 .await
                 .unwrap();
             assert_eq!(with_shell_token.status(), 401, "{path}");
         }
-        let status = h.client.command(&AiProxyCommand::Status).await.unwrap();
-        assert_eq!(status.accounts.len(), 1);
+        assert_eq!(h.client.health().await.unwrap().inflight, 0);
     }
 
     #[tokio::test]
@@ -1444,6 +1506,24 @@ mod tests {
         assert_eq!(activity.routes[0].account_id, None);
         assert_eq!(activity.routes[0].per_minute.last(), Some(&1));
         assert!(activity.events.is_empty());
+    }
+
+    #[test]
+    fn a_new_instance_waits_for_the_old_one_to_release_the_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("proxy.lock");
+        let old = lock_instance(&path, Duration::ZERO).unwrap().unwrap();
+        assert!(
+            lock_instance(&path, Duration::from_millis(200))
+                .unwrap()
+                .is_none()
+        );
+        let shutting_down = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            drop(old);
+        });
+        assert!(lock_instance(&path, Duration::from_secs(10)).unwrap().is_some());
+        shutting_down.join().unwrap();
     }
 
     #[test]
