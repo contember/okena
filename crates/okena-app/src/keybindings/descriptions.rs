@@ -11,9 +11,10 @@ use super::{
     ScrollDown, ScrollUp, Search, SearchNext, SearchPrev, SendEscape, ShowAiProxyActivity,
     ShowBranchSwitcher, ShowCommandPalette, ShowContentSearch, ShowDiffViewer, ShowFileSearch,
     ShowHookLog, ShowKeybindings, ShowLogConsole, ShowProfileManager, ShowProjectSwitcher,
-    ShowSessionManager, ShowSettings, ShowThemeSelector, SplitHorizontal, SplitVertical,
-    StartAllServices, StopAllServices, ToggleFullscreen, TogglePaneSwitcher, ToggleProjectLayout,
-    ToggleProjectVisibility, ToggleSidebar, ToggleSidebarAutoHide, ToggleUnread, ZoomIn, ZoomOut,
+    ShowSessionManager, ShowSettings, ShowThemeSelector, ShowWhatsNew, SplitHorizontal,
+    SplitVertical, StartAllServices, StopAllServices, ToggleFullscreen, TogglePaneSwitcher,
+    ToggleProjectLayout, ToggleProjectVisibility, ToggleSidebar, ToggleSidebarAutoHide,
+    ToggleUnread, ZoomIn, ZoomOut,
 };
 
 /// Get human-readable descriptions for all actions
@@ -419,6 +420,15 @@ pub fn get_action_descriptions() -> HashMap<&'static str, ActionDescription> {
             description: "Display keybinding help",
             category: "Global",
             factory: || Box::new(ShowKeybindings),
+        },
+    );
+    map.insert(
+        "ShowWhatsNew",
+        ActionDescription {
+            name: "What's New",
+            description: "Show release notes for recent Okena versions",
+            category: "Global",
+            factory: || Box::new(ShowWhatsNew),
         },
     );
     map.insert(

@@ -105,6 +105,7 @@ If the file contains invalid JSON, Okena recovers as many fields as possible and
   "default_shell": "Default",
   "show_shell_selector": false,
   "auto_hide_single_terminal_header": false,
+  "show_terminal_name_when_inactive": false,
   "session_backend": "Auto",
   "auto_resume_agent_sessions": false,
   "file_opener": "",
@@ -150,6 +151,8 @@ If the file contains invalid JSON, Okena recovers as many fields as possible and
 | `file_font_size` | float | `12.0` | Font size for file/diff viewer (8.0 - 24.0) |
 | `line_height` | float | `1.3` | Line height multiplier (1.0 - 3.0) |
 | `show_focused_border` | bool | `false` | Show a border around the focused terminal |
+| `show_whats_new_after_update` | bool | `true` | On the first start after an update, post a one-time toast whose button opens What's New (also in the View menu on macOS, the title-bar menu, the About dialog and the command palette: *What's New*) |
+| `whats_new_seen_version` | string | *(absent)* | The last version the app recorded as seen. Written by the app on the first start, when it posts the toast after an update, and whenever What's New opens; omitted until then |
 
 #### Terminal
 
@@ -161,6 +164,7 @@ If the file contains invalid JSON, Okena recovers as many fields as possible and
 | `default_shell` | string | `"Default"` | Shell for new terminals. `"Default"` uses the system shell. On Linux/macOS you can also use `"Bash"`, `"Zsh"`, `"Fish"`, etc. |
 | `show_shell_selector` | bool | `false` | Show shell picker in the terminal header |
 | `auto_hide_single_terminal_header` | bool | `false` | Hide the 28px terminal header for standalone terminals. Its actions remain available from the owning project's focused-terminal menu. Multi-tab headers remain visible. |
+| `show_terminal_name_when_inactive` | bool | `false` | Draw the terminal's name over every pane that does not have focus |
 | `idle_timeout_secs` | int | `0` | Seconds before a terminal is considered idle (0 = disabled) |
 | `terminal_option_as_meta` | bool | `false` | macOS only: Option+key sends the Meta escape prefix (`ESC` + character) instead of composing a character (Option+B is `∫`). No effect on Linux/Windows, where Alt already encodes Meta. |
 
@@ -373,6 +377,7 @@ Set `enabled` to `false` to disable a specific binding without removing it:
 | `ShowSettings` | `Cmd+,` / `Ctrl+,` | Open settings panel |
 | `OpenSettingsFile` | `Cmd+Alt+,` / `Ctrl+Alt+,` | Open settings JSON file |
 | `ShowKeybindings` | `Cmd+K Cmd+S` / `Ctrl+K Ctrl+S` | Show keybindings overlay |
+| `ShowWhatsNew` | *(none)* | Open What's New with the release notes of recent versions |
 | `ShowThemeSelector` | `Cmd+K Cmd+T` / `Ctrl+K Ctrl+T` | Open theme selector |
 | `ShowSessionManager` | `Cmd+K Cmd+W` / `Ctrl+K Ctrl+W` | Open session manager |
 | `ShowFileSearch` | `Cmd+P` / `Ctrl+P` | File search |

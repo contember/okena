@@ -6910,7 +6910,6 @@ mod tests {
                 detached: false,
                 shell_type: ShellType::Default,
                 zoom_level: 1.0,
-                show_name_when_inactive: false,
             }),
             terminal_names: Default::default(),
             hidden_terminals: Default::default(),
@@ -7679,7 +7678,6 @@ mod tests {
                 detached: false,
                 shell_type: ShellType::Default,
                 zoom_level: 1.0,
-                show_name_when_inactive: false,
             }),
             terminal_names: Default::default(),
             hidden_terminals: Default::default(),
@@ -8431,7 +8429,6 @@ mod tests {
                 detached: false,
                 shell_type: ShellType::Default,
                 zoom_level: 1.0,
-                show_name_when_inactive: false,
             }),
             terminal_names: Default::default(),
             hidden_terminals: Default::default(),
@@ -8677,7 +8674,6 @@ mod tests {
                     detached: false,
                     shell_type: ShellType::Default,
                     zoom_level: 1.0,
-                    show_name_when_inactive: false,
                 }),
                 terminal_names: Default::default(),
                 hidden_terminals: Default::default(),
@@ -8777,7 +8773,6 @@ mod tests {
                     detached: false,
                     shell_type: ShellType::Default,
                     zoom_level: 1.0,
-                    show_name_when_inactive: false,
                 },
                 LayoutNode::Terminal {
                     terminal_id: Some("second-in-checkout".to_string()),
@@ -8786,7 +8781,6 @@ mod tests {
                     detached: false,
                     shell_type: ShellType::Default,
                     zoom_level: 1.0,
-                    show_name_when_inactive: false,
                 },
             ],
         });
@@ -9313,7 +9307,6 @@ mod tests {
             detached: false,
             shell_type: ShellType::Default,
             zoom_level: 1.0,
-            show_name_when_inactive: false,
         });
         let mut unaffected = data.projects[0].clone();
         unaffected.id = "unaffected".to_string();
@@ -9328,7 +9321,6 @@ mod tests {
             detached: false,
             shell_type: ShellType::Default,
             zoom_level: 1.0,
-            show_name_when_inactive: false,
         });
         data.projects.push(nested);
         data.projects.push(unaffected);
@@ -10319,7 +10311,6 @@ mod tests {
                 detached: false,
                 shell_type: ShellType::Default,
                 zoom_level: 1.0,
-                show_name_when_inactive: false,
             }),
             terminal_names: Default::default(),
             hidden_terminals: Default::default(),

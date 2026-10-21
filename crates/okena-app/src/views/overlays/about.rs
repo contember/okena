@@ -162,11 +162,11 @@ impl AboutModal {
     }
 
     fn render_link(
-        &self,
         id: &'static str,
         label: &'static str,
         detail: &'static str,
-        url: &'static str,
+        icon: &'static str,
+        on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
         t: &ThemeColors,
         cx: &App,
     ) -> Stateful<Div> {
@@ -205,11 +205,11 @@ impl AboutModal {
             )
             .child(
                 svg()
-                    .path("icons/external-link.svg")
+                    .path(icon)
                     .size(px(14.0))
                     .text_color(rgb(t.text_muted)),
             )
-            .on_click(move |_, _, _| okena_core::process::open_url(url))
+            .on_click(on_click)
     }
 
     fn render_update_action(
@@ -316,6 +316,8 @@ impl AboutModal {
 
 pub enum AboutModalEvent {
     Close,
+    /// The "What's new" link: the host closes this modal and opens What's New.
+    ShowWhatsNew,
 }
 
 impl EventEmitter<AboutModalEvent> for AboutModal {}
@@ -437,12 +439,30 @@ impl Render for AboutModal {
             .py(px(16.0))
             .flex()
             .gap(px(10.0))
-            .child(self.render_link("about-website", "Website", "okena.dev", WEBSITE_URL, &t, cx))
-            .child(self.render_link(
+            .child(Self::render_link(
+                "about-website",
+                "Website",
+                "okena.dev",
+                "icons/external-link.svg",
+                |_, _, _| okena_core::process::open_url(WEBSITE_URL),
+                &t,
+                cx,
+            ))
+            .child(Self::render_link(
                 "about-github",
                 "GitHub",
                 "Source and releases",
-                GITHUB_URL,
+                "icons/external-link.svg",
+                |_, _, _| okena_core::process::open_url(GITHUB_URL),
+                &t,
+                cx,
+            ))
+            .child(Self::render_link(
+                "about-whats-new",
+                "What's new",
+                "Release notes",
+                "icons/lightbulb.svg",
+                cx.listener(|_, _, _, cx| cx.emit(AboutModalEvent::ShowWhatsNew)),
                 &t,
                 cx,
             ))

@@ -339,6 +339,13 @@ pub struct AppSettings {
     /// Whether to show border around focused terminal
     #[serde(default = "default_show_focused_border")]
     pub show_focused_border: bool,
+    /// The last version whose What's New the user opened (or the version that
+    /// was running when the feature first appeared). `None` until then.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub whats_new_seen_version: Option<String>,
+    /// Post a "see what's new" toast on the first start after an update.
+    #[serde(default = "default_true")]
+    pub show_whats_new_after_update: bool,
     /// Tint project backgrounds with the folder color
     #[serde(default)]
     pub color_tinted_background: bool,
@@ -396,6 +403,10 @@ pub struct AppSettings {
     /// A real tab group always keeps its header visible (default: false).
     #[serde(default)]
     pub auto_hide_single_terminal_header: bool,
+    /// Draw the terminal's name over every pane that does not have focus
+    /// (default: false).
+    #[serde(default)]
+    pub show_terminal_name_when_inactive: bool,
 
     // Session persistence settings
     /// Session backend for terminal persistence (tmux/screen/none/auto)
@@ -586,6 +597,8 @@ impl Default for AppSettings {
             active_session: None,
             sidebar: SidebarSettings::default(),
             show_focused_border: default_show_focused_border(),
+            whats_new_seen_version: None,
+            show_whats_new_after_update: true,
             color_tinted_background: false,
             font_size: default_font_size(),
             font_family: default_font_family(),
@@ -602,6 +615,7 @@ impl Default for AppSettings {
             default_shell: ShellType::default(),
             show_shell_selector: false,
             auto_hide_single_terminal_header: false,
+            show_terminal_name_when_inactive: false,
             session_backend: SessionBackend::default(),
             auto_resume_agent_sessions: false,
             claude_remote: false,
@@ -1202,6 +1216,16 @@ mod tests {
     }
 
     #[test]
+    fn inactive_terminal_name_overlay_is_opt_in() {
+        let defaults = AppSettings::default();
+        assert!(!defaults.show_terminal_name_when_inactive);
+
+        let loaded: AppSettings =
+            serde_json::from_str(r#"{"show_terminal_name_when_inactive":true}"#).unwrap();
+        assert!(loaded.show_terminal_name_when_inactive);
+    }
+
+    #[test]
     fn option_as_meta_is_opt_in() {
         assert!(!AppSettings::default().terminal_option_as_meta);
 
@@ -1272,5 +1296,16 @@ mod tests {
         // enabled_extensions should be present
         assert!(json.contains("enabled_extensions"));
         assert!(json.contains("claude-code"));
+    }
+
+    #[test]
+    fn whats_new_keys_default_to_unseen_and_nudging() {
+        let settings: AppSettings = serde_json::from_str("{}").unwrap();
+        assert_eq!(settings.whats_new_seen_version, None);
+        assert!(settings.show_whats_new_after_update);
+
+        let json = serde_json::to_value(&settings).unwrap();
+        assert!(json.get("whats_new_seen_version").is_none());
+        assert_eq!(json["show_whats_new_after_update"], true);
     }
 }

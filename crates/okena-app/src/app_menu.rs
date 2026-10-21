@@ -1,6 +1,6 @@
 use crate::keybindings::{
     About as AboutAction, NewWindow as NewWindowAction, Quit as QuitAction, ShowCommandPalette,
-    ShowKeybindings, ShowProfileManager, ShowSettings, ShowThemeSelector,
+    ShowKeybindings, ShowProfileManager, ShowSettings, ShowThemeSelector, ShowWhatsNew,
 };
 use gpui::{Action, MenuItem, SystemMenuType};
 
@@ -12,6 +12,7 @@ pub enum AppMenuAction {
     CommandPalette,
     Theme,
     Keybindings,
+    WhatsNew,
     NewWindow,
     Quit,
 }
@@ -25,6 +26,7 @@ impl AppMenuAction {
             Self::CommandPalette => "Command Palette",
             Self::Theme => "Select Theme",
             Self::Keybindings => "Keyboard Shortcuts",
+            Self::WhatsNew => "What's New",
             Self::NewWindow => "New Window",
             Self::Quit => "Quit Okena",
         }
@@ -38,6 +40,7 @@ impl AppMenuAction {
             Self::CommandPalette => "ShowCommandPalette",
             Self::Theme => "ShowThemeSelector",
             Self::Keybindings => "ShowKeybindings",
+            Self::WhatsNew => "ShowWhatsNew",
             Self::NewWindow => "NewWindow",
             Self::Quit => "Quit",
         }
@@ -51,6 +54,7 @@ impl AppMenuAction {
             Self::CommandPalette => Box::new(ShowCommandPalette),
             Self::Theme => Box::new(ShowThemeSelector),
             Self::Keybindings => Box::new(ShowKeybindings),
+            Self::WhatsNew => Box::new(ShowWhatsNew),
             Self::NewWindow => Box::new(NewWindowAction),
             Self::Quit => Box::new(QuitAction),
         }
@@ -83,6 +87,7 @@ pub const MACOS_VIEW_MENU: &[AppMenuEntry] = &[
     MenuAction(Theme),
     Separator,
     MenuAction(Keybindings),
+    MenuAction(WhatsNew),
 ];
 
 pub const MACOS_WINDOW_MENU: &[AppMenuEntry] = &[MenuAction(NewWindow)];
@@ -93,6 +98,7 @@ pub const TITLE_BAR_MENU: &[AppMenuEntry] = &[
     MenuAction(CommandPalette),
     MenuAction(Theme),
     MenuAction(Keybindings),
+    MenuAction(WhatsNew),
     Separator,
     MenuAction(Settings),
     MenuAction(Profiles),

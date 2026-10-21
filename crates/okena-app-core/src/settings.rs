@@ -154,6 +154,21 @@ impl SettingsState {
         60
     );
     setting_setter!(set_show_focused_border, show_focused_border, bool);
+    setting_setter!(
+        set_show_whats_new_after_update,
+        show_whats_new_after_update,
+        bool
+    );
+
+    /// Record the version whose What's New the user has seen. A no-op when
+    /// it is already recorded, so opening the overlay twice saves once.
+    pub fn set_whats_new_seen_version(&mut self, version: Option<String>, cx: &mut Context<Self>) {
+        if self.settings.whats_new_seen_version == version {
+            return;
+        }
+        self.settings.whats_new_seen_version = version;
+        self.save_and_notify(cx);
+    }
     setting_setter!(set_color_tinted_background, color_tinted_background, bool);
     setting_setter!(
         set_detached_overlays_by_default,
@@ -174,6 +189,11 @@ impl SettingsState {
     setting_setter!(
         set_auto_hide_single_terminal_header,
         auto_hide_single_terminal_header,
+        bool
+    );
+    setting_setter!(
+        set_show_terminal_name_when_inactive,
+        show_terminal_name_when_inactive,
         bool
     );
     setting_setter!(

@@ -2706,7 +2706,6 @@ mod workspace_tests {
                         shell_type: Default::default(),
                         cols: None,
                         rows: None,
-                        show_name_when_inactive: false,
                     }),
                     terminal_names: names
                         .iter()
@@ -3057,7 +3056,6 @@ mod workspace_tests {
                 detached: false,
                 shell_type: ShellType::Default,
                 zoom_level: 1.0,
-                show_name_when_inactive: false,
             }),
             terminal_names: HashMap::new(),
             hidden_terminals: HashMap::new(),
@@ -3109,7 +3107,6 @@ mod workspace_tests {
                     detached: false,
                     shell_type: ShellType::Default,
                     zoom_level: 1.0,
-                    show_name_when_inactive: false,
                 })
                 .collect(),
             active_tab,
@@ -3445,7 +3442,6 @@ mod workspace_tests {
                     detached: true,
                     shell_type: ShellType::Default,
                     zoom_level: 1.0,
-                    show_name_when_inactive: false,
                 },
                 LayoutNode::Terminal {
                     terminal_id: Some("t2".to_string()),
@@ -3454,7 +3450,6 @@ mod workspace_tests {
                     detached: false,
                     shell_type: ShellType::Default,
                     zoom_level: 1.0,
-                    show_name_when_inactive: false,
                 },
             ],
         });
@@ -4114,7 +4109,6 @@ mod gpui_tests {
                 detached: false,
                 shell_type: ShellType::Default,
                 zoom_level: 1.0,
-                show_name_when_inactive: false,
             }),
             terminal_names: HashMap::new(),
             hidden_terminals: HashMap::new(),
@@ -4160,7 +4154,6 @@ mod gpui_tests {
             detached: false,
             shell_type: ShellType::Default,
             zoom_level: 1.0,
-            show_name_when_inactive: false,
         }
     }
 
@@ -4338,7 +4331,6 @@ mod gpui_tests {
             shell_type: Default::default(),
             cols: None,
             rows: None,
-            show_name_when_inactive: false,
         }
     }
 

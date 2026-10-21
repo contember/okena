@@ -270,6 +270,10 @@ pub fn build_router(
             "/v1/update/releases",
             axum::routing::get(update::get_releases),
         )
+        .route(
+            "/v1/update/release-notes",
+            axum::routing::get(update::get_release_notes),
+        )
         .route("/v1/update/check", axum::routing::post(update::post_check))
         .route(
             "/v1/update/revert",
@@ -744,6 +748,7 @@ mod tests {
         for call in [
             Call::post("/v1/auth/reload"),
             Call::get("/v1/update/status"),
+            Call::get("/v1/update/release-notes"),
             Call::post("/v1/update/check"),
             Call::post("/v1/update/install"),
             Call::post("/v1/update/dismiss"),
@@ -799,6 +804,26 @@ mod tests {
                 .await,
             StatusCode::FORBIDDEN
         );
+    }
+
+    #[tokio::test]
+    async fn release_notes_reject_a_missing_or_unparsable_version() {
+        let store = Arc::new(AuthStore::with_secret(vec![7u8; 32]));
+        let mut router = test_router(store);
+
+        for uri in [
+            "/v1/update/release-notes",
+            "/v1/update/release-notes?version=garbage",
+        ] {
+            assert_eq!(
+                Call::get(uri)
+                    .via_peer(PeerInfo::Local)
+                    .status(&mut router)
+                    .await,
+                StatusCode::BAD_REQUEST,
+                "{uri}"
+            );
+        }
     }
 
     #[tokio::test]
