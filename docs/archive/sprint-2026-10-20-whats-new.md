@@ -1,10 +1,18 @@
-<!--
-On close, prepend an OUTCOME block here, then `git mv` this file to ../archive/:
-
-> **OUTCOME — shipped YYYY-MM-DD.** <one-paragraph result.> Commit map: WU1 → <sha>,
-> WU2 → <sha>, … Verification: <the gate command + numbers>. Backlog closed:
-> <ids deleted/rescoped>. Deferred: <honest notes>.
--->
+> **OUTCOME — shipped 2026-10-21.** An in-app What's New overlay renders the
+> GitHub release notes (newest first, up to the desktop's running version, at
+> most 20) through the daemon, with a one-time toast on the first start after
+> an update. Entry points: the command palette (*What's New*), the View menu on
+> macOS, the title-bar menu and the About dialog. Commit map: plan → ca5b0f128,
+> WU1 → fb7d0af9b, WU2 → 38ca3faa3 + e66581c0d (virtualised list), WU3 →
+> 313093ddb; review fixes → 5d0e48152 (daemon-side cache, semver sort, `since`
+> replaced by the caller's `version`), a2b21da60 (one-time toast), 7944f8aee
+> (open-only path for the toast and About link), 0301e1ce5 (measure_all,
+> remeasure on UI font size, scrollbar). Verification: `cargo test -p
+> okena-ext-updater` 44 passed, `cargo test -p okena-remote-server` 196
+> passed, `cargo test -p okena-app whats_new` 5 passed, `cargo clippy` clean on
+> the touched crates, `cargo tree -i gpui -p okena-daemon` empty. Backlog
+> closed: none. Deferred: the manual checks listed at the end of the run log
+> (real daemon route, overlay on screen, toast after a real update).
 
 # Sprint — What's New (2026-10-20)
 
@@ -19,7 +27,8 @@ daemon and the app already renders Markdown natively, so this is wiring, not
 infrastructure: one more field over the wire, one overlay, one settings key,
 one toast.
 
-Success: `Help → What's New` (and the command palette) opens an overlay listing
+Success: the command palette, the View menu (macOS) and the title-bar menu
+open an overlay listing
 releases newest-first with their notes rendered as Markdown; after an update
 the next start shows a toast "Okena v0.35.0 — see what's new" whose button
 opens the same overlay; a user who never updates sees nothing new.
@@ -99,6 +108,8 @@ opens the same overlay; a user who never updates sees nothing new.
   — confirm the field names; `grep -rn "ReleaseCatalog\|RevertRelease" crates --include='*.rs'`
   — the consumers that must stay untouched.
 - **Scope.**
+  *(Review changed this WU: `since` was dropped as unused and the route takes
+  the caller's `version` instead; see the run log.)*
   1. `checker.rs`: new public types
      `ReleaseNote { version, published_at, release_url, body }` and
      `ReleaseNotes { current_version, releases: Vec<ReleaseNote> }`; new
@@ -190,9 +201,9 @@ opens the same overlay; a user who never updates sees nothing new.
      version, no toast (fresh install, or first run of this feature); seen `<`
      running and the toggle is on → `Toast::info("Okena v{running} — see what's
      new")` with one `Primary` action `whats-new:open`; the `ToastActionEvent`
-     handler opens the overlay (which marks the version seen). Dismissing the
-     toast without opening does **not** mark it seen; the toast returns on the
-     next start until opened or the toggle is turned off. Pure helper
+     handler opens the overlay. Posting the toast records the running version
+     as seen, so it shows once per update (changed in review; the plan had it
+     return on every start until opened). Pure helper
      `whats_new_nudge(seen: Option<&str>, running: &str, enabled: bool) -> Nudge { Toast, RecordOnly, Nothing }`.
 - **Acceptance / witness.** Unit tests on `whats_new_nudge`: `(None, "0.35.0", true)`
   → `RecordOnly`; `("0.34.0", "0.35.0", true)` → `Toast`;
@@ -235,9 +246,10 @@ opens the same overlay; a user who never updates sees nothing new.
   printed by the CLI and tied to revert semantics (platform asset, snapshot).
   Release notes have different filtering; mixing them would make both worse.
 - **Nudge is a toast, not an auto-opened modal.** An update should never steal
-  the screen from a running session. One primary button, returns until acted
-  on, one toggle to silence it.
-- **"Seen" is recorded on open, stored in `settings.json`.** The profile's
+  the screen from a running session. One primary button, shown once per
+  update, one toggle to silence it.
+- **"Seen" is recorded when the toast is posted and on open, stored in
+  `settings.json`.** The profile's
   app-version marker is overwritten at startup and serves config snapshots;
   reusing it would couple two unrelated features.
 - **`None` seen version means "record, don't nudge".** The first run after
@@ -295,6 +307,25 @@ One commit per WU (`feat(whats-new): ...`). After WU3, update
   `manager.rs:1340`), byte-identical to `main`; `okena-files` failed once and
   passed on rerun. Port-binding and cargo-registry steps had to run outside
   the sandbox.
+- **2026-10-21 review fixes.** (1) The toast came back on every start until
+  the overlay was opened; posting it now records the seen version. (2) Every
+  open and Retry hit the unauthenticated GitHub API (60/h, shared with the
+  update check); the daemon now caches the parsed stable list for an hour in
+  `UpdateInfo` (`checker::ReleaseNotesCache`); failures are not cached. (3)
+  GitHub orders by creation date, so the 20 cap could drop a newer version;
+  stable releases are sorted by semver first. (4) `since` was never sent by
+  the client and was not URL-encoded; removed. (5) A daemon can outlive a
+  desktop update: a standalone daemon is left running on quit, a UI-owned
+  one stays while other clients are connected, and the attach path in
+  `ensure_local_daemon_in` has no version check. The toast (desktop
+  `CARGO_PKG_VERSION`) and the overlay (daemon `app_version`) could then
+  disagree, so the route takes `?version=` from the caller (required, 400
+  when missing or unparsable) and the overlay sends the desktop's version.
+  (6) The toast button toggled the overlay and could close it; it now uses
+  `OverlayManager::open_whats_new`, as does the About link. (7) The list
+  uses `measure_all`, remeasures on a UI text size change, and has a
+  scrollbar, following the file viewer's Markdown list. The plan's
+  "`Help → What's New`" was wrong: there is no Help menu.
 - **Not verified by hand.** The daemon route with a real token (`curl` against
   the local socket), the overlay on screen (scroll, GitHub link, dark/light
   re-highlight), and the toast after a real update — see the WU3 manual
