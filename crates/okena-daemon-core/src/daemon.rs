@@ -605,12 +605,10 @@ impl DaemonCore {
                 remote_visible_projects.clone(),
                 git_poll_trigger_rx,
             ));
-            let ai_proxy_poll = crate::ai_proxy::AiProxyPoll::default();
+            let ai_proxy_poll = claude_pane_env.ai_proxy().clone();
             tokio::task::spawn_local(crate::ai_proxy::run_accounts_poll(
                 ai_proxy_poll.clone(),
                 settings.clone(),
-                backend.clone(),
-                claude_pane_env.clone(),
                 usage_hub.clone(),
             ));
             tokio::task::spawn_local(crate::git_poll::run_git_head_poll(

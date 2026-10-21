@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::ai_proxy::AiProxyPoll;
 use okena_terminal::backend::LaunchEnvironment;
 use okena_workspace::persistence::AppSettings;
 use parking_lot::Mutex;
@@ -43,6 +44,7 @@ pub struct PaneEnv {
     /// Exported to panes so the hooks reach this daemon: a tmux server shared
     /// by several profiles hands panes the environment of the first one.
     profile_id: Option<String>,
+    ai_proxy: AiProxyPoll,
 }
 
 impl PaneEnv {
@@ -64,7 +66,13 @@ impl PaneEnv {
                 .and_then(|exe| okena_bin_for_exe(&exe)),
             preload_locations,
             profile_id: profile.map(|profile| profile.id.clone()),
+            ai_proxy: AiProxyPoll::default(),
         }
+    }
+
+    /// The accounts poll that the shells routed through the AI proxy wake.
+    pub(crate) fn ai_proxy(&self) -> &AiProxyPoll {
+        &self.ai_proxy
     }
 
     /// The environment for PTYs spawned from now on: Claude account isolation,
@@ -95,7 +103,7 @@ impl PaneEnv {
         if let (Some(_), Some(profile_id)) = (&preload, &self.profile_id) {
             env.push(("OKENA_PROFILE".to_string(), Some(profile_id.clone())));
         }
-        crate::ai_proxy::launch_environment(settings, env)
+        crate::ai_proxy::launch_environment(settings, env, &self.ai_proxy)
     }
 
     /// Write the preload to the first location that works and return its path.
@@ -499,6 +507,7 @@ mod tests {
                 location(&root, &["okena-p", PRELOAD_DIR]),
             ],
             profile_id: Some("work".to_string()),
+            ai_proxy: AiProxyPoll::default(),
         };
 
         assert_eq!(
@@ -516,6 +525,7 @@ mod tests {
             okena_bin: Some(PathBuf::from("/opt/okena/okena")),
             preload_locations: vec![location(&root, &[PRELOAD_DIR])],
             profile_id: Some("work".to_string()),
+            ai_proxy: AiProxyPoll::default(),
         };
         let settings = AppSettings::default();
 
@@ -543,6 +553,7 @@ mod tests {
             okena_bin: Some(PathBuf::from("/opt/okena/okena")),
             preload_locations: vec![location(&root, &[PRELOAD_DIR])],
             profile_id: Some("work".to_string()),
+            ai_proxy: AiProxyPoll::default(),
         };
         let mut settings = AppSettings::default();
         settings.claude_remote = true;
@@ -575,6 +586,7 @@ mod tests {
             okena_bin: Some(PathBuf::from("/opt/okena/okena")),
             preload_locations: Vec::new(),
             profile_id: Some("work".to_string()),
+            ai_proxy: AiProxyPoll::default(),
         };
         let mut settings = AppSettings::default();
         settings.claude_remote = true;

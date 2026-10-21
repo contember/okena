@@ -9,7 +9,7 @@ use okena_agent_usage::pool;
 use okena_agent_usage::pool_summary;
 use okena_ai::client::ProxyClient;
 use okena_core::ai_proxy::{
-    AiAccount, AiProxyCommand, AiProxyState, AiProxyStatus, ProxyEndpoint, ensure_endpoint,
+    AiAccount, AiProxyCommand, AiProxyState, AiProxyStatus, ensure_endpoint,
 };
 use okena_core::usage_history::Provider;
 use okena_remote_server::usage::UsageHub;
@@ -25,6 +25,9 @@ use tokio::time::Instant;
 
 /// How often the pool summary follows the proxy's usage and cooldowns.
 const ACCOUNTS_POLL_INTERVAL: Duration = Duration::from_secs(15);
+/// How often the proxy is checked while no client is connected, so the hooks
+/// and services of a headless daemon find it running.
+const HEADLESS_CHECK_INTERVAL: Duration = Duration::from_secs(5 * 60);
 /// How long an account's usage history serves the pool summary before it is
 /// read again.
 const HISTORY_RELOAD_INTERVAL: Duration = Duration::from_secs(60);
@@ -43,27 +46,35 @@ fn profile_root() -> Option<PathBuf> {
 /// `ANTHROPIC_BASE_URL` naming the terminal's project, so the proxy applies
 /// that project's routing policy. Shells that already run keep the environment
 /// they started with.
+///
+/// Each routed spawn reads the endpoint the proxy listens on now and asks
+/// `poll` to check the proxy, which starts one that died. The spawn does not
+/// wait for that check.
 pub(crate) fn launch_environment(
     settings: &AppSettings,
     shared: Vec<(String, Option<String>)>,
+    poll: &AiProxyPoll,
 ) -> LaunchEnvironment {
-    let endpoint = if settings.ai_proxy_enabled
-        && let Some(root) = profile_root()
-    {
-        ensure_endpoint(&root)
-            .inspect_err(|error| log::error!("[ai-proxy] no endpoint for new shells: {error:#}"))
-            .ok()
+    let routed_root = if settings.ai_proxy_enabled {
+        profile_root()
     } else {
         None
     };
+    let poll = poll.clone();
     Arc::new(move |project_id| {
         let mut env = shared.clone();
-        if let Some(endpoint) = &endpoint {
-            let url = project_id.map_or_else(
-                || endpoint.base_url(),
-                |project_id| endpoint.project_url(project_id),
-            );
-            env.push(("ANTHROPIC_BASE_URL".into(), Some(url)));
+        if let Some(root) = &routed_root {
+            poll.check();
+            match ensure_endpoint(root) {
+                Ok(endpoint) => {
+                    let url = project_id.map_or_else(
+                        || endpoint.base_url(),
+                        |project_id| endpoint.project_url(project_id),
+                    );
+                    env.push(("ANTHROPIC_BASE_URL".into(), Some(url)));
+                }
+                Err(error) => log::error!("[ai-proxy] no endpoint for a new shell: {error:#}"),
+            }
         }
         env
     })
@@ -178,6 +189,7 @@ pub(crate) async fn execute(command: AiProxyCommand) -> AiProxyState {
 #[derive(Clone, Default)]
 pub struct AiProxyPoll {
     refresh: Arc<Notify>,
+    check: Arc<Notify>,
 }
 
 impl AiProxyPoll {
@@ -185,53 +197,59 @@ impl AiProxyPoll {
     pub(crate) fn refresh(&self) {
         self.refresh.notify_one();
     }
+
+    /// Make sure the proxy runs now, without reading the pool's usage.
+    fn check(&self) {
+        self.check.notify_one();
+    }
+}
+
+/// What the next pass of [`run_accounts_poll`] does.
+#[derive(Debug, PartialEq)]
+enum Pass {
+    /// Read the accounts and their histories and publish the pool.
+    Pool,
+    /// Only start the proxy if it is not running.
+    ProxyCheck,
 }
 
 /// Keep the pool summary in `usage` in step with the proxy while new shells
-/// are routed through it. New shells get its URL
-/// whether or not it listens, so a proxy that died is started again, and a
-/// port it moved to reaches new shells. With routing off, or the proxy
-/// unreachable, no pool is published: the `claude` login's
-/// own usage is then the relevant one. While no client is connected, only a
-/// refresh starts a pass; the next client gets one at once when the interval
-/// has passed.
+/// are routed through it. New shells get its URL whether or not it listens, so
+/// a proxy that died is started again. With routing off, or the proxy
+/// unreachable, no pool is published: the `claude` login's own usage is then
+/// the relevant one. While no client is connected, the pool is read only on a
+/// refresh, and the next client gets a pass at once when the interval has
+/// passed; the proxy itself is still checked every [`HEADLESS_CHECK_INTERVAL`]
+/// and when a routed shell starts.
 pub(crate) async fn run_accounts_poll(
     poll: AiProxyPoll,
     settings: Arc<Mutex<AppSettings>>,
-    backend: Arc<dyn TerminalBackend>,
-    pane_env: Arc<PaneEnv>,
     usage: UsageHub,
 ) {
-    let mut routed_endpoint: Option<ProxyEndpoint> = None;
     let mut restart = RestartBackoff::new();
     let mut histories = PoolHistories::default();
     let mut clients = usage.clients();
+    let mut pass = Pass::Pool;
+    let mut pool_due = Instant::now();
     loop {
         let enabled = settings.lock().ai_proxy_enabled;
         let read = if enabled {
-            match read_or_restart(&mut restart).await {
-                Ok((client, current)) => {
-                    if routed_endpoint.as_ref() != Some(client.endpoint()) {
-                        backend
-                            .set_launch_environment(pane_env.launch_environment(&settings.lock()));
-                        routed_endpoint = Some(client.endpoint().clone());
-                    }
-                    Some((client, current))
-                }
-                Err(error) => {
-                    log::warn!("[ai-proxy] proxy unreachable: {error:#}");
-                    None
-                }
-            }
+            read_or_restart(&mut restart)
+                .await
+                .inspect_err(|error| log::warn!("[ai-proxy] proxy unreachable: {error:#}"))
+                .ok()
         } else {
-            routed_endpoint = None;
             None
         };
         let Some((client, current)) = read else {
             usage.set_pool(None);
-            wait_for_next_poll(&poll, &mut clients).await;
+            pass = wait_for_next_poll(&poll, &mut clients, pass, &mut pool_due).await;
             continue;
         };
+        if pass == Pass::ProxyCheck {
+            pass = wait_for_next_poll(&poll, &mut clients, pass, &mut pool_due).await;
+            continue;
+        }
         // A refresh cuts the history reads short and polls again at once; the
         // pool waits for that pass, so it never shows an account without the
         // history that is still being read.
@@ -260,18 +278,31 @@ pub(crate) async fn run_accounts_poll(
             }
             Err(error) => log::error!("[ai-proxy] pool summary failed: {error}"),
         }
-        wait_for_next_poll(&poll, &mut clients).await;
+        pass = wait_for_next_poll(&poll, &mut clients, pass, &mut pool_due).await;
     }
 }
 
-async fn wait_for_next_poll(poll: &AiProxyPoll, clients: &mut watch::Receiver<usize>) {
+/// Wait for the pass after `finished`. A proxy check leaves the pool's
+/// interval running, so frequent spawns do not hold the pool back.
+async fn wait_for_next_poll(
+    poll: &AiProxyPoll,
+    clients: &mut watch::Receiver<usize>,
+    finished: Pass,
+    pool_due: &mut Instant,
+) -> Pass {
+    if finished == Pass::Pool {
+        *pool_due = Instant::now() + ACCOUNTS_POLL_INTERVAL;
+    }
+    let pool_due = *pool_due;
     let interval_with_a_client = async {
-        tokio::time::sleep(ACCOUNTS_POLL_INTERVAL).await;
+        tokio::time::sleep_until(pool_due).await;
         let _ = clients.wait_for(|count| *count > 0).await;
     };
     tokio::select! {
-        () = interval_with_a_client => {}
-        () = poll.refresh.notified() => {}
+        () = interval_with_a_client => Pass::Pool,
+        () = poll.refresh.notified() => Pass::Pool,
+        () = tokio::time::sleep(HEADLESS_CHECK_INTERVAL) => Pass::ProxyCheck,
+        () = poll.check.notified() => Pass::ProxyCheck,
     }
 }
 
@@ -532,27 +563,59 @@ mod tests {
         let hub = UsageHub::detached();
         let poll = AiProxyPoll::default();
         let mut clients = hub.clients();
+        let mut pool_due = Instant::now();
         {
-            let waiting = wait_for_next_poll(&poll, &mut clients);
+            let waiting = wait_for_next_poll(&poll, &mut clients, Pass::Pool, &mut pool_due);
             tokio::pin!(waiting);
             let headless = tokio::time::timeout(ACCOUNTS_POLL_INTERVAL * 10, &mut waiting).await;
             assert!(headless.is_err(), "polled with no client");
 
             // A client that connects after the interval gets a pass at once.
             let _client = hub.register_client();
-            tokio::time::timeout(Duration::from_millis(1), &mut waiting)
+            let pass = tokio::time::timeout(Duration::from_millis(1), &mut waiting)
                 .await
                 .expect("no pass for the first client");
+            assert_eq!(pass, Pass::Pool);
         }
 
         // A refresh starts a pass with no client.
         poll.refresh();
-        tokio::time::timeout(
+        let pass = tokio::time::timeout(
             Duration::from_millis(1),
-            wait_for_next_poll(&poll, &mut clients),
+            wait_for_next_poll(&poll, &mut clients, Pass::Pool, &mut pool_due),
         )
         .await
         .expect("a refresh did not start a pass");
+        assert_eq!(pass, Pass::Pool);
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn the_proxy_is_checked_headless_and_when_a_shell_starts() {
+        let hub = UsageHub::detached();
+        let poll = AiProxyPoll::default();
+        let mut clients = hub.clients();
+        let mut pool_due = Instant::now();
+
+        let started = Instant::now();
+        let pass = wait_for_next_poll(&poll, &mut clients, Pass::Pool, &mut pool_due).await;
+        assert_eq!(pass, Pass::ProxyCheck);
+        assert_eq!(started.elapsed(), HEADLESS_CHECK_INTERVAL);
+
+        let _client = hub.register_client();
+        poll.check();
+        let checked_at = Instant::now();
+        let pass = tokio::time::timeout(
+            Duration::from_millis(1),
+            wait_for_next_poll(&poll, &mut clients, Pass::Pool, &mut pool_due),
+        )
+        .await
+        .expect("a starting shell did not check the proxy");
+        assert_eq!(pass, Pass::ProxyCheck);
+
+        // The check does not push the pool's next pass back.
+        let pass = wait_for_next_poll(&poll, &mut clients, Pass::ProxyCheck, &mut pool_due).await;
+        assert_eq!(pass, Pass::Pool);
+        assert_eq!(checked_at.elapsed(), ACCOUNTS_POLL_INTERVAL);
     }
 
     #[tokio::test]
@@ -615,13 +678,7 @@ mod tests {
         let mut routing_off = AppSettings::default();
         routing_off.ai_proxy_enabled = false;
         let settings = Arc::new(Mutex::new(routing_off));
-        let poll = run_accounts_poll(
-            AiProxyPoll::default(),
-            settings,
-            Arc::new(StubBackend),
-            Arc::new(PaneEnv::resolve()),
-            hub.clone(),
-        );
+        let poll = run_accounts_poll(AiProxyPoll::default(), settings, hub.clone());
         tokio::time::timeout(Duration::from_secs(5), async {
             tokio::select! {
                 () = poll => unreachable!("the poll runs forever"),

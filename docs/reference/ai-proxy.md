@@ -226,8 +226,12 @@ proxy and shows nothing.
   While the setting is on and a client (desktop, mobile, web) is connected, it
   asks the proxy for its accounts every 15 seconds and starts it again when it
   does not answer; after each failed start it waits twice as long, up to 10
-  minutes. With no client connected it checks only after a management command
-  or settings change, and at once when the next client connects.
+  minutes. With no client connected it reads the accounts only after a
+  management command or settings change, and at once when the next client
+  connects. It still checks every five minutes, and whenever a terminal routed
+  through the proxy starts (hooks and services included), that the proxy
+  answers, and starts it when it does not. The terminal does not wait for that
+  check.
 - On Linux the proxy starts in its own systemd scope (`systemd-run --user
   --scope`), so stopping or OOM-killing the app's cgroup does not stop it;
   without `systemd-run`, or when it fails, the proxy starts in a new session
@@ -244,8 +248,8 @@ proxy and shows nothing.
   version differs. A rebuild with the same version does not replace the proxy.
   A busy older proxy is checked again on a later management command.
 - If the persisted port is taken by another program, the proxy moves to a free
-  port and rewrites `endpoint.json`; only new terminals get the new URL, from
-  the next 15-second check on.
+  port and rewrites `endpoint.json`; only new terminals get the new URL. Each
+  terminal reads `endpoint.json` when it starts.
 - The terminal URL only sends requests through the proxy. Management
   (`/_okena/…`: health, commands, shutdown) is not served on the TCP port. It
   listens on `ai-proxy/management.sock` (Unix), or on Windows on a named pipe
