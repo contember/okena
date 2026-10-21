@@ -18,7 +18,8 @@
  *
  * The terminal on screen counts as seen: each poll (and each selection)
  * clears its unseen bell / notification and acknowledges a `done` agent. Its
- * output does not make its project "running".
+ * output does not make its project "running". While the dashboard is open no
+ * terminal is on screen.
  *
  * It auto-selects the focused project when nothing is selected, and auto-selects
  * a terminal within the selected project (newly-added one, or the remembered /
@@ -59,8 +60,11 @@ import {
   type SelectionMemory,
 } from '../models/terminalSelection';
 import {
+  attentionItemsEqual,
+  computeAttentionItems,
   computeProjectSignals,
   signalsEqual,
+  type AttentionItem,
   type ProjectSignals,
 } from '../models/activityOrder';
 import type { TerminalActivity } from '../native/okena';
@@ -141,6 +145,10 @@ export interface WorkspaceState {
   terminalByProject: Record<ProjectId, TerminalId>;
   /** Live activity signals per project (drawer / switcher order and dots). */
   projectSignals: Record<ProjectId, ProjectSignals>;
+  /** Terminals that need the user, most urgent first (dashboard). */
+  attention: AttentionItem[];
+  /** The dashboard is shown instead of the workspace. */
+  dashboardOpen: boolean;
   /** The project shown before the current one (switcher: one tap back). */
   previousProjectId: ProjectId | null;
   /**
@@ -178,8 +186,11 @@ export interface WorkspaceState {
    * longer connected (mirrors the Dart `_onConnectionChanged` else-branch).
    */
   stop(): void;
-  /** Select a project and its remembered (or first) terminal. Mirrors `selectProject`. */
-  selectProject(projectId: ProjectId): void;
+  /**
+   * Select a project and `terminalId` if it is one of the project's terminals,
+   * else its remembered (or first) terminal. Mirrors `selectProject`.
+   */
+  selectProject(projectId: ProjectId, terminalId?: TerminalId): void;
   /** Select a terminal within the current project. Mirrors `selectTerminal`. */
   selectTerminal(terminalId: TerminalId): void;
   /** Show a terminal as its terminal or as its Claude chat. */
@@ -189,6 +200,13 @@ export interface WorkspaceState {
    * and show {@link usageRefreshing} until the result arrives.
    */
   refreshUsage(provider?: string): void;
+  /** Show the dashboard. */
+  showDashboard(): void;
+  /**
+   * Leave the dashboard for the workspace, on `projectId` (see
+   * {@link selectProject}) or on the current selection.
+   */
+  showWorkspace(projectId?: ProjectId, terminalId?: TerminalId): void;
   /** Acknowledge {@link restoreProjectMissing}. */
   clearRestoreProjectMissing(): void;
   /**
@@ -206,7 +224,8 @@ function deps(): WorkspaceDeps {
   if (!resolvedDeps) {
     resolvedDeps = {
       native: injectedDeps.native ?? getOkenaNative(),
-      isForeground: injectedDeps.isForeground ?? (() => AppState.currentState === 'active'),
+      isForeground:
+        injectedDeps.isForeground ?? (() => AppState.currentState === 'active'),
     };
   }
   return resolvedDeps;
@@ -216,7 +235,9 @@ function deps(): WorkspaceDeps {
  * Override the store's native module. Call before the first action runs (e.g.
  * at the top of a test, or once at app start).
  */
-export function configureWorkspaceStore(overrides: Partial<WorkspaceDeps>): void {
+export function configureWorkspaceStore(
+  overrides: Partial<WorkspaceDeps>,
+): void {
   injectedDeps = { ...injectedDeps, ...overrides };
   resolvedDeps = null;
 }
@@ -287,7 +308,8 @@ function projectListEquals(a: ProjectInfo[], b: ProjectInfo[]): boolean {
   for (let i = 0; i < a.length; i++) {
     const pa = a[i]!;
     const pb = b[i]!;
-    if (pa.id !== pb.id || pa.name !== pb.name || pa.path !== pb.path) return false;
+    if (pa.id !== pb.id || pa.name !== pb.name || pa.path !== pb.path)
+      return false;
     if (pa.showInOverview !== pb.showInOverview) return false;
     if (pa.parentProjectId !== pb.parentProjectId) return false;
     if (!arrayEquals(pa.worktreeIds, pb.worktreeIds)) return false;
@@ -305,8 +327,10 @@ function projectListEquals(a: ProjectInfo[], b: ProjectInfo[]): boolean {
       }
     }
     if (pa.folderColor !== pb.folderColor) return false;
-    if (pa.pinned !== pb.pinned || pa.lastActivityAt !== pb.lastActivityAt) return false;
-    if (!agentStatusEquals(pa.terminalAgentStatus, pb.terminalAgentStatus)) return false;
+    if (pa.pinned !== pb.pinned || pa.lastActivityAt !== pb.lastActivityAt)
+      return false;
+    if (!agentStatusEquals(pa.terminalAgentStatus, pb.terminalAgentStatus))
+      return false;
   }
   return true;
 }
@@ -320,7 +344,8 @@ function agentStatusEquals(
   for (const k of ka) {
     const sa = a[k]!;
     const sb = b[k];
-    if (!sb || sa.lifecycle !== sb.lifecycle || sa.custom !== sb.custom) return false;
+    if (!sb || sa.lifecycle !== sb.lifecycle || sa.custom !== sb.custom)
+      return false;
   }
   return true;
 }
@@ -328,14 +353,15 @@ function agentStatusEquals(
 /**
  * Mark the terminal on screen seen (bell / notification cleared in the
  * mirror, a `done` agent acknowledged), forget acknowledgements of terminals
- * that left `done`, and derive per-project signals from `lastActivity`.
+ * that left `done`, and derive per-project signals and the attention list
+ * from `lastActivity`.
  */
-function deriveSignals(
+function deriveActivity(
   projects: ProjectInfo[],
   claudeDialogs: Record<TerminalId, number>,
   shownTerminalId: TerminalId | null,
   connId: ConnId,
-): Record<ProjectId, ProjectSignals> {
+): { signals: Record<ProjectId, ProjectSignals>; attention: AttentionItem[] } {
   const native = deps().native;
   const lifecycle = new Map<TerminalId, string>();
   for (const p of projects) {
@@ -343,16 +369,22 @@ function deriveSignals(
       lifecycle.set(tid, status.lifecycle);
     }
   }
-  for (const tid of [...doneSeen]) if (lifecycle.get(tid) !== 'done') doneSeen.delete(tid);
+  for (const tid of [...doneSeen])
+    if (lifecycle.get(tid) !== 'done') doneSeen.delete(tid);
 
   if (shownTerminalId !== null && deps().isForeground()) {
-    if (lifecycle.get(shownTerminalId) === 'done') doneSeen.add(shownTerminalId);
+    if (lifecycle.get(shownTerminalId) === 'done')
+      doneSeen.add(shownTerminalId);
     const i = lastActivity.findIndex((a) => a.terminalId === shownTerminalId);
     const shown = i >= 0 ? lastActivity[i]! : undefined;
     if (shown && (shown.bellUnseen || shown.notificationUnseen)) {
       native.markTerminalSeen(connId, shownTerminalId);
       lastActivity = [...lastActivity];
-      lastActivity[i] = { ...shown, bellUnseen: false, notificationUnseen: false };
+      lastActivity[i] = {
+        ...shown,
+        bellUnseen: false,
+        notificationUnseen: false,
+      };
     }
   }
   // Output of the terminal on screen is not "running": the user watches it,
@@ -362,9 +394,32 @@ function deriveSignals(
     shownTerminalId === null
       ? lastActivity
       : lastActivity.map((a) =>
-          a.terminalId === shownTerminalId ? { ...a, lastOutputMsAgo: undefined } : a,
+          a.terminalId === shownTerminalId
+            ? { ...a, lastOutputMsAgo: undefined }
+            : a,
         );
-  return computeProjectSignals(projects, activity, doneSeen, claudeDialogs);
+  return {
+    signals: computeProjectSignals(projects, activity, doneSeen, claudeDialogs),
+    attention: computeAttentionItems(
+      projects,
+      lastActivity,
+      doneSeen,
+      claudeDialogs,
+    ),
+  };
+}
+
+/** Patch for `projectSignals` and `attention`; empty when neither changed. */
+function activityPatch(
+  prev: WorkspaceState,
+  derived: ReturnType<typeof deriveActivity>,
+): Partial<WorkspaceState> {
+  const patch: Partial<WorkspaceState> = {};
+  if (!signalsEqual(derived.signals, prev.projectSignals))
+    patch.projectSignals = derived.signals;
+  if (!attentionItemsEqual(derived.attention, prev.attention))
+    patch.attention = derived.attention;
+  return patch;
 }
 
 /** Folder lists equal by id, name, color and member order (drives drawer ordering). */
@@ -373,13 +428,21 @@ function folderListEquals(a: FolderInfo[], b: FolderInfo[]): boolean {
   for (let i = 0; i < a.length; i++) {
     const fa = a[i]!;
     const fb = b[i]!;
-    if (fa.id !== fb.id || fa.name !== fb.name || fa.folderColor !== fb.folderColor) return false;
+    if (
+      fa.id !== fb.id ||
+      fa.name !== fb.name ||
+      fa.folderColor !== fb.folderColor
+    )
+      return false;
     if (!arrayEquals(fa.projectIds, fb.projectIds)) return false;
   }
   return true;
 }
 
-function countsEqual(a: Record<string, number>, b: Record<string, number>): boolean {
+function countsEqual(
+  a: Record<string, number>,
+  b: Record<string, number>,
+): boolean {
   const entries = Object.entries(a);
   if (entries.length !== Object.keys(b).length) return false;
   return entries.every(([key, count]) => b[key] === count);
@@ -397,7 +460,9 @@ function resolveSelectedProject(
   selectedProjectId: ProjectId | null,
 ): ProjectInfo | null {
   if (selectedProjectId === null) return projects[0] ?? null;
-  return projects.find((p) => p.id === selectedProjectId) ?? projects[0] ?? null;
+  return (
+    projects.find((p) => p.id === selectedProjectId) ?? projects[0] ?? null
+  );
 }
 
 /** One poll tick — refresh remote state + run auto-selection. Mirrors `_pollState`. */
@@ -480,12 +545,19 @@ function pollState(
   // selection is gone (matches the Dart logic + `_previousTerminalIds`).
   const project = resolveSelectedProject(projects, selectedProjectId);
   if (project && project.terminalIds.length > 0) {
-    if (selectedTerminalId === null || !project.terminalIds.includes(selectedTerminalId)) {
-      selectedTerminalId = pickTerminal(project.terminalIds, [prev.terminalByProject[project.id]]);
+    if (
+      selectedTerminalId === null ||
+      !project.terminalIds.includes(selectedTerminalId)
+    ) {
+      selectedTerminalId = pickTerminal(project.terminalIds, [
+        prev.terminalByProject[project.id],
+      ]);
       patch.selectedTerminalId = selectedTerminalId;
       changed = true;
     } else if (previousTerminalIds !== null) {
-      const newIds = project.terminalIds.filter((id) => !previousTerminalIds!.has(id));
+      const newIds = project.terminalIds.filter(
+        (id) => !previousTerminalIds!.has(id),
+      );
       if (newIds.length > 0) {
         selectedTerminalId = newIds[newIds.length - 1]!;
         patch.selectedTerminalId = selectedTerminalId;
@@ -493,7 +565,11 @@ function pollState(
       }
     }
     previousTerminalIds = new Set(project.terminalIds);
-    const remembered = rememberTerminal(prev.terminalByProject, project.id, selectedTerminalId);
+    const remembered = rememberTerminal(
+      prev.terminalByProject,
+      project.id,
+      selectedTerminalId,
+    );
     if (remembered !== prev.terminalByProject) {
       patch.terminalByProject = remembered;
       changed = true;
@@ -507,7 +583,8 @@ function pollState(
   }
 
   const layoutJson =
-    (project ? native.getProjectLayoutJson(connId, project.id) : undefined) ?? null;
+    (project ? native.getProjectLayoutJson(connId, project.id) : undefined) ??
+    null;
   if (layoutJson !== prev.projectLayoutJson) {
     patch.projectLayoutJson = layoutJson;
     changed = true;
@@ -515,14 +592,15 @@ function pollState(
 
   // Activity signals. The shown terminal is the validated selection above.
   lastActivity = native.getTerminalActivity(connId);
-  const signals = deriveSignals(
+  const derived = deriveActivity(
     projects,
     patch.claudeDialogs ?? prev.claudeDialogs,
-    project ? selectedTerminalId : null,
+    project && !prev.dashboardOpen ? selectedTerminalId : null,
     connId,
   );
-  if (!signalsEqual(signals, prev.projectSignals)) {
-    patch.projectSignals = signals;
+  const derivedPatch = activityPatch(prev, derived);
+  if (Object.keys(derivedPatch).length > 0) {
+    Object.assign(patch, derivedPatch);
     changed = true;
   }
 
@@ -548,8 +626,8 @@ function pollState(
   const newActivity = native.secondsSinceActivity(connId);
   const oldActivity = prev.secondsSinceActivity;
   if (
-    (oldActivity < 3) !== (newActivity < 3) ||
-    (oldActivity < 10) !== (newActivity < 10)
+    oldActivity < 3 !== newActivity < 3 ||
+    oldActivity < 10 !== newActivity < 10
   ) {
     changed = true;
   }
@@ -563,15 +641,22 @@ function pollState(
   }
 }
 
-/** `projectSignals` patch after showing `terminalId` (empty when unchanged). */
+/**
+ * `projectSignals` / `attention` patch after selecting `terminalId`, which is
+ * on screen unless the dashboard is open (empty when unchanged).
+ */
 function signalsPatch(
   get: StoreApi<WorkspaceState>['getState'],
   projects: ProjectInfo[],
   terminalId: TerminalId | null,
   connId: ConnId,
 ): Partial<WorkspaceState> {
-  const signals = deriveSignals(projects, get().claudeDialogs, terminalId, connId);
-  return signalsEqual(signals, get().projectSignals) ? {} : { projectSignals: signals };
+  const prev = get();
+  const shown = prev.dashboardOpen ? null : terminalId;
+  return activityPatch(
+    prev,
+    deriveActivity(projects, prev.claudeDialogs, shown, connId),
+  );
 }
 
 /**
@@ -597,6 +682,8 @@ export const useWorkspaceStore: UseBoundStore<StoreApi<WorkspaceState>> =
     secondsSinceActivity: 0,
     terminalByProject: {},
     projectSignals: {},
+    attention: [],
+    dashboardOpen: true,
     previousProjectId: null,
     restoreProjectMissing: false,
     claudeDialogs: {},
@@ -629,6 +716,8 @@ export const useWorkspaceStore: UseBoundStore<StoreApi<WorkspaceState>> =
         selectedTerminalId: null,
         terminalByProject: {},
         projectSignals: {},
+        attention: [],
+        dashboardOpen: true,
         previousProjectId: null,
         restoreProjectMissing: false,
         claudeDialogs: {},
@@ -665,14 +754,17 @@ export const useWorkspaceStore: UseBoundStore<StoreApi<WorkspaceState>> =
         .catch(finish);
     },
 
-    selectProject(projectId) {
+    selectProject(projectId, preferredTerminalId) {
       previousTerminalIds = null;
       const { projects, terminalByProject, selectedProjectId } = get();
       const project = projects.find((p) => p.id === projectId);
       // Reopen the terminal last used in this project (else its first); the
       // next poll re-validates it against the live terminal list.
       const terminalId = project
-        ? pickTerminal(project.terminalIds, [terminalByProject[projectId]])
+        ? pickTerminal(project.terminalIds, [
+            preferredTerminalId,
+            terminalByProject[projectId],
+          ])
         : null;
       const connId = activeConnId;
       set({
@@ -685,7 +777,7 @@ export const useWorkspaceStore: UseBoundStore<StoreApi<WorkspaceState>> =
         // Swap the layout with the project so the old tree isn't shown until
         // the next poll.
         projectLayoutJson: connId
-          ? (deps().native.getProjectLayoutJson(connId, projectId) ?? null)
+          ? deps().native.getProjectLayoutJson(connId, projectId) ?? null
           : null,
         ...(connId ? signalsPatch(get, projects, terminalId, connId) : {}),
       });
@@ -708,7 +800,9 @@ export const useWorkspaceStore: UseBoundStore<StoreApi<WorkspaceState>> =
         terminalByProject: project
           ? rememberTerminal(get().terminalByProject, project.id, terminalId)
           : get().terminalByProject,
-        ...(connId ? signalsPatch(get, get().projects, terminalId, connId) : {}),
+        ...(connId
+          ? signalsPatch(get, get().projects, terminalId, connId)
+          : {}),
       });
     },
 
@@ -717,6 +811,24 @@ export const useWorkspaceStore: UseBoundStore<StoreApi<WorkspaceState>> =
       if (view === 'terminal') delete views[terminalId];
       else views[terminalId] = view;
       set({ terminalViews: views });
+    },
+
+    showDashboard() {
+      if (get().dashboardOpen) return;
+      set({ dashboardOpen: true });
+    },
+
+    showWorkspace(projectId, terminalId) {
+      set({ dashboardOpen: false });
+      if (projectId !== undefined) {
+        get().selectProject(projectId, terminalId);
+        return;
+      }
+      const connId = activeConnId;
+      if (connId)
+        set(
+          signalsPatch(get, get().projects, get().selectedTerminalId, connId),
+        );
     },
 
     clearRestoreProjectMissing() {

@@ -141,6 +141,22 @@ layout, focus and fullscreen state are not changed by switching. Split actions s
 server at the path of the terminal on screen (`findTerminalPath`), and the new terminal is
 auto-selected. Selection helpers live in `src/models/terminalSelection.ts`.
 
+### Dashboard
+
+A connection opens on `DashboardScreen`, not on a terminal. `dashboardOpen` in the workspace store
+switches between it and `WorkspaceScreen`; the workspace app bar's dashboard button and the
+Android back button return to it. While the dashboard is open no terminal is on screen, so nothing
+is marked seen.
+
+- **Needs you** lists the workspace store's `attention`: every terminal with an open Claude
+  dialog, a `blocked` agent, an unseen notification or bell, or a `done` agent not yet seen on the
+  phone (`computeAttentionItems` in `src/models/activityOrder.ts`; the same rule drives the drawer's
+  attention tier). The state snapshot only counts Claude dialogs, so `claudeDialogsStore` fetches
+  the session of each terminal with one while the dashboard is open, to show what it asks. A
+  Claude row opens `ClaudeDialogSheet` (answered through `claudeStore`); any other row opens its
+  terminal.
+- **Pinned projects** lists the projects pinned on the desktop. The phone cannot pin.
+
 ### Session restore
 
 `src/state/sessionStore.ts` persists (AsyncStorage key `session_memory`) the server to reconnect to

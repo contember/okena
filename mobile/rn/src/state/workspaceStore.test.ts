@@ -87,12 +87,16 @@ describe('workspace layout tracking', () => {
     });
 
     useWorkspaceStore.getState().start('conn-1');
-    expect(useWorkspaceStore.getState().projectLayoutJson).toBe(TABS_FIRST_ACTIVE);
+    expect(useWorkspaceStore.getState().projectLayoutJson).toBe(
+      TABS_FIRST_ACTIVE,
+    );
     const projectsBefore = useWorkspaceStore.getState().projects;
 
     jest.advanceTimersByTime(WORKSPACE_POLL_MS);
 
-    expect(useWorkspaceStore.getState().projectLayoutJson).toBe(TABS_SECOND_ACTIVE);
+    expect(useWorkspaceStore.getState().projectLayoutJson).toBe(
+      TABS_SECOND_ACTIVE,
+    );
     // The trigger for the original bug: the project list is byte-identical.
     expect(useWorkspaceStore.getState().projects).toEqual(projectsBefore);
   });
@@ -119,8 +123,12 @@ describe('workspace folder tracking', () => {
   });
 
   it('publishes a reorder inside a folder (same folder ids)', () => {
-    const before = [{ id: 'f', name: 'Work', projectIds: ['a', 'b'], folderColor: 'blue' }];
-    const after = [{ id: 'f', name: 'Work', projectIds: ['b', 'a'], folderColor: 'blue' }];
+    const before = [
+      { id: 'f', name: 'Work', projectIds: ['a', 'b'], folderColor: 'blue' },
+    ];
+    const after = [
+      { id: 'f', name: 'Work', projectIds: ['b', 'a'], folderColor: 'blue' },
+    ];
     let tick = 0;
     configureWorkspaceStore({
       native: {
@@ -130,19 +138,32 @@ describe('workspace folder tracking', () => {
     });
 
     useWorkspaceStore.getState().start('conn-1');
-    expect(useWorkspaceStore.getState().folders[0]!.projectIds).toEqual(['a', 'b']);
+    expect(useWorkspaceStore.getState().folders[0]!.projectIds).toEqual([
+      'a',
+      'b',
+    ]);
 
     jest.advanceTimersByTime(WORKSPACE_POLL_MS);
 
-    expect(useWorkspaceStore.getState().folders[0]!.projectIds).toEqual(['b', 'a']);
+    expect(useWorkspaceStore.getState().folders[0]!.projectIds).toEqual([
+      'b',
+      'a',
+    ]);
   });
 });
 
 describe('workspace terminal selection memory', () => {
-  const P1: ProjectInfo = { ...PROJECT, id: 'p1', terminalIds: ['a', 'b', 'c'] };
+  const P1: ProjectInfo = {
+    ...PROJECT,
+    id: 'p1',
+    terminalIds: ['a', 'b', 'c'],
+  };
   const P2: ProjectInfo = { ...PROJECT, id: 'p2', terminalIds: ['x', 'y'] };
 
-  function native(projects: () => ProjectInfo[], focused = 'p2'): WorkspaceNative {
+  function native(
+    projects: () => ProjectInfo[],
+    focused = 'p2',
+  ): WorkspaceNative {
     return {
       ...stubNative([TABS_FIRST_ACTIVE]),
       getProjects: projects,
@@ -163,7 +184,10 @@ describe('workspace terminal selection memory', () => {
     configureWorkspaceStore({ native: native(() => [P1, P2]) });
     useWorkspaceStore
       .getState()
-      .start('conn-1', { projectId: 'p1', terminalByProject: { p1: 'c', p2: 'y' } });
+      .start('conn-1', {
+        projectId: 'p1',
+        terminalByProject: { p1: 'c', p2: 'y' },
+      });
 
     const s = useWorkspaceStore.getState();
     expect(s.selectedProjectId).toBe('p1');
@@ -173,14 +197,18 @@ describe('workspace terminal selection memory', () => {
 
   it('falls back to the first terminal when the remembered one is gone', () => {
     configureWorkspaceStore({ native: native(() => [P1, P2]) });
-    useWorkspaceStore.getState().start('conn-1', { projectId: 'p1', terminalByProject: { p1: 'gone' } });
+    useWorkspaceStore
+      .getState()
+      .start('conn-1', { projectId: 'p1', terminalByProject: { p1: 'gone' } });
 
     expect(useWorkspaceStore.getState().selectedTerminalId).toBe('a');
   });
 
   it('flags a missing project and falls back to the focused one', () => {
     configureWorkspaceStore({ native: native(() => [P1, P2]) });
-    useWorkspaceStore.getState().start('conn-1', { projectId: 'deleted', terminalByProject: {} });
+    useWorkspaceStore
+      .getState()
+      .start('conn-1', { projectId: 'deleted', terminalByProject: {} });
 
     const s = useWorkspaceStore.getState();
     expect(s.restoreProjectMissing).toBe(true);
@@ -192,7 +220,9 @@ describe('workspace terminal selection memory', () => {
   it('waits for the project list before restoring', () => {
     let projects: ProjectInfo[] = [];
     configureWorkspaceStore({ native: native(() => projects) });
-    useWorkspaceStore.getState().start('conn-1', { projectId: 'p1', terminalByProject: { p1: 'b' } });
+    useWorkspaceStore
+      .getState()
+      .start('conn-1', { projectId: 'p1', terminalByProject: { p1: 'b' } });
     expect(useWorkspaceStore.getState().selectedProjectId).toBeNull();
 
     projects = [P1, P2];
@@ -217,13 +247,18 @@ describe('workspace terminal selection memory', () => {
     expect(useWorkspaceStore.getState().selectedTerminalId).toBe('c');
     jest.advanceTimersByTime(WORKSPACE_POLL_MS);
     expect(useWorkspaceStore.getState().selectedTerminalId).toBe('c');
-    expect(useWorkspaceStore.getState().terminalByProject).toEqual({ p1: 'c', p2: 'y' });
+    expect(useWorkspaceStore.getState().terminalByProject).toEqual({
+      p1: 'c',
+      p2: 'y',
+    });
   });
 
   it('selects the remembered terminal when the selection vanishes', () => {
     let p1 = P1;
     configureWorkspaceStore({ native: native(() => [p1, P2], 'p1') });
-    useWorkspaceStore.getState().start('conn-1', { projectId: null, terminalByProject: { p1: 'b' } });
+    useWorkspaceStore
+      .getState()
+      .start('conn-1', { projectId: null, terminalByProject: { p1: 'b' } });
     expect(useWorkspaceStore.getState().selectedTerminalId).toBe('b');
 
     useWorkspaceStore.getState().selectTerminal('c');
@@ -267,6 +302,8 @@ describe('workspace activity signals', () => {
 
   beforeEach(() => {
     jest.useFakeTimers();
+    // A terminal is on screen only outside the dashboard.
+    useWorkspaceStore.setState({ dashboardOpen: false });
   });
 
   afterEach(() => {
@@ -278,7 +315,10 @@ describe('workspace activity signals', () => {
   it('flags a bell in a background project and marks the shown terminal seen', () => {
     const seen: string[] = [];
     configureWorkspaceStore({
-      native: activityNative({ activity: () => [bell('a1'), bell('b1')], seen }),
+      native: activityNative({
+        activity: () => [bell('a1'), bell('b1')],
+        seen,
+      }),
       isForeground: () => true,
     });
     useWorkspaceStore.getState().start('conn-1');
@@ -294,8 +334,18 @@ describe('workspace activity signals', () => {
     configureWorkspaceStore({
       native: activityNative({
         activity: () => [
-          { terminalId: 'a1', bellUnseen: false, notificationUnseen: false, lastOutputMsAgo: 10 },
-          { terminalId: 'b1', bellUnseen: false, notificationUnseen: false, lastOutputMsAgo: 10 },
+          {
+            terminalId: 'a1',
+            bellUnseen: false,
+            notificationUnseen: false,
+            lastOutputMsAgo: 10,
+          },
+          {
+            terminalId: 'b1',
+            bellUnseen: false,
+            notificationUnseen: false,
+            lastOutputMsAgo: 10,
+          },
         ],
       }),
       isForeground: () => true,
@@ -314,7 +364,9 @@ describe('workspace activity signals', () => {
     });
     useWorkspaceStore.getState().start('conn-1');
     expect(seen).toEqual([]);
-    expect(useWorkspaceStore.getState().projectSignals.pa!.attention).toBe(true);
+    expect(useWorkspaceStore.getState().projectSignals.pa!.attention).toBe(
+      true,
+    );
   });
 
   it('clears attention as soon as the project is opened', () => {
@@ -324,11 +376,15 @@ describe('workspace activity signals', () => {
       isForeground: () => true,
     });
     useWorkspaceStore.getState().start('conn-1');
-    expect(useWorkspaceStore.getState().projectSignals.pb!.attention).toBe(true);
+    expect(useWorkspaceStore.getState().projectSignals.pb!.attention).toBe(
+      true,
+    );
 
     useWorkspaceStore.getState().selectProject('pb');
     expect(seen).toEqual(['b1']);
-    expect(useWorkspaceStore.getState().projectSignals.pb!.attention).toBe(false);
+    expect(useWorkspaceStore.getState().projectSignals.pb!.attention).toBe(
+      false,
+    );
   });
 
   it('acknowledges a done agent once seen, until the next transition to done', () => {
@@ -343,12 +399,16 @@ describe('workspace activity signals', () => {
     });
     const store = useWorkspaceStore.getState();
     store.start('conn-1');
-    expect(useWorkspaceStore.getState().projectSignals.pb!.attention).toBe(true);
+    expect(useWorkspaceStore.getState().projectSignals.pb!.attention).toBe(
+      true,
+    );
 
     store.selectProject('pb');
     store.selectProject('pa');
     jest.advanceTimersByTime(WORKSPACE_POLL_MS);
-    expect(useWorkspaceStore.getState().projectSignals.pb!.attention).toBe(false);
+    expect(useWorkspaceStore.getState().projectSignals.pb!.attention).toBe(
+      false,
+    );
 
     lifecycle = 'working';
     jest.advanceTimersByTime(WORKSPACE_POLL_MS);
@@ -359,7 +419,9 @@ describe('workspace activity signals', () => {
 
     lifecycle = 'done';
     jest.advanceTimersByTime(WORKSPACE_POLL_MS);
-    expect(useWorkspaceStore.getState().projectSignals.pb!.attention).toBe(true);
+    expect(useWorkspaceStore.getState().projectSignals.pb!.attention).toBe(
+      true,
+    );
   });
 
   it('remembers the previous project and reports the switch to the daemon', () => {
@@ -385,7 +447,10 @@ describe('workspace activity signals', () => {
   it('publishes a pin or new activity stamp even when nothing else changed', () => {
     let pinned = false;
     configureWorkspaceStore({
-      native: activityNative({ projects: () => [{ ...A, pinned }, B], activity: () => [] }),
+      native: activityNative({
+        projects: () => [{ ...A, pinned }, B],
+        activity: () => [],
+      }),
       isForeground: () => true,
     });
     useWorkspaceStore.getState().start('conn-1');
@@ -408,7 +473,10 @@ describe('workspace Claude dialog tracking', () => {
   it('publishes dialog-count changes', () => {
     let counts: Record<string, number> = {};
     configureWorkspaceStore({
-      native: { ...stubNative([TABS_FIRST_ACTIVE]), getClaudeDialogCounts: () => counts },
+      native: {
+        ...stubNative([TABS_FIRST_ACTIVE]),
+        getClaudeDialogCounts: () => counts,
+      },
     });
 
     useWorkspaceStore.getState().start('conn-1');
@@ -433,7 +501,10 @@ describe('workspace Claude sessions', () => {
   it('publishes the terminals with a connected claude', () => {
     let sessions: string[] = [];
     configureWorkspaceStore({
-      native: { ...stubNative([TABS_FIRST_ACTIVE]), getClaudeSessions: () => sessions },
+      native: {
+        ...stubNative([TABS_FIRST_ACTIVE]),
+        getClaudeSessions: () => sessions,
+      },
     });
 
     useWorkspaceStore.getState().start('conn-1');
@@ -465,10 +536,103 @@ describe('workspace terminal views', () => {
   });
 });
 
+describe('workspace dashboard', () => {
+  const A: ProjectInfo = { ...PROJECT, id: 'pa', terminalIds: ['a1'] };
+  const B: ProjectInfo = { ...PROJECT, id: 'pb', terminalIds: ['b1', 'b2'] };
+  const bell = (terminalId: string): TerminalActivity => ({
+    terminalId,
+    bellUnseen: true,
+    notificationUnseen: false,
+  });
+
+  function dashboardNative(
+    seen: string[],
+    dialogs: Record<string, number> = {},
+  ): WorkspaceNative {
+    return {
+      ...stubNative([TABS_FIRST_ACTIVE]),
+      getProjects: () => [A, B],
+      getFocusedProjectId: () => 'pa',
+      getTerminalActivity: () => [bell('a1'), bell('b2')],
+      getClaudeDialogCounts: () => dialogs,
+      markTerminalSeen: (_c, tid) => {
+        seen.push(tid);
+      },
+    };
+  }
+
+  beforeEach(() => {
+    jest.useFakeTimers();
+    configureWorkspaceStore({ isForeground: () => true });
+  });
+
+  afterEach(() => {
+    useWorkspaceStore.getState().stop();
+    jest.useRealTimers();
+  });
+
+  it('opens on the dashboard and marks nothing seen there', () => {
+    const seen: string[] = [];
+    configureWorkspaceStore({ native: dashboardNative(seen) });
+    useWorkspaceStore.getState().start('conn-1');
+    jest.advanceTimersByTime(WORKSPACE_POLL_MS);
+
+    const s = useWorkspaceStore.getState();
+    expect(s.dashboardOpen).toBe(true);
+    expect(s.selectedTerminalId).toBe('a1');
+    expect(seen).toEqual([]);
+    expect(s.attention.map((i) => i.terminalId)).toEqual(['a1', 'b2']);
+  });
+
+  it('lists Claude dialogs before bells', () => {
+    configureWorkspaceStore({ native: dashboardNative([], { b1: 2 }) });
+    useWorkspaceStore.getState().start('conn-1');
+
+    expect(useWorkspaceStore.getState().attention).toEqual([
+      { projectId: 'pb', terminalId: 'b1', kind: 'dialog', dialogs: 2 },
+      { projectId: 'pa', terminalId: 'a1', kind: 'bell', dialogs: 0 },
+      { projectId: 'pb', terminalId: 'b2', kind: 'bell', dialogs: 0 },
+    ]);
+  });
+
+  it('opens the chosen terminal and marks it seen', () => {
+    const seen: string[] = [];
+    configureWorkspaceStore({ native: dashboardNative(seen) });
+    useWorkspaceStore.getState().start('conn-1');
+
+    useWorkspaceStore.getState().showWorkspace('pb', 'b2');
+
+    const s = useWorkspaceStore.getState();
+    expect(s.dashboardOpen).toBe(false);
+    expect(s.selectedProjectId).toBe('pb');
+    expect(s.selectedTerminalId).toBe('b2');
+    expect(seen).toEqual(['b2']);
+    expect(s.attention.map((i) => i.terminalId)).toEqual(['a1']);
+  });
+
+  it('returns to the current selection and back to the dashboard', () => {
+    const seen: string[] = [];
+    configureWorkspaceStore({ native: dashboardNative(seen) });
+    useWorkspaceStore.getState().start('conn-1');
+
+    useWorkspaceStore.getState().showWorkspace();
+    expect(seen).toEqual(['a1']);
+
+    useWorkspaceStore.getState().showDashboard();
+    expect(useWorkspaceStore.getState().dashboardOpen).toBe(true);
+  });
+});
+
 describe('workspace agent usage', () => {
   const snapshot = (fetching: boolean, generatedAt: number): UsageInfo => ({
     providers: [
-      { provider: 'claude', status: 'ok', fetching, consecutiveFailures: 0, windows: [] },
+      {
+        provider: 'claude',
+        status: 'ok',
+        fetching,
+        consecutiveFailures: 0,
+        windows: [],
+      },
     ],
     workingDays: [0, 1, 2, 3, 4],
     generatedAt,
@@ -506,7 +670,10 @@ describe('workspace agent usage', () => {
   });
 
   it('reads the snapshot only when its revision moves', () => {
-    const state: { revision: number; usage?: UsageInfo } = { revision: 1, usage: snapshot(false, 1) };
+    const state: { revision: number; usage?: UsageInfo } = {
+      revision: 1,
+      usage: snapshot(false, 1),
+    };
     const calls: string[] = [];
     configureWorkspaceStore({ native: usageNative(state, calls) });
 
@@ -526,7 +693,10 @@ describe('workspace agent usage', () => {
   });
 
   it('shows a refresh until a finished snapshot arrives', () => {
-    const state: { revision: number; usage?: UsageInfo } = { revision: 1, usage: snapshot(false, 1) };
+    const state: { revision: number; usage?: UsageInfo } = {
+      revision: 1,
+      usage: snapshot(false, 1),
+    };
     const calls: string[] = [];
     configureWorkspaceStore({ native: usageNative(state, calls) });
     useWorkspaceStore.getState().start('conn-1');
@@ -549,7 +719,10 @@ describe('workspace agent usage', () => {
   });
 
   it('gives up on a refresh whose result never arrives after the timeout', async () => {
-    const state: { revision: number; usage?: UsageInfo } = { revision: 1, usage: snapshot(false, 1) };
+    const state: { revision: number; usage?: UsageInfo } = {
+      revision: 1,
+      usage: snapshot(false, 1),
+    };
     configureWorkspaceStore({ native: usageNative(state, []) });
     useWorkspaceStore.getState().start('conn-1');
 
@@ -562,8 +735,13 @@ describe('workspace agent usage', () => {
   });
 
   it('ends a throttled refresh as soon as the daemon answers', async () => {
-    const state: { revision: number; usage?: UsageInfo } = { revision: 1, usage: snapshot(false, 1) };
-    configureWorkspaceStore({ native: usageNative(state, [], () => Promise.resolve(false)) });
+    const state: { revision: number; usage?: UsageInfo } = {
+      revision: 1,
+      usage: snapshot(false, 1),
+    };
+    configureWorkspaceStore({
+      native: usageNative(state, [], () => Promise.resolve(false)),
+    });
     useWorkspaceStore.getState().start('conn-1');
 
     useWorkspaceStore.getState().refreshUsage('claude');
@@ -573,8 +751,14 @@ describe('workspace agent usage', () => {
   });
 
   it('ignores a late failure of an earlier refresh', async () => {
-    const state: { revision: number; usage?: UsageInfo } = { revision: 1, usage: snapshot(false, 1) };
-    const pending: Array<{ resolve: (running: boolean) => void; reject: (e: Error) => void }> = [];
+    const state: { revision: number; usage?: UsageInfo } = {
+      revision: 1,
+      usage: snapshot(false, 1),
+    };
+    const pending: Array<{
+      resolve: (running: boolean) => void;
+      reject: (e: Error) => void;
+    }> = [];
     const refresh = () =>
       new Promise<boolean>((resolve, reject) => {
         pending.push({ resolve, reject });

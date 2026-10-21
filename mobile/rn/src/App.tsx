@@ -7,7 +7,8 @@
  *     reconnect to the server the user had open last, bind connection state →
  *     navigation, bridge connection status → workspace polling, and record the
  *     selected project / terminal as it changes.
- *   - render: the screen the {@link useNavStore} currently points at.
+ *   - render: the screen the {@link useNavStore} currently points at; while
+ *     connected, the dashboard or the workspace (`dashboardOpen`).
  *
  * The store wiring is intentionally imperative (not React context) so the
  * stores stay singletons usable from anywhere — including non-React code.
@@ -34,7 +35,7 @@ import {
   selectShowWorkspace,
   type ConnectionState,
 } from './state/connectionStore';
-import { workspaceStore } from './state/workspaceStore';
+import { useWorkspaceStore, workspaceStore } from './state/workspaceStore';
 import { restoreForServer, sessionStore } from './state/sessionStore';
 import { bindSessionMemory, loadAndRestore } from './state/sessionRestore';
 import { onConnectionNotificationDisconnect } from './native/connectionService';
@@ -44,6 +45,7 @@ import { OkenaColors } from './theme';
 import { ServerListScreen } from './screens/ServerListScreen';
 import { PairingScreen } from './screens/PairingScreen';
 import { WorkspaceScreen } from './screens/WorkspaceScreen';
+import { DashboardScreen } from './screens/DashboardScreen';
 
 /**
  * Bridge the connection store to the workspace store's polling lifecycle:
@@ -75,6 +77,7 @@ function bindConnectionToWorkspace(): () => void {
 
 export const App: React.FC = () => {
   const screen = useNavStore((s) => s.screen);
+  const dashboardOpen = useWorkspaceStore((s) => s.dashboardOpen);
 
   useEffect(() => {
     // One-time native init, routed through the store so a configured mock is
@@ -115,7 +118,11 @@ export const App: React.FC = () => {
       >
         <SafeAreaView style={styles.root}>
           {screen === 'workspace' ? (
-            <WorkspaceScreen />
+            dashboardOpen ? (
+              <DashboardScreen />
+            ) : (
+              <WorkspaceScreen />
+            )
           ) : screen === 'pairing' ? (
             <PairingScreen />
           ) : (

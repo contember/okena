@@ -106,12 +106,51 @@ export interface ProjectSignals {
   running: boolean;
 }
 
+/** Why a terminal needs the user, most urgent first. */
+export type AttentionKind = 'dialog' | 'blocked' | 'notification' | 'bell' | 'done';
+
+const ATTENTION_PRIORITY: Record<AttentionKind, number> = {
+  dialog: 0,
+  blocked: 1,
+  notification: 2,
+  bell: 3,
+  done: 4,
+};
+
+/** A terminal that needs the user, as listed on the dashboard. */
+export interface AttentionItem {
+  projectId: ProjectId;
+  terminalId: TerminalId;
+  kind: AttentionKind;
+  /** Open Claude dialogs in the terminal. */
+  dialogs: number;
+}
+
 /**
- * Attention: an unseen bell or notification in any of the project's
- * terminals, an open Claude dialog, an agent that is `blocked`, or one that is
- * `done` and not yet seen on the phone (`doneSeen`). Running: an agent that is
- * `working`, or any terminal with output in the last
- * {@link RUNNING_OUTPUT_WINDOW_MS}.
+ * The most urgent reason `terminalId` needs the user, or `null`: an open
+ * Claude dialog, an agent that is `blocked`, an unseen notification or bell,
+ * or an agent that is `done` and not yet seen on the phone (`doneSeen`).
+ */
+export function terminalAttention(
+  project: ProjectInfo,
+  terminalId: TerminalId,
+  activity: TerminalActivity | undefined,
+  doneSeen: ReadonlySet<TerminalId>,
+  claudeDialogs: Readonly<Record<TerminalId, number>>,
+): AttentionKind | null {
+  const lifecycle = project.terminalAgentStatus[terminalId]?.lifecycle;
+  if ((claudeDialogs[terminalId] ?? 0) > 0) return 'dialog';
+  if (lifecycle === 'blocked') return 'blocked';
+  if (activity?.notificationUnseen) return 'notification';
+  if (activity?.bellUnseen) return 'bell';
+  if (lifecycle === 'done' && !doneSeen.has(terminalId)) return 'done';
+  return null;
+}
+
+/**
+ * Attention: any of the project's terminals needs the user (see
+ * {@link terminalAttention}). Running: an agent that is `working`, or any
+ * terminal with output in the last {@link RUNNING_OUTPUT_WINDOW_MS}.
  */
 export function projectSignals(
   project: ProjectInfo,
@@ -123,17 +162,11 @@ export function projectSignals(
   let running = false;
   for (const tid of project.terminalIds) {
     const a = activity.get(tid);
-    if (a) {
-      if (a.bellUnseen || a.notificationUnseen) attention = true;
-      if (a.lastOutputMsAgo !== undefined && a.lastOutputMsAgo < RUNNING_OUTPUT_WINDOW_MS) {
-        running = true;
-      }
+    if (terminalAttention(project, tid, a, doneSeen, claudeDialogs) !== null) attention = true;
+    if (a?.lastOutputMsAgo !== undefined && a.lastOutputMsAgo < RUNNING_OUTPUT_WINDOW_MS) {
+      running = true;
     }
-    if ((claudeDialogs[tid] ?? 0) > 0) attention = true;
-    const lifecycle = project.terminalAgentStatus[tid]?.lifecycle;
-    if (lifecycle === 'blocked') attention = true;
-    else if (lifecycle === 'done' && !doneSeen.has(tid)) attention = true;
-    else if (lifecycle === 'working') running = true;
+    if (project.terminalAgentStatus[tid]?.lifecycle === 'working') running = true;
   }
   return { attention, running };
 }
@@ -149,6 +182,45 @@ export function computeProjectSignals(
   const out: Record<ProjectId, ProjectSignals> = {};
   for (const p of projects) out[p.id] = projectSignals(p, byTerminal, doneSeen, claudeDialogs);
   return out;
+}
+
+/**
+ * Every terminal that needs the user, most urgent kind first; within a kind
+ * in project and terminal order.
+ */
+export function computeAttentionItems(
+  projects: readonly ProjectInfo[],
+  activity: readonly TerminalActivity[],
+  doneSeen: ReadonlySet<TerminalId>,
+  claudeDialogs: Readonly<Record<TerminalId, number>>,
+): AttentionItem[] {
+  const byTerminal = new Map(activity.map((a) => [a.terminalId, a]));
+  const items: AttentionItem[] = [];
+  for (const p of projects) {
+    for (const tid of p.terminalIds) {
+      const kind = terminalAttention(p, tid, byTerminal.get(tid), doneSeen, claudeDialogs);
+      if (kind === null) continue;
+      items.push({ projectId: p.id, terminalId: tid, kind, dialogs: claudeDialogs[tid] ?? 0 });
+    }
+  }
+  // Array.prototype.sort is stable, so project and terminal order survive.
+  return items.sort((a, b) => ATTENTION_PRIORITY[a.kind] - ATTENTION_PRIORITY[b.kind]);
+}
+
+export function attentionItemsEqual(
+  a: readonly AttentionItem[],
+  b: readonly AttentionItem[],
+): boolean {
+  if (a.length !== b.length) return false;
+  return a.every((item, i) => {
+    const other = b[i]!;
+    return (
+      item.terminalId === other.terminalId &&
+      item.projectId === other.projectId &&
+      item.kind === other.kind &&
+      item.dialogs === other.dialogs
+    );
+  });
 }
 
 /** Shallow equality for {@link computeProjectSignals} results. */
