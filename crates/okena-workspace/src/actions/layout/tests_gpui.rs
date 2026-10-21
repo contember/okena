@@ -21,7 +21,6 @@ fn make_project(id: &str) -> ProjectData {
             detached: false,
             shell_type: ShellType::Default,
             zoom_level: 1.0,
-            show_name_when_inactive: false,
         }),
         terminal_names: HashMap::new(),
         status: None,
@@ -51,7 +50,6 @@ fn terminal(id: &str) -> LayoutNode {
         detached: false,
         shell_type: ShellType::Default,
         zoom_level: 1.0,
-        show_name_when_inactive: false,
     }
 }
 
@@ -142,7 +140,6 @@ fn test_close_terminal_gpui(cx: &mut gpui::TestAppContext) {
                 detached: false,
                 shell_type: ShellType::Default,
                 zoom_level: 1.0,
-                show_name_when_inactive: false,
             },
             LayoutNode::Terminal {
                 terminal_id: Some("t2".to_string()),
@@ -151,7 +148,6 @@ fn test_close_terminal_gpui(cx: &mut gpui::TestAppContext) {
                 detached: false,
                 shell_type: ShellType::Default,
                 zoom_level: 1.0,
-                show_name_when_inactive: false,
             },
         ],
     });
@@ -214,7 +210,6 @@ fn test_close_tab_gpui(cx: &mut gpui::TestAppContext) {
                 detached: false,
                 shell_type: ShellType::Default,
                 zoom_level: 1.0,
-                show_name_when_inactive: false,
             },
             LayoutNode::Terminal {
                 terminal_id: Some("t2".to_string()),
@@ -223,7 +218,6 @@ fn test_close_tab_gpui(cx: &mut gpui::TestAppContext) {
                 detached: false,
                 shell_type: ShellType::Default,
                 zoom_level: 1.0,
-                show_name_when_inactive: false,
             },
             LayoutNode::Terminal {
                 terminal_id: Some("t3".to_string()),
@@ -232,7 +226,6 @@ fn test_close_tab_gpui(cx: &mut gpui::TestAppContext) {
                 detached: false,
                 shell_type: ShellType::Default,
                 zoom_level: 1.0,
-                show_name_when_inactive: false,
             },
         ],
         active_tab: 2,
@@ -288,7 +281,6 @@ fn test_close_terminal_before_active_tab_preserves_focus_gpui(cx: &mut gpui::Tes
                 detached: false,
                 shell_type: ShellType::Default,
                 zoom_level: 1.0,
-                show_name_when_inactive: false,
             },
             LayoutNode::Terminal {
                 terminal_id: Some("t2".to_string()),
@@ -297,7 +289,6 @@ fn test_close_terminal_before_active_tab_preserves_focus_gpui(cx: &mut gpui::Tes
                 detached: false,
                 shell_type: ShellType::Default,
                 zoom_level: 1.0,
-                show_name_when_inactive: false,
             },
             LayoutNode::Terminal {
                 terminal_id: Some("t3".to_string()),
@@ -306,7 +297,6 @@ fn test_close_terminal_before_active_tab_preserves_focus_gpui(cx: &mut gpui::Tes
                 detached: false,
                 shell_type: ShellType::Default,
                 zoom_level: 1.0,
-                show_name_when_inactive: false,
             },
         ],
         active_tab: 1,
@@ -387,7 +377,6 @@ fn test_close_before_last_active_tab_preserves_focus_gpui(cx: &mut gpui::TestApp
         detached: false,
         shell_type: ShellType::Default,
         zoom_level: 1.0,
-        show_name_when_inactive: false,
     };
     let mut project = make_project("p1");
     project.layout = Some(LayoutNode::Tabs {
@@ -447,7 +436,6 @@ fn test_move_tab_gpui(cx: &mut gpui::TestAppContext) {
                 detached: false,
                 shell_type: ShellType::Default,
                 zoom_level: 1.0,
-                show_name_when_inactive: false,
             },
             LayoutNode::Terminal {
                 terminal_id: Some("t2".to_string()),
@@ -456,7 +444,6 @@ fn test_move_tab_gpui(cx: &mut gpui::TestAppContext) {
                 detached: false,
                 shell_type: ShellType::Default,
                 zoom_level: 1.0,
-                show_name_when_inactive: false,
             },
             LayoutNode::Terminal {
                 terminal_id: Some("t3".to_string()),
@@ -465,7 +452,6 @@ fn test_move_tab_gpui(cx: &mut gpui::TestAppContext) {
                 detached: false,
                 shell_type: ShellType::Default,
                 zoom_level: 1.0,
-                show_name_when_inactive: false,
             },
         ],
         active_tab: 0,
@@ -513,7 +499,6 @@ fn terminal_node_t(id: &str) -> LayoutNode {
         detached: false,
         shell_type: ShellType::Default,
         zoom_level: 1.0,
-        show_name_when_inactive: false,
     }
 }
 

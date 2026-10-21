@@ -197,14 +197,6 @@ pub fn execute_action(
             ws.set_project_status(&project_id, status, cx);
             ActionResult::Ok(None)
         }
-        ActionRequest::SetTerminalNameOverlay {
-            project_id,
-            terminal_id,
-            enabled,
-        } => {
-            ws.set_terminal_name_overlay(&project_id, &terminal_id, enabled, cx);
-            ActionResult::Ok(None)
-        }
         ActionRequest::SwitchTerminalShell {
             project_id,
             terminal_id,
@@ -1371,7 +1363,6 @@ mod reconnect_shell_tests {
                 minimized: false,
                 detached: false,
                 zoom_level: 1.0,
-                show_name_when_inactive: false,
             }),
             terminal_names: HashMap::new(),
             status: None,
@@ -1787,7 +1778,6 @@ mod agent_resume_tests {
             detached: false,
             shell_type: ShellType::Default,
             zoom_level: 1.0,
-            show_name_when_inactive: false,
         };
         data.projects[0].layout = Some(LayoutNode::Split {
             direction: SplitDirection::Horizontal,

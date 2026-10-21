@@ -921,7 +921,6 @@ mod tests {
             shell_type,
             cols: None,
             rows: None,
-            show_name_when_inactive: false,
         }
     }
 

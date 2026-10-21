@@ -1223,7 +1223,6 @@ mod tests {
             minimized: false,
             detached: false,
             zoom_level: 1.0,
-            show_name_when_inactive: false,
         };
 
         let mut outgoing = project("old", "outgoing-hook", None);
@@ -1324,7 +1323,6 @@ mod tests {
             minimized: false,
             detached: false,
             zoom_level: 1.0,
-            show_name_when_inactive: false,
         });
         let mut successful = project(
             "successful",
@@ -1339,7 +1337,6 @@ mod tests {
             minimized: false,
             detached: false,
             zoom_level: 1.0,
-            show_name_when_inactive: false,
         });
 
         let result = replace_workspace_with(

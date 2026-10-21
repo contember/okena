@@ -1177,7 +1177,6 @@ mod tests {
                 detached: false,
                 shell_type: Default::default(),
                 zoom_level: 1.0,
-                show_name_when_inactive: false,
             }),
             terminal_names: HashMap::new(),
             status: None,

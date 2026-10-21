@@ -65,18 +65,18 @@ impl<D: ActionDispatch + Send + Sync> Render for TerminalPane<D> {
 
         let is_focused = window.is_window_active() && focus_handle.is_focused(window);
 
+        let view_settings = terminal_view_settings(cx);
         let overlay_name = self
             .terminal
             .as_ref()
-            .filter(|_| !is_focused && !search_active)
+            .filter(|_| view_settings.show_name_when_inactive && !is_focused && !search_active)
             .and_then(|terminal| {
-                let ws = self.workspace.read(cx);
-                if !ws.terminal_name_overlay_enabled(&self.project_id, &terminal.terminal_id) {
-                    return None;
-                }
-                ws.project(&self.project_id).map(|project| {
-                    project.terminal_display_name(&terminal.terminal_id, terminal.title())
-                })
+                self.workspace
+                    .read(cx)
+                    .project(&self.project_id)
+                    .map(|project| {
+                        project.terminal_display_name(&terminal.terminal_id, terminal.title())
+                    })
             });
 
         let has_bell = self.terminal.as_ref().is_some_and(|t| t.has_bell());
@@ -118,7 +118,7 @@ impl<D: ActionDispatch + Send + Sync> Render for TerminalPane<D> {
         }
         self.was_focused = is_focused;
 
-        let show_focused_border = terminal_view_settings(cx).show_focused_border;
+        let show_focused_border = view_settings.show_focused_border;
         let is_waiting = !is_focused
             && self
                 .terminal
