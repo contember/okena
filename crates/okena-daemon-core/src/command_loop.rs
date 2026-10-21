@@ -2866,7 +2866,7 @@ pub async fn daemon_command_loop(
     git_poll_trigger_tx: tokio::sync::mpsc::UnboundedSender<GitPollTrigger>,
     claude_pane_env: Arc<ClaudePaneEnv>,
     claude_hub: Weak<ClaudeRemoteHub>,
-    ai_proxy_accounts: crate::ai_proxy::AiProxyAccounts,
+    ai_proxy_poll: crate::ai_proxy::AiProxyPoll,
 ) {
     // Single dormant "main" FocusManager. The loop is single-threaded, so it
     // owns the FM directly instead of resolving a per-window entity like the
@@ -2912,12 +2912,12 @@ pub async fn daemon_command_loop(
             // Talks to the AI proxy over its management socket (and may start
             // it), so it runs off the loop.
             RemoteCommand::Action(ActionRequest::AiProxy { request }) => {
-                let ai_proxy_accounts = ai_proxy_accounts.clone();
+                let ai_proxy_poll = ai_proxy_poll.clone();
                 let changes_accounts = crate::ai_proxy::changes_accounts(&request);
                 runtime.spawn(async move {
                     let state = crate::ai_proxy::execute(request).await;
                     if changes_accounts {
-                        ai_proxy_accounts.refresh();
+                        ai_proxy_poll.refresh();
                     }
                     if let Some(reply) = reply {
                         let _ = reply.send(CommandResult::Ok(serde_json::to_value(state).ok()));
@@ -3114,7 +3114,7 @@ pub async fn daemon_command_loop(
                                 &backend,
                                 &claude_pane_env,
                                 &runtime,
-                                &ai_proxy_accounts,
+                                &ai_proxy_poll,
                             );
                         }
                         apply_scrollback_after_committed_settings_change(
@@ -4370,7 +4370,6 @@ pub async fn daemon_command_loop(
                     &agent_statuses,
                     windows,
                     hooks,
-                    ai_proxy_accounts.snapshot(),
                 );
                 resp.claude_dialogs = claude_dialogs;
                 resp.claude_sessions = claude_sessions;
@@ -5006,7 +5005,7 @@ mod tests {
                 tokio::sync::mpsc::unbounded_channel().0,
                 Arc::new(ClaudePaneEnv::resolve()),
                 Weak::new(),
-                crate::ai_proxy::AiProxyAccounts::new(watch::channel(0).0),
+                crate::ai_proxy::AiProxyPoll::default(),
             ))
         }
     }

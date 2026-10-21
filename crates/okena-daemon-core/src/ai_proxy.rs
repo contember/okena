@@ -1,7 +1,6 @@
 //! Daemon side of the AI proxy (`okena-ai`): environment for new shells,
 //! starting the proxy process, forwarding `ActionRequest::AiProxy`, and
-//! publishing the pool's accounts, its summary and each account's history to
-//! clients.
+//! publishing the pool summary and each account's history to clients.
 
 use crate::claude_remote::PaneEnv;
 use okena_agent_usage::history::History;
@@ -24,7 +23,7 @@ use std::time::Duration;
 use tokio::sync::{Notify, watch};
 use tokio::time::Instant;
 
-/// How often the published accounts follow the proxy's usage and cooldowns.
+/// How often the pool summary follows the proxy's usage and cooldowns.
 const ACCOUNTS_POLL_INTERVAL: Duration = Duration::from_secs(15);
 /// How long an account's usage history serves the pool summary before it is
 /// read again.
@@ -124,18 +123,18 @@ pub(crate) fn apply_settings_change(
     backend: &Arc<dyn TerminalBackend>,
     pane_env: &Arc<PaneEnv>,
     runtime: &tokio::runtime::Handle,
-    accounts: &AiProxyAccounts,
+    poll: &AiProxyPoll,
 ) {
     let after = ProxySettings::of(&settings.lock());
     if after.routed && !before.routed {
         start_if_enabled(settings, backend, pane_env, runtime);
     }
     if after != *before {
-        accounts.refresh();
+        poll.refresh();
     }
 }
 
-/// Whether `command` can change the published accounts or the pool summary.
+/// Whether `command` can change the pool summary.
 pub(crate) fn changes_accounts(command: &AiProxyCommand) -> bool {
     match command {
         AiProxyCommand::FinishLogin { .. }
@@ -175,52 +174,29 @@ pub(crate) async fn execute(command: AiProxyCommand) -> AiProxyState {
     }
 }
 
-/// The pool's accounts as clients see them in `StateResponse::ai_accounts`.
-#[derive(Clone)]
-pub struct AiProxyAccounts {
-    accounts: Arc<Mutex<Vec<AiAccount>>>,
-    state_version: watch::Sender<u64>,
+/// Handle on [`run_accounts_poll`] for starting a pass before its interval.
+#[derive(Clone, Default)]
+pub struct AiProxyPoll {
     refresh: Arc<Notify>,
 }
 
-impl AiProxyAccounts {
-    pub(crate) fn new(state_version: watch::Sender<u64>) -> Self {
-        Self {
-            accounts: Arc::new(Mutex::new(Vec::new())),
-            state_version,
-            refresh: Arc::new(Notify::new()),
-        }
-    }
-
-    pub(crate) fn snapshot(&self) -> Vec<AiAccount> {
-        self.accounts.lock().clone()
-    }
-
+impl AiProxyPoll {
     /// Re-read the accounts now instead of at the next poll.
     pub(crate) fn refresh(&self) {
         self.refresh.notify_one();
     }
-
-    fn publish(&self, accounts: Vec<AiAccount>) {
-        let mut published = self.accounts.lock();
-        if *published != accounts {
-            *published = accounts;
-            self.state_version
-                .send_modify(|version| *version = version.wrapping_add(1));
-        }
-    }
 }
 
-/// Keep [`AiProxyAccounts`] and the pool summary in `usage` in step with the
-/// proxy while new shells are routed through it. New shells get its URL
+/// Keep the pool summary in `usage` in step with the proxy while new shells
+/// are routed through it. New shells get its URL
 /// whether or not it listens, so a proxy that died is started again, and a
 /// port it moved to reaches new shells. With routing off, or the proxy
-/// unreachable, no accounts and no pool are published: the `claude` login's
+/// unreachable, no pool is published: the `claude` login's
 /// own usage is then the relevant one. While no client is connected, only a
 /// refresh starts a pass; the next client gets one at once when the interval
 /// has passed.
 pub(crate) async fn run_accounts_poll(
-    accounts: AiProxyAccounts,
+    poll: AiProxyPoll,
     settings: Arc<Mutex<AppSettings>>,
     backend: Arc<dyn TerminalBackend>,
     pane_env: Arc<PaneEnv>,
@@ -252,18 +228,16 @@ pub(crate) async fn run_accounts_poll(
             None
         };
         let Some((client, current)) = read else {
-            accounts.publish(Vec::new());
             usage.set_pool(None);
-            wait_for_next_poll(&accounts, &mut clients).await;
+            wait_for_next_poll(&poll, &mut clients).await;
             continue;
         };
-        accounts.publish(current.clone());
         // A refresh cuts the history reads short and polls again at once; the
         // pool waits for that pass, so it never shows an account without the
         // history that is still being read.
         let refresh_requested = tokio::select! {
             () = histories.reload_due(&client, &current) => false,
-            () = accounts.refresh.notified() => true,
+            () = poll.refresh.notified() => true,
         };
         if refresh_requested {
             continue;
@@ -286,18 +260,18 @@ pub(crate) async fn run_accounts_poll(
             }
             Err(error) => log::error!("[ai-proxy] pool summary failed: {error}"),
         }
-        wait_for_next_poll(&accounts, &mut clients).await;
+        wait_for_next_poll(&poll, &mut clients).await;
     }
 }
 
-async fn wait_for_next_poll(accounts: &AiProxyAccounts, clients: &mut watch::Receiver<usize>) {
+async fn wait_for_next_poll(poll: &AiProxyPoll, clients: &mut watch::Receiver<usize>) {
     let interval_with_a_client = async {
         tokio::time::sleep(ACCOUNTS_POLL_INTERVAL).await;
         let _ = clients.wait_for(|count| *count > 0).await;
     };
     tokio::select! {
         () = interval_with_a_client => {}
-        () = accounts.refresh.notified() => {}
+        () = poll.refresh.notified() => {}
     }
 }
 
@@ -556,10 +530,10 @@ mod tests {
     #[tokio::test(flavor = "current_thread", start_paused = true)]
     async fn the_next_poll_waits_for_a_client_unless_refreshed() {
         let hub = UsageHub::detached();
-        let accounts = AiProxyAccounts::new(watch::channel(0).0);
+        let poll = AiProxyPoll::default();
         let mut clients = hub.clients();
         {
-            let waiting = wait_for_next_poll(&accounts, &mut clients);
+            let waiting = wait_for_next_poll(&poll, &mut clients);
             tokio::pin!(waiting);
             let headless = tokio::time::timeout(ACCOUNTS_POLL_INTERVAL * 10, &mut waiting).await;
             assert!(headless.is_err(), "polled with no client");
@@ -572,10 +546,10 @@ mod tests {
         }
 
         // A refresh starts a pass with no client.
-        accounts.refresh();
+        poll.refresh();
         tokio::time::timeout(
             Duration::from_millis(1),
-            wait_for_next_poll(&accounts, &mut clients),
+            wait_for_next_poll(&poll, &mut clients),
         )
         .await
         .expect("a refresh did not start a pass");
@@ -586,11 +560,11 @@ mod tests {
         let settings = Arc::new(Mutex::new(AppSettings::default()));
         let backend: Arc<dyn TerminalBackend> = Arc::new(StubBackend);
         let pane_env = Arc::new(PaneEnv::resolve());
-        let accounts = AiProxyAccounts::new(watch::channel(0).0);
-        let refreshed = |accounts: &AiProxyAccounts| {
-            let accounts = accounts.clone();
+        let poll = AiProxyPoll::default();
+        let refreshed = |poll: &AiProxyPoll| {
+            let poll = poll.clone();
             async move {
-                tokio::time::timeout(Duration::from_millis(20), accounts.refresh.notified())
+                tokio::time::timeout(Duration::from_millis(20), poll.refresh.notified())
                     .await
                     .is_ok()
             }
@@ -604,17 +578,17 @@ mod tests {
                 &backend,
                 &pane_env,
                 &tokio::runtime::Handle::current(),
-                &accounts,
+                &poll,
             );
         };
         change(&|settings| settings.scrollback_lines += 1);
-        assert!(!refreshed(&accounts).await);
+        assert!(!refreshed(&poll).await);
         change(&|settings| {
             settings
                 .extension_settings
                 .insert(USAGE_SETTINGS_KEY.into(), serde_json::json!({"days": [1]}));
         });
-        assert!(refreshed(&accounts).await);
+        assert!(refreshed(&poll).await);
     }
 
     #[tokio::test]
@@ -641,9 +615,8 @@ mod tests {
         let mut routing_off = AppSettings::default();
         routing_off.ai_proxy_enabled = false;
         let settings = Arc::new(Mutex::new(routing_off));
-        let accounts = AiProxyAccounts::new(watch::channel(0).0);
         let poll = run_accounts_poll(
-            accounts,
+            AiProxyPoll::default(),
             settings,
             Arc::new(StubBackend),
             Arc::new(PaneEnv::resolve()),
