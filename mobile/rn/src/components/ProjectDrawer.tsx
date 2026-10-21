@@ -90,7 +90,7 @@ const COLOR_HEX: Record<string, string> = {
   pink: '#e91e63',
 };
 
-function folderColor(name: string): string {
+export function folderColor(name: string): string {
   return COLOR_HEX[name] ?? OkenaColors.textTertiary;
 }
 

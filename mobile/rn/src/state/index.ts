@@ -53,6 +53,13 @@ export {
 } from './claudeStore';
 
 export {
+  useClaudeDialogsStore,
+  configureClaudeDialogsStore,
+  type ClaudeDialogsState,
+  type ClaudeDialogsDeps,
+} from './claudeDialogsStore';
+
+export {
   asyncStoragePersistence,
   createMemoryPersistence,
   type Persistence,

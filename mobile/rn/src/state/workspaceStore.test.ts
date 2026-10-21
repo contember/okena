@@ -263,6 +263,8 @@ describe('workspace activity signals', () => {
 
   beforeEach(() => {
     jest.useFakeTimers();
+    // A terminal is on screen only outside the dashboard.
+    useWorkspaceStore.setState({ dashboardOpen: false });
   });
 
   afterEach(() => {
@@ -458,5 +460,89 @@ describe('workspace terminal views', () => {
 
     store.stop();
     expect(useWorkspaceStore.getState().terminalViews).toEqual({});
+  });
+});
+
+describe('workspace dashboard', () => {
+  const A: ProjectInfo = { ...PROJECT, id: 'pa', terminalIds: ['a1'] };
+  const B: ProjectInfo = { ...PROJECT, id: 'pb', terminalIds: ['b1', 'b2'] };
+  const bell = (terminalId: string): TerminalActivity => ({
+    terminalId,
+    bellUnseen: true,
+    notificationUnseen: false,
+  });
+
+  function dashboardNative(seen: string[], dialogs: Record<string, number> = {}): WorkspaceNative {
+    return {
+      ...stubNative([TABS_FIRST_ACTIVE]),
+      getProjects: () => [A, B],
+      getFocusedProjectId: () => 'pa',
+      getTerminalActivity: () => [bell('a1'), bell('b2')],
+      getClaudeDialogCounts: () => dialogs,
+      markTerminalSeen: (_c, tid) => {
+        seen.push(tid);
+      },
+    };
+  }
+
+  beforeEach(() => {
+    jest.useFakeTimers();
+    configureWorkspaceStore({ isForeground: () => true });
+  });
+
+  afterEach(() => {
+    useWorkspaceStore.getState().stop();
+    jest.useRealTimers();
+  });
+
+  it('opens on the dashboard and marks nothing seen there', () => {
+    const seen: string[] = [];
+    configureWorkspaceStore({ native: dashboardNative(seen) });
+    useWorkspaceStore.getState().start('conn-1');
+    jest.advanceTimersByTime(WORKSPACE_POLL_MS);
+
+    const s = useWorkspaceStore.getState();
+    expect(s.dashboardOpen).toBe(true);
+    expect(s.selectedTerminalId).toBe('a1');
+    expect(seen).toEqual([]);
+    expect(s.attention.map((i) => i.terminalId)).toEqual(['a1', 'b2']);
+  });
+
+  it('lists Claude dialogs before bells', () => {
+    configureWorkspaceStore({ native: dashboardNative([], { b1: 2 }) });
+    useWorkspaceStore.getState().start('conn-1');
+
+    expect(useWorkspaceStore.getState().attention).toEqual([
+      { projectId: 'pb', terminalId: 'b1', kind: 'dialog', dialogs: 2 },
+      { projectId: 'pa', terminalId: 'a1', kind: 'bell', dialogs: 0 },
+      { projectId: 'pb', terminalId: 'b2', kind: 'bell', dialogs: 0 },
+    ]);
+  });
+
+  it('opens the chosen terminal and marks it seen', () => {
+    const seen: string[] = [];
+    configureWorkspaceStore({ native: dashboardNative(seen) });
+    useWorkspaceStore.getState().start('conn-1');
+
+    useWorkspaceStore.getState().showWorkspace('pb', 'b2');
+
+    const s = useWorkspaceStore.getState();
+    expect(s.dashboardOpen).toBe(false);
+    expect(s.selectedProjectId).toBe('pb');
+    expect(s.selectedTerminalId).toBe('b2');
+    expect(seen).toEqual(['b2']);
+    expect(s.attention.map((i) => i.terminalId)).toEqual(['a1']);
+  });
+
+  it('returns to the current selection and back to the dashboard', () => {
+    const seen: string[] = [];
+    configureWorkspaceStore({ native: dashboardNative(seen) });
+    useWorkspaceStore.getState().start('conn-1');
+
+    useWorkspaceStore.getState().showWorkspace();
+    expect(seen).toEqual(['a1']);
+
+    useWorkspaceStore.getState().showDashboard();
+    expect(useWorkspaceStore.getState().dashboardOpen).toBe(true);
   });
 });

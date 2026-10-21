@@ -16,7 +16,8 @@
  *
  * The terminal on screen counts as seen: each poll (and each selection)
  * clears its unseen bell / notification and acknowledges a `done` agent. Its
- * output does not make its project "running".
+ * output does not make its project "running". While the dashboard is open no
+ * terminal is on screen.
  *
  * It auto-selects the focused project when nothing is selected, and auto-selects
  * a terminal within the selected project (newly-added one, or the remembered /
@@ -56,8 +57,11 @@ import {
   type SelectionMemory,
 } from '../models/terminalSelection';
 import {
+  attentionItemsEqual,
+  computeAttentionItems,
   computeProjectSignals,
   signalsEqual,
+  type AttentionItem,
   type ProjectSignals,
 } from '../models/activityOrder';
 import type { TerminalActivity } from '../native/okena';
@@ -128,6 +132,10 @@ export interface WorkspaceState {
   terminalByProject: Record<ProjectId, TerminalId>;
   /** Live activity signals per project (drawer / switcher order and dots). */
   projectSignals: Record<ProjectId, ProjectSignals>;
+  /** Terminals that need the user, most urgent first (dashboard). */
+  attention: AttentionItem[];
+  /** The dashboard is shown instead of the workspace. */
+  dashboardOpen: boolean;
   /** The project shown before the current one (switcher: one tap back). */
   previousProjectId: ProjectId | null;
   /**
@@ -158,12 +166,22 @@ export interface WorkspaceState {
    * longer connected (mirrors the Dart `_onConnectionChanged` else-branch).
    */
   stop(): void;
-  /** Select a project and its remembered (or first) terminal. Mirrors `selectProject`. */
-  selectProject(projectId: ProjectId): void;
+  /**
+   * Select a project and `terminalId` if it is one of the project's terminals,
+   * else its remembered (or first) terminal. Mirrors `selectProject`.
+   */
+  selectProject(projectId: ProjectId, terminalId?: TerminalId): void;
   /** Select a terminal within the current project. Mirrors `selectTerminal`. */
   selectTerminal(terminalId: TerminalId): void;
   /** Show a terminal as its terminal or as its Claude chat. */
   setTerminalView(terminalId: TerminalId, view: TerminalViewMode): void;
+  /** Show the dashboard. */
+  showDashboard(): void;
+  /**
+   * Leave the dashboard for the workspace, on `projectId` (see
+   * {@link selectProject}) or on the current selection.
+   */
+  showWorkspace(projectId?: ProjectId, terminalId?: TerminalId): void;
   /** Acknowledge {@link restoreProjectMissing}. */
   clearRestoreProjectMissing(): void;
   /**
@@ -282,14 +300,15 @@ function agentStatusEquals(
 /**
  * Mark the terminal on screen seen (bell / notification cleared in the
  * mirror, a `done` agent acknowledged), forget acknowledgements of terminals
- * that left `done`, and derive per-project signals from `lastActivity`.
+ * that left `done`, and derive per-project signals and the attention list
+ * from `lastActivity`.
  */
-function deriveSignals(
+function deriveActivity(
   projects: ProjectInfo[],
   claudeDialogs: Record<TerminalId, number>,
   shownTerminalId: TerminalId | null,
   connId: ConnId,
-): Record<ProjectId, ProjectSignals> {
+): { signals: Record<ProjectId, ProjectSignals>; attention: AttentionItem[] } {
   const native = deps().native;
   const lifecycle = new Map<TerminalId, string>();
   for (const p of projects) {
@@ -318,7 +337,21 @@ function deriveSignals(
       : lastActivity.map((a) =>
           a.terminalId === shownTerminalId ? { ...a, lastOutputMsAgo: undefined } : a,
         );
-  return computeProjectSignals(projects, activity, doneSeen, claudeDialogs);
+  return {
+    signals: computeProjectSignals(projects, activity, doneSeen, claudeDialogs),
+    attention: computeAttentionItems(projects, lastActivity, doneSeen, claudeDialogs),
+  };
+}
+
+/** Patch for `projectSignals` and `attention`; empty when neither changed. */
+function activityPatch(
+  prev: WorkspaceState,
+  derived: ReturnType<typeof deriveActivity>,
+): Partial<WorkspaceState> {
+  const patch: Partial<WorkspaceState> = {};
+  if (!signalsEqual(derived.signals, prev.projectSignals)) patch.projectSignals = derived.signals;
+  if (!attentionItemsEqual(derived.attention, prev.attention)) patch.attention = derived.attention;
+  return patch;
 }
 
 /** Folder lists equal by id, name, color and member order (drives drawer ordering). */
@@ -469,14 +502,15 @@ function pollState(
 
   // Activity signals. The shown terminal is the validated selection above.
   lastActivity = native.getTerminalActivity(connId);
-  const signals = deriveSignals(
+  const derived = deriveActivity(
     projects,
     patch.claudeDialogs ?? prev.claudeDialogs,
-    project ? selectedTerminalId : null,
+    project && !prev.dashboardOpen ? selectedTerminalId : null,
     connId,
   );
-  if (!signalsEqual(signals, prev.projectSignals)) {
-    patch.projectSignals = signals;
+  const derivedPatch = activityPatch(prev, derived);
+  if (Object.keys(derivedPatch).length > 0) {
+    Object.assign(patch, derivedPatch);
     changed = true;
   }
 
@@ -499,15 +533,19 @@ function pollState(
   }
 }
 
-/** `projectSignals` patch after showing `terminalId` (empty when unchanged). */
+/**
+ * `projectSignals` / `attention` patch after selecting `terminalId`, which is
+ * on screen unless the dashboard is open (empty when unchanged).
+ */
 function signalsPatch(
   get: StoreApi<WorkspaceState>['getState'],
   projects: ProjectInfo[],
   terminalId: TerminalId | null,
   connId: ConnId,
 ): Partial<WorkspaceState> {
-  const signals = deriveSignals(projects, get().claudeDialogs, terminalId, connId);
-  return signalsEqual(signals, get().projectSignals) ? {} : { projectSignals: signals };
+  const prev = get();
+  const shown = prev.dashboardOpen ? null : terminalId;
+  return activityPatch(prev, deriveActivity(projects, prev.claudeDialogs, shown, connId));
 }
 
 /**
@@ -533,6 +571,8 @@ export const useWorkspaceStore: UseBoundStore<StoreApi<WorkspaceState>> =
     secondsSinceActivity: 0,
     terminalByProject: {},
     projectSignals: {},
+    attention: [],
+    dashboardOpen: true,
     previousProjectId: null,
     restoreProjectMissing: false,
     claudeDialogs: {},
@@ -563,6 +603,8 @@ export const useWorkspaceStore: UseBoundStore<StoreApi<WorkspaceState>> =
         selectedTerminalId: null,
         terminalByProject: {},
         projectSignals: {},
+        attention: [],
+        dashboardOpen: true,
         previousProjectId: null,
         restoreProjectMissing: false,
         claudeDialogs: {},
@@ -571,14 +613,14 @@ export const useWorkspaceStore: UseBoundStore<StoreApi<WorkspaceState>> =
       });
     },
 
-    selectProject(projectId) {
+    selectProject(projectId, preferredTerminalId) {
       previousTerminalIds = null;
       const { projects, terminalByProject, selectedProjectId } = get();
       const project = projects.find((p) => p.id === projectId);
       // Reopen the terminal last used in this project (else its first); the
       // next poll re-validates it against the live terminal list.
       const terminalId = project
-        ? pickTerminal(project.terminalIds, [terminalByProject[projectId]])
+        ? pickTerminal(project.terminalIds, [preferredTerminalId, terminalByProject[projectId]])
         : null;
       const connId = activeConnId;
       set({
@@ -623,6 +665,21 @@ export const useWorkspaceStore: UseBoundStore<StoreApi<WorkspaceState>> =
       if (view === 'terminal') delete views[terminalId];
       else views[terminalId] = view;
       set({ terminalViews: views });
+    },
+
+    showDashboard() {
+      if (get().dashboardOpen) return;
+      set({ dashboardOpen: true });
+    },
+
+    showWorkspace(projectId, terminalId) {
+      set({ dashboardOpen: false });
+      if (projectId !== undefined) {
+        get().selectProject(projectId, terminalId);
+        return;
+      }
+      const connId = activeConnId;
+      if (connId) set(signalsPatch(get, get().projects, get().selectedTerminalId, connId));
     },
 
     clearRestoreProjectMissing() {

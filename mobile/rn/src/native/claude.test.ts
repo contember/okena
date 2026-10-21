@@ -9,6 +9,8 @@ import {
   previewClaudeToolInput,
   readClaudePlan,
   readClaudeQuestions,
+  summarizeClaudeDialog,
+  type ApiClaudeDialog,
 } from './claude';
 import { nativeErrorMessage } from './okena';
 
@@ -216,5 +218,35 @@ describe('nativeErrorMessage', () => {
     ).toBe('dialog already answered');
     expect(nativeErrorMessage(new Error('boom'))).toBe('boom');
     expect(nativeErrorMessage('text')).toBe('text');
+  });
+});
+
+describe('summarizeClaudeDialog', () => {
+  const dialog = (tool_name: string, tool_input: unknown): ApiClaudeDialog => ({
+    id: 'd1',
+    tool_name,
+    tool_input,
+    permission_suggestions: [],
+    created_at_ms: 1,
+  });
+
+  it('shows the first question of AskUserQuestion', () => {
+    const input = {
+      questions: [
+        { question: 'Which layout?', options: [{ label: 'A' }] },
+        { question: 'Second?', options: [{ label: 'B' }] },
+      ],
+    };
+    expect(summarizeClaudeDialog(dialog('AskUserQuestion', input))).toBe('Which layout?');
+  });
+
+  it('shows the first plan line without its heading marks', () => {
+    const input = { plan: '\n# Move the differ\n\n1. Step' };
+    expect(summarizeClaudeDialog(dialog('ExitPlanMode', input))).toBe('Plan: Move the differ');
+    expect(summarizeClaudeDialog(dialog('ExitPlanMode', {}))).toBe('Plan ready to approve');
+  });
+
+  it('shows any other tool call on one line', () => {
+    expect(summarizeClaudeDialog(dialog('Bash', { command: 'ls\n  -la' }))).toBe('Bash: ls -la');
   });
 });
