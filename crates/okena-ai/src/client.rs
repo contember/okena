@@ -17,16 +17,16 @@ pub struct ProxyClient {
 }
 
 impl ProxyClient {
-    pub fn new(endpoint: ProxyEndpoint, management_key: String) -> Self {
-        Self {
+    pub fn new(endpoint: ProxyEndpoint, management_key: String) -> anyhow::Result<Self> {
+        Ok(Self {
             endpoint,
             management_key,
             http: reqwest::Client::builder()
-                // Loopback must never go through a configured HTTP proxy.
+                // Loopback must never go through a configured HTTP proxy, and a
+                // default client would send the management key through one.
                 .no_proxy()
-                .build()
-                .unwrap_or_default(),
-        }
+                .build()?,
+        })
     }
 
     pub fn endpoint(&self) -> &ProxyEndpoint {
@@ -87,7 +87,7 @@ impl ProxyClient {
 /// an update never cuts a running response; otherwise the old one keeps serving.
 pub async fn ensure_running(profile_root: &Path, exe: &Path) -> anyhow::Result<ProxyClient> {
     let management_key = ensure_management_key(profile_root)?;
-    let client = ProxyClient::new(ensure_endpoint(profile_root)?, management_key.clone());
+    let client = ProxyClient::new(ensure_endpoint(profile_root)?, management_key.clone())?;
     match client.health().await {
         Ok(health) if health.version == crate::VERSION => return Ok(client),
         Ok(health) => {
@@ -112,7 +112,7 @@ pub async fn ensure_running(profile_root: &Path, exe: &Path) -> anyhow::Result<P
     while tokio::time::Instant::now() < deadline {
         // The proxy may have moved to another port if the old one was taken.
         if let Ok(Some(endpoint)) = load_endpoint(profile_root) {
-            let started = ProxyClient::new(endpoint, management_key.clone());
+            let started = ProxyClient::new(endpoint, management_key.clone())?;
             if started.health().await.is_ok() {
                 return Ok(started);
             }

@@ -495,7 +495,7 @@ mod tests {
         let endpoint = okena_core::ai_proxy::ensure_endpoint(&root).unwrap();
         let management_key = ensure_management_key(&root).unwrap();
         tokio::spawn(serve(root, upstream, std::future::pending()));
-        let client = crate::client::ProxyClient::new(endpoint.clone(), management_key);
+        let client = crate::client::ProxyClient::new(endpoint.clone(), management_key).unwrap();
         for _ in 0..100 {
             if client.health().await.is_ok() {
                 break;

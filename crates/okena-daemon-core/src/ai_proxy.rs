@@ -259,7 +259,7 @@ async fn read_or_restart(
 async fn read_accounts() -> anyhow::Result<(ProxyClient, Vec<AiAccount>)> {
     let root = profile_root().ok_or_else(|| anyhow::anyhow!("No active profile"))?;
     let endpoint = load_endpoint(&root)?.ok_or_else(|| anyhow::anyhow!("No proxy endpoint"))?;
-    let client = ProxyClient::new(endpoint, ensure_management_key(&root)?);
+    let client = ProxyClient::new(endpoint, ensure_management_key(&root)?)?;
     let accounts = client.command(&AiProxyCommand::Status).await?.accounts;
     Ok((client, accounts))
 }
