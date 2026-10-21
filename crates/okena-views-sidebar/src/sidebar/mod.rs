@@ -1022,13 +1022,12 @@ impl SidebarProjectInfo {
 /// An item in the sidebar's top-level ordering: a project, a folder, or (in
 /// the Separate remote layout) a host section header. Headers are not cursor
 /// targets.
-#[allow(clippy::large_enum_variant)]
 pub(crate) enum SidebarItem {
     SectionHeader {
         section: sections::SidebarSectionInfo,
     },
     Project {
-        project: SidebarProjectInfo,
+        project: Box<SidebarProjectInfo>,
         index: usize,
         worktree_children: Vec<SidebarProjectInfo>,
     },

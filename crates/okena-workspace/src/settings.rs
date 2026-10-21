@@ -384,7 +384,7 @@ pub struct AppSettings {
     /// Sidebar settings
     #[serde(default)]
     pub sidebar: SidebarSettings,
-    /// Terminal status board columns.
+    /// Status board: master switch and columns.
     #[serde(default)]
     pub status_board: StatusBoardSettings,
     /// Whether to show border around focused terminal

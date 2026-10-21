@@ -416,9 +416,8 @@ fn interleave_address_families(addrs: Vec<std::net::SocketAddr>) -> Vec<std::net
         return addrs;
     };
     let first_v6 = first.is_ipv6();
-    let (preferred, other): (Vec<_>, Vec<_>) = addrs
-        .into_iter()
-        .partition(|addr| addr.is_ipv6() == first_v6);
+    let (preferred, other): (Vec<_>, Vec<_>) =
+        addrs.into_iter().partition(|addr| addr.is_ipv6() == first_v6);
     let mut ordered = Vec::with_capacity(preferred.len() + other.len());
     let mut preferred = preferred.into_iter();
     let mut other = other.into_iter();
@@ -478,7 +477,9 @@ async fn happy_eyeballs_connect(
             else => break,
         }
     }
-    Err(last_error.unwrap_or_else(|| std::io::Error::other("all connection attempts failed")))
+    Err(last_error.unwrap_or_else(|| {
+        std::io::Error::other("all connection attempts failed")
+    }))
 }
 
 /// TCP-connect to `host:port`. An IP literal is dialed directly; a name is
@@ -1394,11 +1395,7 @@ impl<H: ConnectionHandler> RemoteClient<H> {
                             config.display_endpoint()
                         ))
                     })??;
-                log::info!(
-                    "WS connected to {} in {}ms",
-                    config.display_endpoint(),
-                    elapsed_ms()
-                );
+                log::info!("WS connected to {} in {}ms", config.display_endpoint(), elapsed_ms());
                 AnyWsStream::Unix(Box::new(ws))
             }
             #[cfg(not(unix))]
@@ -2496,9 +2493,7 @@ mod tests {
 
             match result {
                 Err(SessionError::Transient(msg)) => assert!(msg.contains("timed out"), "{msg}"),
-                Err(SessionError::Auth(msg)) => {
-                    panic!("timeout must be transient, got auth: {msg}")
-                }
+                Err(SessionError::Auth(msg)) => panic!("timeout must be transient, got auth: {msg}"),
                 Ok(_) => panic!("blackhole must not connect"),
             }
             assert!(started.elapsed() < Duration::from_secs(3));
@@ -2578,11 +2573,9 @@ mod tests {
             let result =
                 happy_eyeballs_connect(vec![closed, closed], Duration::from_millis(50)).await;
             assert!(result.is_err());
-            assert!(
-                happy_eyeballs_connect(Vec::new(), Duration::from_millis(50))
-                    .await
-                    .is_err()
-            );
+            assert!(happy_eyeballs_connect(Vec::new(), Duration::from_millis(50))
+                .await
+                .is_err());
         });
     }
 

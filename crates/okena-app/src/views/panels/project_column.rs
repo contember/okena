@@ -760,8 +760,7 @@ impl ProjectColumn {
                 .into_any_element()
         };
 
-        let status_pill_a = self.render_status_pill(project, cx);
-        let status_pill_b = self.render_status_pill(project, cx);
+        let status_pill = self.render_status_pill(project, cx);
 
         let project_name_el = {
             let display_name = project_header_display_name(project);
@@ -1026,7 +1025,7 @@ impl ProjectColumn {
                                 .overflow_hidden()
                                 .child(worktree_dot)
                                 .child(project_name_el)
-                                .children(status_pill_a),
+                                .children(status_pill),
                         )
                         .child(right_controls),
                 )
@@ -1069,7 +1068,7 @@ impl ProjectColumn {
                         .overflow_hidden()
                         .child(worktree_dot)
                         .child(project_name_el)
-                        .children(status_pill_b)
+                        .children(status_pill)
                         .child(git_status_el),
                 )
                 .child(right_controls)

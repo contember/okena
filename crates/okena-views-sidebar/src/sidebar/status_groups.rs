@@ -29,7 +29,7 @@ pub(crate) struct WorktreeRow {
 /// when any resolves to a column, as given otherwise.
 pub(crate) fn worktree_rows(statuses: &[Option<&str>], cx: &App) -> Vec<WorktreeRow> {
     let grouped = if okena_ui::board::status_board_enabled(cx) {
-        grouped_rows(statuses, &okena_ui::board::board_columns(cx))
+        grouped_rows(statuses, okena_ui::board::board_columns(cx))
     } else {
         None
     };

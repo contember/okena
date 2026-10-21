@@ -107,7 +107,7 @@ impl WindowView {
             .iter()
             .map(|id| workspace.project(id).and_then(|p| p.status.as_deref()))
             .collect();
-        match okena_workspace::status_board::lanes(&statuses, &okena_ui::board::board_columns(cx)) {
+        match okena_workspace::status_board::lanes(&statuses, okena_ui::board::board_columns(cx)) {
             Some(lanes) => GridLayout::with_lanes(&visible, lanes),
             None => GridLayout::flat(visible),
         }

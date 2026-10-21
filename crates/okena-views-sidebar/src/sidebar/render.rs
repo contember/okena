@@ -920,7 +920,7 @@ impl Render for Sidebar {
                     project_info.services = services;
                 }
                 items.push(SidebarItem::Project {
-                    project: project_info,
+                    project: Box::new(project_info),
                     index: top_index,
                     worktree_children: wt_children,
                 });
