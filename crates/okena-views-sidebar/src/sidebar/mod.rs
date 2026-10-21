@@ -51,6 +51,10 @@ pub struct SidebarSettings {
     pub remote_layout: okena_workspace::settings::RemoteSidebarLayout,
     /// How CPU / memory per host is drawn, if at all.
     pub host_stats: okena_workspace::settings::HostStatsStyle,
+    /// What the ring before a worktree row shows.
+    pub worktree_marker: okena_workspace::settings::WorktreeMarker,
+    /// Thin guide in the parent's colour down an expanded family.
+    pub worktree_guide: bool,
 }
 
 /// Snapshot of a remote connection for rendering.

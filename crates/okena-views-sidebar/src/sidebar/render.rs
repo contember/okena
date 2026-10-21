@@ -3,6 +3,7 @@
 
 use super::{
     GroupKind, Sidebar, SidebarCursorItem, SidebarItem, SidebarProjectInfo, SidebarServiceInfo,
+    SidebarSettings,
 };
 use crate::activity_order::{ActivityEntry, ActivityTier, order_by_activity};
 use crate::drag::{FolderDrag, ProjectDrag};
@@ -967,6 +968,12 @@ impl Render for Sidebar {
             (fm.focused_project_id().cloned(), fm.is_focus_individual())
         };
 
+        let SidebarSettings {
+            worktree_marker,
+            worktree_guide,
+            ..
+        } = self.sidebar_settings(cx);
+
         // Build flat elements with cursor tracking
         let mut flat_elements: Vec<AnyElement> = Vec::new();
         let mut flat_idx: usize = 0;
@@ -1144,6 +1151,7 @@ impl Render for Sidebar {
                                         wt_idx,
                                         is_cursor,
                                         is_focused_project,
+                                        worktree_marker,
                                         window,
                                         cx,
                                     )
@@ -1164,12 +1172,13 @@ impl Render for Sidebar {
                                     );
                                 }
                             }
-                            super::status_groups::add_tree_guide(
-                                &mut flat_elements[guide_start..],
-                                12.0,
-                                t.get_folder_color(project.folder_color),
-                                cx,
-                            );
+                            if worktree_guide {
+                                super::status_groups::add_tree_guide(
+                                    &mut flat_elements[guide_start..],
+                                    12.0,
+                                    t.get_folder_color(project.folder_color),
+                                );
+                            }
                         }
                     } else {
                         // No worktrees or orphan — standard rendering
@@ -1183,6 +1192,7 @@ impl Render for Sidebar {
                                     0,
                                     is_cursor,
                                     is_focused_project,
+                                    worktree_marker,
                                     window,
                                     cx,
                                 )
@@ -1362,6 +1372,7 @@ impl Render for Sidebar {
                                                     wt_idx,
                                                     is_cursor,
                                                     is_focused_project,
+                                                    worktree_marker,
                                                     window,
                                                     cx,
                                                 )
@@ -1383,12 +1394,13 @@ impl Render for Sidebar {
                                             }
                                         }
                                     }
-                                    super::status_groups::add_tree_guide(
-                                        &mut flat_elements[guide_start..],
-                                        28.0,
-                                        t.get_folder_color(fp.folder_color),
-                                        cx,
-                                    );
+                                    if worktree_guide {
+                                        super::status_groups::add_tree_guide(
+                                            &mut flat_elements[guide_start..],
+                                            28.0,
+                                            t.get_folder_color(fp.folder_color),
+                                        );
+                                    }
                                 }
                             } else {
                                 // No worktrees or orphan — standard folder project rendering
@@ -1403,6 +1415,7 @@ impl Render for Sidebar {
                                             0,
                                             is_cursor,
                                             is_focused_project,
+                                            worktree_marker,
                                             window,
                                             cx,
                                         )

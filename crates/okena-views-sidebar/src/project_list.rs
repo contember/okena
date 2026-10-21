@@ -4,6 +4,7 @@ use gpui::prelude::*;
 use gpui::*;
 use gpui_component::tooltip::Tooltip;
 use okena_core::api::ActionRequest;
+use okena_core::types::WorktreeMarker;
 use okena_ui::color_dot::color_dot;
 use okena_ui::icon_button::icon_button;
 use okena_ui::rename_state::is_renaming;
@@ -34,6 +35,7 @@ pub enum ProjectRowStyle {
         is_orphan: bool,
         is_busy: bool,
         busy_label: String,
+        marker: WorktreeMarker,
     },
     /// Child under a group header: plain solid dot, no rename.
     GroupChild,
@@ -121,9 +123,9 @@ impl Sidebar {
                     )
                     .into_any_element()
                 }
-                ProjectRowStyle::Worktree { is_orphan, .. } => {
-                    use okena_core::types::WorktreeMarker;
-                    let marker = okena_ui::board::sidebar_look(cx).worktree_marker;
+                ProjectRowStyle::Worktree {
+                    is_orphan, marker, ..
+                } => {
                     let base_color = match marker {
                         WorktreeMarker::Status => {
                             okena_ui::board::status_color(project.status.as_deref(), cx)
@@ -408,6 +410,7 @@ impl Sidebar {
         worktree_index: usize,
         is_cursor: bool,
         is_focused_project: bool,
+        marker: WorktreeMarker,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
@@ -518,6 +521,7 @@ impl Sidebar {
                 is_orphan: project.is_orphan,
                 is_busy,
                 busy_label,
+                marker,
             },
             cx,
         )

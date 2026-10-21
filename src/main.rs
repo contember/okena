@@ -729,29 +729,14 @@ fn main() {
             settings::settings_entity(cx).read(cx).settings.status_bar.style
         }));
 
-        // Terminal status board columns, read by the sidebar groups and the
-        // board overlay.
-        cx.set_global(okena_ui::board::GlobalSidebarLook(|cx| {
-            let s = &settings::settings_entity(cx).read(cx).settings.sidebar;
-            okena_ui::board::SidebarLook {
-                worktree_marker: s.worktree_marker,
-                worktree_guide: s.worktree_guide,
+        // Status board, read by the sidebar, the column headers, the lanes and
+        // the pane tint.
+        cx.set_global(okena_ui::board::GlobalStatusBoard(|cx| {
+            let board = &settings::settings_entity(cx).read(cx).settings.status_board;
+            okena_ui::board::StatusBoard {
+                enabled: board.enabled,
+                columns: &board.columns,
             }
-        }));
-        cx.set_global(okena_ui::board::GlobalStatusBoardEnabled(|cx| {
-            settings::settings_entity(cx)
-                .read(cx)
-                .settings
-                .status_board
-                .enabled
-        }));
-        cx.set_global(okena_ui::board::GlobalBoardColumns(|cx| {
-            settings::settings_entity(cx)
-                .read(cx)
-                .settings
-                .status_board
-                .columns
-                .clone()
         }));
 
         // NOTE: Terminal and git view settings are now served through

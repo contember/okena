@@ -618,6 +618,8 @@ impl WindowView {
                         hooks: s.hooks.clone(),
                         remote_layout: s.sidebar.remote_layout,
                         host_stats: s.sidebar.host_stats,
+                        worktree_marker: s.sidebar.worktree_marker,
+                        worktree_guide: s.sidebar.worktree_guide,
                     }
                 }));
 

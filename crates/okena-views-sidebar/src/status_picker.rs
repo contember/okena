@@ -77,7 +77,7 @@ impl Render for StatusPickerPopover {
             .read(cx)
             .project(&self.project_id)
             .and_then(|p| p.status.clone());
-        let columns = okena_ui::board::board_columns(cx);
+        let columns = okena_ui::board::board_columns(cx).to_vec();
         let known = current
             .as_deref()
             .is_some_and(|s| columns.iter().any(|c| c.id == s));
