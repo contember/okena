@@ -193,7 +193,6 @@ mod tests {
                 shell_type: Default::default(),
                 cols: None,
                 rows: None,
-                show_name_when_inactive: false,
             })
         } else {
             Some(ApiLayoutNode::Split {
@@ -208,7 +207,6 @@ mod tests {
                         shell_type: Default::default(),
                         cols: None,
                         rows: None,
-                        show_name_when_inactive: false,
                     })
                     .collect(),
             })
@@ -397,7 +395,6 @@ mod tests {
                     shell_type: Default::default(),
                     cols: None,
                     rows: None,
-                    show_name_when_inactive: false,
                 },
                 ApiLayoutNode::Terminal {
                     terminal_id: None,
@@ -406,7 +403,6 @@ mod tests {
                     shell_type: Default::default(),
                     cols: None,
                     rows: None,
-                    show_name_when_inactive: false,
                 },
                 ApiLayoutNode::Split {
                     direction: SplitDirection::Vertical,
@@ -419,7 +415,6 @@ mod tests {
                             shell_type: Default::default(),
                             cols: None,
                             rows: None,
-                            show_name_when_inactive: false,
                         },
                         ApiLayoutNode::Terminal {
                             terminal_id: Some("t3".to_string()),
@@ -428,7 +423,6 @@ mod tests {
                             shell_type: Default::default(),
                             cols: None,
                             rows: None,
-                            show_name_when_inactive: false,
                         },
                     ],
                 },
@@ -456,7 +450,6 @@ mod tests {
                         shell_type: Default::default(),
                         cols: Some(120),
                         rows: Some(40),
-                        show_name_when_inactive: false,
                     },
                     ApiLayoutNode::Terminal {
                         terminal_id: Some("t2".into()),
@@ -465,7 +458,6 @@ mod tests {
                         shell_type: Default::default(),
                         cols: None,
                         rows: None,
-                        show_name_when_inactive: false,
                     },
                 ],
             }),

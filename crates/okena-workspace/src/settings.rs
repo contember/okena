@@ -396,6 +396,10 @@ pub struct AppSettings {
     /// A real tab group always keeps its header visible (default: false).
     #[serde(default)]
     pub auto_hide_single_terminal_header: bool,
+    /// Draw the terminal's name over every pane that does not have focus
+    /// (default: false).
+    #[serde(default)]
+    pub show_terminal_name_when_inactive: bool,
 
     // Session persistence settings
     /// Session backend for terminal persistence (tmux/screen/none/auto)
@@ -598,6 +602,7 @@ impl Default for AppSettings {
             default_shell: ShellType::default(),
             show_shell_selector: false,
             auto_hide_single_terminal_header: false,
+            show_terminal_name_when_inactive: false,
             session_backend: SessionBackend::default(),
             auto_resume_agent_sessions: false,
             claude_remote: false,
@@ -1194,6 +1199,16 @@ mod tests {
         let loaded: AppSettings =
             serde_json::from_str(r#"{"auto_hide_single_terminal_header":true}"#).unwrap();
         assert!(loaded.auto_hide_single_terminal_header);
+    }
+
+    #[test]
+    fn inactive_terminal_name_overlay_is_opt_in() {
+        let defaults = AppSettings::default();
+        assert!(!defaults.show_terminal_name_when_inactive);
+
+        let loaded: AppSettings =
+            serde_json::from_str(r#"{"show_terminal_name_when_inactive":true}"#).unwrap();
+        assert!(loaded.show_terminal_name_when_inactive);
     }
 
     #[test]

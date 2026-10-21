@@ -28,7 +28,6 @@ mod tests {
             shell_type: Default::default(),
             cols: None,
             rows: None,
-            show_name_when_inactive: false,
         };
         let node = LayoutNode::from_api_prefixed(&api, "remote:conn1");
         match node {
@@ -48,7 +47,6 @@ mod tests {
             shell_type: Default::default(),
             cols: None,
             rows: None,
-            show_name_when_inactive: false,
         };
         let node = LayoutNode::from_api_prefixed(&api, "remote:x");
         match node {
@@ -77,7 +75,6 @@ mod tests {
                     shell_type: Default::default(),
                     cols: None,
                     rows: None,
-                    show_name_when_inactive: false,
                 },
                 ApiLayoutNode::Tabs {
                     active_tab: 0,
@@ -89,7 +86,6 @@ mod tests {
                             shell_type: Default::default(),
                             cols: None,
                             rows: None,
-                            show_name_when_inactive: false,
                         },
                         ApiLayoutNode::Terminal {
                             terminal_id: Some("t3".into()),
@@ -98,7 +94,6 @@ mod tests {
                             shell_type: Default::default(),
                             cols: None,
                             rows: None,
-                            show_name_when_inactive: false,
                         },
                     ],
                 },
@@ -118,7 +113,6 @@ mod tests {
             shell_type: Default::default(),
             cols: None,
             rows: None,
-            show_name_when_inactive: false,
         };
         let node = LayoutNode::from_api(&api);
         match node {
