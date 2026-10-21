@@ -173,7 +173,8 @@ days, and publishes it as `pool` in the Claude entry of the usage channel
 (`blocked`) for one that does not serve requests; only serving accounts count
 in Today and Nonstop. The desktop and the mobile app only render it, for every
 connected host whose daemon publishes it; a host with an older daemon shows
-only the account items. The daemon recomputes the pool on each 15-second
+only the account items. `okena usage` prints the pool, in the status bar's
+words, in place of the login's own windows. The daemon recomputes the pool on each 15-second
 accounts poll, after each proxy command that changes the accounts, and after
 the routing setting or the working days change, and republishes it when it
 changed. The pool follows each account's live

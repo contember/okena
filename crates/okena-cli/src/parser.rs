@@ -67,6 +67,13 @@ pub enum Command {
     /// Default: one tab-separated line per window: provider, status, window
     /// id, used percent, reset time (Unix epoch seconds, empty if unknown). A provider
     /// without windows prints provider, status and the error, if any.
+    ///
+    /// While the host routes Claude through its AI proxy, Claude prints the
+    /// account pool instead, as the desktop shows it: `claude pool today
+    /// <3h00m left | 45m over>`, `claude pool nonstop <3h10m | 7d+ | out, 2h>`,
+    /// and one line per account: label, plan size, 5h and 7d used percent,
+    /// why it is blocked and until when (Unix epoch seconds); empty fields if
+    /// unknown or not blocked.
     Usage {
         /// Output the raw `GET /v1/usage` JSON
         #[arg(long)]

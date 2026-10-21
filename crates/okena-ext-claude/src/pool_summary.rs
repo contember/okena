@@ -17,6 +17,7 @@ use okena_core::api::{
 use okena_extensions::ThemeColors;
 use okena_transport::LOCAL_DAEMON_CONNECTION_ID;
 use okena_ui::tokens::{ui_text_ms, ui_text_sm, ui_text_xs};
+use okena_usage::pool_text::{self, short_duration};
 use okena_usage::{
     Severity, WorkingDays, format_reset_time_epoch, severity_color, usage_body_container,
     usage_divider, usage_kv_row, usage_trigger_item,
@@ -94,6 +95,7 @@ struct NonstopView {
 
 /// `None` for a state added by a newer daemon, which this client cannot word.
 fn nonstop_view(nonstop: &ApiPoolNonstop, now_ms: i64) -> Option<NonstopView> {
+    let trigger = pool_text::nonstop(nonstop, now_ms)?;
     let lasting_note = "Working nonstop from now, every account hits its 5h or weekly limit \
                         after this long. Accounts come back as their windows reset.";
     let view = match *nonstop {
@@ -107,20 +109,20 @@ fn nonstop_view(nonstop: &ApiPoolNonstop, now_ms: i64) -> Option<NonstopView> {
                 Severity::Normal
             };
             NonstopView {
-                trigger: short_duration(ms),
+                trigger,
                 value: short_duration(ms),
                 note: lasting_note.into(),
                 severity,
             }
         }
-        ApiPoolNonstop::BeyondHorizon { horizon_seconds } => NonstopView {
-            trigger: format!("{}+", short_duration(seconds_to_ms(horizon_seconds))),
+        ApiPoolNonstop::BeyondHorizon { .. } => NonstopView {
+            trigger,
             value: "a week or more".into(),
             note: lasting_note.into(),
             severity: Severity::Normal,
         },
         ApiPoolNonstop::Blocked { until: Some(until) } => NonstopView {
-            trigger: format!("out, {}", short_duration(seconds_to_ms(until) - now_ms)),
+            trigger,
             value: "blocked".into(),
             note: format!(
                 "Every account has hit its 5h or weekly limit; the first is back {}.",
@@ -129,7 +131,7 @@ fn nonstop_view(nonstop: &ApiPoolNonstop, now_ms: i64) -> Option<NonstopView> {
             severity: Severity::Critical,
         },
         ApiPoolNonstop::Blocked { until: None } => NonstopView {
-            trigger: "out".into(),
+            trigger,
             value: "blocked".into(),
             note: "Every account has hit its 5h or weekly limit.".into(),
             severity: Severity::Critical,
@@ -150,28 +152,8 @@ fn today_severity(summary: &HostSummary) -> Severity {
     }
 }
 
-/// "45m", "3h10m", "26h", "3d".
-fn short_duration(ms: i64) -> String {
-    let minutes = (ms / MINUTE_MS).max(1);
-    if minutes < 60 {
-        format!("{minutes}m")
-    } else if minutes < 10 * 60 {
-        format!("{}h{:02}m", minutes / 60, minutes % 60)
-    } else if minutes < 48 * 60 {
-        format!("{}h", minutes / 60)
-    } else {
-        format!("{}d", minutes / (24 * 60))
-    }
-}
-
-/// "3h left" or "45m over".
 fn today_value(summary: &HostSummary) -> String {
-    let left = work_ms(summary.pool.today.left);
-    if left >= 0 {
-        format!("{} left", short_duration(left))
-    } else {
-        format!("{} over", short_duration(-left))
-    }
+    pool_text::today(summary.pool.today.left)
 }
 
 /// Share of today's safe use already used, for the trigger's bar.
@@ -543,8 +525,8 @@ pub(crate) fn render_back(on_back: GoBack, t: &ThemeColors, cx: &App) -> AnyElem
 #[cfg(test)]
 mod tests {
     use super::{
-        HOUR_MS, MINUTE_MS, nonstop_view, short_duration, summarize, today_fraction,
-        today_severity, today_value, trigger_nonstop,
+        HOUR_MS, MINUTE_MS, nonstop_view, summarize, today_fraction, today_severity, today_value,
+        trigger_nonstop,
     };
     use crate::settings::PoolDisplay;
     use okena_core::api::{
@@ -618,15 +600,6 @@ mod tests {
             working_days: vec![0, 1, 2, 3, 4],
             generated_at: 0.0,
         }
-    }
-
-    #[test]
-    fn short_duration_keeps_the_status_bar_narrow() {
-        assert_eq!(short_duration(0), "1m");
-        assert_eq!(short_duration(45 * 60 * 1000), "45m");
-        assert_eq!(short_duration((3 * 60 + 10) * 60 * 1000), "3h10m");
-        assert_eq!(short_duration(26 * 60 * 60 * 1000), "26h");
-        assert_eq!(short_duration(7 * 24 * 60 * 60 * 1000), "7d");
     }
 
     #[test]

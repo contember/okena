@@ -22,6 +22,7 @@ pub mod history;
 pub mod pace;
 pub mod pool;
 pub mod pool_summary;
+pub mod pool_text;
 pub mod provider;
 
 use std::path::Path;

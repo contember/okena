@@ -160,13 +160,14 @@ pub fn cli_usage(json_mode: bool) -> i32 {
             return 1;
         }
     };
-    for line in usage_lines(&usage) {
+    let now_ms = (okena_agent_usage::now_epoch() * 1000.0) as i64;
+    for line in usage_lines(&usage, now_ms) {
         println!("{line}");
     }
     0
 }
 
-fn usage_lines(usage: &okena_core::api::ApiUsage) -> Vec<String> {
+fn usage_lines(usage: &okena_core::api::ApiUsage, now_ms: i64) -> Vec<String> {
     let status_name = |status| {
         serde_json::to_value(status)
             .ok()
@@ -175,6 +176,12 @@ fn usage_lines(usage: &okena_core::api::ApiUsage) -> Vec<String> {
     };
     let mut lines = Vec::new();
     for provider in &usage.providers {
+        // While a pool is published, the login's own windows are not the
+        // ones its terminals use.
+        if let Some(pool) = &provider.pool {
+            lines.extend(pool_lines(provider.provider, pool, now_ms));
+            continue;
+        }
         let status = status_name(provider.status);
         if provider.windows.is_empty() {
             lines.push(format!(
@@ -199,6 +206,47 @@ fn usage_lines(usage: &okena_core::api::ApiUsage) -> Vec<String> {
                 reset
             ));
         }
+    }
+    lines
+}
+
+fn pool_lines(
+    provider: okena_core::api::ApiUsageProvider,
+    pool: &okena_core::api::ApiPool,
+    now_ms: i64,
+) -> Vec<String> {
+    use okena_agent_usage::pool_text;
+    use okena_core::api::ApiUsageWindowKind;
+    let provider = provider.as_str();
+    let mut lines = vec![format!(
+        "{provider}\tpool\ttoday\t{}",
+        pool_text::today(pool.today.left)
+    )];
+    if let Some(nonstop) = pool_text::nonstop(&pool.nonstop, now_ms) {
+        lines.push(format!("{provider}\tpool\tnonstop\t{nonstop}"));
+    }
+    for account in &pool.accounts {
+        let used_percent = |kind| {
+            account
+                .windows
+                .iter()
+                .find(|window| window.kind == kind)
+                .map(|window| format!("{:.0}", window.used_percent))
+                .unwrap_or_default()
+        };
+        let blocked_until = account
+            .blocked_until
+            .map(|at| format!("{}", at.round() as i64))
+            .unwrap_or_default();
+        lines.push(format!(
+            "{provider}\taccount\t{}\t{}\t{}\t{}\t{}\t{}",
+            account.label,
+            account.tier.as_deref().unwrap_or(""),
+            used_percent(ApiUsageWindowKind::FiveHour),
+            used_percent(ApiUsageWindowKind::Weekly),
+            account.blocked.as_deref().unwrap_or(""),
+            blocked_until
+        ));
     }
     lines
 }
@@ -2537,10 +2585,93 @@ mod tests {
             generated_at: 0.0,
         };
         assert_eq!(
-            super::usage_lines(&usage),
+            super::usage_lines(&usage, 0),
             vec![
                 "claude\tok\tfive_hour\t42\t1782371508".to_string(),
                 "codex\tno_credentials\tsigned out".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn usage_lines_show_a_published_pool_instead_of_the_login() {
+        use okena_core::api::{
+            ApiPool, ApiPoolAccount, ApiPoolAmount, ApiPoolNonstop, ApiPoolPace, ApiPoolToday,
+            ApiProviderUsage, ApiUsage, ApiUsageProvider, ApiUsageStatus, ApiUsageWindow,
+            ApiUsageWindowKind,
+        };
+        let amount = |hours: f64| ApiPoolAmount {
+            work_seconds: hours * 3600.0,
+            account_week_percent: 0.0,
+        };
+        let window = |id: &str, kind, used_percent| ApiUsageWindow {
+            id: id.into(),
+            label: id.into(),
+            kind,
+            used_percent,
+            window_seconds: 0.0,
+            reset_at: None,
+            active: true,
+            history: Vec::new(),
+        };
+        let mut claude = ApiProviderUsage::empty(ApiUsageProvider::Claude, ApiUsageStatus::Ok);
+        claude
+            .windows
+            .push(window("five_hour", ApiUsageWindowKind::FiveHour, 99.0));
+        claude.pool = Some(ApiPool {
+            today: ApiPoolToday {
+                left: amount(-0.75),
+                used: amount(4.0),
+                safe_per_day: amount(3.25),
+                off_day: amount(0.0),
+                runs_short_at: None,
+                runs_short_before: None,
+                runs_out_at_recent_pace: None,
+            },
+            nonstop: ApiPoolNonstop::Lasts {
+                work_seconds: 3.0 * 3600.0 + 600.0,
+            },
+            pace: ApiPoolPace {
+                session_fill_seconds: 3600.0,
+                session_week_percent: 10.0,
+                from_history: true,
+            },
+            accounts: vec![
+                ApiPoolAccount {
+                    id: "a".into(),
+                    label: "work".into(),
+                    tier: Some("Max 5x".into()),
+                    blocked: None,
+                    blocked_until: None,
+                    used_today_percent: 3.0,
+                    windows: vec![
+                        window("seven_day", ApiUsageWindowKind::Weekly, 12.4),
+                        window("five_hour", ApiUsageWindowKind::FiveHour, 41.6),
+                    ],
+                },
+                ApiPoolAccount {
+                    id: "b".into(),
+                    label: "home".into(),
+                    tier: None,
+                    blocked: Some("7d limit".into()),
+                    blocked_until: Some(1_782_371_508.4),
+                    used_today_percent: 0.0,
+                    windows: vec![window("seven_day", ApiUsageWindowKind::Weekly, 100.0)],
+                },
+            ],
+        });
+        let usage = ApiUsage {
+            providers: vec![claude],
+            working_days: vec![0, 1, 2, 3, 4, 5, 6],
+            generated_at: 0.0,
+        };
+        assert_eq!(
+            super::usage_lines(&usage, 0),
+            vec![
+                "claude\tpool\ttoday\t45m over".to_string(),
+                "claude\tpool\tnonstop\t3h10m".to_string(),
+                "claude\taccount\twork\tMax 5x\t42\t12\t\t".to_string(),
+                "claude\taccount\thome\t\t\t100\t7d limit\t1782371508".to_string(),
             ]
         );
     }
