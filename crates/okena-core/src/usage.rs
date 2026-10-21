@@ -318,7 +318,9 @@ pub struct ApiPool {
     pub today: ApiPoolToday,
     pub nonstop: ApiPoolNonstop,
     pub pace: ApiPoolPace,
-    /// Accounts that serve requests (enabled and logged in), in pool order.
+    /// Every pool account, in pool order. Only accounts that serve requests
+    /// (enabled and logged in) count in the numbers above; the others have
+    /// `blocked` set. Daemons before that listed only the serving ones.
     #[serde(default)]
     pub accounts: Vec<ApiPoolAccount>,
 }
@@ -399,15 +401,33 @@ pub struct ApiPoolAccount {
     /// Plan size label (`"Max 20x"`, `"Max 5x"`); `None` for the base plan.
     #[serde(default)]
     pub tier: Option<String>,
-    /// Why the proxy skips the account now (`"7d limit"`, `"5h limit"`,
-    /// `"429 cooldown"`); `None` while it serves requests.
+    /// Why the proxy skips the account now (`"Needs login"`, `"Disabled"`,
+    /// `"7d limit"`, `"5h limit"`, `"429 cooldown"`); `None` while it serves
+    /// requests.
     #[serde(default)]
     pub blocked: Option<String>,
+    /// When `blocked` ends (epoch seconds): the exhausted window's reset or
+    /// the end of the 429 cooldown. `None` when unknown or not timed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocked_until: Option<f64>,
     /// Weekly percent of this account used since the daemon's local midnight.
     pub used_today_percent: f64,
     /// The `five_hour` and `seven_day` windows, shaped like provider windows
     /// but without `history`: the pool is republished whenever an account's
-    /// utilization moves, and clients draw only the bars.
+    /// utilization moves, and clients draw only the bars. The history is
+    /// served on request, see [`ApiPoolAccountHistory`].
+    #[serde(default)]
+    pub windows: Vec<ApiUsageWindow>,
+}
+
+/// `GET /v1/usage/pool/{account_id}`: one pool account's windows with their
+/// `history`, from the usage history the daemon loads for the pool (at most
+/// a minute old). An account that does not serve requests has no history.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ApiPoolAccountHistory {
+    pub account_id: String,
+    /// The account's `five_hour` and `seven_day` windows, as in
+    /// [`ApiPoolAccount::windows`] but with `history` filled.
     #[serde(default)]
     pub windows: Vec<ApiUsageWindow>,
 }

@@ -4,8 +4,9 @@
 //! the app-installed [`GlobalDaemonUsage`] entity. This widget never fetches;
 //! opening the popover asks the daemon to refresh (throttled there to 60 s).
 //! While a host routes new shells through the AI proxy, the widget shows the
-//! proxy's account pool instead: each account from the host's state sync, and
-//! the pool summary from the host's usage snapshot.
+//! proxy's account pool instead, as the host publishes it in its usage
+//! snapshot (`pool`): its accounts and its summary. Opening an account reads
+//! that account's history from the host once.
 
 use crate::pool_usage::{AccountKey, PoolHistory};
 use crate::settings::PoolDisplay;
@@ -14,17 +15,16 @@ use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::{h_flex, v_flex};
 use okena_core::api::{
-    ApiExtraUsage, ApiProviderUsage, ApiUsageProvider, ApiUsageWindow, ApiUsageWindowKind,
+    ApiExtraUsage, ApiPool, ApiProviderUsage, ApiUsageProvider, ApiUsageWindow,
+    ApiUsageWindowKind,
 };
 use okena_extensions::{ExtensionSettingsStore, ThemeColors};
 use okena_usage::{
-    DaemonUsage, GlobalDaemonUsage, WorkingDays, provider_usage, read_working_days,
+    DaemonUsage, GlobalDaemonUsage, HostUsage, WorkingDays, provider_usage, read_working_days,
     render_simple_bar, render_usage_row, usage_body_container, usage_divider, usage_kv_row,
     usage_popover_container, usage_popover_header, usage_trigger_items, window_points, window_row,
     window_trigger_item,
 };
-use okena_workspace::remote_sync::HostAiAccounts;
-use okena_workspace::state::{GlobalWorkspace, Workspace};
 use std::collections::BTreeMap;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -55,20 +55,30 @@ enum Trigger {
 /// [`GlobalDaemonUsage`] snapshot and hold only per-window UI state.
 pub struct ClaudeUsage {
     store: Entity<DaemonUsage>,
-    /// AI proxy accounts of the connected hosts; when any host has some, they
-    /// are shown instead of the `claude` login's usage.
-    pool: Vec<HostAiAccounts>,
     pool_history: Entity<PoolHistory>,
     active: Trigger,
     trigger_bounds: BTreeMap<Trigger, Bounds<Pixels>>,
-    workspace: Option<Entity<Workspace>>,
-    _workspace_observation: Option<Subscription>,
     chart_state: Entity<okena_usage::HistoryChartState>,
     popover_visible: bool,
     hover_token: Arc<AtomicU64>,
-    history_refresh_task: Option<Task<()>>,
     /// The account opened from the pool popover, shown in place of the pool.
     pool_detail: Option<AccountKey>,
+}
+
+/// The pool a host publishes in its usage snapshot.
+fn host_pool(host: &HostUsage) -> Option<&ApiPool> {
+    host.usage.provider(ApiUsageProvider::Claude)?.pool.as_ref()
+}
+
+/// The hosts that publish a pool; when there is any, their pools are shown
+/// instead of the `claude` login's usage.
+fn pool_hosts(store: &DaemonUsage) -> Vec<HostUsage> {
+    store
+        .hosts()
+        .iter()
+        .filter(|host| host_pool(host).is_some())
+        .cloned()
+        .collect()
 }
 
 impl ClaudeUsage {
@@ -79,77 +89,39 @@ impl ClaudeUsage {
         let chart_state = cx.new(|_| okena_usage::HistoryChartState::default());
         cx.observe(&chart_state, |_, _, cx| cx.notify()).detach();
         // Re-render whenever the daemon pushes a new snapshot.
-        cx.observe(&store, |_, _, cx| cx.notify()).detach();
-        // Extensions may activate before the app installs the workspace.
-        cx.observe_global::<GlobalWorkspace>(|this, cx| this.bind_workspace(cx))
+        cx.observe(&store, |this, _, cx| this.forget_gone_triggers(cx))
             .detach();
         cx.observe_global::<ExtensionSettingsStore>(|_, cx| cx.notify())
             .detach();
-        let mut this = Self {
+        Self {
             store,
-            pool: Vec::new(),
             pool_history,
             active: Trigger::Login,
             trigger_bounds: BTreeMap::new(),
-            workspace: None,
-            _workspace_observation: None,
             chart_state,
             popover_visible: false,
             hover_token: Arc::new(AtomicU64::new(0)),
-            history_refresh_task: None,
             pool_detail: None,
-        };
-        this.bind_workspace(cx);
-        this
+        }
     }
 
-    fn bind_workspace(&mut self, cx: &mut Context<Self>) {
-        let workspace = cx
-            .try_global::<GlobalWorkspace>()
-            .map(|global| global.0.clone());
-        if self.workspace == workspace {
-            return;
-        }
-        self._workspace_observation = workspace.as_ref().map(|workspace| {
-            cx.observe(workspace, |this, workspace, cx| {
-                this.update_pool(&workspace, cx);
-            })
+    /// Drop the triggers of accounts and pools that are no longer published,
+    /// closing the popover when it belonged to one of them.
+    fn forget_gone_triggers(&mut self, cx: &mut Context<Self>) {
+        let hosts = pool_hosts(self.store.read(cx));
+        self.trigger_bounds.retain(|trigger, _| match trigger {
+            Trigger::Login => true,
+            Trigger::Account(key) => find_account(&hosts, key).is_some(),
+            Trigger::Pool(connection_id) => {
+                hosts.iter().any(|host| &host.connection_id == connection_id)
+            }
         });
-        if let Some(workspace) = &workspace {
-            self.update_pool(workspace, cx);
+        if self.active != Trigger::Login && !self.trigger_bounds.contains_key(&self.active) {
+            self.hover_token.fetch_add(1, Ordering::SeqCst);
+            self.active = Trigger::Login;
+            self.popover_visible = false;
         }
-        self.workspace = workspace;
-    }
-
-    fn update_pool(&mut self, workspace: &Entity<Workspace>, cx: &mut Context<Self>) {
-        let pool = workspace.read(cx).remote_sync.ai_accounts();
-        if self.pool != pool {
-            self.pool = pool.to_vec();
-            let pool = &self.pool;
-            self.trigger_bounds.retain(|trigger, _| match trigger {
-                Trigger::Login => true,
-                Trigger::Account(key) => pool.iter().any(|host| {
-                    host.connection_id == key.connection_id
-                        && host
-                            .accounts
-                            .iter()
-                            .any(|account| account.id == key.account_id)
-                }),
-                Trigger::Pool(connection_id) => {
-                    pool.iter().any(|host| &host.connection_id == connection_id)
-                }
-            });
-            if !self.trigger_bounds.contains_key(&self.active) {
-                self.hover_token.fetch_add(1, Ordering::SeqCst);
-                self.active = Trigger::Login;
-                self.popover_visible = false;
-                self.history_refresh_task = None;
-            }
-            if self.popover_visible {
-                self.request_pool_history(cx);
-            }
-            cx.notify();
-        }
+        cx.notify();
     }
 
     /// Load the history of the account whose detail the popover shows.
@@ -173,7 +145,6 @@ impl ClaudeUsage {
         }
         self.active = trigger;
         self.popover_visible = false;
-        self.history_refresh_task = None;
         self.pool_detail = None;
         cx.notify();
 
@@ -191,21 +162,7 @@ impl ClaudeUsage {
                 if hover_token.load(Ordering::SeqCst) == token {
                     this.popover_visible = true;
                     this.request_pool_history(cx);
-                    if this.active != Trigger::Login {
-                        this.history_refresh_task =
-                            Some(cx.spawn(async move |this: WeakEntity<Self>, cx| {
-                                loop {
-                                    smol::Timer::after(Duration::from_secs(60)).await;
-                                    if this
-                                        .update(cx, |this, cx| this.request_pool_history(cx))
-                                        .is_err()
-                                    {
-                                        break;
-                                    }
-                                }
-                            }));
-                    }
-                    if this.pool.is_empty() {
+                    if pool_hosts(this.store.read(cx)).is_empty() {
                         GlobalDaemonUsage::request_refresh(ApiUsageProvider::Claude, cx);
                     }
                     cx.notify();
@@ -234,7 +191,6 @@ impl ClaudeUsage {
             let _ = this.update(cx, |this, cx| {
                 if hover_token.load(Ordering::SeqCst) == token && this.popover_visible {
                     this.popover_visible = false;
-                    this.history_refresh_task = None;
                     cx.notify();
                 }
             });
@@ -258,13 +214,16 @@ impl ClaudeUsage {
                 ("CLAUDE ACCOUNT", None, detail)
             }
             Trigger::Pool(connection_id) => {
-                let Some(summary) = self
-                    .pool
+                let hosts = pool_hosts(self.store.read(cx));
+                let Some(summary) = hosts
                     .iter()
                     .find(|host| &host.connection_id == connection_id)
                     .and_then(|host| {
-                        let usage = self.store.read(cx).host_usage(connection_id)?;
-                        crate::pool_summary::summarize(host, usage)
+                        crate::pool_summary::summarize(
+                            &host.connection_id,
+                            &host.host_name,
+                            &host.usage,
+                        )
                     })
                 else {
                     return div().size_0().into_any_element();
@@ -303,7 +262,7 @@ impl ClaudeUsage {
                 ("CLAUDE POOL", summary.host_name.clone(), body)
             }
             Trigger::Login => {
-                if !self.pool.is_empty() {
+                if !pool_hosts(self.store.read(cx)).is_empty() {
                     return div().size_0().into_any_element();
                 }
                 let Some(data) = provider_usage(ApiUsageProvider::Claude, cx)
@@ -356,14 +315,6 @@ impl ClaudeUsage {
         .into_any_element()
     }
 
-    /// The working days `connection_id`'s daemon computes its usage with.
-    fn host_working_days(&self, connection_id: &str, cx: &App) -> WorkingDays {
-        self.store.read(cx).host_usage(connection_id).map_or_else(
-            || read_working_days(cx),
-            |usage| WorkingDays::from_indices(&usage.working_days),
-        )
-    }
-
     /// One pool account's usage with its history chart, or `None` when the
     /// account is gone.
     fn render_account_detail(
@@ -372,25 +323,17 @@ impl ClaudeUsage {
         t: &ThemeColors,
         cx: &App,
     ) -> Option<AnyElement> {
-        let host = self
-            .pool
-            .iter()
-            .find(|host| host.connection_id == key.connection_id)?;
-        let working = self.host_working_days(&key.connection_id, cx);
-        let account = host
-            .accounts
-            .iter()
-            .find(|account| account.id == key.account_id)?;
+        let hosts = pool_hosts(self.store.read(cx));
+        let (host, account) = find_account(&hosts, key)?;
         let entry = self.pool_history.read(cx).entries.get(key);
-        let history = entry.map(|entry| entry.history.clone()).unwrap_or_default();
+        let detail = entry.map(|entry| entry.windows.as_slice()).unwrap_or_default();
         let error = entry.and_then(|entry| entry.error.clone());
         Some(
             div()
                 .child(crate::pool_usage::render_body(
                     host,
                     account,
-                    &history,
-                    working,
+                    detail,
                     &self.chart_state,
                     t,
                     cx,
@@ -525,7 +468,8 @@ impl Render for ClaudeUsage {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
 
-        let triggers = if self.pool.is_empty() {
+        let hosts = pool_hosts(self.store.read(cx));
+        let triggers = if hosts.is_empty() {
             let items = login_trigger_items(read_working_days(cx), cx);
             if items.is_empty() {
                 return div().size_0().into_any_element();
@@ -534,16 +478,17 @@ impl Render for ClaudeUsage {
         } else {
             let display = PoolDisplay::read(cx);
             let mut triggers = Vec::new();
-            for host in &self.pool {
-                let working = self.host_working_days(&host.connection_id, cx);
+            for host in &hosts {
+                let working = WorkingDays::from_indices(&host.usage.working_days);
                 let pool_content = if display.summary() {
-                    self.store
-                        .read(cx)
-                        .host_usage(&host.connection_id)
-                        .and_then(|usage| crate::pool_summary::summarize(host, usage))
-                        .and_then(|summary| {
-                            crate::pool_summary::render_trigger(&summary, display, &t, cx)
-                        })
+                    crate::pool_summary::summarize(
+                        &host.connection_id,
+                        &host.host_name,
+                        &host.usage,
+                    )
+                    .and_then(|summary| {
+                        crate::pool_summary::render_trigger(&summary, display, &t, cx)
+                    })
                 } else {
                     None
                 };
@@ -557,10 +502,11 @@ impl Render for ClaudeUsage {
                     ));
                 }
                 if shows_account_items(display, shows_pool) {
-                    for account in &host.accounts {
+                    let accounts = host_pool(host).map_or(&[][..], |pool| &pool.accounts);
+                    for account in accounts {
                         let content = crate::pool_usage::render_trigger(account, working, &t, cx);
                         triggers.push(self.render_trigger(
-                            Trigger::Account(AccountKey::new(host, account)),
+                            Trigger::Account(AccountKey::new(&host.connection_id, account)),
                             vec![content],
                             &t,
                             cx,
@@ -623,6 +569,21 @@ impl ClaudeUsage {
             }))
             .into_any_element()
     }
+}
+
+/// The host and the published account `key` names.
+fn find_account<'a>(
+    hosts: &'a [HostUsage],
+    key: &AccountKey,
+) -> Option<(&'a HostUsage, &'a okena_core::api::ApiPoolAccount)> {
+    let host = hosts
+        .iter()
+        .find(|host| host.connection_id == key.connection_id)?;
+    let account = host_pool(host)?
+        .accounts
+        .iter()
+        .find(|account| account.id == key.account_id)?;
+    Some((host, account))
 }
 
 /// A host whose pool item is not shown (no pool published, or no value to

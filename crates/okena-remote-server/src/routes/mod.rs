@@ -216,6 +216,10 @@ pub fn build_router(
             "/v1/usage/refresh",
             axum::routing::post(usage::post_refresh),
         )
+        .route(
+            "/v1/usage/pool/{account_id}",
+            axum::routing::get(usage::get_pool_account_history),
+        )
         .route("/v1/tokens", axum::routing::get(tokens::list_tokens))
         .route(
             "/v1/tokens/{id}",
@@ -578,6 +582,48 @@ mod tests {
                 .await,
             StatusCode::OK
         );
+    }
+
+    #[tokio::test]
+    async fn pool_account_history_is_served_while_the_pool_lists_it() {
+        let store = Arc::new(AuthStore::with_secret(vec![7u8; 32]));
+        let token = paired_token(&store);
+        let hub = crate::usage::UsageHub::detached();
+        let mut router = router_with_usage(store, true, hub.clone());
+        let call = || {
+            Call::get("/v1/usage/pool/acct-1")
+                .via_peer(OFF_HOST)
+                .with_token(&token)
+        };
+        assert_eq!(call().status(&mut router).await, StatusCode::NOT_FOUND);
+        assert_eq!(
+            Call::get("/v1/usage/pool/acct-1")
+                .via_peer(OFF_HOST)
+                .status(&mut router)
+                .await,
+            StatusCode::UNAUTHORIZED
+        );
+
+        let pool: okena_core::api::ApiPool = serde_json::from_value(serde_json::json!({
+            "today": {
+                "left": {"work_seconds": 0.0, "account_week_percent": 0.0},
+                "used": {"work_seconds": 0.0, "account_week_percent": 0.0},
+                "safe_per_day": {"work_seconds": 0.0, "account_week_percent": 0.0},
+                "off_day": {"work_seconds": 0.0, "account_week_percent": 0.0}
+            },
+            "nonstop": {"type": "blocked"},
+            "pace": {"session_fill_seconds": 1.0, "session_week_percent": 1.0, "from_history": false}
+        }))
+        .unwrap();
+        hub.set_pool(Some(pool));
+        hub.set_pool_histories(std::collections::HashMap::from([(
+            "acct-1".to_string(),
+            okena_core::api::ApiPoolAccountHistory {
+                account_id: "acct-1".into(),
+                windows: Vec::new(),
+            },
+        )]));
+        assert_eq!(call().status(&mut router).await, StatusCode::OK);
     }
 
     #[tokio::test]

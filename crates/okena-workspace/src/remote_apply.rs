@@ -20,7 +20,7 @@ use okena_state::{
 };
 use okena_transport::client::RemoteConnectionConfig;
 
-use crate::remote_sync::{HostAiAccounts, RemoteSyncState};
+use crate::remote_sync::RemoteSyncState;
 
 /// Owned snapshot of a single remote connection, built by the view from the
 /// `RemoteConnectionManager` so the pure core never touches a GPUI entity.
@@ -102,21 +102,6 @@ pub fn apply_remote_snapshot(
     let mut expected_remote_ids: HashSet<String> = HashSet::new();
     let mut synced_conn_ids: HashSet<String> = HashSet::new();
     let active_conn_ids: HashSet<String> = snapshots.iter().map(|s| s.config.id.clone()).collect();
-
-    // A disconnected host reports nothing, so its accounts are not shown stale.
-    remote_sync.set_ai_accounts(
-        snapshots
-            .iter()
-            .filter_map(|snap| {
-                let state = snap.state.as_ref()?;
-                (!state.ai_accounts.is_empty()).then(|| HostAiAccounts {
-                    connection_id: snap.config.id.clone(),
-                    host_name: snap.config.name.clone(),
-                    accounts: state.ai_accounts.clone(),
-                })
-            })
-            .collect(),
-    );
 
     for snap in snapshots {
         let conn_id = &snap.config.id;
@@ -644,63 +629,6 @@ mod tests {
             claude_sessions: Vec::new(),
             ai_accounts: Vec::new(),
         }
-    }
-
-    #[test]
-    fn keeps_ai_accounts_of_connected_hosts_only() {
-        let account = okena_core::ai_proxy::AiAccount {
-            id: "a1".into(),
-            label: "Work".into(),
-            email: None,
-            plan: None,
-            rate_limit_tier: None,
-            enabled: true,
-            needs_login: false,
-            cooldown_until_ms: None,
-            five_hour: None,
-            seven_day: None,
-            requests: 0,
-            last_used_ms: None,
-        };
-        let mut with_pool = state_with(vec![], vec![], vec![]);
-        with_pool.ai_accounts = vec![account.clone()];
-        let mut data = empty_data();
-        let mut rs = RemoteSyncState::new();
-
-        apply_remote_snapshot(
-            &mut data,
-            &mut rs,
-            &[
-                RemoteSnapshot {
-                    config: config("c1"),
-                    state: Some(with_pool.clone()),
-                },
-                RemoteSnapshot {
-                    config: config("c2"),
-                    state: Some(state_with(vec![], vec![], vec![])),
-                },
-            ],
-            WindowId::Main,
-        );
-        assert_eq!(
-            rs.ai_accounts(),
-            [HostAiAccounts {
-                connection_id: "c1".into(),
-                host_name: "conn-c1".into(),
-                accounts: vec![account],
-            }]
-        );
-
-        apply_remote_snapshot(
-            &mut data,
-            &mut rs,
-            &[RemoteSnapshot {
-                config: config("c1"),
-                state: None,
-            }],
-            WindowId::Main,
-        );
-        assert!(rs.ai_accounts().is_empty());
     }
 
     #[test]

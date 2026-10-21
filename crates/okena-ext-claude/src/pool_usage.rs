@@ -1,24 +1,26 @@
 //! Usage of the AI proxy's account pool. While a host routes new shells through
 //! the proxy, these accounts serve `claude`, not the `claude` login itself.
+//! Every account comes from the host's published pool (`ApiPool::accounts`);
+//! an account's history is read from its host when its detail opens.
 
-use crate::ui_helpers::capitalize_first;
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::{h_flex, v_flex};
-use okena_core::ai_proxy::{AiAccount, AiProxyCommand, AiProxyState, AiUsage};
-use okena_core::api::{ActionRequest, ApiUsageWindow};
-use okena_extensions::{ExtensionActions, ThemeColors};
+use okena_core::api::{ApiPoolAccount, ApiPoolAccountHistory, ApiUsageWindow, ApiUsageWindowKind};
+use okena_extensions::ThemeColors;
 use okena_transport::LOCAL_DAEMON_CONNECTION_ID;
 use okena_ui::tokens::{ui_text_ms, ui_text_sm, ui_text_xs};
-use okena_usage::history::{History, Provider};
 use okena_usage::{
-    SegmentUnit, Segments, TriggerItem, UsageRow, WorkingDays, effective_time_pct,
-    format_reset_time_epoch, headline_color, history_points, now_secs, render_usage_bar,
-    render_usage_row, reset_aligned_segments, usage_body_container, usage_trigger_items,
+    GlobalDaemonUsage, HostUsage, SegmentUnit, Segments, format_window_label, TriggerItem, WorkingDays, format_reset_time_epoch,
+    headline_color, now_secs, render_usage_bar, render_usage_row, reset_aligned_segments,
+    usage_body_container, usage_trigger_items, window_points, window_row, window_trigger_item,
 };
-use okena_workspace::remote_sync::HostAiAccounts;
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
+
+/// How long a loaded history serves before opening the detail reads it again;
+/// the host reloads it at most once a minute too.
+const HISTORY_REUSE: Duration = Duration::from_secs(60);
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct AccountKey {
@@ -27,9 +29,9 @@ pub(crate) struct AccountKey {
 }
 
 impl AccountKey {
-    pub fn new(host: &HostAiAccounts, account: &AiAccount) -> Self {
+    pub fn new(connection_id: &str, account: &ApiPoolAccount) -> Self {
         Self {
-            connection_id: host.connection_id.clone(),
+            connection_id: connection_id.to_string(),
             account_id: account.id.clone(),
         }
     }
@@ -49,14 +51,15 @@ impl Global for GlobalPoolHistory {}
 
 #[derive(Default)]
 pub(crate) struct AccountHistory {
-    pub history: History,
+    /// The account's windows with `history`, as its host served them.
+    pub windows: Vec<ApiUsageWindow>,
     pub error: Option<String>,
     fetched_at: Option<Instant>,
     request: Option<Task<()>>,
 }
 
-/// Usage history of the pool accounts whose detail is open, fetched on demand
-/// and shared across windows.
+/// Usage history of the pool accounts whose detail was opened, read once per
+/// opening (reused for a minute) and shared across windows.
 #[derive(Default)]
 pub(crate) struct PoolHistory {
     pub entries: BTreeMap<AccountKey, AccountHistory>,
@@ -80,32 +83,25 @@ impl PoolHistory {
         if entry.request.is_some()
             || entry
                 .fetched_at
-                .is_some_and(|at| at.elapsed() < Duration::from_secs(60))
+                .is_some_and(|at| at.elapsed() < HISTORY_REUSE)
         {
             return;
         }
-        let response = ExtensionActions::send(
-            &key.connection_id,
-            ActionRequest::AiProxy {
-                request: AiProxyCommand::UsageHistory {
-                    account_id: key.account_id.clone(),
-                },
-            },
-            cx,
-        );
+        let response =
+            GlobalDaemonUsage::pool_account_history(&key.connection_id, &key.account_id, cx);
         let request_key = key.clone();
         let task = cx.spawn(async move |this: WeakEntity<Self>, cx| {
             let result = response
                 .await
-                .and_then(|value| parse_history(value, &key.account_id));
+                .and_then(|history| checked_history(history, &key.account_id));
             let _ = this.update(cx, |this, cx| {
                 let entry = this.entries.entry(key).or_default();
                 entry.request = None;
                 entry.fetched_at = Some(Instant::now());
                 match result {
-                    Ok(history) => {
+                    Ok(windows) => {
                         entry.error = None;
-                        entry.history = history;
+                        entry.windows = windows;
                     }
                     Err(error) => {
                         entry.error = Some(error);
@@ -118,45 +114,46 @@ impl PoolHistory {
     }
 }
 
-fn parse_history(value: serde_json::Value, account_id: &str) -> Result<History, String> {
-    let state: AiProxyState =
-        serde_json::from_value(value).map_err(|error| format!("Invalid usage history: {error}"))?;
-    if let Some(failure) = state.failure {
-        return Err(failure);
-    }
-    let history = state
-        .status
-        .and_then(|status| status.usage_history)
-        .ok_or("Usage history is unavailable from this proxy")?;
-    if history.account_id != account_id
-        || history
-            .samples
-            .iter()
-            .any(|sample| sample.source != account_id || sample.provider != Provider::Claude)
-    {
+fn checked_history(
+    history: ApiPoolAccountHistory,
+    account_id: &str,
+) -> Result<Vec<ApiUsageWindow>, String> {
+    if history.account_id != account_id {
         return Err("Usage history belongs to another account".into());
     }
-    Ok(History::from_samples(history.samples))
+    Ok(history.windows)
 }
 
-const FIVE_HOUR_SECS: f64 = 5.0 * 3600.0;
-const SEVEN_DAY_SECS: f64 = 7.0 * 86400.0;
+/// Status-bar label for a pool window.
+fn trigger_label(window: &ApiUsageWindow) -> Option<&'static str> {
+    match window.kind {
+        ApiUsageWindowKind::FiveHour => Some("5h"),
+        ApiUsageWindowKind::Weekly => Some("7d"),
+        _ => None,
+    }
+}
+
+/// The account is blocked by a quota window at 100%. Its red bar already says
+/// so, so the status bar adds no label for it.
+fn blocked_by_full_window(account: &ApiPoolAccount) -> bool {
+    account.blocked_until.is_some_and(|until| {
+        account
+            .windows
+            .iter()
+            .any(|window| window.used_percent >= 100.0 && window.reset_at == Some(until))
+    })
+}
 
 pub(crate) fn render_trigger(
-    account: &AiAccount,
+    account: &ApiPoolAccount,
     working: WorkingDays,
     t: &ThemeColors,
     cx: &App,
 ) -> AnyElement {
-    let now_ms = jiff::Timestamp::now().as_millisecond();
-    let status = if account.needs_login || !account.enabled {
-        account_status(account, now_ms)
-    } else {
-        account
-            .cooldown_until_ms
-            .filter(|until| *until > now_ms && account.exhausted_period(now_ms).is_none())
-            .map(|_| "429 cooldown".to_string())
-    };
+    let status = account
+        .blocked
+        .clone()
+        .filter(|_| !blocked_by_full_window(account));
     let items = trigger_items(account, working);
     h_flex()
         .gap(px(6.0))
@@ -186,31 +183,12 @@ pub(crate) fn render_trigger(
         .into_any_element()
 }
 
-fn trigger_items(account: &AiAccount, working: WorkingDays) -> Vec<TriggerItem> {
-    [
-        (
-            "5h",
-            account.five_hour.as_ref(),
-            FIVE_HOUR_SECS,
-            SegmentUnit::Hour,
-        ),
-        (
-            "7d",
-            account.seven_day.as_ref(),
-            SEVEN_DAY_SECS,
-            SegmentUnit::Day,
-        ),
-    ]
-    .into_iter()
-    .filter_map(|(period, usage, seconds, unit)| {
-        let usage = usage?;
-        Some((
-            period.into(),
-            usage.utilization,
-            time_pct(usage, seconds, unit, working),
-        ))
-    })
-    .collect()
+fn trigger_items(account: &ApiPoolAccount, working: WorkingDays) -> Vec<TriggerItem> {
+    account
+        .windows
+        .iter()
+        .filter_map(|window| Some(window_trigger_item(window, trigger_label(window)?, working)))
+        .collect()
 }
 
 /// One labeled bar per known window, with the grid and time marker of the
@@ -270,46 +248,36 @@ pub(crate) fn window_bars(
     .collect()
 }
 
+/// One pool account of `host`: its windows from the published pool, with the
+/// chart from `detail`, the history the host served (if loaded).
 pub(crate) fn render_body(
-    host: &HostAiAccounts,
-    account: &AiAccount,
-    history: &History,
-    working: WorkingDays,
+    host: &HostUsage,
+    account: &ApiPoolAccount,
+    detail: &[ApiUsageWindow],
     chart_state: &Entity<okena_usage::HistoryChartState>,
     t: &ThemeColors,
     cx: &App,
 ) -> Div {
-    let host_name =
-        (host.connection_id != LOCAL_DAEMON_CONNECTION_ID).then_some(host.host_name.as_str());
-    let marker = AccountKey::new(host, account).element_id();
-    let now_ms = jiff::Timestamp::now().as_millisecond();
+    let working = WorkingDays::from_indices(&host.usage.working_days);
+    let marker = AccountKey::new(&host.connection_id, account).element_id();
     let mut title = account.label.clone();
-    if let Some(host_name) = host_name {
-        title = format!("{host_name} / {title}");
+    if host.connection_id != LOCAL_DAEMON_CONNECTION_ID {
+        title = format!("{} / {title}", host.host_name);
     }
-    let plan = account.plan.as_deref().map(capitalize_first);
-    let status = account_status(account, now_ms);
-    let row = |label: &str, period: &str, usage: &AiUsage, period_secs: f64, unit: SegmentUnit| {
-        let usage_row = UsageRow {
-            label: label.to_owned().into(),
-            period: period.to_owned().into(),
-            pct: usage.utilization,
-            time_pct: linear_time_pct(usage, period_secs),
-            reset_epoch: reset_epoch(usage),
-            period_secs,
-            unit: Some(unit),
-            marker_id: format!("{marker}-{period}").into(),
-        };
-        render_usage_row(
-            t,
-            cx,
-            &usage_row,
-            working,
-            history_points(history, period, &usage_row),
-            chart_state,
-        )
-        .into_any_element()
-    };
+    let status = account.blocked.as_ref().map(|blocked| match account.blocked_until {
+        Some(until) => format!("{blocked} until {}", format_reset_time_epoch(until, true)),
+        None => blocked.clone(),
+    });
+    let rows = account.windows.iter().map(|window| {
+        let period = format_window_label(window.window_seconds);
+        let row = window_row(window, window.label.clone(), format!("{marker}-{period}"));
+        let points = detail
+            .iter()
+            .find(|loaded| loaded.id == window.id)
+            .map(window_points)
+            .unwrap_or_default();
+        render_usage_row(t, cx, &row, working, points, chart_state).into_any_element()
+    });
 
     usage_body_container().child(
         v_flex()
@@ -330,12 +298,12 @@ pub(crate) fn render_body(
                                     .text_color(rgb(t.text_primary))
                                     .child(title),
                             )
-                            .when_some(plan, |el, plan| {
+                            .when_some(account.tier.clone(), |el, tier| {
                                 el.child(
                                     div()
                                         .text_size(ui_text_xs(cx))
                                         .text_color(rgb(t.text_muted))
-                                        .child(plan),
+                                        .child(tier),
                                 )
                             }),
                     )
@@ -348,116 +316,66 @@ pub(crate) fn render_body(
                         )
                     }),
             )
-            .when_some(account.five_hour.as_ref(), |el, usage| {
-                el.child(row(
-                    "Session",
-                    "5h",
-                    usage,
-                    FIVE_HOUR_SECS,
-                    SegmentUnit::Hour,
-                ))
-            })
-            .when_some(account.seven_day.as_ref(), |el, usage| {
-                el.child(row("Weekly", "7d", usage, SEVEN_DAY_SECS, SegmentUnit::Day))
-            }),
-    )
-}
-
-/// Why the proxy does not route to the account right now, if it does not.
-fn account_status(account: &AiAccount, now_ms: i64) -> Option<String> {
-    if account.needs_login {
-        return Some("Needs login".into());
-    }
-    if !account.enabled {
-        return Some("Disabled".into());
-    }
-    if let Some(period) = account.exhausted_period(now_ms) {
-        return Some(format!("{period} limit reached"));
-    }
-    let until_ms = account.cooldown_until_ms.filter(|until| *until > now_ms)?;
-    Some(format!(
-        "429 cooldown until {}",
-        format_reset_time_epoch(until_ms as f64 / 1000.0, true)
-    ))
-}
-
-fn reset_epoch(usage: &AiUsage) -> Option<f64> {
-    usage.resets_at_ms.map(|ms| ms as f64 / 1000.0)
-}
-
-fn linear_time_pct(usage: &AiUsage, period_secs: f64) -> Option<f64> {
-    okena_usage::linear_time_pct(reset_epoch(usage)?, period_secs, now_secs()?)
-}
-
-fn time_pct(
-    usage: &AiUsage,
-    period_secs: f64,
-    unit: SegmentUnit,
-    working: WorkingDays,
-) -> Option<f64> {
-    effective_time_pct(
-        reset_epoch(usage),
-        period_secs,
-        Some(unit),
-        working,
-        linear_time_pct(usage, period_secs),
+            .children(rows),
     )
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{AccountKey, account_status, parse_history, trigger_items};
-    use okena_core::ai_proxy::{AiAccount, AiUsage};
-    use okena_usage::WorkingDays;
+    use super::{AccountKey, PoolHistory, blocked_by_full_window, trigger_items};
+    use okena_core::api::{
+        ApiPoolAccount, ApiPoolAccountHistory, ApiUsagePoint, ApiUsageWindow, ApiUsageWindowKind,
+    };
+    use okena_usage::{GlobalDaemonUsage, WorkingDays};
+    use std::rc::Rc;
 
-    fn account() -> AiAccount {
-        AiAccount {
+    fn window(id: &str, kind: ApiUsageWindowKind, used_percent: f64) -> ApiUsageWindow {
+        ApiUsageWindow {
+            id: id.into(),
+            label: id.into(),
+            kind,
+            used_percent,
+            window_seconds: 18000.0,
+            reset_at: Some(2.0),
+            active: true,
+            history: Vec::new(),
+        }
+    }
+
+    fn account() -> ApiPoolAccount {
+        ApiPoolAccount {
             id: "a".into(),
             label: "Work".into(),
-            email: None,
-            plan: None,
-            rate_limit_tier: None,
-            enabled: true,
-            needs_login: false,
-            cooldown_until_ms: None,
-            five_hour: None,
-            seven_day: None,
-            requests: 0,
-            last_used_ms: None,
+            tier: None,
+            blocked: None,
+            blocked_until: None,
+            used_today_percent: 0.0,
+            windows: Vec::new(),
         }
     }
 
     #[gpui::test]
     fn history_requests_are_shared_and_isolated_by_host(cx: &mut gpui::TestAppContext) {
-        use super::PoolHistory;
-        use gpui::Task;
-        use okena_core::ai_proxy::AiProxyCommand;
-        use okena_core::api::ActionRequest;
-        use okena_extensions::ExtensionActions;
-        use std::sync::{
-            Arc,
-            atomic::{AtomicUsize, Ordering},
-        };
+        use std::cell::Cell;
 
-        let calls = Arc::new(AtomicUsize::new(0));
+        let calls = Rc::new(Cell::new(0));
         let counter = calls.clone();
         let (first, second) = cx.update(|cx| {
-            cx.set_global(ExtensionActions::new(move |connection, action, _| {
-                counter.fetch_add(1, Ordering::SeqCst);
-                let ActionRequest::AiProxy { request: AiProxyCommand::UsageHistory { account_id } } = action else {
-                    panic!("expected a usage history request");
-                };
-                let percent = if connection == "local" { 23.0 } else { 71.0 };
-                Task::ready(Ok(serde_json::json!({
-                    "status": {
-                        "version": "test", "inflight": 0, "accounts": [], "logins": [],
-                        "usage_history": { "account_id": account_id, "samples": [{
-                            "version": 1, "recorded_at": 1500.0, "provider": "claude", "source": account_id, "plan": null,
-                            "limits": [{ "name": "5h", "used_percent": percent, "window_seconds": 18000.0, "reset_at": 19000.0 }]
-                        }] }
-                    }, "failure": null
-                })))
-            }));
+            GlobalDaemonUsage::entity(cx).update(cx, |store, _| {
+                store.set_pool_history(Rc::new(move |connection, account_id, _| {
+                    counter.set(counter.get() + 1);
+                    let percent = if connection == "local" { 23.0 } else { 71.0 };
+                    let mut weekly = window("five_hour", ApiUsageWindowKind::FiveHour, percent);
+                    weekly.history = vec![ApiUsagePoint {
+                        recorded_at: 1.0,
+                        used_percent: percent,
+                    }];
+                    gpui::Task::ready(Ok(ApiPoolAccountHistory {
+                        account_id: account_id.into(),
+                        windows: vec![weekly],
+                    }))
+                }));
+            });
             (PoolHistory::shared(cx), PoolHistory::shared(cx))
         });
         assert_eq!(first, second);
@@ -481,46 +399,36 @@ mod tests {
             for (key, percent) in [(local, 23.0), (remote, 71.0)] {
                 let entry = &history.entries[&key];
                 assert!(entry.error.is_none());
-                assert_eq!(
-                    entry.history.points("5h", 19000.0, 18000.0, 1600.0)[0].used_percent,
-                    percent
-                );
+                assert_eq!(entry.windows[0].history[0].used_percent, percent);
             }
         });
-        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(calls.get(), 2);
     }
 
-    #[test]
-    fn history_response_keeps_account_and_window_boundaries() {
-        let response = serde_json::json!({
-            "status": {
-                "version": "test", "inflight": 0, "accounts": [], "logins": [],
-                "usage_history": { "account_id": "a", "samples": [{
-                    "version": 1, "recorded_at": 1500.0, "provider": "claude", "source": "a", "plan": null,
-                    "limits": [{ "name": "5h", "used_percent": 23.0, "window_seconds": 18000.0, "reset_at": 19000.0 }]
-                }] }
-            }, "failure": null
+    #[gpui::test]
+    fn a_history_of_another_account_is_an_error(cx: &mut gpui::TestAppContext) {
+        let history = cx.update(|cx| {
+            GlobalDaemonUsage::entity(cx).update(cx, |store, _| {
+                store.set_pool_history(Rc::new(|_, _, _| {
+                    gpui::Task::ready(Ok(ApiPoolAccountHistory {
+                        account_id: "b".into(),
+                        windows: Vec::new(),
+                    }))
+                }));
+            });
+            PoolHistory::shared(cx)
         });
-        let history = parse_history(response.clone(), "a").unwrap();
-        assert_eq!(
-            history.points("5h", 19000.0, 18000.0, 1600.0)[0].used_percent,
-            23.0
-        );
-        assert!(history.points("7d", 19000.0, 604800.0, 1600.0).is_empty());
-        assert!(parse_history(response.clone(), "b").is_err());
-        let mut mixed = response.clone();
-        mixed["status"]["usage_history"]["samples"][0]["source"] = "b".into();
-        assert!(parse_history(mixed, "a").is_err());
-        let mut legacy = response;
-        legacy["status"]["usage_history"] = serde_json::Value::Null;
-        assert!(parse_history(legacy, "a").is_err());
-        assert!(
-            parse_history(
-                serde_json::json!({"status": null, "failure": "Offline"}),
-                "a"
-            )
-            .is_err()
-        );
+        let key = AccountKey {
+            connection_id: "local".into(),
+            account_id: "a".into(),
+        };
+        cx.update(|cx| history.update(cx, |history, cx| history.request(key.clone(), cx)));
+        cx.run_until_parked();
+        cx.update(|cx| {
+            let entry = &history.read(cx).entries[&key];
+            assert!(entry.error.is_some());
+            assert!(entry.windows.is_empty());
+        });
     }
 
     #[test]
@@ -543,51 +451,35 @@ mod tests {
     }
 
     #[test]
-    fn status_names_why_an_account_is_skipped() {
-        assert_eq!(account_status(&account(), 1_000), None);
-        let cooled_down = AiAccount {
-            cooldown_until_ms: Some(500),
+    fn a_full_window_needs_no_status_label_but_other_blocks_do() {
+        let limited = ApiPoolAccount {
+            blocked: Some("7d limit".into()),
+            blocked_until: Some(2.0),
+            windows: vec![window("seven_day", ApiUsageWindowKind::Weekly, 100.0)],
             ..account()
         };
-        assert_eq!(account_status(&cooled_down, 1_000), None);
-        let disabled = AiAccount {
-            enabled: false,
-            ..account()
+        assert!(blocked_by_full_window(&limited));
+        let disabled = ApiPoolAccount {
+            blocked: Some("Disabled".into()),
+            blocked_until: None,
+            ..limited.clone()
         };
-        assert_eq!(
-            account_status(&disabled, 1_000).as_deref(),
-            Some("Disabled")
-        );
-        let logged_out = AiAccount {
-            needs_login: true,
-            enabled: false,
-            ..account()
+        assert!(!blocked_by_full_window(&disabled));
+        let cooling = ApiPoolAccount {
+            blocked: Some("429 cooldown".into()),
+            blocked_until: Some(9.0),
+            ..limited
         };
-        assert_eq!(
-            account_status(&logged_out, 1_000).as_deref(),
-            Some("Needs login")
-        );
-        let limited = AiAccount {
-            cooldown_until_ms: Some(2_000),
-            ..account()
-        };
-        assert!(
-            account_status(&limited, 1_000)
-                .is_some_and(|status| status.starts_with("429 cooldown until"))
-        );
+        assert!(!blocked_by_full_window(&cooling));
     }
 
     #[test]
     fn zero_session_usage_does_not_hide_an_exhausted_weekly_quota() {
-        let mut account = AiAccount {
-            five_hour: Some(AiUsage {
-                utilization: 0.0,
-                resets_at_ms: None,
-            }),
-            seven_day: Some(AiUsage {
-                utilization: 100.0,
-                resets_at_ms: Some(2_000),
-            }),
+        let account = ApiPoolAccount {
+            windows: vec![
+                window("five_hour", ApiUsageWindowKind::FiveHour, 0.0),
+                window("seven_day", ApiUsageWindowKind::Weekly, 100.0),
+            ],
             ..account()
         };
         let items = trigger_items(&account, WorkingDays::all());
@@ -598,12 +490,5 @@ mod tests {
                 .collect::<Vec<_>>(),
             [("5h", 0.0), ("7d", 100.0)]
         );
-        assert_eq!(
-            account_status(&account, 1_000).as_deref(),
-            Some("7d limit reached")
-        );
-        assert_eq!(account_status(&account, 2_000), None);
-        account.five_hour = None;
-        assert_eq!(trigger_items(&account, WorkingDays::all()).len(), 1);
     }
 }

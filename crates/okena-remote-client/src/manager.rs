@@ -704,6 +704,44 @@ impl RemoteConnectionManager {
         true
     }
 
+    /// One AI proxy pool account's windows with their history
+    /// (`GET /v1/usage/pool/{account_id}`), from `connection_id`'s server.
+    pub fn pool_account_history(
+        &self,
+        connection_id: &str,
+        account_id: &str,
+        cx: &mut Context<Self>,
+    ) -> gpui::Task<Result<okena_core::api::ApiPoolAccountHistory, String>> {
+        let Some(connection) = self.connections.get(connection_id) else {
+            return Task::ready(Err(format!("Connection {connection_id} not found")));
+        };
+        let config = connection.config().clone();
+        let Some(token) = config.effective_auth_token() else {
+            return Task::ready(Err("No auth token for remote connection".to_string()));
+        };
+        let account_id = account_id.to_string();
+        let request = self.runtime.spawn(async move {
+            okena_transport::remote_action::get_json_async(
+                &config,
+                &token,
+                &["v1", "usage", "pool", &account_id],
+                &[],
+            )
+            .await
+            .map_err(|error| match error {
+                okena_transport::remote_action::JsonRequestError::Status { status: 404, .. } => {
+                    "History is unavailable from this host".to_string()
+                }
+                error => error.to_string(),
+            })
+        });
+        cx.background_executor().spawn(async move {
+            request
+                .await
+                .unwrap_or_else(|error| Err(format!("History request failed: {error}")))
+        })
+    }
+
     /// Send through the same FIFO as `send_action` and return the API response.
     /// Void responses use the canonical `{"ok": true}` envelope.
     pub fn send_action_with_result(

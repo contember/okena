@@ -1,15 +1,15 @@
 //! The AI proxy's account pool as the wire's [`okena_core::api::ApiPool`]:
 //! [`crate::pool`]'s model applied to the accounts and their usage history.
 
-use crate::history::History;
+use crate::history::{History, window_history};
 use crate::pace::WorkingDays;
 use crate::pool::{self, PlanSize, RUNWAY_HORIZON_MS, Runway};
 use jiff::Timestamp;
 use jiff::tz::TimeZone;
 use okena_core::ai_proxy::{AiAccount, AiUsage};
 use okena_core::api::{
-    ApiPool, ApiPoolAccount, ApiPoolAmount, ApiPoolNonstop, ApiPoolPace, ApiPoolToday,
-    ApiUsageWindow, ApiUsageWindowKind,
+    ApiPool, ApiPoolAccount, ApiPoolAccountHistory, ApiPoolAmount, ApiPoolNonstop, ApiPoolPace,
+    ApiPoolToday, ApiUsageWindow, ApiUsageWindowKind,
 };
 use std::collections::HashMap;
 
@@ -21,8 +21,8 @@ const SEVEN_DAY_SECS: f64 = 7.0 * 24.0 * HOUR_SECS;
 const RUNS_SHORT_RESET_TOLERANCE_MS: i64 = 30 * 60 * 1000;
 
 /// Summarize the pool at `now`. `histories` holds each account's usage history
-/// by account id; a missing one counts as empty. `None` when the pool has no
-/// accounts at all.
+/// by account id; a missing one counts as empty. Every account is listed, but
+/// only those in service count. `None` when the pool has no accounts at all.
 pub fn summarize(
     accounts: &[AiAccount],
     histories: &HashMap<String, History>,
@@ -88,21 +88,25 @@ pub fn summarize(
             session_week_percent: pace.weekly_per_session_point * 100.0,
             from_history: pace.from_history,
         },
-        accounts: pairs
+        accounts: accounts
             .iter()
-            .map(|(account, history)| ApiPoolAccount {
-                id: account.id.clone(),
-                label: account.label.clone(),
-                tier: tier_label(account).map(Into::into),
-                blocked: blocked_reason(account, now_ms),
-                used_today_percent: pool::weekly_used_between(
-                    account,
-                    history,
-                    midnight_secs,
-                    now_secs,
-                    now,
-                ),
-                windows: account_windows(account),
+            .map(|account| {
+                let blocked = blocked(account, now_ms);
+                let used_today_percent = if pool::in_service(account) {
+                    let history = histories.get(&account.id).unwrap_or(&empty);
+                    pool::weekly_used_between(account, history, midnight_secs, now_secs, now)
+                } else {
+                    0.0
+                };
+                ApiPoolAccount {
+                    id: account.id.clone(),
+                    label: account.label.clone(),
+                    tier: tier_label(account).map(Into::into),
+                    blocked: blocked.as_ref().map(|blocked| blocked.reason.clone()),
+                    blocked_until: blocked.and_then(|blocked| blocked.until_ms).map(epoch_secs),
+                    used_today_percent,
+                    windows: account_windows(account),
+                }
             })
             .collect(),
     })
@@ -171,49 +175,132 @@ fn tier_label(account: &AiAccount) -> Option<&'static str> {
     }
 }
 
-fn blocked_reason(account: &AiAccount, now_ms: i64) -> Option<String> {
+struct Blocked {
+    reason: String,
+    until_ms: Option<i64>,
+}
+
+/// Why the proxy skips the account now, if it does.
+fn blocked(account: &AiAccount, now_ms: i64) -> Option<Blocked> {
+    let untimed = |reason: &str| {
+        Some(Blocked {
+            reason: reason.into(),
+            until_ms: None,
+        })
+    };
+    if account.needs_login {
+        return untimed("Needs login");
+    }
+    if !account.enabled {
+        return untimed("Disabled");
+    }
     if let Some(period) = account.exhausted_period(now_ms) {
-        return Some(format!("{period} limit"));
+        let window = match period {
+            "7d" => account.seven_day.as_ref(),
+            _ => account.five_hour.as_ref(),
+        };
+        return Some(Blocked {
+            reason: format!("{period} limit"),
+            until_ms: window.and_then(|usage| usage.resets_at_ms),
+        });
     }
     account
         .cooldown_until_ms
         .filter(|until| *until > now_ms)
-        .map(|_| "429 cooldown".into())
+        .map(|until| Blocked {
+            reason: "429 cooldown".into(),
+            until_ms: Some(until),
+        })
 }
 
-/// The account's 5 h and 7 d windows, without history.
-fn account_windows(account: &AiAccount) -> Vec<ApiUsageWindow> {
-    [
-        (
-            "five_hour",
-            "Session",
-            ApiUsageWindowKind::FiveHour,
-            FIVE_HOUR_SECS,
-            account.five_hour.as_ref(),
-        ),
-        (
-            "seven_day",
-            "Weekly",
-            ApiUsageWindowKind::Weekly,
-            SEVEN_DAY_SECS,
-            account.seven_day.as_ref(),
-        ),
-    ]
-    .into_iter()
-    .filter_map(|(id, label, kind, window_seconds, usage)| {
-        let usage: &AiUsage = usage?;
+/// One account's windows with their history, for its detail chart.
+pub fn account_history(
+    account: &AiAccount,
+    history: &History,
+    now: Timestamp,
+) -> ApiPoolAccountHistory {
+    let now_secs = epoch_secs(now.as_millisecond());
+    let windows = ACCOUNT_WINDOWS
+        .iter()
+        .filter_map(|spec| {
+            let mut window = spec.window(account)?;
+            window.history = window_history(history, spec.series, &window, now_secs);
+            Some(window)
+        })
+        .collect();
+    ApiPoolAccountHistory {
+        account_id: account.id.clone(),
+        windows,
+    }
+}
+
+/// [`account_history`] of every account, by account id.
+pub fn account_histories_now(
+    accounts: &[AiAccount],
+    histories: &HashMap<String, History>,
+) -> HashMap<String, ApiPoolAccountHistory> {
+    let now = Timestamp::now();
+    let empty = History::default();
+    accounts
+        .iter()
+        .map(|account| {
+            let history = histories.get(&account.id).unwrap_or(&empty);
+            (account.id.clone(), account_history(account, history, now))
+        })
+        .collect()
+}
+
+struct AccountWindow {
+    id: &'static str,
+    /// Name of the window's series in the proxy's usage history.
+    series: &'static str,
+    label: &'static str,
+    kind: ApiUsageWindowKind,
+    window_seconds: f64,
+    usage: fn(&AiAccount) -> Option<&AiUsage>,
+}
+
+const ACCOUNT_WINDOWS: [AccountWindow; 2] = [
+    AccountWindow {
+        id: "five_hour",
+        series: "5h",
+        label: "Session",
+        kind: ApiUsageWindowKind::FiveHour,
+        window_seconds: FIVE_HOUR_SECS,
+        usage: |account| account.five_hour.as_ref(),
+    },
+    AccountWindow {
+        id: "seven_day",
+        series: "7d",
+        label: "Weekly",
+        kind: ApiUsageWindowKind::Weekly,
+        window_seconds: SEVEN_DAY_SECS,
+        usage: |account| account.seven_day.as_ref(),
+    },
+];
+
+impl AccountWindow {
+    fn window(&self, account: &AiAccount) -> Option<ApiUsageWindow> {
+        let usage = (self.usage)(account)?;
         Some(ApiUsageWindow {
-            id: id.into(),
-            label: label.into(),
-            kind,
+            id: self.id.into(),
+            label: self.label.into(),
+            kind: self.kind.clone(),
             used_percent: usage.utilization,
-            window_seconds,
+            window_seconds: self.window_seconds,
             reset_at: usage.resets_at_ms.map(epoch_secs),
             active: true,
             history: Vec::new(),
         })
-    })
-    .collect()
+    }
+}
+
+/// The account's 5 h and 7 d windows, without history.
+fn account_windows(account: &AiAccount) -> Vec<ApiUsageWindow> {
+    ACCOUNT_WINDOWS
+        .iter()
+        .filter_map(|spec| spec.window(account))
+        .collect()
 }
 
 #[cfg(test)]
@@ -297,20 +384,41 @@ mod tests {
     }
 
     #[test]
-    fn only_accounts_in_service_are_listed() {
+    fn accounts_out_of_service_are_listed_as_blocked_but_do_not_count() {
         let disabled = AiAccount {
             enabled: false,
+            seven_day: usage(10.0, NOW_MS + 48 * HOUR_MS),
             ..account("b")
         };
         let logged_out = AiAccount {
             needs_login: true,
+            enabled: false,
             ..account("c")
         };
         let summary = summarize_at(&[account("a"), disabled, logged_out], &HashMap::new());
-        let ids: Vec<&str> = summary.accounts.iter().map(|a| a.id.as_str()).collect();
-        assert_eq!(ids, ["a"]);
+        let listed: Vec<(&str, Option<&str>)> = summary
+            .accounts
+            .iter()
+            .map(|a| (a.id.as_str(), a.blocked.as_deref()))
+            .collect();
+        assert_eq!(
+            listed,
+            [
+                ("a", None),
+                ("b", Some("Disabled")),
+                ("c", Some("Needs login"))
+            ]
+        );
         assert_eq!(summary.accounts[0].tier.as_deref(), Some("Max 5x"));
         assert!(!summary.pace.from_history);
+        assert_eq!(
+            summary,
+            ApiPool {
+                accounts: summary.accounts.clone(),
+                ..summarize_at(&[account("a")], &HashMap::new())
+            },
+            "accounts out of service changed the pool's numbers"
+        );
     }
 
     #[test]
@@ -337,6 +445,18 @@ mod tests {
             .map(|account| account.blocked.as_deref())
             .collect();
         assert_eq!(blocked, [Some("7d limit"), Some("429 cooldown")]);
+        let until: Vec<Option<f64>> = summary
+            .accounts
+            .iter()
+            .map(|account| account.blocked_until)
+            .collect();
+        assert_eq!(
+            until,
+            [
+                Some((NOW_MS + 48 * HOUR_MS) as f64 / 1000.0),
+                Some((NOW_MS + HOUR_MS) as f64 / 1000.0)
+            ]
+        );
         assert_eq!(summary.accounts[1].tier.as_deref(), Some("Max 20x"));
     }
 
@@ -421,6 +541,44 @@ mod tests {
         assert!(windows.iter().all(|window| window.history.is_empty()));
         // The history still feeds the pool math: 10% at the sample to 12% live.
         assert_eq!(summary.accounts[0].used_today_percent, 2.0);
+    }
+
+    #[test]
+    fn account_history_fills_each_window_from_its_series() {
+        let now_secs = NOW_MS as f64 / 1000.0;
+        let session_reset = now_secs + 3600.0;
+        let weekly_reset = now_secs + 86400.0;
+        let account = AiAccount {
+            five_hour: usage(40.0, NOW_MS + HOUR_MS),
+            seven_day: usage(12.0, NOW_MS + 24 * HOUR_MS),
+            ..account("a")
+        };
+        let history = History::from_samples(vec![sample(
+            "a",
+            now_secs - 600.0,
+            vec![
+                ("5h", 30.0, FIVE_HOUR_SECS, session_reset),
+                ("7d", 10.0, SEVEN_DAY_SECS, weekly_reset),
+            ],
+        )]);
+        let detail = account_history(&account, &history, now());
+        assert_eq!(detail.account_id, "a");
+        let series: Vec<(&str, Vec<f64>)> = detail
+            .windows
+            .iter()
+            .map(|window| {
+                let used = window.history.iter().map(|p| p.used_percent).collect();
+                (window.id.as_str(), used)
+            })
+            .collect();
+        assert_eq!(
+            series,
+            [("five_hour", vec![30.0]), ("seven_day", vec![10.0])]
+        );
+        assert_eq!(detail.windows[0].used_percent, 40.0);
+
+        let unknown = account_history(&account, &History::default(), now());
+        assert!(unknown.windows.iter().all(|window| window.history.is_empty()));
     }
 
     #[test]

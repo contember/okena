@@ -11,10 +11,11 @@
 //! stream registers as a client ([`UsageHub::register_client`]); both polls
 //! pause their automatic cadence while there is none.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use okena_core::api::{ApiPool, ApiUsage, ApiUsageProvider, ApiUsageStatus};
+use okena_core::api::{ApiPool, ApiPoolAccountHistory, ApiUsage, ApiUsageProvider, ApiUsageStatus};
 use parking_lot::Mutex;
 use tokio::sync::{mpsc, oneshot, watch};
 
@@ -60,6 +61,9 @@ struct UsageSources {
     pool: Option<ApiPool>,
     /// [`UsageHub::set_pool`] was called at least once.
     pool_reported: bool,
+    /// The pool accounts' windows with history, by account id; served on
+    /// request, never pushed.
+    pool_histories: HashMap<String, ApiPoolAccountHistory>,
 }
 
 impl UsageSources {
@@ -87,6 +91,7 @@ impl UsageHub {
             polled: initial,
             pool: None,
             pool_reported: false,
+            pool_histories: HashMap::new(),
         };
         (
             Self {
@@ -143,9 +148,23 @@ impl UsageHub {
     }
 
     /// Set the AI proxy's account pool (`None` while new shells do not use
-    /// the proxy). Returns whether a changed snapshot was published.
+    /// the proxy, which also drops the histories). Returns whether a changed
+    /// snapshot was published.
     pub fn set_pool(&self, pool: Option<ApiPool>) -> bool {
         self.set_pool_at(pool, now_epoch())
+    }
+
+    /// Replace the pool accounts' histories that
+    /// [`Self::pool_account_history`] serves. Subscribers are not woken.
+    pub fn set_pool_histories(&self, histories: HashMap<String, ApiPoolAccountHistory>) {
+        self.sources.lock().pool_histories = histories;
+    }
+
+    /// One pool account's windows with history, while a pool is set.
+    pub fn pool_account_history(&self, account_id: &str) -> Option<ApiPoolAccountHistory> {
+        let sources = self.sources.lock();
+        sources.pool.as_ref()?;
+        sources.pool_histories.get(account_id).cloned()
     }
 
     fn publish_at(&self, usage: ApiUsage, now: f64) -> bool {
@@ -157,6 +176,9 @@ impl UsageHub {
     fn set_pool_at(&self, pool: Option<ApiPool>, now: f64) -> bool {
         let mut sources = self.sources.lock();
         sources.pool_reported = true;
+        if pool.is_none() {
+            sources.pool_histories.clear();
+        }
         if sources.pool == pool {
             return false;
         }
@@ -375,6 +397,24 @@ mod tests {
         assert!(!hub.login_in_use());
         hub.set_pool(None);
         assert!(hub.login_in_use());
+    }
+
+    #[test]
+    fn pool_histories_are_served_only_with_a_pool() {
+        let hub = UsageHub::detached();
+        let history = ApiPoolAccountHistory {
+            account_id: "a".into(),
+            windows: Vec::new(),
+        };
+        hub.set_pool_histories(HashMap::from([("a".to_string(), history.clone())]));
+        assert_eq!(hub.pool_account_history("a"), None, "no pool");
+        hub.set_pool(Some(pool(3600.0)));
+        hub.set_pool_histories(HashMap::from([("a".to_string(), history.clone())]));
+        assert_eq!(hub.pool_account_history("a"), Some(history));
+        assert_eq!(hub.pool_account_history("b"), None);
+        hub.set_pool(None);
+        hub.set_pool(Some(pool(3600.0)));
+        assert_eq!(hub.pool_account_history("a"), None, "a pool gap drops the histories");
     }
 
     #[test]

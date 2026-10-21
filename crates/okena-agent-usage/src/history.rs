@@ -200,18 +200,29 @@ pub fn attach_history(
     now: f64,
 ) {
     for window in windows {
-        let Some(reset) = window.reset_at else {
-            continue;
-        };
-        let points = history.points(&window.id, reset, window.window_seconds, now);
-        window.history = compact_points(&points, okena_core::api::USAGE_HISTORY_MAX_POINTS)
-            .into_iter()
-            .map(|point| okena_core::api::ApiUsagePoint {
-                recorded_at: point.recorded_at,
-                used_percent: point.used_percent,
-            })
-            .collect();
+        window.history = window_history(history, &window.id, window, now);
     }
+}
+
+/// The wire history of `window` from the series `name`: its samples inside
+/// the current window, compacted. Empty without a reset time.
+pub fn window_history(
+    history: &History,
+    name: &str,
+    window: &okena_core::api::ApiUsageWindow,
+    now: f64,
+) -> Vec<okena_core::api::ApiUsagePoint> {
+    let Some(reset) = window.reset_at else {
+        return Vec::new();
+    };
+    let points = history.points(name, reset, window.window_seconds, now);
+    compact_points(&points, okena_core::api::USAGE_HISTORY_MAX_POINTS)
+        .into_iter()
+        .map(|point| okena_core::api::ApiUsagePoint {
+            recorded_at: point.recorded_at,
+            used_percent: point.used_percent,
+        })
+        .collect()
 }
 
 fn filename(provider: Provider) -> &'static str {

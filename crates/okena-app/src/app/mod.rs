@@ -422,10 +422,12 @@ impl Okena {
 
         // Agent usage: the daemon polls Claude Code / Codex. Mirror its
         // snapshot into the global the usage widgets read, and route their
-        // refresh requests (popover opened) back to the daemon.
+        // refresh requests (popover opened) and pool history reads back to
+        // the daemons.
         {
             let store = okena_usage::GlobalDaemonUsage::entity(cx);
             let weak_manager = remote_manager.downgrade();
+            let history_manager = remote_manager.downgrade();
             store.update(cx, |store, _| {
                 store.set_refresh(std::rc::Rc::new(move |provider, cx: &mut App| {
                     weak_manager.upgrade().is_some_and(|manager| {
@@ -435,6 +437,18 @@ impl Okena {
                         )
                     })
                 }));
+                store.set_pool_history(std::rc::Rc::new(
+                    move |connection_id, account_id, cx: &mut App| {
+                        let Some(manager) = history_manager.upgrade() else {
+                            return gpui::Task::ready(Err(
+                                "Daemon connection is unavailable".into()
+                            ));
+                        };
+                        manager.update(cx, |manager, cx| {
+                            manager.pool_account_history(connection_id, account_id, cx)
+                        })
+                    },
+                ));
             });
         }
 
@@ -1071,10 +1085,19 @@ impl Okena {
     /// Copy one connection's usage snapshot into the widgets' per-host store;
     /// a removed or dead connection has none, which clears its entry.
     fn sync_host_usage(&self, connection_id: &str, cx: &mut Context<Self>) {
-        let usage = self.remote_manager.read(cx).usage(connection_id).cloned();
+        let (usage, host_name) = {
+            let manager = self.remote_manager.read(cx);
+            let host_name = manager
+                .connections()
+                .into_iter()
+                .find(|(config, _, _)| config.id == connection_id)
+                .map(|(config, _, _)| config.name.clone())
+                .unwrap_or_default();
+            (manager.usage(connection_id).cloned(), host_name)
+        };
         let store = okena_usage::GlobalDaemonUsage::entity(cx);
         store.update(cx, |store, cx| {
-            store.set_host_usage(connection_id, usage, cx);
+            store.set_host_usage(connection_id, &host_name, usage, cx);
         });
     }
 

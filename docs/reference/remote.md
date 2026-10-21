@@ -258,6 +258,16 @@ auth like the other `/v1` routes. Returns `ApiUsage`
   pool, new shells use the pool accounts; the login's entry keeps its last
   data and refresh requests for it are ignored.
 
+### `GET /v1/usage/pool/{account_id}`
+
+One AI proxy pool account's `five_hour` and `seven_day` windows with their
+`history` (the pool in `GET /v1/usage` carries none), as
+`ApiPoolAccountHistory` (`{"account_id": "…", "windows": [ApiUsageWindow]}`).
+The daemon serves its own copy, loaded from the proxy at most once a minute;
+an account that does not serve requests has no history. `404` while no pool
+is published or the account is not in it, and from daemons older than the
+route.
+
 ### `POST /v1/usage/refresh`
 
 Body `{"provider": "claude"}`, `{"provider": "codex"}`, `{"provider": "grok"}`,

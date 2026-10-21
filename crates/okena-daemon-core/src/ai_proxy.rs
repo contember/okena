@@ -1,6 +1,7 @@
 //! Daemon side of the AI proxy (`okena-ai`): environment for new shells,
 //! starting the proxy process, forwarding `ActionRequest::AiProxy`, and
-//! publishing the pool's accounts and its summary to clients.
+//! publishing the pool's accounts, its summary and each account's history to
+//! clients.
 
 use crate::claude_remote::PaneEnv;
 use okena_agent_usage::history::History;
@@ -220,12 +221,16 @@ pub(crate) async fn run_accounts_poll(
             WorkingDays::from_value(settings.lock().extension_settings.get(USAGE_SETTINGS_KEY));
         // Off the LocalSet, which also drives the PTY loop.
         let summary = tokio::task::spawn_blocking(move || {
-            pool_summary::summarize_now(&current, &pool_histories, working)
+            (
+                pool_summary::summarize_now(&current, &pool_histories, working),
+                pool_summary::account_histories_now(&current, &pool_histories),
+            )
         })
         .await;
         match summary {
-            Ok(summary) => {
+            Ok((summary, account_histories)) => {
                 usage.set_pool(summary);
+                usage.set_pool_histories(account_histories);
             }
             Err(error) => log::error!("[ai-proxy] pool summary failed: {error}"),
         }

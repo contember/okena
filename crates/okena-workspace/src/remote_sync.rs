@@ -2,7 +2,6 @@
 
 use std::collections::{HashMap, HashSet};
 
-use okena_core::ai_proxy::AiAccount;
 use okena_core::api::{ApiFullscreen, ApiGitStatus, ApiServiceInfo};
 use okena_layout::LayoutNode;
 use okena_state::WindowId;
@@ -59,16 +58,6 @@ pub struct RemoteSyncState {
     /// Client-owned layouts waiting for their daemon projects to materialize,
     /// or retained across a temporary disconnect.
     preserved_project_layouts: HashMap<String, LayoutNode>,
-    /// AI proxy accounts of each connected host, in connection order.
-    ai_accounts: Vec<HostAiAccounts>,
-}
-
-/// One host's AI proxy accounts, as its last state sync reported them.
-#[derive(Clone, Debug, PartialEq)]
-pub struct HostAiAccounts {
-    pub connection_id: String,
-    pub host_name: String,
-    pub accounts: Vec<AiAccount>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -296,16 +285,6 @@ impl RemoteSyncState {
 
     pub fn remove_snapshot(&mut self, project_id: &str) {
         self.snapshots.remove(project_id);
-    }
-
-    // === AI proxy accounts ===
-
-    pub fn ai_accounts(&self) -> &[HostAiAccounts] {
-        &self.ai_accounts
-    }
-
-    pub fn set_ai_accounts(&mut self, accounts: Vec<HostAiAccounts>) {
-        self.ai_accounts = accounts;
     }
 
     // === client presentation ===

@@ -115,29 +115,31 @@ headers and from polling the usage endpoint every five minutes.
 The status bar shows a separate entry for each pool account, with both
 **5h** and **7d** when available. Disabled accounts and accounts needing login
 show their state alongside the name. A red **100%** conveys quota exhaustion
-without an extra status label; the popover and activity view name the exhausted
-window as **5h/7d limit reached**.
+without an extra status label; the account's popover names the exhausted window
+and its reset (**7d limit until …**), the activity view as **5h/7d limit
+reached**.
 **429 cooldown** means the provider returned 429 and the proxy is waiting before trying that
 account again. A 429 alone does not establish that either quota is at 100%.
 The activity view records these responses as HTTP 429 events separately from
 the account's current quota state.
 
 Pool usage refreshes in the proxy, first five seconds after startup and then
-every five minutes, and also follows response headers. The daemon publishes
-the account state every 15 seconds. Opening the pool popover does not fetch
-usage with the local Claude login; both the status bar and popover use the
-accounts published by the daemon.
+every five minutes, and also follows response headers. Clients never poll the
+proxy or the providers for it; the daemon is their only source.
 
 While new terminals are routed through the proxy, the daemon reads the accounts
-from it every 15 seconds and after each management command, and sends them to
-clients with the workspace state. The Claude usage widget in the status bar then
+from it every 15 seconds while a client is connected and after each management
+command, and publishes them as `pool` in the usage channel (see below). The
+daemon then stops polling the `claude` login's own usage: those terminals use
+the pool accounts. Without a pool (routing off, the proxy unreachable or without
+accounts) it polls the login again. The Claude usage widget in the status bar
 shows the pool instead of the `claude` login's own usage. The Claude extension
 settings choose any combination of three items per host:
 
 - **Per-account usage** (default): the 5-hour and 7-day usage of each account.
-  Hovering an account opens its own popover with its usage, plan and state
-  (disabled, needs login, quota exhausted or cooling down). Remote accounts
-  include the host name in their popover.
+  Hovering an account opens its own popover with its usage, plan size and
+  state (disabled, needs login, quota exhausted or cooling down, with the time
+  it ends). Remote accounts include the host name in their popover.
 - **Nonstop** (hard limit): how long nonstop work at the usual pace lasts
   before every account is blocked. A simulation serves the pace from one account at a time,
   the one whose weekly quota expires first, and returns accounts as their
@@ -160,9 +162,10 @@ usage poll.
 
 The host's daemon computes the pool, in its own time zone and with its working
 days, and publishes it as `pool` in the Claude entry of the usage channel
-(`GET /v1/usage`, `usage_changed`). The desktop and the mobile app only render
-it, for every connected host whose daemon publishes it; a host with an older
-daemon shows only the account items. The daemon recomputes the pool on each
+(`GET /v1/usage`, `usage_changed`). It lists every account, with the reason
+(`blocked`) for one that does not serve requests; only serving accounts count
+in Today and Nonstop. The desktop and the mobile app only render it, for every
+connected host whose daemon publishes it. The daemon recomputes the pool on each
 15-second accounts poll and after each proxy command or settings change, and
 republishes it when it changed. The pool follows each account's live
 utilization, so while Claude is in use it can republish on most polls.
@@ -179,12 +182,15 @@ continues while the proxy runs, even with the desktop closed. Samples survive
 proxy restarts; history begins with the first successful poll after upgrading.
 While new shells route through the proxy, the daemon loads every in-service
 account's last seven days through the authenticated `usage_history` management
-command, at most once a minute per account, to compute the pool. The popup loads
-the selected account's history the same way for its chart, at most once a minute
-across desktop windows. History is omitted from ordinary status and workspace
-snapshots and from the published pool. The shared
-storage and chart data live in `okena-core::usage_history`; `okena-usage` renders
-them without owning proxy persistence.
+command, at most once a minute per account, to compute the pool. History is
+omitted from ordinary status and workspace snapshots and from the published
+pool, which republishes often. Opening an account's detail reads its chart once
+from the daemon's copy (`GET /v1/usage/pool/{account_id}`), reused for a minute
+across desktop windows; the daemon does not ask the proxy for it again. The
+sample types live in `okena-core::usage_history` because the proxy's wire
+schema carries them; storage, pruning and chart data live in
+`okena-agent-usage::history`, and `okena-usage` renders them without owning
+proxy persistence.
 
 ## Activity
 

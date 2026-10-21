@@ -114,7 +114,8 @@ pub struct PoolInfo {
     pub today: PoolTodayInfo,
     pub nonstop: PoolNonstopInfo,
     pub pace: PoolPaceInfo,
-    /// Accounts that serve requests, in pool order.
+    /// Every pool account, in pool order; those that do not serve requests
+    /// have `blocked` set.
     pub accounts: Vec<PoolAccountInfo>,
 }
 
@@ -167,7 +168,8 @@ pub struct PoolAccountInfo {
     pub label: String,
     /// `Max 20x` / `Max 5x`; `None` for the base plan.
     pub tier: Option<String>,
-    /// Why the proxy skips the account now (`7d limit`, `429 cooldown`).
+    /// Why the proxy skips the account now (`Disabled`, `7d limit`,
+    /// `429 cooldown`).
     pub blocked: Option<String>,
     pub used_today_percent: f64,
     /// The `five_hour` and `seven_day` windows.

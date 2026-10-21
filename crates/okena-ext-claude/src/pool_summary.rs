@@ -21,7 +21,6 @@ use okena_usage::{
     Severity, WorkingDays, format_reset_time_epoch, severity_color, usage_body_container,
     usage_divider, usage_kv_row, usage_trigger_item,
 };
-use okena_workspace::remote_sync::HostAiAccounts;
 use std::rc::Rc;
 
 const MINUTE_MS: i64 = 60 * 1000;
@@ -46,9 +45,13 @@ pub(crate) struct HostSummary<'a> {
     accounts: Vec<AccountShare<'a>>,
 }
 
-/// The pool of `host` from its usage snapshot, or `None` when the host does
-/// not publish one.
-pub(crate) fn summarize<'a>(host: &HostAiAccounts, usage: &'a ApiUsage) -> Option<HostSummary<'a>> {
+/// The pool of the host `connection_id` (named `host_name`) from its usage
+/// snapshot, or `None` when the host does not publish one.
+pub(crate) fn summarize<'a>(
+    connection_id: &str,
+    host_name: &str,
+    usage: &'a ApiUsage,
+) -> Option<HostSummary<'a>> {
     let pool = usage.provider(ApiUsageProvider::Claude)?.pool.as_ref()?;
     let window = |account: &'a ApiPoolAccount, kind: ApiUsageWindowKind| {
         account.windows.iter().find(|window| window.kind == kind)
@@ -57,18 +60,14 @@ pub(crate) fn summarize<'a>(host: &HostAiAccounts, usage: &'a ApiUsage) -> Optio
         .accounts
         .iter()
         .map(|account| AccountShare {
-            key: AccountKey {
-                connection_id: host.connection_id.clone(),
-                account_id: account.id.clone(),
-            },
+            key: AccountKey::new(connection_id, account),
             account,
             five_hour: window(account, ApiUsageWindowKind::FiveHour),
             seven_day: window(account, ApiUsageWindowKind::Weekly),
         })
         .collect();
     Some(HostSummary {
-        host_name: (host.connection_id != LOCAL_DAEMON_CONNECTION_ID)
-            .then(|| host.host_name.clone()),
+        host_name: (connection_id != LOCAL_DAEMON_CONNECTION_ID).then(|| host_name.to_string()),
         pool,
         working: WorkingDays::from_indices(&usage.working_days),
         accounts,
@@ -555,7 +554,6 @@ mod tests {
     };
     use okena_transport::LOCAL_DAEMON_CONNECTION_ID;
     use okena_usage::Severity;
-    use okena_workspace::remote_sync::HostAiAccounts;
 
     fn amount(hours: f64, percent: f64) -> ApiPoolAmount {
         ApiPoolAmount {
@@ -601,6 +599,7 @@ mod tests {
                 label: "Work".into(),
                 tier: Some("Max 5x".into()),
                 blocked: None,
+                blocked_until: None,
                 used_today_percent: 3.0,
                 windows: vec![
                     window("seven_day", ApiUsageWindowKind::Weekly, 2000.0),
@@ -621,14 +620,6 @@ mod tests {
         }
     }
 
-    fn host(connection_id: &str) -> HostAiAccounts {
-        HostAiAccounts {
-            connection_id: connection_id.into(),
-            host_name: "studio".into(),
-            accounts: Vec::new(),
-        }
-    }
-
     #[test]
     fn short_duration_keeps_the_status_bar_narrow() {
         assert_eq!(short_duration(0), "1m");
@@ -641,16 +632,16 @@ mod tests {
     #[test]
     fn a_host_without_a_published_pool_has_no_summary() {
         let usage = usage(None);
-        assert!(summarize(&host(LOCAL_DAEMON_CONNECTION_ID), &usage).is_none());
+        assert!(summarize(LOCAL_DAEMON_CONNECTION_ID, "studio", &usage).is_none());
     }
 
     #[test]
     fn summary_keys_accounts_by_host_and_finds_their_windows() {
         let usage = usage(Some(pool(2.0)));
-        let local = summarize(&host(LOCAL_DAEMON_CONNECTION_ID), &usage).unwrap();
+        let local = summarize(LOCAL_DAEMON_CONNECTION_ID, "studio", &usage).unwrap();
         assert_eq!(local.host_name, None);
         assert!(!local.working.is_all());
-        let remote = summarize(&host("remote"), &usage).unwrap();
+        let remote = summarize("remote", "studio", &usage).unwrap();
         assert_eq!(remote.host_name.as_deref(), Some("studio"));
         let share = &remote.accounts[0];
         assert_eq!(share.key.connection_id, "remote");
@@ -667,7 +658,6 @@ mod tests {
 
     #[test]
     fn today_reads_left_or_over_with_its_severity() {
-        let host = host(LOCAL_DAEMON_CONNECTION_ID);
         let cases = [
             (3.0, "3h00m left", Severity::Normal),
             (0.5, "30m left", Severity::Warning),
@@ -675,7 +665,7 @@ mod tests {
         ];
         for (left_hours, text, severity) in cases {
             let usage = usage(Some(pool(left_hours)));
-            let summary = summarize(&host, &usage).unwrap();
+            let summary = summarize(LOCAL_DAEMON_CONNECTION_ID, "studio", &usage).unwrap();
             assert_eq!(today_value(&summary), text);
             assert_eq!(today_severity(&summary), severity);
             assert_eq!(today_fraction(&summary), 0.25);
@@ -735,17 +725,16 @@ mod tests {
 
     #[test]
     fn today_fraction_is_full_without_a_safe_amount_and_capped_at_one() {
-        let host = host(LOCAL_DAEMON_CONNECTION_ID);
         let mut nothing_safe = pool(0.0);
         nothing_safe.today.safe_per_day = amount(0.0, 0.0);
         let usage_without_safe = usage(Some(nothing_safe));
-        let summary = summarize(&host, &usage_without_safe).unwrap();
+        let summary = summarize(LOCAL_DAEMON_CONNECTION_ID, "studio", &usage_without_safe).unwrap();
         assert_eq!(today_fraction(&summary), 1.0);
 
         let mut over = pool(-2.0);
         over.today.used = amount(6.0, 30.0);
         let usage_over = usage(Some(over));
-        let summary = summarize(&host, &usage_over).unwrap();
+        let summary = summarize(LOCAL_DAEMON_CONNECTION_ID, "studio", &usage_over).unwrap();
         assert_eq!(today_fraction(&summary), 1.0);
     }
 
@@ -754,7 +743,7 @@ mod tests {
         let mut unknown = pool(2.0);
         unknown.nonstop = ApiPoolNonstop::Unknown;
         let unknown_usage = usage(Some(unknown));
-        let summary = summarize(&host(LOCAL_DAEMON_CONNECTION_ID), &unknown_usage).unwrap();
+        let summary = summarize(LOCAL_DAEMON_CONNECTION_ID, "studio", &unknown_usage).unwrap();
         let nonstop_only = PoolDisplay {
             accounts: false,
             runway: true,
@@ -763,7 +752,7 @@ mod tests {
         assert!(trigger_nonstop(&summary, nonstop_only, 0).is_none());
 
         let known_usage = usage(Some(pool(2.0)));
-        let summary = summarize(&host(LOCAL_DAEMON_CONNECTION_ID), &known_usage).unwrap();
+        let summary = summarize(LOCAL_DAEMON_CONNECTION_ID, "studio", &known_usage).unwrap();
         assert!(trigger_nonstop(&summary, nonstop_only, 0).is_some());
         let today_only = PoolDisplay {
             runway: false,

@@ -15,8 +15,8 @@ pub use okena_agent_usage::pace::*;
 mod daemon_usage;
 mod history_chart;
 pub use daemon_usage::{
-    DaemonUsage, GlobalDaemonUsage, UsageRefreshFn, provider_usage, window_points, window_row,
-    window_trigger_item,
+    DaemonUsage, GlobalDaemonUsage, HostUsage, PoolHistoryFn, UsageRefreshFn, provider_usage,
+    window_points, window_row, window_trigger_item,
 };
 pub use history_chart::HistoryChartState;
 

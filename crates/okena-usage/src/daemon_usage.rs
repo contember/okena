@@ -6,16 +6,19 @@
 //! snapshot from the local daemon connection, and plugs in a
 //! [`UsageRefreshFn`] that calls `POST /v1/usage/refresh`. It also mirrors
 //! every connection's snapshot, the local daemon's included, by connection id
-//! ([`DaemonUsage::host_usage`]) for widgets that show one item per host. The
-//! usage widgets in the extension crates only read this entity — they never
-//! fetch.
+//! ([`DaemonUsage::hosts`]) for widgets that show one item per host, and plugs
+//! in a [`PoolHistoryFn`] that reads a pool account's history from its host
+//! (`GET /v1/usage/pool/{account_id}`). The usage widgets in the extension
+//! crates only read this entity and ask through it — they never fetch.
 
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use gpui::*;
-use okena_core::api::{ApiProviderUsage, ApiUsage, ApiUsageProvider, ApiUsageWindow};
+use okena_core::api::{
+    ApiPoolAccountHistory, ApiProviderUsage, ApiUsage, ApiUsageProvider, ApiUsageWindow,
+};
 
 use crate::history::HistoryPoint;
 use crate::{
@@ -28,6 +31,20 @@ use crate::{
 /// request).
 pub type UsageRefreshFn = Rc<dyn Fn(ApiUsageProvider, &mut App) -> bool>;
 
+/// Reads one pool account's history from the host with this connection id.
+/// Installed by the app layer.
+pub type PoolHistoryFn =
+    Rc<dyn Fn(&str, &str, &mut App) -> Task<Result<ApiPoolAccountHistory, String>>>;
+
+/// One connection's latest usage snapshot.
+#[derive(Clone, Debug, PartialEq)]
+pub struct HostUsage {
+    pub connection_id: String,
+    /// The connection's display name.
+    pub host_name: String,
+    pub usage: ApiUsage,
+}
+
 /// Client-side spacing between refresh requests for one provider. The daemon
 /// throttles too (60 s); this only saves the round trip on hover jitter.
 const REFRESH_REQUEST_THROTTLE: Duration = Duration::from_secs(60);
@@ -36,10 +53,12 @@ const REFRESH_REQUEST_THROTTLE: Duration = Duration::from_secs(60);
 #[derive(Default)]
 pub struct DaemonUsage {
     usage: Option<ApiUsage>,
-    /// Latest snapshot of each connection that has one, by connection id.
-    hosts: HashMap<String, ApiUsage>,
+    /// Latest snapshot of each connection that has one, in the order they
+    /// first reported.
+    hosts: Vec<HostUsage>,
     source_label: Option<SharedString>,
     refresh: Option<UsageRefreshFn>,
+    pool_history: Option<PoolHistoryFn>,
     last_refresh_request: HashMap<ApiUsageProvider, Instant>,
 }
 
@@ -66,25 +85,45 @@ impl DaemonUsage {
         }
     }
 
+    /// Every connection's snapshot, local daemon included.
+    pub fn hosts(&self) -> &[HostUsage] {
+        &self.hosts
+    }
+
     /// The snapshot of the connection `connection_id`, local daemon included.
     pub fn host_usage(&self, connection_id: &str) -> Option<&ApiUsage> {
-        self.hosts.get(connection_id)
+        self.hosts
+            .iter()
+            .find(|host| host.connection_id == connection_id)
+            .map(|host| &host.usage)
     }
 
     /// Replace one connection's snapshot (`None` when it has none any more).
     pub fn set_host_usage(
         &mut self,
         connection_id: &str,
+        host_name: &str,
         usage: Option<ApiUsage>,
         cx: &mut Context<Self>,
     ) {
-        if self.hosts.get(connection_id) == usage.as_ref() {
-            return;
+        let index = self
+            .hosts
+            .iter()
+            .position(|host| host.connection_id == connection_id);
+        let next = usage.map(|usage| HostUsage {
+            connection_id: connection_id.to_string(),
+            host_name: host_name.to_string(),
+            usage,
+        });
+        match (index, next) {
+            (Some(index), Some(next)) if self.hosts[index] == next => return,
+            (Some(index), Some(next)) => self.hosts[index] = next,
+            (Some(index), None) => {
+                self.hosts.remove(index);
+            }
+            (None, Some(next)) => self.hosts.push(next),
+            (None, None) => return,
         }
-        match usage {
-            Some(usage) => self.hosts.insert(connection_id.to_string(), usage),
-            None => self.hosts.remove(connection_id),
-        };
         cx.notify();
     }
 
@@ -97,6 +136,10 @@ impl DaemonUsage {
 
     pub fn set_refresh(&mut self, refresh: UsageRefreshFn) {
         self.refresh = Some(refresh);
+    }
+
+    pub fn set_pool_history(&mut self, pool_history: PoolHistoryFn) {
+        self.pool_history = Some(pool_history);
     }
 }
 
@@ -139,6 +182,20 @@ impl GlobalDaemonUsage {
             entity.update(cx, |store, _| {
                 store.last_refresh_request.insert(provider, Instant::now());
             });
+        }
+    }
+
+    /// Read one pool account's history from its host; an error until the app
+    /// layer installed a [`PoolHistoryFn`].
+    pub fn pool_account_history(
+        connection_id: &str,
+        account_id: &str,
+        cx: &mut App,
+    ) -> Task<Result<ApiPoolAccountHistory, String>> {
+        let pool_history = Self::entity(cx).read(cx).pool_history.clone();
+        match pool_history {
+            Some(pool_history) => pool_history(connection_id, account_id, cx),
+            None => Task::ready(Err("Daemon connection is unavailable".into())),
         }
     }
 }
@@ -224,15 +281,19 @@ mod tests {
         cx.update(|cx| {
             let entity = GlobalDaemonUsage::entity(cx);
             entity.update(cx, |store, cx| {
-                store.set_host_usage("local", Some(ApiUsage::default()), cx);
-                store.set_host_usage("remote", Some(remote.clone()), cx);
+                store.set_host_usage("local", "Local", Some(ApiUsage::default()), cx);
+                store.set_host_usage("remote", "Studio", Some(remote.clone()), cx);
             });
             let store = entity.read(cx);
             assert_eq!(store.host_usage("remote"), Some(&remote));
             assert_eq!(store.host_usage("local"), Some(&ApiUsage::default()));
             assert_eq!(store.usage(), None);
+            let names: Vec<&str> = store.hosts().iter().map(|h| h.host_name.as_str()).collect();
+            assert_eq!(names, ["Local", "Studio"]);
 
-            entity.update(cx, |store, cx| store.set_host_usage("remote", None, cx));
+            entity.update(cx, |store, cx| {
+                store.set_host_usage("remote", "Studio", None, cx)
+            });
             assert_eq!(entity.read(cx).host_usage("remote"), None);
             assert!(entity.read(cx).host_usage("local").is_some());
         });
@@ -249,7 +310,9 @@ mod tests {
         });
         let set = |usage: Option<ApiUsage>, cx: &mut gpui::TestAppContext| {
             cx.update(|cx| {
-                entity.update(cx, |store, cx| store.set_host_usage("remote", usage, cx))
+                entity.update(cx, |store, cx| {
+                    store.set_host_usage("remote", "Studio", usage, cx)
+                })
             });
         };
         set(Some(ApiUsage::default()), cx);
