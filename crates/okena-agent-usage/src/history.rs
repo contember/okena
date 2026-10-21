@@ -265,10 +265,14 @@ pub fn append(directory: &Path, sample: &UsageSample) -> io::Result<()> {
     let mut line = serde_json::to_vec(sample)?;
     line.push(b'\n');
     fs::create_dir_all(directory)?;
+    // Not `append(true)`: on Windows an append-only handle cannot truncate,
+    // so pruning would fail on every write. Every writer holds the lock, so
+    // seeking to the end before writing is as safe as `O_APPEND`.
     let mut file = OpenOptions::new()
         .create(true)
-        .read(true) // Windows file locking requires more than append-only access.
-        .append(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
         .open(directory.join(filename(sample.provider)))?;
     // Multiple Okena profiles/processes share this history directory.
     file.lock()?;
@@ -278,6 +282,7 @@ pub fn append(directory: &Path, sample: &UsageSample) -> io::Result<()> {
             sample.provider
         );
     }
+    file.seek(SeekFrom::End(0))?;
     file.write_all(&line)
 }
 
@@ -591,5 +596,30 @@ mod tests {
         let content = std::fs::read_to_string(&path).unwrap();
         assert_eq!(content.lines().count(), 5);
         assert!(content.lines().all(|line| recorded_at(line).is_some()));
+    }
+
+    #[test]
+    fn a_prune_that_shrinks_the_file_keeps_the_new_sample_last() {
+        let temp = tempfile::tempdir().unwrap();
+        let day = 86400.0;
+        let now = 100.0 * day;
+        let path = temp.path().join("claude.jsonl");
+        for index in 0..20 {
+            let at = now - 30.0 * day + f64::from(index);
+            append(temp.path(), &sample_at(at, at + day, 1.0)).unwrap();
+        }
+        append(temp.path(), &sample_at(now, now + day, 2.0)).unwrap();
+        append(temp.path(), &sample_at(now + 1.0, now + day, 3.0)).unwrap();
+
+        let kept: Vec<UsageSample> = std::fs::read_to_string(&path)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let used: Vec<f64> = kept
+            .iter()
+            .map(|sample| sample.limits[0].used_percent)
+            .collect();
+        assert_eq!(used, [2.0, 3.0]);
     }
 }
