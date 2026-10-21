@@ -322,6 +322,19 @@ impl Accounts {
         };
         let plan = oauth::fetch_plan(&self.http, &self.upstream, &result.tokens.access_token).await;
 
+        // A refresh running for the same account would overwrite the new tokens.
+        let refresh_lock = result.account_uuid.as_ref().and_then(|uuid| {
+            self.state
+                .lock()
+                .accounts
+                .iter()
+                .find(|account| account.stored.account_uuid.as_ref() == Some(uuid))
+                .map(|account| account.refresh.clone())
+        });
+        let _refreshing = match &refresh_lock {
+            Some(lock) => Some(lock.lock().await),
+            None => None,
+        };
         let mut state = self.state.lock();
         state.logins.retain(|login| login.id != login_id);
         // Logging the same provider account in again replaces its credentials.

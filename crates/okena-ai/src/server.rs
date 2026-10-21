@@ -379,6 +379,15 @@ mod tests {
             State(fake): State<Arc<Fake>>,
             axum::Json(body): axum::Json<serde_json::Value>,
         ) -> Response {
+            if body["grant_type"] == "authorization_code" {
+                return axum::Json(serde_json::json!({
+                    "access_token": "login-access",
+                    "refresh_token": "login-rt",
+                    "expires_in": 3600,
+                    "account": {"uuid": "uuid-a"},
+                }))
+                .into_response();
+            }
             assert_eq!(body["grant_type"], "refresh_token");
             let delay = *fake.token_delay.lock();
             tokio::time::sleep(delay).await;
@@ -706,6 +715,35 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
         panic!("the refreshed credentials were not persisted");
+    }
+
+    #[tokio::test]
+    async fn a_login_during_a_refresh_keeps_the_new_credentials() {
+        let h = harness(vec![account("a", "token-a", "uuid-a")]).await;
+        h.fake.replies.lock().insert("token-a".into(), vec![401]);
+        *h.fake.token_delay.lock() = Duration::from_millis(500);
+        let refreshing = h.message("conv");
+        let login = async {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let status = h
+                .client
+                .command(&AiProxyCommand::StartLogin { label: "a".into() })
+                .await
+                .unwrap();
+            let finish = AiProxyCommand::FinishLogin {
+                login_id: status.logins[0].id.clone(),
+                code: "code".into(),
+            };
+            h.client.command(&finish).await.unwrap()
+        };
+        let ((status, _), _) = tokio::join!(refreshing, login);
+        assert_eq!(status, 200);
+        let stored: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(proxy_dir(h._dir.path()).join("accounts.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(stored["accounts"][0]["tokens"]["access_token"], "login-access");
+        assert_eq!(stored["accounts"].as_array().unwrap().len(), 1);
     }
 
     #[tokio::test]
