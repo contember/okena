@@ -7,6 +7,7 @@ import {
   RUNNING_OUTPUT_WINDOW_MS,
   applySnapshot,
   buildActivityRows,
+  computeAttentionItems,
   computeProjectSignals,
   orderByActivity,
   projectSignals,
@@ -164,6 +165,36 @@ describe('projectSignals', () => {
     expect(
       projectSignals(project('p'), map(act('other', { bellUnseen: true })), none, {}).attention,
     ).toBe(false);
+  });
+});
+
+describe('computeAttentionItems', () => {
+  it('lists each terminal once under its most urgent reason, most urgent first', () => {
+    const p = project('p', {
+      terminalIds: ['done', 'bell', 'dialog', 'blocked', 'quiet'],
+      terminalAgentStatus: {
+        done: { lifecycle: 'done' },
+        blocked: { lifecycle: 'blocked' },
+        dialog: { lifecycle: 'blocked' },
+      },
+    });
+    const items = computeAttentionItems(
+      [p],
+      [act('bell', { bellUnseen: true }), act('dialog', { notificationUnseen: true })],
+      new Set<string>(),
+      { dialog: 1 },
+    );
+    expect(items.map((i) => [i.terminalId, i.kind])).toEqual([
+      ['dialog', 'dialog'],
+      ['blocked', 'blocked'],
+      ['bell', 'bell'],
+      ['done', 'done'],
+    ]);
+  });
+
+  it('skips a done agent already seen on the phone', () => {
+    const p = project('p', { terminalAgentStatus: { 'p-t': { lifecycle: 'done' } } });
+    expect(computeAttentionItems([p], [], new Set(['p-t']), {})).toEqual([]);
   });
 });
 

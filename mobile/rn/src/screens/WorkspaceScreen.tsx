@@ -2,7 +2,8 @@
  * WorkspaceScreen.tsx — the connected workspace.
  *
  * Port of `mobile/lib/src/screens/workspace_screen.dart`. Composes:
- *   - an app bar: a drawer-toggle (☰), the selected project name (tap to switch
+ *   - an app bar: a drawer-toggle (☰), a dashboard button (also the Android
+ *     back button), the selected project name (tap to switch
  *     when there are several), a Terminal / Chat switch for a terminal with a
  *     connected `claude`, a small connection-quality dot, and a "＋"
  *     terminal-actions menu (new / split V / split H). StatusIndicator is NOT
@@ -37,6 +38,7 @@
 
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
+  BackHandler,
   View,
   Text,
   Pressable,
@@ -92,6 +94,7 @@ import { KeyToolbar, KeyModifiers } from '../components/KeyToolbar';
 import { ProjectDrawer } from '../components/ProjectDrawer';
 import { ClaudeChat } from '../components/ClaudeChat';
 import { DialogBadge } from '../components/ClaudeIndicator';
+import { ConnectionDot } from '../components/ConnectionDot';
 import { Icon } from '../components/Icon';
 import type { TerminalFonts } from '../components/TerminalView';
 
@@ -150,7 +153,6 @@ export const WorkspaceScreen: React.FC = () => {
   const selectedProjectId = useWorkspaceStore((s) => s.selectedProjectId);
   const selectedTerminalId = useWorkspaceStore((s) => s.selectedTerminalId);
   const layoutJson = useWorkspaceStore((s) => s.projectLayoutJson);
-  const secondsSinceActivity = useWorkspaceStore((s) => s.secondsSinceActivity);
   const selectProject = useWorkspaceStore((s) => s.selectProject);
   const selectTerminal = useWorkspaceStore((s) => s.selectTerminal);
   const restoreProjectMissing = useWorkspaceStore(
@@ -165,6 +167,7 @@ export const WorkspaceScreen: React.FC = () => {
   const claudeSessions = useWorkspaceStore((s) => s.claudeSessions);
   const terminalViews = useWorkspaceStore((s) => s.terminalViews);
   const setTerminalView = useWorkspaceStore((s) => s.setTerminalView);
+  const showDashboard = useWorkspaceStore((s) => s.showDashboard);
   const sortMode = useSettingsStore((s) => s.projectSortMode);
   // Recompute the selected project from the live id (cheap selector helper).
   const project = useMemo(() => {
@@ -184,6 +187,16 @@ export const WorkspaceScreen: React.FC = () => {
   const [switcherOpen, setSwitcherOpen] = useState(false);
   const [actionsOpen, setActionsOpen] = useState(false);
   const [switcherQuery, setSwitcherQuery] = useState('');
+
+  // Android back returns to the dashboard; the drawer and the other modals
+  // take the back press themselves while open.
+  useEffect(() => {
+    const subscription = BackHandler.addEventListener('hardwareBackPress', () => {
+      showDashboard();
+      return true;
+    });
+    return () => subscription.remove();
+  }, [showDashboard]);
 
   // The remembered project is gone: show the project list instead.
   useEffect(() => {
@@ -262,14 +275,6 @@ export const WorkspaceScreen: React.FC = () => {
       activeDialogs > 0 ||
       activeView === 'chat');
   const showChat = canChat && activeView === 'chat';
-
-  const dotColor = reconnecting
-    ? OkenaColors.warning
-    : secondsSinceActivity < 3
-    ? OkenaColors.success
-    : secondsSinceActivity < 10
-    ? OkenaColors.warning
-    : OkenaColors.error;
 
   const projectName = project ? projectDisplayName(project) : 'No Project';
 
@@ -367,6 +372,15 @@ export const WorkspaceScreen: React.FC = () => {
           <Icon name="menu" size={22} color={OkenaColors.textPrimary} />
         </Pressable>
         <Pressable
+          hitSlop={8}
+          style={styles.appBarBtn}
+          onPress={showDashboard}
+          accessibilityRole="button"
+          accessibilityLabel="Dashboard"
+        >
+          <Icon name="dashboard" size={20} color={OkenaColors.textPrimary} />
+        </Pressable>
+        <Pressable
           style={styles.titleWrap}
           disabled={projects.length <= 1}
           onPress={() => setSwitcherOpen(true)}
@@ -391,9 +405,7 @@ export const WorkspaceScreen: React.FC = () => {
             onChange={(view) => setTerminalView(activeTerminalId, view)}
           />
         ) : null}
-        {connId ? (
-          <View style={[styles.dot, { backgroundColor: dotColor }]} />
-        ) : null}
+        {connId ? <ConnectionDot /> : null}
         {connId && project ? (
           <Pressable
             hitSlop={8}
@@ -702,7 +714,6 @@ const styles = StyleSheet.create({
     flexShrink: 1,
   },
   titleCaret: { marginLeft: 4 },
-  dot: { width: 8, height: 8, borderRadius: 4, marginHorizontal: 6 },
   viewSwitch: {
     flexDirection: 'row',
     padding: 2,

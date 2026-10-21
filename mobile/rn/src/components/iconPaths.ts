@@ -39,6 +39,8 @@ export const ICONS = {
   arrowUp: { d: 'M12 19V5M5 12l7-7 7 7' },
   stop: { d: 'M7 7h10v10H7z', fill: true },
   disconnect: { d: 'M3 12a9 9 0 1 0 18 0a9 9 0 1 0-18 0M5.7 5.7l12.6 12.6' },
+  bell: { d: 'M6 16v-5a6 6 0 0 1 12 0v5l2 2H4l2-2zM10 21h4' },
+  dashboard: { d: 'M4 4h6v6H4zM14 4h6v6h-6zM4 14h6v6H4zM14 14h6v6h-6z' },
 } satisfies Record<string, IconDef>;
 
 export type IconName = keyof typeof ICONS;

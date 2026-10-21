@@ -336,3 +336,23 @@ export function previewClaudeToolInput(toolInput: unknown): string {
   }
   return JSON.stringify(toolInput, null, 2);
 }
+
+/**
+ * One line saying what a dialog asks: its first question, the first line of
+ * its plan, or the tool call.
+ */
+export function summarizeClaudeDialog(dialog: ApiClaudeDialog): string {
+  const oneLine = (text: string) => text.replace(/\s+/g, ' ').trim();
+  if (dialog.tool_name === 'AskUserQuestion') {
+    const first = readClaudeQuestions(dialog.tool_input)?.[0];
+    if (first) return oneLine(first.question);
+  }
+  if (dialog.tool_name === 'ExitPlanMode') {
+    const heading = readClaudePlan(dialog.tool_input)
+      ?.split('\n')
+      .map((line) => line.replace(/^#+\s*/, '').trim())
+      .find((line) => line.length > 0);
+    return heading ? `Plan: ${heading}` : 'Plan ready to approve';
+  }
+  return oneLine(`${dialog.tool_name}: ${previewClaudeToolInput(dialog.tool_input)}`);
+}
