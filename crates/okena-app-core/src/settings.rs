@@ -203,6 +203,7 @@ impl SettingsState {
     );
     setting_setter!(set_claude_remote, claude_remote, bool);
     setting_setter!(set_claude_remote_channel, claude_remote_channel, bool);
+    setting_setter!(set_ai_proxy_enabled, ai_proxy_enabled, bool);
     setting_setter!(
         set_terminal_ctrl_c_copies_selection,
         terminal_ctrl_c_copies_selection,

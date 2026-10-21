@@ -6,6 +6,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::ai_proxy::AiProxyPoll;
+use okena_terminal::backend::LaunchEnvironment;
 use okena_workspace::persistence::AppSettings;
 use parking_lot::Mutex;
 
@@ -42,6 +44,7 @@ pub struct PaneEnv {
     /// Exported to panes so the hooks reach this daemon: a tmux server shared
     /// by several profiles hands panes the environment of the first one.
     profile_id: Option<String>,
+    ai_proxy: AiProxyPoll,
 }
 
 impl PaneEnv {
@@ -63,13 +66,20 @@ impl PaneEnv {
                 .and_then(|exe| okena_bin_for_exe(&exe)),
             preload_locations,
             profile_id: profile.map(|profile| profile.id.clone()),
+            ai_proxy: AiProxyPoll::default(),
         }
     }
 
-    /// The extra environment for PTYs spawned from now on: Claude account
-    /// isolation plus Claude remote (set when the setting is on and the
-    /// preload could be written, removed otherwise).
-    pub fn pty_env(&self, settings: &AppSettings) -> Vec<(String, Option<String>)> {
+    /// The accounts poll that the shells routed through the AI proxy wake.
+    pub(crate) fn ai_proxy(&self) -> &AiProxyPoll {
+        &self.ai_proxy
+    }
+
+    /// The environment for PTYs spawned from now on: Claude account isolation,
+    /// Claude remote (set when the setting is on and the preload could be
+    /// written, removed otherwise) and the AI proxy URL of the terminal's
+    /// project ([`crate::ai_proxy::launch_environment`]).
+    pub fn launch_environment(&self, settings: &AppSettings) -> LaunchEnvironment {
         let mut env = okena_workspace::claude_env::claude_pty_env_for_settings(settings);
         let enabled = cfg!(unix) && settings.claude_remote;
         if enabled && self.okena_bin.is_none() {
@@ -93,7 +103,7 @@ impl PaneEnv {
         if let (Some(_), Some(profile_id)) = (&preload, &self.profile_id) {
             env.push(("OKENA_PROFILE".to_string(), Some(profile_id.clone())));
         }
-        env
+        crate::ai_proxy::launch_environment(settings, env, &self.ai_proxy)
     }
 
     /// Write the preload to the first location that works and return its path.
@@ -497,6 +507,7 @@ mod tests {
                 location(&root, &["okena-p", PRELOAD_DIR]),
             ],
             profile_id: Some("work".to_string()),
+            ai_proxy: AiProxyPoll::default(),
         };
 
         assert_eq!(
@@ -514,10 +525,11 @@ mod tests {
             okena_bin: Some(PathBuf::from("/opt/okena/okena")),
             preload_locations: vec![location(&root, &[PRELOAD_DIR])],
             profile_id: Some("work".to_string()),
+            ai_proxy: AiProxyPoll::default(),
         };
         let settings = AppSettings::default();
 
-        let env = pane_env.pty_env(&settings);
+        let env = pane_env.launch_environment(&settings)(None);
 
         let mut expected = okena_workspace::claude_env::claude_pty_env_for_settings(&settings);
         expected.extend(okena_workspace::claude_remote_env::claude_remote_pty_env(
@@ -541,11 +553,12 @@ mod tests {
             okena_bin: Some(PathBuf::from("/opt/okena/okena")),
             preload_locations: vec![location(&root, &[PRELOAD_DIR])],
             profile_id: Some("work".to_string()),
+            ai_proxy: AiProxyPoll::default(),
         };
         let mut settings = AppSettings::default();
         settings.claude_remote = true;
 
-        let env = pane_env.pty_env(&settings);
+        let env = pane_env.launch_environment(&settings)(None);
 
         let preload = root.join(PRELOAD_DIR).join(PRELOAD_FILE);
         assert_eq!(
@@ -573,11 +586,12 @@ mod tests {
             okena_bin: Some(PathBuf::from("/opt/okena/okena")),
             preload_locations: Vec::new(),
             profile_id: Some("work".to_string()),
+            ai_proxy: AiProxyPoll::default(),
         };
         let mut settings = AppSettings::default();
         settings.claude_remote = true;
 
-        let env = pane_env.pty_env(&settings);
+        let env = pane_env.launch_environment(&settings)(None);
 
         assert!(env.contains(&("OKENA_BIN".to_string(), None)));
         assert!(env.contains(&("OKENA_CLAUDE_REMOTE_CHANNEL".to_string(), None)));

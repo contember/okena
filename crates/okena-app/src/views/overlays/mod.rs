@@ -17,6 +17,7 @@
 
 pub mod about;
 pub mod add_project_dialog;
+pub mod ai_proxy_activity;
 pub mod change_path_dialog;
 pub mod close_worktree_dialog;
 pub mod command_palette;

@@ -12,7 +12,9 @@
  *   - per-terminal activity (`getTerminalActivity`), folded into per-project
  *     {@link ProjectSignals} for the activity-ordered project list,
  *   - open Claude dialogs per terminal (`getClaudeDialogCounts`) and the
- *     terminals with a connected `claude` (`getClaudeSessions`).
+ *     terminals with a connected `claude` (`getClaudeSessions`),
+ *   - the server's agent usage (`getUsage`), fetched only when
+ *     `getUsageRevision` moved, so an unchanged snapshot costs one call.
  *
  * The terminal on screen counts as seen: each poll (and each selection)
  * clears its unseen bell / notification and acknowledges a `done` agent. Its
@@ -49,6 +51,7 @@ import type {
   ProjectId,
   ProjectInfo,
   TerminalId,
+  UsageInfo,
 } from '../native/okena';
 import { getOkenaNative } from '../native/okena';
 import {
@@ -73,6 +76,13 @@ export const WORKSPACE_POLL_MS = 1000;
 export type TerminalViewMode = 'terminal' | 'chat';
 
 /**
+ * How long a usage refresh shows as loading at most (ms). The daemon throttles
+ * refreshes to one per provider per minute, so a throttled request never
+ * produces a new snapshot to end the loading state.
+ */
+export const USAGE_REFRESH_TIMEOUT_MS = 5000;
+
+/**
  * The slice of the native surface this store calls. Narrowed from
  * {@link OkenaNative} so a test stub only has to provide these.
  */
@@ -90,6 +100,9 @@ export type WorkspaceNative = Pick<
   | 'getTerminalActivity'
   | 'markTerminalSeen'
   | 'focusTerminal'
+  | 'getUsage'
+  | 'getUsageRevision'
+  | 'requestUsageRefresh'
 >;
 
 /** Dependencies the store calls out to. Overridable for tests. */
@@ -149,6 +162,13 @@ export interface WorkspaceState {
   claudeSessions: TerminalId[];
   /** How each terminal is shown; terminals not listed show the terminal. */
   terminalViews: Record<TerminalId, TerminalViewMode>;
+  /** The server's latest Claude / Codex / Grok usage snapshot, if it sent one. */
+  usage: UsageInfo | null;
+  /**
+   * A refresh is in flight: until the daemon reports no fetch started
+   * (throttled), a new snapshot without a running fetch, or a timeout.
+   */
+  usageRefreshing: boolean;
 
   // ── actions ────────────────────────────────────────────────────────────
   /**
@@ -175,6 +195,11 @@ export interface WorkspaceState {
   selectTerminal(terminalId: TerminalId): void;
   /** Show a terminal as its terminal or as its Claude chat. */
   setTerminalView(terminalId: TerminalId, view: TerminalViewMode): void;
+  /**
+   * Ask the daemon to refetch usage (`provider` `claude` / `codex` / `grok`, or all)
+   * and show {@link usageRefreshing} until the result arrives.
+   */
+  refreshUsage(provider?: string): void;
   /** Show the dashboard. */
   showDashboard(): void;
   /**
@@ -199,7 +224,8 @@ function deps(): WorkspaceDeps {
   if (!resolvedDeps) {
     resolvedDeps = {
       native: injectedDeps.native ?? getOkenaNative(),
-      isForeground: injectedDeps.isForeground ?? (() => AppState.currentState === 'active'),
+      isForeground:
+        injectedDeps.isForeground ?? (() => AppState.currentState === 'active'),
     };
   }
   return resolvedDeps;
@@ -209,7 +235,9 @@ function deps(): WorkspaceDeps {
  * Override the store's native module. Call before the first action runs (e.g.
  * at the top of a test, or once at app start).
  */
-export function configureWorkspaceStore(overrides: Partial<WorkspaceDeps>): void {
+export function configureWorkspaceStore(
+  overrides: Partial<WorkspaceDeps>,
+): void {
   injectedDeps = { ...injectedDeps, ...overrides };
   resolvedDeps = null;
 }
@@ -230,6 +258,25 @@ let lastActivity: TerminalActivity[] = [];
  * `done` is unseen again: the key is effectively terminal + transition.
  */
 const doneSeen = new Set<TerminalId>();
+/** Usage revision the store last read (`-1` = never read). */
+let usageRevision = -1;
+/** Usage revision when the current refresh started (`null` = no refresh). */
+let refreshBaseRevision: number | null = null;
+let refreshTimer: ReturnType<typeof setTimeout> | null = null;
+/**
+ * Identifies the refresh in flight. Bumped whenever a refresh ends or a new one
+ * starts, so a late answer to an earlier request cannot clear a newer one.
+ */
+let refreshToken = 0;
+
+function clearRefresh(): void {
+  refreshToken += 1;
+  refreshBaseRevision = null;
+  if (refreshTimer !== null) {
+    clearTimeout(refreshTimer);
+    refreshTimer = null;
+  }
+}
 
 function stopPolling(): void {
   if (pollTimer !== null) {
@@ -241,6 +288,8 @@ function stopPolling(): void {
   pendingRestore = null;
   lastActivity = [];
   doneSeen.clear();
+  usageRevision = -1;
+  clearRefresh();
 }
 
 /** `map` with `projectId → terminalId` set; the same object when unchanged. */
@@ -259,7 +308,8 @@ function projectListEquals(a: ProjectInfo[], b: ProjectInfo[]): boolean {
   for (let i = 0; i < a.length; i++) {
     const pa = a[i]!;
     const pb = b[i]!;
-    if (pa.id !== pb.id || pa.name !== pb.name || pa.path !== pb.path) return false;
+    if (pa.id !== pb.id || pa.name !== pb.name || pa.path !== pb.path)
+      return false;
     if (pa.showInOverview !== pb.showInOverview) return false;
     if (pa.parentProjectId !== pb.parentProjectId) return false;
     if (!arrayEquals(pa.worktreeIds, pb.worktreeIds)) return false;
@@ -277,8 +327,10 @@ function projectListEquals(a: ProjectInfo[], b: ProjectInfo[]): boolean {
       }
     }
     if (pa.folderColor !== pb.folderColor) return false;
-    if (pa.pinned !== pb.pinned || pa.lastActivityAt !== pb.lastActivityAt) return false;
-    if (!agentStatusEquals(pa.terminalAgentStatus, pb.terminalAgentStatus)) return false;
+    if (pa.pinned !== pb.pinned || pa.lastActivityAt !== pb.lastActivityAt)
+      return false;
+    if (!agentStatusEquals(pa.terminalAgentStatus, pb.terminalAgentStatus))
+      return false;
   }
   return true;
 }
@@ -292,7 +344,8 @@ function agentStatusEquals(
   for (const k of ka) {
     const sa = a[k]!;
     const sb = b[k];
-    if (!sb || sa.lifecycle !== sb.lifecycle || sa.custom !== sb.custom) return false;
+    if (!sb || sa.lifecycle !== sb.lifecycle || sa.custom !== sb.custom)
+      return false;
   }
   return true;
 }
@@ -316,16 +369,22 @@ function deriveActivity(
       lifecycle.set(tid, status.lifecycle);
     }
   }
-  for (const tid of [...doneSeen]) if (lifecycle.get(tid) !== 'done') doneSeen.delete(tid);
+  for (const tid of [...doneSeen])
+    if (lifecycle.get(tid) !== 'done') doneSeen.delete(tid);
 
   if (shownTerminalId !== null && deps().isForeground()) {
-    if (lifecycle.get(shownTerminalId) === 'done') doneSeen.add(shownTerminalId);
+    if (lifecycle.get(shownTerminalId) === 'done')
+      doneSeen.add(shownTerminalId);
     const i = lastActivity.findIndex((a) => a.terminalId === shownTerminalId);
     const shown = i >= 0 ? lastActivity[i]! : undefined;
     if (shown && (shown.bellUnseen || shown.notificationUnseen)) {
       native.markTerminalSeen(connId, shownTerminalId);
       lastActivity = [...lastActivity];
-      lastActivity[i] = { ...shown, bellUnseen: false, notificationUnseen: false };
+      lastActivity[i] = {
+        ...shown,
+        bellUnseen: false,
+        notificationUnseen: false,
+      };
     }
   }
   // Output of the terminal on screen is not "running": the user watches it,
@@ -335,11 +394,18 @@ function deriveActivity(
     shownTerminalId === null
       ? lastActivity
       : lastActivity.map((a) =>
-          a.terminalId === shownTerminalId ? { ...a, lastOutputMsAgo: undefined } : a,
+          a.terminalId === shownTerminalId
+            ? { ...a, lastOutputMsAgo: undefined }
+            : a,
         );
   return {
     signals: computeProjectSignals(projects, activity, doneSeen, claudeDialogs),
-    attention: computeAttentionItems(projects, lastActivity, doneSeen, claudeDialogs),
+    attention: computeAttentionItems(
+      projects,
+      lastActivity,
+      doneSeen,
+      claudeDialogs,
+    ),
   };
 }
 
@@ -349,8 +415,10 @@ function activityPatch(
   derived: ReturnType<typeof deriveActivity>,
 ): Partial<WorkspaceState> {
   const patch: Partial<WorkspaceState> = {};
-  if (!signalsEqual(derived.signals, prev.projectSignals)) patch.projectSignals = derived.signals;
-  if (!attentionItemsEqual(derived.attention, prev.attention)) patch.attention = derived.attention;
+  if (!signalsEqual(derived.signals, prev.projectSignals))
+    patch.projectSignals = derived.signals;
+  if (!attentionItemsEqual(derived.attention, prev.attention))
+    patch.attention = derived.attention;
   return patch;
 }
 
@@ -360,13 +428,21 @@ function folderListEquals(a: FolderInfo[], b: FolderInfo[]): boolean {
   for (let i = 0; i < a.length; i++) {
     const fa = a[i]!;
     const fb = b[i]!;
-    if (fa.id !== fb.id || fa.name !== fb.name || fa.folderColor !== fb.folderColor) return false;
+    if (
+      fa.id !== fb.id ||
+      fa.name !== fb.name ||
+      fa.folderColor !== fb.folderColor
+    )
+      return false;
     if (!arrayEquals(fa.projectIds, fb.projectIds)) return false;
   }
   return true;
 }
 
-function countsEqual(a: Record<string, number>, b: Record<string, number>): boolean {
+function countsEqual(
+  a: Record<string, number>,
+  b: Record<string, number>,
+): boolean {
   const entries = Object.entries(a);
   if (entries.length !== Object.keys(b).length) return false;
   return entries.every(([key, count]) => b[key] === count);
@@ -384,7 +460,9 @@ function resolveSelectedProject(
   selectedProjectId: ProjectId | null,
 ): ProjectInfo | null {
   if (selectedProjectId === null) return projects[0] ?? null;
-  return projects.find((p) => p.id === selectedProjectId) ?? projects[0] ?? null;
+  return (
+    projects.find((p) => p.id === selectedProjectId) ?? projects[0] ?? null
+  );
 }
 
 /** One poll tick — refresh remote state + run auto-selection. Mirrors `_pollState`. */
@@ -467,12 +545,19 @@ function pollState(
   // selection is gone (matches the Dart logic + `_previousTerminalIds`).
   const project = resolveSelectedProject(projects, selectedProjectId);
   if (project && project.terminalIds.length > 0) {
-    if (selectedTerminalId === null || !project.terminalIds.includes(selectedTerminalId)) {
-      selectedTerminalId = pickTerminal(project.terminalIds, [prev.terminalByProject[project.id]]);
+    if (
+      selectedTerminalId === null ||
+      !project.terminalIds.includes(selectedTerminalId)
+    ) {
+      selectedTerminalId = pickTerminal(project.terminalIds, [
+        prev.terminalByProject[project.id],
+      ]);
       patch.selectedTerminalId = selectedTerminalId;
       changed = true;
     } else if (previousTerminalIds !== null) {
-      const newIds = project.terminalIds.filter((id) => !previousTerminalIds!.has(id));
+      const newIds = project.terminalIds.filter(
+        (id) => !previousTerminalIds!.has(id),
+      );
       if (newIds.length > 0) {
         selectedTerminalId = newIds[newIds.length - 1]!;
         patch.selectedTerminalId = selectedTerminalId;
@@ -480,7 +565,11 @@ function pollState(
       }
     }
     previousTerminalIds = new Set(project.terminalIds);
-    const remembered = rememberTerminal(prev.terminalByProject, project.id, selectedTerminalId);
+    const remembered = rememberTerminal(
+      prev.terminalByProject,
+      project.id,
+      selectedTerminalId,
+    );
     if (remembered !== prev.terminalByProject) {
       patch.terminalByProject = remembered;
       changed = true;
@@ -494,7 +583,8 @@ function pollState(
   }
 
   const layoutJson =
-    (project ? native.getProjectLayoutJson(connId, project.id) : undefined) ?? null;
+    (project ? native.getProjectLayoutJson(connId, project.id) : undefined) ??
+    null;
   if (layoutJson !== prev.projectLayoutJson) {
     patch.projectLayoutJson = layoutJson;
     changed = true;
@@ -514,12 +604,30 @@ function pollState(
     changed = true;
   }
 
+  // Agent usage: the snapshot carries history, so convert it only on change.
+  const revision = native.getUsageRevision(connId);
+  if (revision !== usageRevision) {
+    usageRevision = revision;
+    const usage = native.getUsage(connId) ?? null;
+    patch.usage = usage;
+    changed = true;
+    // The refresh is done once a newer snapshot shows no fetch in flight.
+    if (
+      refreshBaseRevision !== null &&
+      revision !== refreshBaseRevision &&
+      !(usage?.providers.some((p) => p.fetching) ?? false)
+    ) {
+      clearRefresh();
+      patch.usageRefreshing = false;
+    }
+  }
+
   // Connection health (drives the staleness indicator's 3s / 10s thresholds).
   const newActivity = native.secondsSinceActivity(connId);
   const oldActivity = prev.secondsSinceActivity;
   if (
-    (oldActivity < 3) !== (newActivity < 3) ||
-    (oldActivity < 10) !== (newActivity < 10)
+    oldActivity < 3 !== newActivity < 3 ||
+    oldActivity < 10 !== newActivity < 10
   ) {
     changed = true;
   }
@@ -545,7 +653,10 @@ function signalsPatch(
 ): Partial<WorkspaceState> {
   const prev = get();
   const shown = prev.dashboardOpen ? null : terminalId;
-  return activityPatch(prev, deriveActivity(projects, prev.claudeDialogs, shown, connId));
+  return activityPatch(
+    prev,
+    deriveActivity(projects, prev.claudeDialogs, shown, connId),
+  );
 }
 
 /**
@@ -578,6 +689,8 @@ export const useWorkspaceStore: UseBoundStore<StoreApi<WorkspaceState>> =
     claudeDialogs: {},
     claudeSessions: [],
     terminalViews: {},
+    usage: null,
+    usageRefreshing: false,
 
     start(connId, restore) {
       if (pollTimer !== null && activeConnId === connId) return; // already polling this conn
@@ -610,7 +723,35 @@ export const useWorkspaceStore: UseBoundStore<StoreApi<WorkspaceState>> =
         claudeDialogs: {},
         claudeSessions: [],
         terminalViews: {},
+        usage: null,
+        usageRefreshing: false,
       });
+    },
+
+    refreshUsage(provider) {
+      const connId = activeConnId;
+      if (!connId) return;
+      clearRefresh();
+      refreshBaseRevision = usageRevision;
+      refreshTimer = setTimeout(() => {
+        clearRefresh();
+        set({ usageRefreshing: false });
+      }, USAGE_REFRESH_TIMEOUT_MS);
+      const token = refreshToken;
+      set({ usageRefreshing: true });
+      const finish = () => {
+        if (token !== refreshToken || activeConnId !== connId) return;
+        clearRefresh();
+        set({ usageRefreshing: false });
+      };
+      deps()
+        .native.requestUsageRefresh(connId, provider)
+        .then((running) => {
+          // Throttled or nothing enabled: no snapshot is coming, stop now.
+          if (!running) finish();
+        })
+        // An older daemon or a dropped connection: the snapshot stays as is.
+        .catch(finish);
     },
 
     selectProject(projectId, preferredTerminalId) {
@@ -620,7 +761,10 @@ export const useWorkspaceStore: UseBoundStore<StoreApi<WorkspaceState>> =
       // Reopen the terminal last used in this project (else its first); the
       // next poll re-validates it against the live terminal list.
       const terminalId = project
-        ? pickTerminal(project.terminalIds, [preferredTerminalId, terminalByProject[projectId]])
+        ? pickTerminal(project.terminalIds, [
+            preferredTerminalId,
+            terminalByProject[projectId],
+          ])
         : null;
       const connId = activeConnId;
       set({
@@ -633,7 +777,7 @@ export const useWorkspaceStore: UseBoundStore<StoreApi<WorkspaceState>> =
         // Swap the layout with the project so the old tree isn't shown until
         // the next poll.
         projectLayoutJson: connId
-          ? (deps().native.getProjectLayoutJson(connId, projectId) ?? null)
+          ? deps().native.getProjectLayoutJson(connId, projectId) ?? null
           : null,
         ...(connId ? signalsPatch(get, projects, terminalId, connId) : {}),
       });
@@ -656,7 +800,9 @@ export const useWorkspaceStore: UseBoundStore<StoreApi<WorkspaceState>> =
         terminalByProject: project
           ? rememberTerminal(get().terminalByProject, project.id, terminalId)
           : get().terminalByProject,
-        ...(connId ? signalsPatch(get, get().projects, terminalId, connId) : {}),
+        ...(connId
+          ? signalsPatch(get, get().projects, terminalId, connId)
+          : {}),
       });
     },
 
@@ -679,7 +825,10 @@ export const useWorkspaceStore: UseBoundStore<StoreApi<WorkspaceState>> =
         return;
       }
       const connId = activeConnId;
-      if (connId) set(signalsPatch(get, get().projects, get().selectedTerminalId, connId));
+      if (connId)
+        set(
+          signalsPatch(get, get().projects, get().selectedTerminalId, connId),
+        );
     },
 
     clearRestoreProjectMissing() {

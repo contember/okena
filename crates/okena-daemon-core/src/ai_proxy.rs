@@ -1,0 +1,692 @@
+//! Daemon side of the AI proxy (`okena-ai`): environment for new shells,
+//! starting the proxy process, forwarding `ActionRequest::AiProxy`, and
+//! publishing the pool summary and each account's history to clients.
+
+use crate::claude_remote::PaneEnv;
+use okena_agent_usage::history::History;
+use okena_agent_usage::pace::{USAGE_SETTINGS_KEY, WorkingDays};
+use okena_agent_usage::pool;
+use okena_agent_usage::pool_summary;
+use okena_ai::client::ProxyClient;
+use okena_core::ai_proxy::{
+    AiAccount, AiProxyCommand, AiProxyState, AiProxyStatus, ensure_endpoint,
+};
+use okena_core::usage_history::Provider;
+use okena_remote_server::usage::UsageHub;
+use okena_terminal::backend::{LaunchEnvironment, TerminalBackend};
+use okena_workspace::persistence::AppSettings;
+use parking_lot::Mutex;
+use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::sync::{Notify, watch};
+use tokio::time::Instant;
+
+/// How often the pool summary follows the proxy's usage and cooldowns.
+const ACCOUNTS_POLL_INTERVAL: Duration = Duration::from_secs(15);
+/// How often the proxy is checked while no client is connected, so the hooks
+/// and services of a headless daemon find it running.
+const HEADLESS_CHECK_INTERVAL: Duration = Duration::from_secs(5 * 60);
+/// How long an account's usage history serves the pool summary before it is
+/// read again.
+const HISTORY_RELOAD_INTERVAL: Duration = Duration::from_secs(60);
+/// Cap on one account's history read, so a proxy that hangs on it does not
+/// hold up the accounts poll for the client's minute-long command timeout.
+const HISTORY_READ_TIMEOUT: Duration = Duration::from_secs(10);
+/// Longest wait between attempts to start a proxy that keeps failing to come up.
+const MAX_RESTART_DELAY: Duration = Duration::from_secs(10 * 60);
+
+fn profile_root() -> Option<PathBuf> {
+    okena_core::profiles::try_current().map(|profile| profile.root.clone())
+}
+
+/// Environment for newly spawned PTYs: `shared` (the same for every terminal,
+/// see [`PaneEnv::launch_environment`]) and, with the proxy enabled,
+/// `ANTHROPIC_BASE_URL` naming the terminal's project, so the proxy applies
+/// that project's routing policy. Shells that already run keep the environment
+/// they started with.
+///
+/// Each routed spawn reads the endpoint the proxy listens on now and asks
+/// `poll` to check the proxy, which starts one that died. The spawn does not
+/// wait for that check.
+pub(crate) fn launch_environment(
+    settings: &AppSettings,
+    shared: Vec<(String, Option<String>)>,
+    poll: &AiProxyPoll,
+) -> LaunchEnvironment {
+    let routed_root = if settings.ai_proxy_enabled {
+        profile_root()
+    } else {
+        None
+    };
+    let poll = poll.clone();
+    Arc::new(move |project_id| {
+        let mut env = shared.clone();
+        if let Some(root) = &routed_root {
+            poll.check();
+            match ensure_endpoint(root) {
+                Ok(endpoint) => {
+                    let url = project_id.map_or_else(
+                        || endpoint.base_url(),
+                        |project_id| endpoint.project_url(project_id),
+                    );
+                    env.push(("ANTHROPIC_BASE_URL".into(), Some(url)));
+                }
+                Err(error) => log::error!("[ai-proxy] no endpoint for a new shell: {error:#}"),
+            }
+        }
+        env
+    })
+}
+
+async fn connect() -> anyhow::Result<ProxyClient> {
+    let root = profile_root().ok_or_else(|| anyhow::anyhow!("No active profile"))?;
+    let exe = okena_remote_server::local::remember_current_executable()?;
+    okena_ai::client::ensure_running(&root, &exe).await
+}
+
+/// Start the proxy when it is enabled, then refresh the shell environment in
+/// case the proxy had to move to another port.
+pub(crate) fn start_if_enabled(
+    settings: &Arc<Mutex<AppSettings>>,
+    backend: &Arc<dyn TerminalBackend>,
+    pane_env: &Arc<PaneEnv>,
+    runtime: &tokio::runtime::Handle,
+) {
+    if !settings.lock().ai_proxy_enabled {
+        return;
+    }
+    let settings = settings.clone();
+    let backend = backend.clone();
+    let pane_env = pane_env.clone();
+    runtime.spawn(async move {
+        match connect().await {
+            Ok(_) => backend.set_launch_environment(pane_env.launch_environment(&settings.lock())),
+            Err(error) => log::error!("[ai-proxy] failed to start: {error:#}"),
+        }
+    });
+}
+
+/// The settings this module reads: whether new shells are routed through the
+/// proxy, and the working days the pool summary is computed for.
+#[derive(PartialEq)]
+pub(crate) struct ProxySettings {
+    routed: bool,
+    working_days: Option<serde_json::Value>,
+}
+
+impl ProxySettings {
+    pub(crate) fn of(settings: &AppSettings) -> Self {
+        Self {
+            routed: settings.ai_proxy_enabled,
+            working_days: settings.extension_settings.get(USAGE_SETTINGS_KEY).cloned(),
+        }
+    }
+}
+
+/// After a committed settings change: start the proxy when routing was turned
+/// on, and re-read the pool when a setting it depends on changed. Other
+/// changes leave the proxy and the running history reads alone.
+pub(crate) fn apply_settings_change(
+    before: &ProxySettings,
+    settings: &Arc<Mutex<AppSettings>>,
+    backend: &Arc<dyn TerminalBackend>,
+    pane_env: &Arc<PaneEnv>,
+    runtime: &tokio::runtime::Handle,
+    poll: &AiProxyPoll,
+) {
+    let after = ProxySettings::of(&settings.lock());
+    if after.routed && !before.routed {
+        start_if_enabled(settings, backend, pane_env, runtime);
+    }
+    if after != *before {
+        poll.refresh();
+    }
+}
+
+/// Whether `command` can change the pool summary.
+pub(crate) fn changes_accounts(command: &AiProxyCommand) -> bool {
+    match command {
+        AiProxyCommand::FinishLogin { .. }
+        | AiProxyCommand::RemoveAccount { .. }
+        | AiProxyCommand::SetAccountEnabled { .. } => true,
+        AiProxyCommand::Status
+        | AiProxyCommand::UsageHistory { .. }
+        | AiProxyCommand::StartLogin { .. }
+        | AiProxyCommand::CancelLogin { .. }
+        | AiProxyCommand::SetDefaultPolicy { .. }
+        | AiProxyCommand::SetProjectPolicy { .. } => false,
+    }
+}
+
+/// Run one management command against the proxy, starting it if needed.
+/// Management works whether or not new shells are routed through the proxy.
+pub(crate) async fn execute(command: AiProxyCommand) -> AiProxyState {
+    let client = match connect().await {
+        Ok(client) => client,
+        Err(error) => {
+            return AiProxyState {
+                status: None,
+                failure: Some(format!("{error:#}")),
+            };
+        }
+    };
+    match client.command(&command).await {
+        Ok(status) => AiProxyState {
+            status: Some(status),
+            failure: None,
+        },
+        // A failed command (e.g. a mistyped login code) still shows the pool.
+        Err(error) => AiProxyState {
+            status: client.command(&AiProxyCommand::Status).await.ok(),
+            failure: Some(format!("{error:#}")),
+        },
+    }
+}
+
+/// Handle on [`run_accounts_poll`] for starting a pass before its interval.
+#[derive(Clone, Default)]
+pub struct AiProxyPoll {
+    refresh: Arc<Notify>,
+    check: Arc<Notify>,
+}
+
+impl AiProxyPoll {
+    /// Re-read the accounts now instead of at the next poll.
+    pub(crate) fn refresh(&self) {
+        self.refresh.notify_one();
+    }
+
+    /// Make sure the proxy runs now, without reading the pool's usage.
+    fn check(&self) {
+        self.check.notify_one();
+    }
+}
+
+/// What the next pass of [`run_accounts_poll`] does.
+#[derive(Debug, PartialEq)]
+enum Pass {
+    /// Read the accounts and their histories and publish the pool.
+    Pool,
+    /// Only start the proxy if it is not running.
+    ProxyCheck,
+}
+
+/// Keep the pool summary in `usage` in step with the proxy while new shells
+/// are routed through it. New shells get its URL whether or not it listens, so
+/// a proxy that died is started again. With routing off, or the proxy
+/// unreachable, no pool is published: the `claude` login's own usage is then
+/// the relevant one. While no client is connected, the pool is read only on a
+/// refresh, and the next client gets a pass at once when the interval has
+/// passed; the proxy itself is still checked every [`HEADLESS_CHECK_INTERVAL`]
+/// and when a routed shell starts.
+pub(crate) async fn run_accounts_poll(
+    poll: AiProxyPoll,
+    settings: Arc<Mutex<AppSettings>>,
+    usage: UsageHub,
+) {
+    let mut restart = RestartBackoff::new();
+    let mut histories = PoolHistories::default();
+    let mut clients = usage.clients();
+    let mut pass = Pass::Pool;
+    let mut pool_due = Instant::now();
+    loop {
+        let enabled = settings.lock().ai_proxy_enabled;
+        let read = if enabled {
+            read_or_restart(&mut restart)
+                .await
+                .inspect_err(|error| log::warn!("[ai-proxy] proxy unreachable: {error:#}"))
+                .ok()
+        } else {
+            None
+        };
+        let Some((client, current)) = read else {
+            usage.set_pool(None);
+            pass = wait_for_next_poll(&poll, &mut clients, pass, &mut pool_due).await;
+            continue;
+        };
+        if pass == Pass::ProxyCheck {
+            pass = wait_for_next_poll(&poll, &mut clients, pass, &mut pool_due).await;
+            continue;
+        }
+        // A refresh cuts the history reads short and polls again at once; the
+        // pool waits for that pass, so it never shows an account without the
+        // history that is still being read.
+        let refresh_requested = tokio::select! {
+            () = histories.reload_due(&client, &current) => false,
+            () = poll.refresh.notified() => true,
+        };
+        if refresh_requested {
+            continue;
+        }
+        let pool_histories = histories.by_account().clone();
+        let working =
+            WorkingDays::from_value(settings.lock().extension_settings.get(USAGE_SETTINGS_KEY));
+        // Off the LocalSet, which also drives the PTY loop.
+        let summary = tokio::task::spawn_blocking(move || {
+            (
+                pool_summary::summarize_now(&current, &pool_histories, working),
+                pool_summary::account_histories_now(&current, &pool_histories),
+            )
+        })
+        .await;
+        match summary {
+            Ok((summary, account_histories)) => {
+                usage.set_pool(summary);
+                usage.set_pool_histories(account_histories);
+            }
+            Err(error) => log::error!("[ai-proxy] pool summary failed: {error}"),
+        }
+        pass = wait_for_next_poll(&poll, &mut clients, pass, &mut pool_due).await;
+    }
+}
+
+/// Wait for the pass after `finished`. A proxy check leaves the pool's
+/// interval running, so frequent spawns do not hold the pool back.
+async fn wait_for_next_poll(
+    poll: &AiProxyPoll,
+    clients: &mut watch::Receiver<usize>,
+    finished: Pass,
+    pool_due: &mut Instant,
+) -> Pass {
+    if finished == Pass::Pool {
+        *pool_due = Instant::now() + ACCOUNTS_POLL_INTERVAL;
+    }
+    let pool_due = *pool_due;
+    let interval_with_a_client = async {
+        tokio::time::sleep_until(pool_due).await;
+        let _ = clients.wait_for(|count| *count > 0).await;
+    };
+    tokio::select! {
+        () = interval_with_a_client => Pass::Pool,
+        () = poll.refresh.notified() => Pass::Pool,
+        () = tokio::time::sleep(HEADLESS_CHECK_INTERVAL) => Pass::ProxyCheck,
+        () = poll.check.notified() => Pass::ProxyCheck,
+    }
+}
+
+/// Read the running proxy's accounts; when it does not answer, start it, at
+/// most as often as `restart` allows.
+async fn read_or_restart(
+    restart: &mut RestartBackoff,
+) -> anyhow::Result<(ProxyClient, Vec<AiAccount>)> {
+    match read_accounts().await {
+        Ok(read) => {
+            restart.reset();
+            return Ok(read);
+        }
+        Err(error) if !restart.due() => return Err(error),
+        Err(error) => log::warn!("[ai-proxy] proxy unreachable, starting it: {error:#}"),
+    }
+    restart.back_off();
+    connect().await?;
+    read_accounts().await
+}
+
+/// Ask a running proxy for its accounts without starting one.
+async fn read_accounts() -> anyhow::Result<(ProxyClient, Vec<AiAccount>)> {
+    let root = profile_root().ok_or_else(|| anyhow::anyhow!("No active profile"))?;
+    let client = ProxyClient::open(&root)?;
+    let accounts = client.command(&AiProxyCommand::Status).await?.accounts;
+    Ok((client, accounts))
+}
+
+/// Usage history of the in-service pool accounts, read from the proxy at most
+/// once per [`HISTORY_RELOAD_INTERVAL`] per account. A failed read keeps the
+/// history read before.
+#[derive(Default)]
+struct PoolHistories {
+    histories: HashMap<String, History>,
+    attempted_at: HashMap<String, Instant>,
+    /// Accounts whose last read failed, so a lasting failure warns once.
+    failing: HashSet<String>,
+}
+
+impl PoolHistories {
+    fn by_account(&self) -> &HashMap<String, History> {
+        &self.histories
+    }
+
+    async fn reload_due(&mut self, client: &ProxyClient, accounts: &[AiAccount]) {
+        for account_id in self.due(accounts, Instant::now()) {
+            let command = AiProxyCommand::UsageHistory {
+                account_id: account_id.clone(),
+            };
+            let read = client.command(&command);
+            let result = match tokio::time::timeout(HISTORY_READ_TIMEOUT, read).await {
+                Ok(status) => status.and_then(|status| account_history(status, &account_id)),
+                Err(_) => Err(anyhow::anyhow!("Usage history read timed out")),
+            };
+            self.record(account_id, result, Instant::now());
+        }
+    }
+
+    /// Forget accounts that left the pool; the ids whose history is due.
+    fn due(&mut self, accounts: &[AiAccount], now: Instant) -> Vec<String> {
+        let in_service: Vec<&str> = accounts
+            .iter()
+            .filter(|account| pool::in_service(account))
+            .map(|account| account.id.as_str())
+            .collect();
+        self.histories
+            .retain(|id, _| in_service.contains(&id.as_str()));
+        self.attempted_at
+            .retain(|id, _| in_service.contains(&id.as_str()));
+        self.failing.retain(|id| in_service.contains(&id.as_str()));
+        in_service
+            .into_iter()
+            .filter(|id| {
+                self.attempted_at
+                    .get(*id)
+                    .is_none_or(|at| now.duration_since(*at) >= HISTORY_RELOAD_INTERVAL)
+            })
+            .map(String::from)
+            .collect()
+    }
+
+    fn record(&mut self, account_id: String, result: anyhow::Result<History>, now: Instant) {
+        match result {
+            Ok(history) => {
+                if self.failing.remove(&account_id) {
+                    log::info!("[ai-proxy] usage history of {account_id} available again");
+                }
+                self.histories.insert(account_id.clone(), history);
+            }
+            Err(error) if self.failing.insert(account_id.clone()) => {
+                log::warn!("[ai-proxy] usage history of {account_id} unavailable: {error:#}");
+            }
+            Err(error) => {
+                log::debug!(
+                    "[ai-proxy] usage history of {account_id} still unavailable: {error:#}"
+                );
+            }
+        }
+        self.attempted_at.insert(account_id, now);
+    }
+}
+
+/// The proxy's answer to `UsageHistory`, accepted only when it holds Claude
+/// samples of the requested account.
+fn account_history(status: AiProxyStatus, account_id: &str) -> anyhow::Result<History> {
+    let history = status
+        .usage_history
+        .ok_or_else(|| anyhow::anyhow!("Usage history is unavailable from this proxy"))?;
+    if history.account_id != account_id
+        || history
+            .samples
+            .iter()
+            .any(|sample| sample.source != account_id || sample.provider != Provider::Claude)
+    {
+        anyhow::bail!("Usage history belongs to another account");
+    }
+    Ok(History::from_samples(history.samples))
+}
+
+/// Doubling delay between start attempts, so a proxy that exits at once (e.g.
+/// on a corrupt `accounts.json`) is not respawned on every poll.
+struct RestartBackoff {
+    next_attempt: tokio::time::Instant,
+    delay: Duration,
+}
+
+impl RestartBackoff {
+    fn new() -> Self {
+        Self {
+            next_attempt: tokio::time::Instant::now(),
+            delay: ACCOUNTS_POLL_INTERVAL,
+        }
+    }
+
+    fn due(&self) -> bool {
+        tokio::time::Instant::now() >= self.next_attempt
+    }
+
+    fn back_off(&mut self) {
+        self.next_attempt = tokio::time::Instant::now() + self.delay;
+        self.delay = (self.delay * 2).min(MAX_RESTART_DELAY);
+    }
+
+    fn reset(&mut self) {
+        *self = Self::new();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::StubBackend;
+    use okena_core::ai_proxy::AiAccountHistory;
+    use okena_core::api::{ApiProviderUsage, ApiUsage, ApiUsageProvider, ApiUsageStatus};
+    use okena_core::usage_history::{LimitSample, UsageSample};
+
+    fn account(id: &str) -> AiAccount {
+        AiAccount {
+            id: id.into(),
+            label: id.into(),
+            email: None,
+            plan: Some("max".into()),
+            rate_limit_tier: None,
+            enabled: true,
+            needs_login: false,
+            cooldown_until_ms: None,
+            five_hour: None,
+            seven_day: None,
+            requests: 0,
+            last_used_ms: None,
+        }
+    }
+
+    fn sample(source: &str) -> UsageSample {
+        UsageSample {
+            version: 1,
+            recorded_at: 1500.0,
+            provider: Provider::Claude,
+            source: source.into(),
+            plan: None,
+            limits: vec![LimitSample {
+                name: "5h".into(),
+                used_percent: 23.0,
+                window_seconds: 18000.0,
+                reset_at: Some(19000.0),
+            }],
+        }
+    }
+
+    fn status(history: Option<AiAccountHistory>) -> AiProxyStatus {
+        AiProxyStatus {
+            usage_history: history,
+            ..serde_json::from_value(serde_json::json!({
+                "version": "test", "inflight": 0, "accounts": [], "logins": []
+            }))
+            .unwrap()
+        }
+    }
+
+    fn history_of(account_id: &str, samples: Vec<UsageSample>) -> Option<AiAccountHistory> {
+        Some(AiAccountHistory {
+            account_id: account_id.into(),
+            samples,
+        })
+    }
+
+    #[test]
+    fn history_keeps_account_boundaries() {
+        let history = account_history(status(history_of("a", vec![sample("a")])), "a").unwrap();
+        assert_eq!(
+            history.points("5h", 19000.0, 18000.0, 1600.0)[0].used_percent,
+            23.0
+        );
+        assert!(account_history(status(history_of("a", vec![sample("a")])), "b").is_err());
+        assert!(account_history(status(history_of("a", vec![sample("b")])), "a").is_err());
+        let mut codex = sample("a");
+        codex.provider = Provider::Codex;
+        assert!(account_history(status(history_of("a", vec![codex])), "a").is_err());
+        assert!(account_history(status(None), "a").is_err());
+    }
+
+    #[test]
+    fn histories_reload_once_a_minute_and_forget_accounts_that_left() {
+        let mut histories = PoolHistories::default();
+        let start = Instant::now();
+        let disabled = AiAccount {
+            enabled: false,
+            ..account("off")
+        };
+        let accounts = [account("a"), account("b"), disabled];
+        assert_eq!(histories.due(&accounts, start), ["a", "b"]);
+        histories.record(
+            "a".into(),
+            Ok(History::from_samples(vec![sample("a")])),
+            start,
+        );
+        histories.record("b".into(), Err(anyhow::anyhow!("offline")), start);
+        assert!(
+            histories
+                .due(&accounts, start + Duration::from_secs(59))
+                .is_empty()
+        );
+
+        // A failed reload keeps the history read before.
+        let later = start + HISTORY_RELOAD_INTERVAL;
+        assert_eq!(histories.due(&accounts, later), ["a", "b"]);
+        histories.record("a".into(), Err(anyhow::anyhow!("offline")), later);
+        assert_eq!(histories.by_account()["a"].samples().len(), 1);
+        assert!(!histories.by_account().contains_key("b"));
+
+        assert_eq!(histories.due(&[account("b")], later), ["b"]);
+        assert!(histories.by_account().is_empty());
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn the_next_poll_waits_for_a_client_unless_refreshed() {
+        let hub = UsageHub::detached();
+        let poll = AiProxyPoll::default();
+        let mut clients = hub.clients();
+        let mut pool_due = Instant::now();
+        {
+            let waiting = wait_for_next_poll(&poll, &mut clients, Pass::Pool, &mut pool_due);
+            tokio::pin!(waiting);
+            let headless = tokio::time::timeout(ACCOUNTS_POLL_INTERVAL * 10, &mut waiting).await;
+            assert!(headless.is_err(), "polled with no client");
+
+            // A client that connects after the interval gets a pass at once.
+            let _client = hub.register_client();
+            let pass = tokio::time::timeout(Duration::from_millis(1), &mut waiting)
+                .await
+                .expect("no pass for the first client");
+            assert_eq!(pass, Pass::Pool);
+        }
+
+        // A refresh starts a pass with no client.
+        poll.refresh();
+        let pass = tokio::time::timeout(
+            Duration::from_millis(1),
+            wait_for_next_poll(&poll, &mut clients, Pass::Pool, &mut pool_due),
+        )
+        .await
+        .expect("a refresh did not start a pass");
+        assert_eq!(pass, Pass::Pool);
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn the_proxy_is_checked_headless_and_when_a_shell_starts() {
+        let hub = UsageHub::detached();
+        let poll = AiProxyPoll::default();
+        let mut clients = hub.clients();
+        let mut pool_due = Instant::now();
+
+        let started = Instant::now();
+        let pass = wait_for_next_poll(&poll, &mut clients, Pass::Pool, &mut pool_due).await;
+        assert_eq!(pass, Pass::ProxyCheck);
+        assert_eq!(started.elapsed(), HEADLESS_CHECK_INTERVAL);
+
+        let _client = hub.register_client();
+        poll.check();
+        let checked_at = Instant::now();
+        let pass = tokio::time::timeout(
+            Duration::from_millis(1),
+            wait_for_next_poll(&poll, &mut clients, Pass::Pool, &mut pool_due),
+        )
+        .await
+        .expect("a starting shell did not check the proxy");
+        assert_eq!(pass, Pass::ProxyCheck);
+
+        // The check does not push the pool's next pass back.
+        let pass = wait_for_next_poll(&poll, &mut clients, Pass::ProxyCheck, &mut pool_due).await;
+        assert_eq!(pass, Pass::Pool);
+        assert_eq!(checked_at.elapsed(), ACCOUNTS_POLL_INTERVAL);
+    }
+
+    #[tokio::test]
+    async fn only_settings_the_pool_depends_on_re_read_it() {
+        let settings = Arc::new(Mutex::new(AppSettings::default()));
+        let backend: Arc<dyn TerminalBackend> = Arc::new(StubBackend);
+        let pane_env = Arc::new(PaneEnv::resolve());
+        let poll = AiProxyPoll::default();
+        let refreshed = |poll: &AiProxyPoll| {
+            let poll = poll.clone();
+            async move {
+                tokio::time::timeout(Duration::from_millis(20), poll.refresh.notified())
+                    .await
+                    .is_ok()
+            }
+        };
+        let change = |edit: &dyn Fn(&mut AppSettings)| {
+            let before = ProxySettings::of(&settings.lock());
+            edit(&mut settings.lock());
+            apply_settings_change(
+                &before,
+                &settings,
+                &backend,
+                &pane_env,
+                &tokio::runtime::Handle::current(),
+                &poll,
+            );
+        };
+        change(&|settings| settings.scrollback_lines += 1);
+        assert!(!refreshed(&poll).await);
+        change(&|settings| {
+            settings
+                .extension_settings
+                .insert(USAGE_SETTINGS_KEY.into(), serde_json::json!({"days": [1]}));
+        });
+        assert!(refreshed(&poll).await);
+    }
+
+    #[tokio::test]
+    async fn routing_off_publishes_no_pool() {
+        let (hub, _refresh_rx) = UsageHub::new(ApiUsage {
+            providers: vec![ApiProviderUsage::empty(
+                ApiUsageProvider::Claude,
+                ApiUsageStatus::Ok,
+            )],
+            ..ApiUsage::default()
+        });
+        let claude_pool = |hub: &UsageHub| {
+            hub.snapshot()
+                .provider(ApiUsageProvider::Claude)
+                .and_then(|entry| entry.pool.clone())
+        };
+        hub.set_pool(pool_summary::summarize_now(
+            &[account("a")],
+            &HashMap::new(),
+            WorkingDays::all(),
+        ));
+        assert!(claude_pool(&hub).is_some());
+        let mut changes = hub.subscribe();
+        let mut routing_off = AppSettings::default();
+        routing_off.ai_proxy_enabled = false;
+        let settings = Arc::new(Mutex::new(routing_off));
+        let poll = run_accounts_poll(AiProxyPoll::default(), settings, hub.clone());
+        tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::select! {
+                () = poll => unreachable!("the poll runs forever"),
+                changed = changes.changed() => changed.unwrap(),
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(claude_pool(&hub), None);
+    }
+}

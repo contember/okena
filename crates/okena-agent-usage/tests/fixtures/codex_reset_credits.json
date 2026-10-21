@@ -1,0 +1,25 @@
+{
+  "available_count": 3,
+  "credits": [
+    {
+      "status": "available",
+      "title": "Later reset",
+      "expires_at": "2026-08-11T21:08:50.081157Z"
+    },
+    {
+      "status": "redeemed",
+      "title": "Used reset",
+      "expires_at": "2026-07-01T00:00:00Z"
+    },
+    {
+      "status": "available",
+      "title": "First reset",
+      "expires_at": "2026-07-18T00:32:13.609604Z"
+    },
+    {
+      "status": "available",
+      "title": "",
+      "expires_at": null
+    }
+  ]
+}

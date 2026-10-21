@@ -27,12 +27,12 @@ The directory contains:
 
 ## Usage limit history
 
-The Claude, Codex, and Grok desktop widgets append each successful usage fetch to
-`usage-history/claude.jsonl`, `usage-history/codex.jsonl`, and
+The daemon's usage poller appends each successful Claude, Codex, and Grok usage
+fetch to `usage-history/claude.jsonl`, `usage-history/codex.jsonl`, and
 `usage-history/grok.jsonl` under the config
 directory above. These files are shared across Okena profiles. Collection runs
-while the widgets are active, normally every five minutes; opening a popover can
-trigger an earlier fetch. Unchanged values are recorded too. Failed requests and
+while the provider's extension is enabled, normally every five minutes; opening a
+popover can trigger an earlier fetch. Unchanged values are recorded too. Failed requests and
 responses without recognized limits do not add samples.
 
 Each line is a versioned JSON object with `version: 1`, `recorded_at`, `provider`,
@@ -174,6 +174,7 @@ If the file contains invalid JSON, Okena recovers as many fields as possible and
 |-----|------|---------|-------------|
 | `session_backend` | string | `"Auto"` | Session persistence backend. Values: `"Auto"`, `"None"`, `"Tmux"`, `"Screen"`, `"Dtach"`. Auto prefers dtach, then tmux, then screen. Not supported on Windows. |
 | `auto_resume_agent_sessions` | bool | `false` | On restore, re-run the captured AI agent session's resume command (e.g. `claude --resume <id>`) as the pane's startup command. Applies when the pane comes back **without** its process, i.e. under `session_backend: "None"` — with a live backend the agent is still running and is left alone. See [Agent Status](agent-status.md#session-resume). |
+| `ai_proxy_enabled` | bool | `false` | Give new terminals `ANTHROPIC_BASE_URL` of the local AI proxy, which spreads `claude` requests over the accounts added in Settings → AI Proxy. See [AI proxy](ai-proxy.md). |
 
 #### Sidebar
 
@@ -253,7 +254,7 @@ If the configured directory does not exist, Okena logs a warning and falls back 
 
 #### Grok Extension
 
-The Grok extension reads the Grok CLI session from `~/.grok/auth.json`. `GROK_HOME` overrides that directory, matching the CLI. Enable the `grok` extension to show the usage meter. Okena only reads `auth.json` and never refreshes or writes the session. When the access token is expired or the usage API rejects it, the widget shows that the session expired. Okena never sends a request with a token that `auth.json` marks as expired; run `grok` to renew the session.
+The daemon reads the Grok CLI session from `~/.grok/auth.json` on its own machine. `GROK_HOME` in the daemon's environment overrides that directory, matching the CLI. Enable the `grok` extension to show the usage meter. Okena only reads `auth.json` and never refreshes or writes the session. When the access token is expired or the usage API rejects it, the widget shows that the session expired. Okena never sends a request with a token that `auth.json` marks as expired; run `grok` to renew the session.
 
 #### Hooks
 

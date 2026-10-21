@@ -1,0 +1,23 @@
+[package]
+name = "okena-agent-usage"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+# GPUI-free agent usage core: Claude Code / Codex / Grok credential reading, token
+# refresh, usage fetch + parsing into the `okena_core::api::ApiUsage` wire
+# model, retry/backoff policy, history recording, and the pure pace/severity
+# math. Linked by the headless daemon, so it must never depend on gpui.
+
+[dependencies]
+okena-core = { path = "../okena-core" }
+okena-transport = { path = "../okena-transport", features = ["blocking-http"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+log = "0.4"
+jiff = "0.2"
+dirs = "5.0"
+sha2 = "0.10"
+
+[dev-dependencies]
+tempfile = "3"

@@ -48,6 +48,16 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
+    // `--ai-proxy <profile-root>`: the per-profile AI proxy the daemon starts.
+    // Gated before profile resolution and logging; it has its own of both.
+    if let Some(profile_root) = okena_ai::proxy_args(&std::env::args().collect::<Vec<_>>()) {
+        if let Err(error) = okena_ai::run(profile_root) {
+            eprintln!("AI proxy failed: {error:#}");
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
+
     // 0. Resolve the active profile (env-only: the spawning desktop propagates
     //    OKENA_PROFILE; a standalone daemon reads the default / last-used). This
     //    makes get_config_dir() resolve the SAME profile dir the desktop uses, so

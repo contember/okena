@@ -20,7 +20,7 @@ On Windows, build from **x64 Native Tools Command Prompt for VS 2022** to avoid 
 
 ```
 src/                        # Thin `okena` binary entry point (main.rs, assets.rs, smoke_tests.rs)
-crates/                     # All logic — 34 crates, see below
+crates/                     # All logic — 38 crates, see below
 docs/                       # Project docs (see "Docs" at the bottom)
 mobile/                     # Mobile app — React Native UI (mobile/rn) over the Rust core via uniffi (crates/okena-mobile-ffi)
 web/                        # Web client (React + TypeScript + xterm.js)
@@ -35,7 +35,10 @@ state (projects, layouts, PTYs, git, services, hooks, persistence) and thin
 clients that own only presentation. The desktop spawns its own local daemon over
 loopback; web, mobile and remote clients speak the same protocol. Local and
 remote projects render through identical machinery. See
-[ADR-0001](docs/decisions/0001-headless-two-process-daemon.md).
+[ADR-0001](docs/decisions/0001-headless-two-process-daemon.md). The one exception
+is the optional AI account proxy (`okena --ai-proxy`), which outlives the daemon
+so persisted `claude` sessions keep working
+([ADR-0004](docs/decisions/0004-ai-proxy-process.md)).
 
 ### Crate layout
 
@@ -76,10 +79,12 @@ Everything lives in `crates/`; `src/` is only the binary entry point.
 | `okena-app-core` | Headless app-logic layer: global observable settings + action-execution glue over the workspace. No views. |
 | `okena-daemon-core` | GPUI-free daemon core: tokio reactor impls, observer reactor, PTY loop, git poller, command loop, `DaemonCore`. |
 | `okena-daemon` | Standalone GPUI-free daemon binary. Gate: `cargo tree -i gpui -p okena-daemon` must stay empty. |
+| `okena-ai` | GPUI-free Claude account pool proxy, run as `okena --ai-proxy`; outlives the daemon. |
 | `okena-remote-server` | The HTTP/WS server itself: routes, auth/pairing, PTY broadcaster, daemon bridge, local-daemon discovery. |
 | `okena-cli` | `okena <subcommand>` — controls a running instance over the remote HTTP API. Gated before GUI startup in `main.rs`. |
 | `okena-tui` | Proof-of-concept terminal UI client for a running daemon. |
-| `okena-usage` | Shared usage-bar UI + working-days logic behind the Claude and Codex usage widgets. |
+| `okena-agent-usage` | GPUI-free agent usage core: Claude/Codex/Grok credentials (file, macOS Keychain, `~/.codex/auth.json` + token refresh, the Grok CLI session), usage fetch + parsing into `ApiUsage`, retry/backoff, history, pace/working-days math, and the AI proxy pool model + summary. Driven by the daemon's `usage_poll` and `ai_proxy`. |
+| `okena-usage` | GPUI usage-bar UI behind the Claude/Codex/Grok widgets, plus `GlobalDaemonUsage` (the desktop mirror of the daemon's usage snapshot). Re-exports the pure math from `okena-agent-usage`. |
 
 ## Module-Specific Context
 
@@ -89,6 +94,7 @@ Read these when working in the corresponding areas:
 - `crates/okena-app/src/app/CLAUDE.md` — Main app entity, daemon connection, detached windows
 - `crates/okena-app/src/keybindings/CLAUDE.md` — Keyboard actions, bindings config
 - `crates/okena-daemon-core/CLAUDE.md` — The daemon: reactor traits, LocalSet, gpui-free invariants
+- `crates/okena-ai/CLAUDE.md` — AI account proxy: process lifetime, credentials, routing
 - `crates/okena-remote-server/src/CLAUDE.md` — Remote control server (HTTP/WS API)
 - `crates/okena-cli/src/CLAUDE.md` — CLI subcommands over the remote API
 - `crates/okena-workspace/CLAUDE.md` — State management, `WorkspaceCx`, LayoutNode tree, persistence

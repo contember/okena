@@ -52,6 +52,7 @@ impl RemoteServer {
         ui_owned: bool,
         tls_enabled: bool,
         app_version: &'static str,
+        usage: crate::usage::UsageHub,
     ) -> anyhow::Result<Self> {
         let _slow = okena_core::timing::SlowGuard::new("RemoteServer::start");
         let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -223,6 +224,7 @@ impl RemoteServer {
                 had_client,
                 local_bootstrap,
                 update_info,
+                usage,
             );
             #[cfg(unix)]
             let local_server = if let Some((path, listener)) = local_listener {

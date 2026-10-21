@@ -507,6 +507,7 @@ dependencies = [
  "compression-core",
  "futures-io",
  "pin-project-lite",
+ "tokio",
 ]
 
 [[package]]
@@ -1415,6 +1416,7 @@ version = "0.4.37"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "eb7b51a7d9c967fc26773061ba86150f19c50c0d65c887cb1fbe295fd16619b7"
 dependencies = [
+ "brotli",
  "bzip2",
  "compression-core",
  "flate2",
@@ -6201,6 +6203,7 @@ dependencies = [
  "log",
  "mimalloc",
  "okena-agent-harnesses",
+ "okena-ai",
  "okena-app",
  "okena-cli",
  "okena-core",
@@ -6234,6 +6237,47 @@ dependencies = [
 ]
 
 [[package]]
+name = "okena-agent-usage"
+version = "0.1.0"
+dependencies = [
+ "dirs 5.0.1",
+ "jiff",
+ "log",
+ "okena-core",
+ "okena-transport",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+]
+
+[[package]]
+name = "okena-ai"
+version = "0.34.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "base64",
+ "env_logger",
+ "flate2",
+ "fs2",
+ "futures",
+ "getrandom 0.2.17",
+ "jiff",
+ "libc",
+ "log",
+ "okena-agent-usage",
+ "okena-core",
+ "parking_lot",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "okena-app"
 version = "0.34.0"
 dependencies = [
@@ -6262,6 +6306,7 @@ dependencies = [
  "okena-theme",
  "okena-transport",
  "okena-ui",
+ "okena-usage",
  "okena-views-git",
  "okena-views-remote",
  "okena-views-services",
@@ -6309,6 +6354,7 @@ dependencies = [
  "base64",
  "clap",
  "dirs 5.0.1",
+ "okena-agent-usage",
  "okena-core",
  "okena-ext-updater",
  "okena-git",
@@ -6329,6 +6375,7 @@ dependencies = [
  "alacritty_terminal",
  "anyhow",
  "dirs 5.0.1",
+ "getrandom 0.2.17",
  "libc",
  "log",
  "serde",
@@ -6345,6 +6392,7 @@ dependencies = [
  "env_logger",
  "log",
  "okena-agent-harnesses",
+ "okena-ai",
  "okena-core",
  "okena-daemon-core",
  "okena-remote-server",
@@ -6359,6 +6407,8 @@ dependencies = [
  "async-channel",
  "libc",
  "log",
+ "okena-agent-usage",
+ "okena-ai",
  "okena-app-core",
  "okena-core",
  "okena-git",
@@ -6379,7 +6429,6 @@ dependencies = [
 name = "okena-ext-claude"
 version = "0.1.0"
 dependencies = [
- "dirs 5.0.1",
  "gpui",
  "gpui-component",
  "jiff",
@@ -6391,16 +6440,13 @@ dependencies = [
  "okena-usage",
  "parking_lot",
  "serde_json",
- "sha2",
  "smol",
- "tempfile",
 ]
 
 [[package]]
 name = "okena-ext-codex"
 version = "0.1.0"
 dependencies = [
- "dirs 5.0.1",
  "gpui",
  "gpui-component",
  "jiff",
@@ -6435,20 +6481,13 @@ dependencies = [
 name = "okena-ext-grok"
 version = "0.1.0"
 dependencies = [
- "dirs 5.0.1",
  "gpui",
  "gpui-component",
- "jiff",
- "log",
  "okena-core",
  "okena-extensions",
- "okena-transport",
  "okena-ui",
  "okena-usage",
- "parking_lot",
- "serde_json",
  "smol",
- "tempfile",
 ]
 
 [[package]]
@@ -6546,6 +6585,7 @@ dependencies = [
 name = "okena-hooks"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "base64",
  "gpui",
  "libc",
@@ -6798,12 +6838,12 @@ dependencies = [
  "gpui-component",
  "jiff",
  "log",
+ "okena-agent-usage",
  "okena-core",
  "okena-extensions",
  "okena-ui",
  "serde",
  "serde_json",
- "tempfile",
 ]
 
 [[package]]
@@ -8102,12 +8142,14 @@ dependencies = [
  "sync_wrapper",
  "tokio",
  "tokio-rustls",
+ "tokio-util",
  "tower",
  "tower-http",
  "tower-service",
  "url",
  "wasm-bindgen",
  "wasm-bindgen-futures",
+ "wasm-streams",
  "web-sys",
  "webpki-roots",
 ]
@@ -9878,13 +9920,18 @@ version = "0.6.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d4e6559d53cc268e5031cd8429d05415bc4cb4aefc4aa5d6cc35fbf5b924a1f8"
 dependencies = [
+ "async-compression",
  "bitflags 2.11.0",
  "bytes",
+ "futures-core",
  "futures-util",
  "http",
  "http-body",
+ "http-body-util",
  "iri-string",
  "pin-project-lite",
+ "tokio",
+ "tokio-util",
  "tower",
  "tower-layer",
  "tower-service",

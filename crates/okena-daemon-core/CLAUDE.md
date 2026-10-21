@@ -59,6 +59,8 @@ The two reactor trait families are what make the logic crates reactor-agnostic:
 | `daemon_config.rs` | Gpui-free settings/theme handlers. |
 | `soft_close.rs` | Soft-close deadline poll (grace window before killing a session). |
 | `toast_poll.rs` | Drains `HookMonitor` toasts onto the stream. |
+| `usage_poll.rs` | Claude Code / Codex / Grok usage poller (5 min, backoff, retry-after, 60 s refresh throttle). Reads extension toggles + Claude `config_dir` + working days from settings every 2 s; fetches via `okena-agent-usage` on the blocking pool (one fetch per provider at a time, even across config changes and past the 90 s watchdog); publishes into the server's `UsageHub` and acks refresh requests after publishing. Automatic fetches wait for a connected client (`UsageHub::clients`); the `claude` login is skipped while the hub holds a pool (`UsageHub::login_in_use`). |
+| `ai_proxy.rs` | AI proxy glue: shell environment, proxy start, management commands, and the accounts poll (15 s, paused while no client is connected; it still checks that the proxy runs every 5 min and on every routed PTY spawn) that loads each account's history (≤ once a minute) and publishes the pool summary into `UsageHub::set_pool` and each account's windows with history into `UsageHub::set_pool_histories`, computed on the blocking pool. |
 | `worktree_close_watchdog.rs` | Watches pending worktree closes. |
 | `worktree_stale_sweep.rs` | Drops worktree projects whose checkout was deleted outside Okena. |
 

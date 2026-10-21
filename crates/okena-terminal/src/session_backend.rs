@@ -248,7 +248,7 @@ impl ResolvedBackend {
                 // Use sh -c to properly chain tmux commands
                 // \; is tmux command separator - since args are passed directly via CommandBuilder
                 // (not through shell parsing), we only need single escape level
-                // -A: attach if exists, create if not
+                // has-session || new-session -d, then attach-session: create if missing, attach
                 // -s: session name
                 // -c: start directory
                 // set status off: hide tmux status bar (we have our own UI)
@@ -289,8 +289,12 @@ impl ResolvedBackend {
                     .filter(|(_, v)| v.is_none())
                     .map(|(k, _)| format!(" \\; set-environment -u {}", shell_escape(k)))
                     .collect();
+                // Create detached, then attach: `-e` values (the AI proxy URL
+                // carries a secret token) stay out of the long-lived client's
+                // argv, which other local users can read.
+                let target = shell_escape(&format!("={session_name}"));
                 let tmux_cmd = format!(
-                    "tmux new-session -A{} -s {} -c {}{} \\; set status off \\; set mouse on \\; set default-terminal xterm-256color \\; set terminal-features 'xterm-256color:RGB' \\; set -as terminal-overrides ',xterm-256color:Tc' \\; set-window-option automatic-rename off \\; rename-window {}{}",
+                    "tmux has-session -t {target} 2>/dev/null || tmux new-session -d{} -s {} -c {}{}; exec tmux attach-session -t {target} \\; set status off \\; set mouse on \\; set default-terminal xterm-256color \\; set terminal-features 'xterm-256color:RGB' \\; set -as terminal-overrides ',xterm-256color:Tc' \\; set-window-option automatic-rename off \\; rename-window {}{}",
                     env_args,
                     shell_escape(session_name),
                     shell_escape(cwd),
@@ -2775,7 +2779,8 @@ holders() {{
         let (program, args) = result.unwrap();
         assert_eq!(program, "sh");
         assert_eq!(args[0], "-c");
-        assert!(args[1].contains("tmux new-session -A"));
+        assert!(args[1].contains("tmux new-session -d"));
+        assert!(args[1].contains("exec tmux attach-session -t '=test-session'"));
         // Inner command uses the user's shell with -ic
         assert!(args[1].contains("'-ic'"));
         assert!(args[1].contains("npm run dev"));
@@ -3110,6 +3115,10 @@ holders() {{
         let env_pos = args[1].find("-e ").unwrap();
         let s_pos = args[1].find("-s ").unwrap();
         assert!(env_pos < s_pos, "expected -e before -s in: {}", args[1]);
+        // The long-lived attach client must not carry the values in its argv.
+        let (create, attach) = args[1].split_once("; exec tmux attach-session").unwrap();
+        assert!(create.contains("new-session -d -e "), "got: {create}");
+        assert!(!attach.contains("/tmp/foo"), "got: {attach}");
     }
 
     #[test]
@@ -3214,7 +3223,7 @@ holders() {{
         assert_eq!(program, "wsl.exe");
         let inner_cmd = args.last().unwrap();
         assert!(
-            inner_cmd.contains("tmux new-session -A"),
+            inner_cmd.contains("exec tmux attach-session"),
             "inner cmd: {}",
             inner_cmd
         );

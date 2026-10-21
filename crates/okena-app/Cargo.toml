@@ -31,6 +31,8 @@ okena-views-remote = { path = "../okena-views-remote" }
 okena-extensions = { path = "../okena-extensions" }
 okena-ext-claude = { path = "../okena-ext-claude" }
 okena-ext-updater = { path = "../okena-ext-updater" }
+# Daemon usage mirror the Claude/Codex usage widgets read.
+okena-usage = { path = "../okena-usage" }
 
 # UI Framework (from Zed repo)
 gpui = { git = "https://github.com/zed-industries/zed", package = "gpui" }

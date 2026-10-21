@@ -4,6 +4,13 @@ use crate::theme::FolderColor;
 use crate::types::{DiffMode, SplitDirection};
 use serde::{Deserialize, Serialize};
 
+pub use crate::usage::{
+    ApiExtraUsage, ApiPool, ApiPoolAccount, ApiPoolAccountHistory, ApiPoolAmount, ApiPoolNonstop,
+    ApiPoolPace, ApiPoolToday, ApiProviderUsage, ApiResetCredit, ApiResetCredits, ApiUsage,
+    ApiUsageCredits, ApiUsagePoint, ApiUsageProvider, ApiUsageStatus, ApiUsageWindow,
+    ApiUsageWindowKind, USAGE_HISTORY_MAX_POINTS, UsageRefreshRequest,
+};
+
 // ── API request/response types ──────────────────────────────────────────────
 
 /// GET /health response
@@ -1372,6 +1379,13 @@ pub enum ActionRequest {
         action_name: String,
         #[serde(default)]
         window: Option<String>,
+    },
+
+    // ── AI proxy (app-scoped; handled at the remote bridge) ───────────
+    /// Manage the host's AI proxy account pool. Replies with
+    /// [`crate::ai_proxy::AiProxyState`].
+    AiProxy {
+        request: crate::ai_proxy::AiProxyCommand,
     },
 }
 

@@ -55,7 +55,10 @@ mod tests {
     fn reconnecting_is_not_collapsed_into_connecting() {
         let status: ConnectionStatus =
             okena_transport::client::ConnectionStatus::Reconnecting { attempt: 3 }.into();
-        assert!(matches!(status, ConnectionStatus::Reconnecting { attempt: 3 }));
+        assert!(matches!(
+            status,
+            ConnectionStatus::Reconnecting { attempt: 3 }
+        ));
 
         let ffi: crate::types::ConnectionStatus = status.into();
         assert!(matches!(

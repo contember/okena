@@ -9,6 +9,7 @@ use crate::remote_client::manager::RemoteConnectionManager;
 use crate::terminal::shell_config::ShellType;
 use crate::views::overlays::about::{AboutModal, AboutModalEvent};
 use crate::views::overlays::add_project_dialog::{AddProjectDialog, AddProjectDialogEvent};
+use crate::views::overlays::ai_proxy_activity::{AiProxyActivity, AiProxyActivityEvent};
 use crate::views::overlays::change_path_dialog::{ChangePathDialog, ChangePathDialogEvent};
 use crate::views::overlays::close_worktree_dialog::{
     CloseWorktreeDialog, CloseWorktreeDialogEvent,
@@ -830,6 +831,17 @@ impl OverlayManager {
     /// Toggle the log console overlay (live in-app log viewer).
     pub fn toggle_log_console(&mut self, cx: &mut Context<Self>) {
         toggle_overlay!(self, cx, LogConsole, LogConsoleEvent, LogConsole::new);
+    }
+
+    pub fn toggle_ai_proxy_activity(
+        &mut self,
+        daemon_endpoint: Option<DaemonEndpoint>,
+        cx: &mut Context<Self>,
+    ) {
+        let workspace = self.workspace.clone();
+        toggle_overlay!(self, cx, AiProxyActivity, AiProxyActivityEvent, |cx| {
+            AiProxyActivity::new(workspace, daemon_endpoint, cx)
+        });
     }
 
     /// Toggle pairing dialog overlay.

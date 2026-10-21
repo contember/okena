@@ -3,11 +3,14 @@
 pub mod agent_harness;
 pub mod agent_session;
 pub mod agent_status;
+pub mod ai_proxy;
 pub mod api;
 pub mod claude_remote;
 pub mod git_poll;
 pub mod keys;
 pub mod latency_probe;
+#[cfg(windows)]
+pub mod owner_only;
 pub mod process;
 pub mod profiles;
 pub mod render_probe;
@@ -19,4 +22,6 @@ pub mod soft_close;
 pub mod theme;
 pub mod timing;
 pub mod types;
+pub mod usage;
+pub mod usage_history;
 pub mod ws;

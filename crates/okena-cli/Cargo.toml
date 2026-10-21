@@ -7,6 +7,8 @@ license = "MIT"
 
 [dependencies]
 okena-core = { path = "../okena-core" }
+# The pool's values in the desktop status bar's words.
+okena-agent-usage = { path = "../okena-agent-usage" }
 # For `project clone`'s client-side directory-name derivation (already in the
 # dependency graph via okena-workspace).
 okena-git = { path = "../okena-git" }

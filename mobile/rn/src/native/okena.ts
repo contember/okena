@@ -228,6 +228,164 @@ export interface FullscreenInfo {
   terminalId: TerminalId;
 }
 
+// ── Agent usage (mirrors `crates/okena-mobile-ffi/src/usage.rs`) ─────────
+
+/** One history sample of a usage window. Epoch seconds, percent 0–100. */
+export interface UsagePointInfo {
+  recordedAt: number;
+  usedPercent: number;
+}
+
+/** One rate-limit window. Timestamps are epoch seconds on the daemon's clock. */
+export interface UsageWindowInfo {
+  /**
+   * Stable key: Claude `five_hour` / `seven_day` / `seven_day_<model>`; Codex `primary` /
+   * `secondary` / `code_review`; Grok `included` / `on_demand`.
+   */
+  id: string;
+  /** Label the desktop uses (`Session`, `Weekly`, `Rate Limit`, …). */
+  label: string;
+  /** `five_hour` | `weekly` | `weekly_scoped` | `code_review` | `other`. */
+  kind: string;
+  /** Model of a `weekly_scoped` window. */
+  scopedModel?: string;
+  usedPercent: number;
+  windowSeconds: number;
+  resetAt?: number;
+  /** Scoped Claude limits: currently binding. Always true for unscoped windows. */
+  active: boolean;
+  /** Samples in the current window, oldest first. */
+  history: UsagePointInfo[];
+}
+
+/** Claude paid usage beyond the plan (cents). */
+export interface ExtraUsageInfo {
+  isEnabled: boolean;
+  monthlyLimitCents: number;
+  usedCreditsCents: number;
+  utilization: number;
+}
+
+/** Codex credit balance (USD). */
+export interface UsageCreditsInfo {
+  hasCredits: boolean;
+  unlimited: boolean;
+  balance: number;
+}
+
+export interface ResetCreditInfo {
+  title: string;
+  expiresAt?: number;
+}
+
+/** Codex rate-limit reset credits. */
+export interface ResetCreditsInfo {
+  availableCount: number;
+  credits: ResetCreditInfo[];
+}
+
+/** Weighted weekly quota of the account pool, as work and as a share of a week. */
+export interface PoolAmountInfo {
+  /** Work time at the pool's pace, in seconds. */
+  workSeconds: number;
+  /** Percent of one average pool account's week. */
+  accountWeekPercent: number;
+}
+
+/** The pool's soft limit: what today may use so every working day still has quota. */
+export interface PoolTodayInfo {
+  /** `safePerDay - used`; negative when today already used more. */
+  left: PoolAmountInfo;
+  /** Used since the daemon's local midnight. */
+  used: PoolAmountInfo;
+  safePerDay: PoolAmountInfo;
+  /** What each non-working day uses, as last week. */
+  offDay: PoolAmountInfo;
+  /** Using more than `safePerDay` makes the pool run short at this time; unset: it only takes from later weeks. */
+  runsShortAt?: number;
+  /** Label of the account whose weekly reset is at `runsShortAt`. */
+  runsShortBefore?: string;
+  /** At the last 24 hours' pace the pool runs out at this time; unset: it lasts the week. */
+  runsOutAtRecentPace?: number;
+}
+
+/** The pool's hard limit: nonstop work until every account is blocked. */
+export interface PoolNonstopInfo {
+  /** `lasts` | `beyond_horizon` | `blocked` | `unknown`. */
+  kind: string;
+  /** `lasts`: seconds of work until every account is blocked. */
+  workSeconds?: number;
+  /** `beyond_horizon`: the simulated horizon in seconds. */
+  horizonSeconds?: number;
+  /** `blocked`: when the first account is back, if known. */
+  until?: number;
+}
+
+/** The pace that converts quota into work time. */
+export interface PoolPaceInfo {
+  /** Work time that fills one 5h window of an average account, in seconds. */
+  sessionFillSeconds: number;
+  /** Percent of a week one full 5h window costs. */
+  sessionWeekPercent: number;
+  /** Measured from the last 7 days; `false` means defaults. */
+  fromHistory: boolean;
+}
+
+/** One account of the pool. */
+export interface PoolAccountInfo {
+  id: string;
+  label: string;
+  /** `Max 20x` / `Max 5x`; unset for the base plan. */
+  tier?: string;
+  /** Why the proxy skips the account now (`7d limit`, `429 cooldown`). */
+  blocked?: string;
+  /** Weekly percent of this account used since the daemon's local midnight. */
+  usedTodayPercent: number;
+  /** The `five_hour` and `seven_day` windows. */
+  windows: UsageWindowInfo[];
+}
+
+/** The AI proxy's Claude account pool; severity rules are on `ApiPool` in okena-core. */
+export interface PoolInfo {
+  today: PoolTodayInfo;
+  nonstop: PoolNonstopInfo;
+  pace: PoolPaceInfo;
+  /** Accounts that serve requests, in pool order. */
+  accounts: PoolAccountInfo[];
+}
+
+/** Usage of one provider on the daemon's machine. */
+export interface ProviderUsageInfo {
+  /** `claude` | `codex` | `grok` | `unknown`. */
+  provider: string;
+  /** `disabled` | `no_credentials` | `pending` | `ok` | `error` | `unknown`. */
+  status: string;
+  plan?: string;
+  fetchedAt?: number;
+  lastAttemptAt?: number;
+  nextAttemptAt?: number;
+  fetching: boolean;
+  error?: string;
+  consecutiveFailures: number;
+  rateLimitedUntil?: number;
+  windows: UsageWindowInfo[];
+  extraUsage?: ExtraUsageInfo;
+  credits?: UsageCreditsInfo;
+  resetCredits?: ResetCreditsInfo;
+  /** Grok prepaid credit balance, in the provider's credit units. */
+  prepaidBalance?: number;
+  /** Claude only: the AI proxy's account pool; shown instead of `windows` when set. */
+  pool?: PoolInfo;
+}
+
+/** Agent usage snapshot of one server (`usage_changed`). */
+export interface UsageInfo {
+  providers: ProviderUsageInfo[];
+  /** `0 = Monday .. 6 = Sunday`; never empty. */
+  workingDays: number[];
+  generatedAt: number;
+}
+
 // ─────────────────────────────────────────────────────────────────────────
 // The binding contract
 // ─────────────────────────────────────────────────────────────────────────
@@ -428,6 +586,20 @@ export interface OkenaNative {
 
   /** Flat list of every terminal id across all projects. */
   getAllTerminalIds(connId: ConnId): TerminalId[];
+
+  // ── agent usage (usage.rs) ───────────────────────────────────────────────
+
+  /** Latest Claude / Codex / Grok usage snapshot the server pushed; `undefined` before the first. */
+  getUsage(connId: ConnId): UsageInfo | undefined;
+  /** Changes whenever the stored snapshot changes (`0` before the first). Poll this, then `getUsage`. */
+  getUsageRevision(connId: ConnId): number;
+  /**
+   * Ask the daemon to refetch (`provider` `claude` / `codex` / `grok`, or all when
+   * `undefined`). Throttled to 60 s per provider; the result arrives as a new
+   * snapshot. Resolves to whether a fetch is now running for the requested
+   * provider(s): `false` means throttled, so no new result is coming.
+   */
+  requestUsageRefresh(connId: ConnId, provider: string | undefined): Promise<boolean>;
 
   // ── terminal actions (state.rs, async) ───────────────────────────────────
 
@@ -771,6 +943,15 @@ export function getOkenaNative(): OkenaNative {
         typeof gen.getClaudeSessions === 'function'
           ? parseStrings(gen.getClaudeSessions(connId))
           : [],
+      // Bindings generated before the usage API: no usage, refresh is a no-op.
+      getUsage: (connId: ConnId) =>
+        typeof gen.getUsage === 'function' ? (gen.getUsage(connId) as UsageInfo | undefined) : undefined,
+      getUsageRevision: (connId: ConnId) =>
+        typeof gen.getUsageRevision === 'function' ? (gen.getUsageRevision(connId) as number) : 0,
+      requestUsageRefresh: (connId: ConnId, provider: string | undefined) =>
+        typeof gen.requestUsageRefresh === 'function'
+          ? (gen.requestUsageRefresh(connId, provider) as Promise<boolean>)
+          : Promise.resolve(false),
       canReportCertFingerprint: () => pinsReadable,
       // Bindings generated before the lifecycle hooks existed: no-ops, and
       // "Retry now" falls back to a fresh connect.

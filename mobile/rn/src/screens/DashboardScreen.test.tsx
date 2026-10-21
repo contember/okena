@@ -12,6 +12,7 @@ import { useConnectionStore } from '../state/connectionStore';
 import { useWorkspaceStore } from '../state/workspaceStore';
 
 jest.mock('../components/Icon', () => ({ Icon: () => null }));
+jest.mock('./UsageSheet', () => ({ ConnectedUsageSheet: () => null }));
 jest.mock('../components/ClaudeDialogSheet', () => ({
   ClaudeDialogSheet: (props: { title: string }) => {
     const { Text: MockText } = jest.requireActual('react-native');

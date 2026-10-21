@@ -5,7 +5,8 @@
  *   - an app bar: a drawer-toggle (☰), a dashboard button (also the Android
  *     back button), the selected project name (tap to switch
  *     when there are several), a Terminal / Chat switch for a terminal with a
- *     connected `claude`, a small connection-quality dot, and a "＋"
+ *     connected `claude`, the agent usage rings (tap for the
+ *     {@link UsageSheet}), a small connection-quality dot, and a "＋"
  *     terminal-actions menu (new / split V / split H). StatusIndicator is NOT
  *     imported (owned by another agent) — the dot is inline.
  *   - when the project has several terminals, a {@link TerminalTabs} chip row
@@ -96,6 +97,8 @@ import { ClaudeChat } from '../components/ClaudeChat';
 import { DialogBadge } from '../components/ClaudeIndicator';
 import { ConnectionDot } from '../components/ConnectionDot';
 import { Icon } from '../components/Icon';
+import { ConnectedUsageIndicator } from '../components/UsageIndicator';
+import { ConnectedUsageSheet } from './UsageSheet';
 import type { TerminalFonts } from '../components/TerminalView';
 
 const native: OkenaNative = (() => {
@@ -187,14 +190,18 @@ export const WorkspaceScreen: React.FC = () => {
   const [switcherOpen, setSwitcherOpen] = useState(false);
   const [actionsOpen, setActionsOpen] = useState(false);
   const [switcherQuery, setSwitcherQuery] = useState('');
+  const [usageOpen, setUsageOpen] = useState(false);
 
   // Android back returns to the dashboard; the drawer and the other modals
   // take the back press themselves while open.
   useEffect(() => {
-    const subscription = BackHandler.addEventListener('hardwareBackPress', () => {
-      showDashboard();
-      return true;
-    });
+    const subscription = BackHandler.addEventListener(
+      'hardwareBackPress',
+      () => {
+        showDashboard();
+        return true;
+      },
+    );
     return () => subscription.remove();
   }, [showDashboard]);
 
@@ -340,7 +347,7 @@ export const WorkspaceScreen: React.FC = () => {
         modifiers={modifiers}
         onSelect={selectTerminal}
         selected
-        focusBlocked={drawerOpen || switcherOpen || actionsOpen}
+        focusBlocked={drawerOpen || switcherOpen || actionsOpen || usageOpen}
         native={native}
       />
     );
@@ -405,6 +412,9 @@ export const WorkspaceScreen: React.FC = () => {
             onChange={(view) => setTerminalView(activeTerminalId, view)}
           />
         ) : null}
+        {connId ? (
+          <ConnectedUsageIndicator onPress={() => setUsageOpen(true)} />
+        ) : null}
         {connId ? <ConnectionDot /> : null}
         {connId && project ? (
           <Pressable
@@ -465,6 +475,11 @@ export const WorkspaceScreen: React.FC = () => {
         open={drawerOpen}
         onClose={() => setDrawerOpen(false)}
         native={native}
+      />
+
+      <ConnectedUsageSheet
+        visible={usageOpen}
+        onClose={() => setUsageOpen(false)}
       />
 
       {/* Project switcher */}

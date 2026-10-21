@@ -8,13 +8,13 @@ use super::{
     FullscreenNextTerminal, FullscreenPrevTerminal, InstallUpdate, JumpToNextFailedCommand,
     JumpToNextPrompt, JumpToPreviousFailedCommand, JumpToPreviousPrompt, MinimizeTerminal,
     NewProject, NewWindow, OpenSettingsFile, Paste, Quit, ResetZoom, RestartDaemon, ReviewChanges,
-    ScrollDown, ScrollUp, Search, SearchNext, SearchPrev, SendEscape, ShowBranchSwitcher,
-    ShowCommandPalette, ShowContentSearch, ShowDiffViewer, ShowFileSearch, ShowHookLog,
-    ShowKeybindings, ShowLogConsole, ShowProfileManager, ShowProjectSwitcher, ShowSessionManager,
-    ShowSettings, ShowThemeSelector, ShowWhatsNew, SplitHorizontal, SplitVertical,
-    StartAllServices, StopAllServices, ToggleFullscreen, TogglePaneSwitcher, ToggleProjectLayout,
-    ToggleProjectVisibility, ToggleSidebar, ToggleSidebarAutoHide, ToggleStatusLanes, ToggleUnread,
-    ZoomIn, ZoomOut,
+    ScrollDown, ScrollUp, Search, SearchNext, SearchPrev, SendEscape, ShowAiProxyActivity,
+    ShowBranchSwitcher, ShowCommandPalette, ShowContentSearch, ShowDiffViewer, ShowFileSearch,
+    ShowHookLog, ShowKeybindings, ShowLogConsole, ShowProfileManager, ShowProjectSwitcher,
+    ShowSessionManager, ShowSettings, ShowThemeSelector, ShowWhatsNew, SplitHorizontal,
+    SplitVertical, StartAllServices, StopAllServices, ToggleFullscreen, TogglePaneSwitcher,
+    ToggleProjectLayout, ToggleProjectVisibility, ToggleSidebar, ToggleSidebarAutoHide,
+    ToggleStatusLanes, ToggleUnread, ZoomIn, ZoomOut,
 };
 
 /// Get human-readable descriptions for all actions
@@ -598,6 +598,16 @@ pub fn get_action_descriptions() -> HashMap<&'static str, ActionDescription> {
             description: "Live log viewer with runtime filter",
             category: "Global",
             factory: || Box::new(ShowLogConsole),
+        },
+    );
+
+    map.insert(
+        "ShowAiProxyActivity",
+        ActionDescription {
+            name: "AI Proxy Activity",
+            description: "Requests per account, failovers and errors of the AI proxy",
+            category: "Global",
+            factory: || Box::new(ShowAiProxyActivity),
         },
     );
 

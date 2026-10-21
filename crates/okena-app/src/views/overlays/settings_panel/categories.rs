@@ -7,6 +7,7 @@ pub(in crate::views::overlays) enum SettingsCategory {
     Hooks,
     Extensions,
     PairedDevices,
+    AiProxy,
     /// Dynamic category for an extension's own settings (keyed by extension ID).
     Extension(String),
 }
@@ -21,6 +22,7 @@ impl SettingsCategory {
             Self::Hooks => "Hooks",
             Self::Extensions => "Extensions",
             Self::PairedDevices => "Devices",
+            Self::AiProxy => "AI Proxy",
             Self::Extension(_) => "", // label provided dynamically from registry
         }
     }
@@ -34,11 +36,12 @@ impl SettingsCategory {
             Self::Hooks,
             Self::Extensions,
             Self::PairedDevices,
+            Self::AiProxy,
         ]
     }
 
-    /// Categories available in project mode (only hooks for now)
+    /// Categories available in project mode
     pub(super) fn project_categories() -> &'static [SettingsCategory] {
-        &[Self::Hooks]
+        &[Self::Hooks, Self::AiProxy]
     }
 }

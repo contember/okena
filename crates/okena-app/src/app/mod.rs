@@ -336,6 +336,17 @@ impl Okena {
 
         // Create remote connection manager and wire to main window
         let remote_manager = cx.new(|cx| RemoteConnectionManager::new(terminals.clone(), cx));
+        let extension_manager = remote_manager.downgrade();
+        cx.set_global(okena_extensions::ExtensionActions::new(
+            move |connection_id, action, cx| {
+                let Some(manager) = extension_manager.upgrade() else {
+                    return gpui::Task::ready(Err("Daemon connection is unavailable".into()));
+                };
+                manager.update(cx, |manager, cx| {
+                    manager.send_action_with_result(connection_id, action, cx)
+                })
+            },
+        ));
         main_window.update(cx, |rv, cx| {
             rv.set_remote_manager(remote_manager.clone(), cx);
         });
@@ -449,6 +460,38 @@ impl Okena {
             .detach();
         }
 
+        // Agent usage: the daemon polls Claude Code / Codex. Mirror its
+        // snapshot into the global the usage widgets read, and route their
+        // refresh requests (popover opened) and pool history reads back to
+        // the daemons.
+        {
+            let store = okena_usage::GlobalDaemonUsage::entity(cx);
+            let weak_manager = remote_manager.downgrade();
+            let history_manager = remote_manager.downgrade();
+            store.update(cx, |store, _| {
+                store.set_refresh(std::rc::Rc::new(move |provider, cx: &mut App| {
+                    weak_manager.upgrade().is_some_and(|manager| {
+                        manager.read(cx).request_usage_refresh(
+                            okena_transport::client::LOCAL_DAEMON_CONNECTION_ID,
+                            Some(provider),
+                        )
+                    })
+                }));
+                store.set_pool_history(std::rc::Rc::new(
+                    move |connection_id, account_id, cx: &mut App| {
+                        let Some(manager) = history_manager.upgrade() else {
+                            return gpui::Task::ready(Err(
+                                "Daemon connection is unavailable".into()
+                            ));
+                        };
+                        manager.update(cx, |manager, cx| {
+                            manager.pool_account_history(connection_id, account_id, cx)
+                        })
+                    },
+                ));
+            });
+        }
+
         // The first start after an update gets a one-time toast that opens
         // What's New; a fresh install only records the running version.
         // Placed after the settings subscription above so the recorded version
@@ -503,6 +546,14 @@ impl Okena {
             // the GUI recovers instead of staying wedged on a dead socket.
             RemoteManagerEvent::LocalConnectionFailed => {
                 this.recover_local_daemon(cx);
+            }
+            // Every host's usage is mirrored per connection; the widgets'
+            // main snapshot stays the desktop's own daemon.
+            RemoteManagerEvent::UsageChanged { connection_id } => {
+                this.sync_host_usage(connection_id, cx);
+                if connection_id == okena_transport::client::LOCAL_DAEMON_CONNECTION_ID {
+                    this.sync_daemon_usage(cx);
+                }
             }
             RemoteManagerEvent::SettingsChanged(settings) => {
                 // Initial/reconnected daemon snapshots also restore the
@@ -1046,6 +1097,55 @@ impl Okena {
         // should hold just did — clear the memo so the sync actually runs.
         self.scrollback_visible_projects.lock().take();
         self.publish_visible_projects(cx);
+    }
+
+    /// Copy the local daemon's usage snapshot into the widgets' global. When
+    /// that daemon is reached over the network rather than this machine's
+    /// socket/loopback, label the numbers with its name.
+    fn sync_daemon_usage(&self, cx: &mut Context<Self>) {
+        let (usage, source_label) = {
+            let manager = self.remote_manager.read(cx);
+            let id = okena_transport::client::LOCAL_DAEMON_CONNECTION_ID;
+            let usage = manager.usage(id).cloned();
+            let source_label = manager
+                .connections()
+                .into_iter()
+                .find(|(config, _, _)| config.id == id)
+                .and_then(|(config, _, _)| {
+                    let on_this_machine = config.local_endpoint.is_some()
+                        || config
+                            .host
+                            .parse::<std::net::IpAddr>()
+                            .is_ok_and(|ip| ip.is_loopback())
+                        || config.host.eq_ignore_ascii_case("localhost");
+                    (!on_this_machine).then(|| SharedString::from(config.name.clone()))
+                });
+            (usage, source_label)
+        };
+        let store = okena_usage::GlobalDaemonUsage::entity(cx);
+        store.update(cx, |store, cx| {
+            store.set_source_label(source_label, cx);
+            store.set_usage(usage, cx);
+        });
+    }
+
+    /// Copy one connection's usage snapshot into the widgets' per-host store;
+    /// a removed or dead connection has none, which clears its entry.
+    fn sync_host_usage(&self, connection_id: &str, cx: &mut Context<Self>) {
+        let (usage, host_name) = {
+            let manager = self.remote_manager.read(cx);
+            let host_name = manager
+                .connections()
+                .into_iter()
+                .find(|(config, _, _)| config.id == connection_id)
+                .map(|(config, _, _)| config.name.clone())
+                .unwrap_or_default();
+            (manager.usage(connection_id).cloned(), host_name)
+        };
+        let store = okena_usage::GlobalDaemonUsage::entity(cx);
+        store.update(cx, |store, cx| {
+            store.set_host_usage(connection_id, &host_name, usage, cx);
+        });
     }
 
     fn sync_system_appearance(&self, cx: &mut Context<Self>) {

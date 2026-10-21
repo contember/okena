@@ -577,6 +577,7 @@ impl Workspace {
             return;
         };
         let project_hooks = project.hooks.clone();
+        let root_project_id = project.root_project_id().to_owned();
         let name = project.name.clone();
         let path = project.path.clone();
         self.clear_stale_hook_terminals(project_id, cx);
@@ -591,6 +592,7 @@ impl Workspace {
         let hook_results = hooks::fire_on_project_open(
             &project_hooks,
             project_id,
+            &root_project_id,
             &name,
             &path,
             folder_id,

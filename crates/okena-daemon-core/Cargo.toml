@@ -24,6 +24,11 @@ okena-app-core = { path = "../okena-app-core", default-features = false }
 # Remote bridge types (`BridgeReceiver`, `BridgeMessage`, `RemoteCommand`).
 # `default-features = false` drops its `gpui` default feature.
 okena-remote-server = { path = "../okena-remote-server", default-features = false }
+# Claude Code / Codex usage fetching (credentials, HTTP, parsing, history).
+# gpui-free by construction.
+okena-agent-usage = { path = "../okena-agent-usage" }
+# Per-profile AI proxy: started on demand, outlives the daemon.
+okena-ai = { path = "../okena-ai" }
 
 # Tokio reactor backing the gpui-free trait impls.
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros", "signal", "test-util"] }

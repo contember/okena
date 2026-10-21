@@ -47,6 +47,7 @@ actions!(
         StopAllServices,
         ShowHookLog,
         ShowLogConsole,
+        ShowAiProxyActivity,
         ToggleStatusLanes,
         EqualizeLayout,
         ToggleProjectLayout,
@@ -484,6 +485,7 @@ fn create_keybinding(action: &str, keystroke: &str, context: Option<&str>) -> Op
         "ShowBranchSwitcher" => Some(KeyBinding::new(keystroke, ShowBranchSwitcher, context)),
         "ShowProfileManager" => Some(KeyBinding::new(keystroke, ShowProfileManager, context)),
         "ShowLogConsole" => Some(KeyBinding::new(keystroke, ShowLogConsole, context)),
+        "ShowAiProxyActivity" => Some(KeyBinding::new(keystroke, ShowAiProxyActivity, context)),
         "ToggleStatusLanes" => Some(KeyBinding::new(keystroke, ToggleStatusLanes, context)),
         "NewWindow" => Some(KeyBinding::new(keystroke, NewWindow, context)),
         _ => {

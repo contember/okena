@@ -203,6 +203,94 @@ Get the visible terminal viewport as text.
 { "content": "user@host:~$ ls\nfile1  file2\nuser@host:~$ " }
 ```
 
+### `GET /v1/usage`
+
+Claude Code / Codex / Grok rate-limit usage measured on the daemon's machine,
+and the AI proxy's account pool while new shells route through it (`pool` on
+the Claude entry, see [ai-proxy.md](ai-proxy.md)). Bearer
+auth like the other `/v1` routes. Returns `ApiUsage`
+(`crates/okena-core/src/usage.rs` is the schema, with field docs):
+
+```json
+{
+  "providers": [
+    {
+      "provider": "claude", "status": "ok", "plan": "max",
+      "fetched_at": 1792260185.0, "last_attempt_at": 1792260184.2,
+      "next_attempt_at": 1792260485.0, "fetching": false,
+      "error": null, "consecutive_failures": 0, "rate_limited_until": null,
+      "windows": [
+        {
+          "id": "five_hour", "label": "Session", "kind": {"type": "five_hour"},
+          "used_percent": 20.0, "window_seconds": 18000.0,
+          "reset_at": 1792264800.0, "active": true,
+          "history": [{"recorded_at": 1792259000.0, "used_percent": 18.0}]
+        }
+      ],
+      "extra_usage": {"is_enabled": false, "monthly_limit_cents": 10000.0,
+                      "used_credits_cents": 0.0, "utilization": 0.0},
+      "credits": null, "reset_credits": null
+    },
+    { "provider": "codex", "status": "disabled", "windows": [] },
+    {
+      "provider": "grok", "status": "ok",
+      "windows": [
+        {
+          "id": "included", "label": "Credits", "kind": {"type": "other"},
+          "used_percent": 37.0, "window_seconds": 2678400.0,
+          "reset_at": 1793404800.0, "active": true, "history": []
+        }
+      ],
+      "prepaid_balance": 1200.0
+    }
+  ],
+  "working_days": [0, 1, 2, 3, 4],
+  "generated_at": 1792260190.0
+}
+```
+
+- `status`: `disabled` (extension off in settings) · `no_credentials` ·
+  `pending` · `ok` · `error` (windows are then the last good data, see
+  `fetched_at`).
+- Window `kind`: `five_hour`, `weekly`, `weekly_scoped` (+ `model`),
+  `code_review`, `other`. Window ids double as history series names.
+- Timestamps are epoch seconds. Time elapsed in a window is
+  `(now - (reset_at - window_seconds)) / window_seconds`; a window with
+  `window_seconds: 0` (Grok without a billing period) has none.
+- `pool` and the `grok` entry come only from daemons that know them; older
+  daemons omit both.
+- `working_days`: `0 = Monday`; the desktop's weekly pace marker only advances
+  on these days.
+- Polling: every 5 min per enabled provider (`enabled_extensions` contains
+  `claude-code` / `codex` / `grok`), backoff 30 s → 1 h on errors,
+  `retry-after` on 429. Only while a client holds a `/v1/stream` WebSocket:
+  with none, a fetch that falls due waits for the next client, which gets it
+  at once. `POST /v1/usage/refresh` fetches without a client.
+- The `claude` login is polled only while no `pool` is published. With a
+  pool, new shells use the pool accounts; the login's entry keeps its last
+  data and refresh requests for it are ignored.
+
+### `GET /v1/usage/pool/{account_id}`
+
+One AI proxy pool account's `five_hour` and `seven_day` windows with their
+`history` (the pool in `GET /v1/usage` carries none), as
+`ApiPoolAccountHistory` (`{"account_id": "…", "windows": [ApiUsageWindow]}`).
+The daemon serves its own copy, loaded from the proxy at most once a minute;
+an account that does not serve requests has no history. `404` while no pool
+is published or the account is not in it, and from daemons older than the
+route.
+
+### `POST /v1/usage/refresh`
+
+Body `{"provider": "claude"}`, `{"provider": "codex"}`, `{"provider": "grok"}`,
+or empty / `{}` for all. Returns the `ApiUsage` snapshot as soon as the daemon has applied the
+request (at most ~2 s): a requested provider with `fetching: true` is being
+refetched, otherwise the request was ignored. The fetch result arrives as
+`usage_changed`. Ignored per provider when its last attempt is under 60 s old,
+it is fetching, rate limited (`rate_limited_until`) or disabled. An error
+backoff does not block it: it only spaces the automatic poll. Unknown fields or providers → `400`, so a daemon
+older than Grok support rejects `{"provider": "grok"}`.
+
 ### `WS /v1/stream`
 
 Real-time PTY output and state change notifications.
@@ -232,6 +320,7 @@ Real-time PTY output and state change notifications.
 | `auth_failed` | `error` | Authentication failed |
 | `subscribed` | `mappings: {terminal_id: stream_id}` | Subscription confirmed with numeric stream IDs |
 | `state_changed` | `state_version: u64` | Workspace state changed — refetch via `GET /v1/state` |
+| `usage_changed` | `usage: ApiUsage` | Full agent usage snapshot (same as `GET /v1/usage`); sent right after `auth_ok` and on every change |
 | `dropped` | `count: u64` | Subscriber fell behind, N events were dropped |
 | `pong` | — | Keepalive response |
 

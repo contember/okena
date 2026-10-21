@@ -11,7 +11,7 @@ use crate::workspace::persistence::AppSettings;
 use crate::workspace::state::{HookTerminalStatus, WindowId, Workspace};
 use okena_core::theme::FolderColor;
 use okena_terminal::TerminalsRegistry;
-use okena_terminal::backend::TerminalBackend;
+use okena_terminal::backend::{TerminalBackend, TerminalLaunchPlan};
 use okena_terminal::terminal::{Terminal, TerminalSize};
 use okena_workspace::context::WorkspaceCx;
 use okena_workspace::hook_monitor::HookStatus;
@@ -579,7 +579,7 @@ pub(super) fn rerun_hook(
     terminals: &TerminalsRegistry,
     cx: &mut impl WorkspaceCx,
 ) -> ActionResult {
-    let (command, cwd, hook_type, project_name, status) =
+    let (command, cwd, hook_type, project_name, root_project_id, status) =
         match ws.project(&project_id).and_then(|p| {
             p.hook_terminals.get(&terminal_id).map(|entry| {
                 (
@@ -587,6 +587,7 @@ pub(super) fn rerun_hook(
                     entry.cwd.clone(),
                     entry.hook_type.clone(),
                     p.name.clone(),
+                    p.root_project_id().to_owned(),
                     entry.status.clone(),
                 )
             })
@@ -598,8 +599,10 @@ pub(super) fn rerun_hook(
         return ActionResult::Err("hook is still running".to_string());
     }
     let monitor = cx.hook_monitor();
-    let shell = okena_workspace::hooks::keep_alive_hook_shell(&command);
-    let new_id = match backend.create_terminal(&cwd, Some(&shell)) {
+    let plan =
+        TerminalLaunchPlan::for_shell(okena_workspace::hooks::keep_alive_hook_shell(&command))
+            .for_project(&root_project_id);
+    let new_id = match backend.create_terminal_with_plan(&cwd, &plan) {
         Ok(id) => id,
         Err(e) => {
             let message = format!("failed to spawn hook terminal: {e}");
@@ -721,7 +724,7 @@ mod hook_action_tests {
     };
     use okena_core::theme::FolderColor;
     use okena_terminal::TerminalsRegistry;
-    use okena_terminal::backend::TerminalBackend;
+    use okena_terminal::backend::{TerminalBackend, TerminalLaunchPlan};
     use okena_terminal::shell_config::ShellType;
     use okena_terminal::terminal::TerminalTransport;
     use okena_workspace::context::WorkspaceCx;
@@ -757,6 +760,7 @@ mod hook_action_tests {
         transport: Arc<RecordingTransport>,
         next_id: AtomicUsize,
         shells: Mutex<Vec<Option<ShellType>>>,
+        plan_project_ids: Mutex<Vec<Option<String>>>,
         killed: Mutex<Vec<String>>,
         fail_create: AtomicBool,
     }
@@ -773,6 +777,18 @@ mod hook_action_tests {
             }
             let id = self.next_id.fetch_add(1, Ordering::Relaxed);
             Ok(format!("rerun-{id}"))
+        }
+
+        fn create_terminal_with_plan(
+            &self,
+            cwd: &str,
+            plan: &TerminalLaunchPlan,
+        ) -> anyhow::Result<String> {
+            self.plan_project_ids
+                .lock()
+                .unwrap()
+                .push(plan.project_id.clone());
+            self.create_terminal(cwd, Some(&plan.route))
         }
 
         fn reconnect_terminal(
@@ -946,6 +962,31 @@ mod hook_action_tests {
         assert_eq!(history[0].terminal_id.as_deref(), Some("rerun-0"));
         assert!(matches!(history[0].status, HookStatus::Running));
         assert!(monitor.drain_pending_toasts().is_empty());
+    }
+
+    #[test]
+    fn rerun_hook_launches_a_worktree_hook_under_its_main_project() {
+        let mut workspace = workspace_with_worktree_hook("old-hook");
+        let backend = RecordingBackend::default();
+        let terminals: TerminalsRegistry = Default::default();
+        let mut cx = TestCx {
+            monitor: HookMonitor::new(),
+        };
+
+        let result = rerun_hook(
+            &mut workspace,
+            "p1".to_string(),
+            "old-hook".to_string(),
+            &backend,
+            &terminals,
+            &mut cx,
+        );
+
+        assert!(matches!(result, ActionResult::Ok(_)));
+        assert_eq!(
+            backend.plan_project_ids.lock().unwrap().as_slice(),
+            [Some("parent".to_string())]
+        );
     }
 
     #[test]

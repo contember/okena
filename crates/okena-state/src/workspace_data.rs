@@ -289,6 +289,13 @@ pub struct ProjectData {
 }
 
 impl ProjectData {
+    /// The main project of a worktree; the project itself otherwise.
+    pub fn root_project_id(&self) -> &str {
+        self.worktree_info
+            .as_ref()
+            .map_or(&self.id, |worktree| &worktree.parent_project_id)
+    }
+
     /// Get the display name for a terminal.
     /// Priority: user-set custom name > useful OSC title > directory-based fallback.
     /// Shell/runtime-generated titles are ignored in favor of the directory name.
