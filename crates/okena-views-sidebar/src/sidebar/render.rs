@@ -1163,13 +1163,13 @@ impl Render for Sidebar {
                                         cx,
                                     );
                                 }
-                                super::status_groups::add_tree_guide(
-                                    &mut flat_elements[guide_start..],
-                                    12.0,
-                                    t.get_folder_color(project.folder_color),
-                                    cx,
-                                );
                             }
+                            super::status_groups::add_tree_guide(
+                                &mut flat_elements[guide_start..],
+                                12.0,
+                                t.get_folder_color(project.folder_color),
+                                cx,
+                            );
                         }
                     } else {
                         // No worktrees or orphan — standard rendering
