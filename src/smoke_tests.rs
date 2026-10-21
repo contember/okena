@@ -51,6 +51,9 @@ mod tests {
                                 auto_hide_single_terminal_header: s
                                     .settings
                                     .auto_hide_single_terminal_header,
+                                show_name_when_inactive: s
+                                    .settings
+                                    .show_terminal_name_when_inactive,
                                 idle_timeout_secs: s.settings.idle_timeout_secs,
                                 color_tinted_background: s.settings.color_tinted_background,
                                 file_opener: s.settings.file_opener.clone(),

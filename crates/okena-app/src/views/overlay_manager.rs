@@ -1483,10 +1483,6 @@ impl OverlayManager {
         self.close_modal(cx);
         self.close_all_context_menus(cx);
 
-        let show_name_when_inactive = self
-            .workspace
-            .read(cx)
-            .terminal_name_overlay_enabled(&project_id, &terminal_id);
         let menu = cx.new(|cx| {
             TerminalMenu::new(
                 terminal_id,
@@ -1497,7 +1493,6 @@ impl OverlayManager {
                 current_shell,
                 can_export_buffer,
                 has_bell,
-                show_name_when_inactive,
                 invocation,
                 cx,
             )
@@ -1572,21 +1567,6 @@ impl OverlayManager {
                     current_shell.clone(),
                     project_id.clone(),
                     terminal_id.clone(),
-                    cx,
-                );
-            }
-            TerminalMenuEvent::SetNameOverlay {
-                project_id,
-                terminal_id,
-                enabled,
-            } => {
-                self.emit_project_action(
-                    project_id,
-                    ActionRequest::SetTerminalNameOverlay {
-                        project_id: project_id.clone(),
-                        terminal_id: terminal_id.clone(),
-                        enabled: *enabled,
-                    },
                     cx,
                 );
             }

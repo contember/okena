@@ -73,6 +73,14 @@ impl SettingsPanel {
                     |state, val, cx| state.set_auto_hide_single_terminal_header(val, cx),
                     cx,
                 ))
+                .child(self.render_toggle(
+                    "show-terminal-name-when-inactive",
+                    "Show Name on Inactive Terminals",
+                    s.show_terminal_name_when_inactive,
+                    true,
+                    |state, val, cx| state.set_show_terminal_name_when_inactive(val, cx),
+                    cx,
+                ))
                 .child(self.render_cursor_style_row(s.cursor_style, cx))
                 .child(self.render_toggle(
                     "cursor-blink",

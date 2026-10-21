@@ -192,6 +192,11 @@ impl SettingsState {
         bool
     );
     setting_setter!(
+        set_show_terminal_name_when_inactive,
+        show_terminal_name_when_inactive,
+        bool
+    );
+    setting_setter!(
         set_auto_resume_agent_sessions,
         auto_resume_agent_sessions,
         bool

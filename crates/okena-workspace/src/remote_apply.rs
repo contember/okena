@@ -607,7 +607,6 @@ mod tests {
             shell_type: Default::default(),
             cols: None,
             rows: None,
-            show_name_when_inactive: false,
         }
     }
 
