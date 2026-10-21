@@ -1,15 +1,16 @@
 //! Whether the next start should nudge the user towards What's New.
 //!
 //! Pure: the host reads `whats_new_seen_version` from its settings, decides
-//! here, and either posts the toast or records the running version.
+//! here, and records the running version — posting the toast first when an
+//! update calls for it, so the toast shows once per update.
 
 use semver::Version;
 
 /// What the host does at startup.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Nudge {
-    /// Post the "see what's new" toast; the seen version is recorded only
-    /// when the user opens the overlay.
+    /// Post the "see what's new" toast and record the running version as
+    /// seen, so the next start is quiet whether or not the toast was used.
     Toast,
     /// Record the running version as seen, quietly: a fresh install, the
     /// first run of this feature, or a seen marker that cannot be parsed.
@@ -47,7 +48,7 @@ mod tests {
     }
 
     #[test]
-    fn an_update_toasts_once_per_start_until_opened() {
+    fn an_update_toasts() {
         assert_eq!(
             whats_new_nudge(Some("0.34.0"), "0.35.0", true),
             Nudge::Toast
