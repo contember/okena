@@ -384,6 +384,8 @@ pub fn render_split_divider<D: ActionDispatch + Send + Sync>(
 /// `WindowId::Main` because the runtime is single-window; once extras land
 /// (slice 05) each caller will pass its own `WindowView::window_id` so that a
 /// drag on column N starts from the same width the user sees in that window.
+/// `chrome` is the grid's size along the axis not taken by columns (dividers,
+/// lane captions and gaps), so the drag works from the same budget as the render.
 // Render helper: params are render inputs (geometry, theme, window slot, callbacks).
 #[allow(clippy::too_many_arguments)]
 pub fn render_project_divider(
@@ -392,6 +394,7 @@ pub fn render_project_divider(
     divider_index: usize,
     project_ids: Vec<String>,
     container_bounds: Rc<RefCell<Bounds<Pixels>>>,
+    chrome: f32,
     active_drag: &ActiveDrag,
     min_col_width: f32,
     is_rows: bool,
@@ -409,14 +412,13 @@ pub fn render_project_divider(
         move |mouse_pos, modifiers, cx| {
             let bounds = *container_bounds.borrow();
             let num_projects = project_ids.len();
-            let num_dividers = num_projects.saturating_sub(1) as f32;
 
             let viewport_size = if is_rows {
                 f32::from(bounds.size.height)
             } else {
                 f32::from(bounds.size.width)
             };
-            let available_size = (viewport_size - num_dividers * 1.0).max(0.0);
+            let available_size = (viewport_size - chrome).max(0.0);
 
             let ws = workspace.read(cx);
             let raw_widths: HashMap<String, f32> = project_ids

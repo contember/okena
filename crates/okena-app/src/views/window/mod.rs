@@ -1,3 +1,4 @@
+mod grid_layout;
 mod handlers;
 mod pane_switcher;
 mod render;

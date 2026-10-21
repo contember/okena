@@ -1,3 +1,4 @@
+use super::grid_layout::{GridLayout, GridSpan, LANE_CAPTION_HEIGHT, LANE_GAP};
 use crate::app_menu::AppMenuAction;
 use crate::keybindings::{
     About, AddTab, CheckForUpdates, ClearFocus, CloseWindow, CreateWorktree, EqualizeLayout,
@@ -73,15 +74,43 @@ impl WindowView {
 }
 
 impl WindowView {
+    /// `chrome` is the grid's non-column size along the axis, see
+    /// [`GridLayout::chrome`].
     fn to_pixel_widths(
         widths: &[f32],
         container_width: f32,
+        chrome: f32,
         min_col_width: f32,
         persisted_scale: Option<f32>,
     ) -> Vec<f32> {
-        let num_dividers = widths.len().saturating_sub(1) as f32;
-        let available_width = (container_width - num_dividers * 1.0).max(0.0);
+        let available_width = (container_width - chrome).max(0.0);
         project_pixel_widths(widths, available_width, min_col_width, persisted_scale)
+    }
+
+    /// The grid's column order and spans: lanes by status while the focused
+    /// family has them on, the flat grid otherwise. A single column needs no
+    /// caption either way.
+    fn grid_layout(&self, visible: Vec<String>, cx: &App) -> GridLayout {
+        if visible.len() <= 1 || !okena_ui::board::status_board_enabled(cx) {
+            return GridLayout::flat(visible);
+        }
+        let workspace = self.workspace.read(cx);
+        let lanes_on = self
+            .focus_manager
+            .read(cx)
+            .focused_project_id()
+            .is_some_and(|root| workspace.status_lanes(self.window_id, root));
+        if !lanes_on {
+            return GridLayout::flat(visible);
+        }
+        let statuses: Vec<Option<&str>> = visible
+            .iter()
+            .map(|id| workspace.project(id).and_then(|p| p.status.as_deref()))
+            .collect();
+        match okena_workspace::status_board::lanes(&statuses, &okena_ui::board::board_columns(cx)) {
+            Some(lanes) => GridLayout::with_lanes(&visible, lanes),
+            None => GridLayout::flat(visible),
+        }
     }
 
     /// Scroll the projects grid horizontally to ensure the focused project column is visible.
@@ -120,6 +149,8 @@ impl WindowView {
             .iter()
             .map(|p| p.id.clone())
             .collect();
+        let layout = self.grid_layout(visible_projects, cx);
+        let visible_projects = &layout.order;
         let num_projects = visible_projects.len();
         if num_projects <= 1 {
             return;
@@ -146,15 +177,12 @@ impl WindowView {
         let pixel_widths = Self::to_pixel_widths(
             &raw_widths,
             container_size,
+            layout.chrome(is_rows),
             settings.min_column_width,
             persisted_scale,
         );
 
-        // Compute the leading edge (along the grid axis) of the focused project
-        let mut col_lead: f32 = 0.0;
-        for width in &pixel_widths[..focused_idx] {
-            col_lead += width + 1.0; // +1 for divider
-        }
+        let col_lead = layout.leading_edges(&pixel_widths, is_rows)[focused_idx];
 
         let current_offset_axis = {
             let o = self.projects_scroll_handle.offset();
@@ -257,56 +285,19 @@ impl WindowView {
             }
         };
 
-        // Status lanes: when on, the columns stand in lanes by status. The
-        // visible list is reordered lane by lane so every index below (widths,
-        // dividers) keeps pointing at the column it is next to.
-        let lane_groups: Option<Vec<okena_workspace::status_board::Lane>> = {
-            let workspace = self.workspace.read(cx);
-            // Lanes belong to a focused family whose parent has them on; a
-            // single focused column needs no caption either way.
-            let lanes_root = self.focus_manager.read(cx).focused_project_id().cloned();
-            if okena_ui::board::status_board_enabled(cx)
-                && lanes_root
-                    .as_deref()
-                    .is_some_and(|root| workspace.status_lanes(self.window_id, root))
-                && visible_projects.len() > 1
-            {
-                let statuses: Vec<Option<String>> = visible_projects
-                    .iter()
-                    .map(|id| workspace.project(id).and_then(|p| p.status.clone()))
-                    .collect();
-                let refs: Vec<Option<&str>> = statuses.iter().map(|s| s.as_deref()).collect();
-                okena_workspace::status_board::lanes(&refs, &okena_ui::board::board_columns(cx))
-            } else {
-                None
-            }
-        };
-        let visible_projects: Vec<String> = match &lane_groups {
-            Some(lanes) => lanes
-                .iter()
-                .flat_map(|lane| lane.indices.iter().map(|&i| visible_projects[i].clone()))
-                .collect(),
-            None => visible_projects,
-        };
-        // Spans into the (reordered) visible list, one per lane; a single
-        // caption-less span is today's flat grid.
-        let spans: Vec<(
-            Option<Option<okena_core::types::BoardColumn>>,
-            std::ops::Range<usize>,
-        )> = match &lane_groups {
-            Some(lanes) => {
-                let mut start = 0;
-                lanes
-                    .iter()
-                    .map(|lane| {
-                        let range = start..start + lane.indices.len();
-                        start = range.end;
-                        (Some(lane.column.clone()), range)
-                    })
-                    .collect()
-            }
-            None => vec![(None, 0..visible_projects.len())],
-        };
+        // Per-window orientation: columns (side by side) vs rows (stacked).
+        let is_rows = self
+            .workspace
+            .read(cx)
+            .project_layout_mode(self.window_id)
+            .is_rows();
+
+        let layout = self.grid_layout(visible_projects, cx);
+        let chrome = layout.chrome(is_rows);
+        let GridLayout {
+            order: visible_projects,
+            spans,
+        } = layout;
 
         let num_projects = visible_projects.len();
 
@@ -394,13 +385,6 @@ impl WindowView {
         // Get widths for each project
         let settings = settings_entity(cx).read(cx).settings.clone();
 
-        // Per-window orientation: columns (side by side) vs rows (stacked).
-        let is_rows = self
-            .workspace
-            .read(cx)
-            .project_layout_mode(self.window_id)
-            .is_rows();
-
         let widths: Vec<f32> = if num_projects <= 1 {
             vec![100.0; num_projects]
         } else {
@@ -414,7 +398,7 @@ impl WindowView {
         // Persistent bounds reference for resize calculation (survives across renders)
         let container_bounds = self.projects_grid_bounds.clone();
 
-        // Compute pixel sizes from weights, accounting for divider thickness.
+        // Compute pixel sizes from weights, accounting for dividers and lanes.
         // The relevant axis is width for columns, height for rows.
         let container_size = {
             let b = container_bounds.borrow();
@@ -430,6 +414,7 @@ impl WindowView {
         let pixel_widths = Self::to_pixel_widths(
             &widths,
             container_size,
+            chrome,
             settings.min_column_width,
             persisted_scale,
         );
@@ -445,10 +430,10 @@ impl WindowView {
         // Build interleaved columns and dividers
         let mut elements: Vec<AnyElement> = Vec::new();
 
-        for (caption, span) in spans {
+        for GridSpan { caption, range } in spans {
             let mut inner: Vec<AnyElement> = Vec::new();
-            let span_end = span.end;
-            for i in span {
+            let span_end = range.end;
+            for i in range {
                 let project_id = &visible_projects[i];
                 let pixel_size = pixel_widths.get(i).copied().unwrap_or(200.0);
 
@@ -486,6 +471,7 @@ impl WindowView {
                             i,
                             visible_projects.clone(),
                             container_bounds.clone(),
+                            chrome,
                             &self.active_drag,
                             min_col_width,
                             is_rows,
@@ -506,7 +492,7 @@ impl WindowView {
                     let label =
                         okena_workspace::status_board::caption_label(&column).to_uppercase();
                     let strip = div()
-                        .h(px(22.0))
+                        .h(px(LANE_CAPTION_HEIGHT))
                         .px(px(6.0))
                         .flex()
                         .items_center()
@@ -539,7 +525,7 @@ impl WindowView {
                             .flex_col()
                             .flex_shrink_0()
                             .when(is_rows, |d| d.w_full())
-                            .when(!is_rows, |d| d.h_full().mr(px(16.0)))
+                            .when(!is_rows, |d| d.h_full().mr(px(LANE_GAP)))
                             .child(strip)
                             .child(
                                 div()
