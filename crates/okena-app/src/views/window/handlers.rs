@@ -437,9 +437,16 @@ impl WindowView {
     ) {
         use crate::soft_close::{
             KILL_PREFIX, RESTART_DAEMON_CANCEL_PREFIX, RESTART_DAEMON_CONFIRM_PREFIX, UNDO_PREFIX,
-            decode_action,
+            WHATS_NEW_OPEN_ACTION, decode_action,
         };
         use crate::workspace::toast::ToastManager;
+
+        if event.action_id == WHATS_NEW_OPEN_ACTION {
+            ToastManager::dismiss(&event.toast_id, cx);
+            self.overlay_manager
+                .update(cx, |om, cx| om.open_whats_new(cx));
+            return;
+        }
 
         // Restart-daemon confirmation toast: dismiss either way, and run the
         // restart only on confirm. Checked first since these action ids carry no

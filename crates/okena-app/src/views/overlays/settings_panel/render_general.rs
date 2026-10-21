@@ -40,6 +40,10 @@ impl SettingsPanel {
                 "detached-by-default", "Detached Overlays by Default", s.detached_overlays_by_default, true,
                 |state, val, cx| state.set_detached_overlays_by_default(val, cx), cx,
             ))
+            .child(self.render_toggle(
+                "whats-new-after-update", "Show What's New After an Update", s.show_whats_new_after_update, true,
+                |state, val, cx| state.set_show_whats_new_after_update(val, cx), cx,
+            ))
             .child(self.render_remote_sidebar_layout_row(s.sidebar.remote_layout, cx))
             .child(self.render_host_stats_row(s.sidebar.host_stats, cx))
             .child(self.render_toggle(

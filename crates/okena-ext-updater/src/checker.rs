@@ -1,7 +1,9 @@
 use anyhow::{Context, Result};
+use parking_lot::Mutex;
 use semver::Version;
 use serde::{Deserialize, Serialize};
-use std::time::Duration;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 const RELEASES_URL: &str = "https://api.github.com/repos/contember/okena/releases";
 
@@ -30,6 +32,65 @@ pub struct ReleaseCatalog {
     pub releases: Vec<RevertRelease>,
 }
 
+/// One published release with its notes, for the What's New overlay.
+/// Unlike [`RevertRelease`] it does not care about platform assets.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReleaseNote {
+    pub version: String,
+    pub published_at: String,
+    pub release_url: String,
+    /// The GitHub release body, Markdown. Empty when the release has none.
+    pub body: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReleaseNotes {
+    pub current_version: String,
+    /// Newest first.
+    pub releases: Vec<ReleaseNote>,
+}
+
+/// How many releases What's New shows at most.
+pub const RELEASE_NOTES_CAP: usize = 20;
+
+/// How long fetched release notes are served without asking GitHub again.
+/// The unauthenticated API allows 60 calls an hour, shared with the update check.
+const RELEASE_NOTES_TTL: Duration = Duration::from_secs(60 * 60);
+
+/// A stable release with its parsed version, so selection can sort and compare.
+#[derive(Clone, Debug)]
+pub struct PublishedNote {
+    version: Version,
+    note: ReleaseNote,
+}
+
+/// The daemon's last successful release-notes fetch. Failures are not stored,
+/// so a Retry after an error always reaches GitHub.
+#[derive(Clone, Default)]
+pub struct ReleaseNotesCache(Arc<Mutex<Option<FetchedNotes>>>);
+
+struct FetchedNotes {
+    fetched_at: Instant,
+    published: Arc<Vec<PublishedNote>>,
+}
+
+impl ReleaseNotesCache {
+    fn fresh_at(&self, now: Instant) -> Option<Arc<Vec<PublishedNote>>> {
+        self.0
+            .lock()
+            .as_ref()
+            .filter(|fetched| now.duration_since(fetched.fetched_at) < RELEASE_NOTES_TTL)
+            .map(|fetched| fetched.published.clone())
+    }
+
+    fn store_at(&self, published: Arc<Vec<PublishedNote>>, now: Instant) {
+        *self.0.lock() = Some(FetchedNotes {
+            fetched_at: now,
+            published,
+        });
+    }
+}
+
 /// Check GitHub for the latest release newer than `app_version`.
 pub async fn check_for_update(app_version: String) -> Result<Option<ReleaseAsset>> {
     smol::unblock(move || check_blocking(&app_version)).await
@@ -39,6 +100,28 @@ pub async fn check_for_update(app_version: String) -> Result<Option<ReleaseAsset
 /// this platform. GitHub returns releases newest-first; the order is preserved.
 pub async fn list_revert_releases(app_version: String) -> Result<ReleaseCatalog> {
     smol::unblock(move || list_revert_releases_blocking(&app_version)).await
+}
+
+/// List the notes of stable releases up to and including `current`, from the
+/// cache while it is fresh. See [`select_release_notes`] for the rules.
+pub async fn list_release_notes(
+    cache: &ReleaseNotesCache,
+    app_version: String,
+    current: Version,
+) -> Result<ReleaseNotes> {
+    let published = match cache.fresh_at(Instant::now()) {
+        Some(published) => published,
+        None => {
+            let published =
+                Arc::new(smol::unblock(move || fetch_published_notes(&app_version)).await?);
+            cache.store_at(published.clone(), Instant::now());
+            published
+        }
+    };
+    Ok(ReleaseNotes {
+        current_version: current.to_string(),
+        releases: select_release_notes(&published, &current),
+    })
 }
 
 /// Resolve one exact downgrade target from GitHub. The target must be older
@@ -77,6 +160,73 @@ fn list_revert_releases_blocking(app_version: &str) -> Result<ReleaseCatalog> {
         current_version: app_version.to_string(),
         releases,
     })
+}
+
+fn fetch_published_notes(app_version: &str) -> Result<Vec<PublishedNote>> {
+    let response = fetch_json(
+        &format!("{RELEASES_URL}?per_page=100"),
+        app_version,
+        "updater.release_notes",
+    )?;
+    let releases = response
+        .as_array()
+        .context("release list is not an array")?;
+    Ok(published_notes(releases))
+}
+
+/// A version as tags and clients spell it, with or without the leading `v`.
+pub fn parse_release_version(version: &str) -> Option<Version> {
+    Version::parse(version.strip_prefix('v').unwrap_or(version)).ok()
+}
+
+/// The stable releases of a GitHub release list, newest version first.
+/// Sorted here because GitHub orders by creation date, not by version.
+pub fn published_notes(releases: &[serde_json::Value]) -> Vec<PublishedNote> {
+    let mut published: Vec<PublishedNote> = releases
+        .iter()
+        .filter(|release| is_stable_release(release))
+        .filter_map(|release| {
+            let version = parse_release_version(release["tag_name"].as_str()?)?;
+            Some(PublishedNote {
+                note: release_note(&version, release),
+                version,
+            })
+        })
+        .collect();
+    published.sort_by(|a, b| b.version.cmp(&a.version));
+    published
+}
+
+/// Pick the releases What's New shows from [`published_notes`]: those
+/// `<= current`, newest first, capped at [`RELEASE_NOTES_CAP`]. A build ahead
+/// of the last tag (nothing `<= current`) gets the newest published release
+/// instead of an empty list.
+pub fn select_release_notes(published: &[PublishedNote], current: &Version) -> Vec<ReleaseNote> {
+    let selected: Vec<ReleaseNote> = published
+        .iter()
+        .filter(|published| published.version <= *current)
+        .take(RELEASE_NOTES_CAP)
+        .map(|published| published.note.clone())
+        .collect();
+    if !selected.is_empty() {
+        return selected;
+    }
+    published
+        .first()
+        .map(|newest| vec![newest.note.clone()])
+        .unwrap_or_default()
+}
+
+fn release_note(version: &Version, release: &serde_json::Value) -> ReleaseNote {
+    ReleaseNote {
+        version: version.to_string(),
+        published_at: release["published_at"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string(),
+        release_url: release["html_url"].as_str().unwrap_or_default().to_string(),
+        body: release["body"].as_str().unwrap_or_default().to_string(),
+    }
 }
 
 fn release_for_revert_blocking(app_version: &str, target: &str) -> Result<ReleaseAsset> {
@@ -281,5 +431,134 @@ mod tests {
     fn exact_release_rejects_prerelease() {
         let candidate = release("0.26.0", false, true, true);
         assert!(!is_stable_release(&candidate));
+    }
+
+    fn note(
+        version: &str,
+        draft: bool,
+        prerelease: bool,
+        body: serde_json::Value,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "tag_name": format!("v{version}"),
+            "published_at": "2026-10-09T15:49:55Z",
+            "html_url": format!("https://github.com/contember/okena/releases/tag/v{version}"),
+            "draft": draft,
+            "prerelease": prerelease,
+            "body": body,
+            "assets": []
+        })
+    }
+
+    /// GitHub order, newest first: a draft, a prerelease, then four stable
+    /// releases 0.35 … 0.32.
+    fn notes_fixture() -> Vec<serde_json::Value> {
+        vec![
+            note("0.36.0", true, false, "## Draft".into()),
+            note("0.36.0-rc.1", false, true, "## Prerelease".into()),
+            note("0.35.0", false, false, "## What's new\n\n- 0.35".into()),
+            note("0.34.0", false, false, serde_json::Value::Null),
+            note("0.33.0", false, false, "## What's new\n\n- 0.33".into()),
+            note("0.32.0", false, false, "## What's Changed".into()),
+        ]
+    }
+
+    fn versions(notes: &[ReleaseNote]) -> Vec<&str> {
+        notes.iter().map(|n| n.version.as_str()).collect()
+    }
+
+    fn select(releases: &[serde_json::Value], current: &str) -> Vec<ReleaseNote> {
+        select_release_notes(
+            &published_notes(releases),
+            &Version::parse(current).unwrap(),
+        )
+    }
+
+    #[test]
+    fn notes_keep_everything_up_to_current() {
+        assert_eq!(
+            versions(&select(&notes_fixture(), "0.34.0")),
+            ["0.34.0", "0.33.0", "0.32.0"]
+        );
+    }
+
+    #[test]
+    fn notes_for_a_bumped_unreleased_version_show_the_published_ones() {
+        assert_eq!(
+            versions(&select(&notes_fixture(), "0.36.0")),
+            ["0.35.0", "0.34.0", "0.33.0", "0.32.0"]
+        );
+    }
+
+    #[test]
+    fn notes_fall_back_to_the_newest_release_when_nothing_is_older() {
+        assert_eq!(versions(&select(&notes_fixture(), "0.31.0")), ["0.35.0"]);
+    }
+
+    #[test]
+    fn notes_skip_drafts_and_prereleases() {
+        let notes = select(&notes_fixture(), "0.99.0");
+        assert!(
+            notes
+                .iter()
+                .all(|n| !n.body.contains("Draft") && !n.body.contains("Prerelease"))
+        );
+    }
+
+    #[test]
+    fn notes_carry_body_url_and_date_and_a_null_body_becomes_empty() {
+        let notes = select(&notes_fixture(), "0.35.0");
+        assert_eq!(notes[0].body, "## What's new\n\n- 0.35");
+        assert_eq!(notes[0].published_at, "2026-10-09T15:49:55Z");
+        assert_eq!(
+            notes[0].release_url,
+            "https://github.com/contember/okena/releases/tag/v0.35.0"
+        );
+        assert_eq!(notes[1].version, "0.34.0");
+        assert_eq!(notes[1].body, "");
+    }
+
+    #[test]
+    fn notes_are_capped_at_the_newest_twenty() {
+        let releases: Vec<serde_json::Value> = (0..25)
+            .rev()
+            .map(|minor| note(&format!("0.{minor}.0"), false, false, "x".into()))
+            .collect();
+        let notes = select(&releases, "0.24.0");
+        assert_eq!(notes.len(), RELEASE_NOTES_CAP);
+        assert_eq!(notes[0].version, "0.24.0");
+        assert_eq!(notes[19].version, "0.5.0");
+    }
+
+    #[test]
+    fn notes_are_ordered_and_capped_by_version_not_by_github_order() {
+        // A patch for an older line published after the newer releases, then
+        // the rest oldest-first: the cap must still keep the newest twenty.
+        let releases: Vec<serde_json::Value> = std::iter::once("0.3.1".to_string())
+            .chain((0..25).map(|minor| format!("0.{minor}.0")))
+            .map(|version| note(&version, false, false, "x".into()))
+            .collect();
+        let notes = select(&releases, "0.24.0");
+        assert_eq!(notes.len(), RELEASE_NOTES_CAP);
+        assert_eq!(notes[0].version, "0.24.0");
+        assert_eq!(notes[19].version, "0.5.0");
+        assert!(notes.windows(2).all(|pair| {
+            Version::parse(&pair[0].version).unwrap() > Version::parse(&pair[1].version).unwrap()
+        }));
+    }
+
+    #[test]
+    fn cached_notes_expire_after_the_ttl() {
+        let cache = ReleaseNotesCache::default();
+        let fetched_at = Instant::now();
+        assert!(cache.fresh_at(fetched_at).is_none());
+
+        cache.store_at(Arc::new(published_notes(&notes_fixture())), fetched_at);
+        assert!(
+            cache
+                .fresh_at(fetched_at + RELEASE_NOTES_TTL - Duration::from_secs(1))
+                .is_some()
+        );
+        assert!(cache.fresh_at(fetched_at + RELEASE_NOTES_TTL).is_none());
     }
 }

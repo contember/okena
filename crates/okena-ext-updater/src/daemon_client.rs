@@ -1,4 +1,4 @@
-use crate::{ReleaseCatalog, UpdateStatusSnapshot};
+use crate::{ReleaseCatalog, ReleaseNotes, UpdateStatusSnapshot};
 use anyhow::{Context, Result};
 use std::time::Duration;
 
@@ -99,6 +99,22 @@ pub fn fetch_releases() -> Result<ReleaseCatalog> {
         .context("release history request failed")?
         .json()
         .context("failed to decode release history")
+}
+
+/// Release notes up to and including `version`, the caller's running version.
+pub fn fetch_release_notes(version: &str) -> Result<ReleaseNotes> {
+    let endpoint = local_update_endpoint("/v1/update/release-notes")?;
+    endpoint
+        .client
+        .get(&endpoint.url)
+        .query(&[("version", version)])
+        .timeout(Duration::from_secs(20))
+        .send()
+        .context("failed to fetch release notes")?
+        .error_for_status()
+        .context("release notes request failed")?
+        .json()
+        .context("failed to decode release notes")
 }
 
 pub fn request_revert(version: &str, keep_config: bool) -> Result<UpdateStatusSnapshot> {

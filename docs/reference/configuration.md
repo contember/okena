@@ -151,6 +151,8 @@ If the file contains invalid JSON, Okena recovers as many fields as possible and
 | `file_font_size` | float | `12.0` | Font size for file/diff viewer (8.0 - 24.0) |
 | `line_height` | float | `1.3` | Line height multiplier (1.0 - 3.0) |
 | `show_focused_border` | bool | `false` | Show a border around the focused terminal |
+| `show_whats_new_after_update` | bool | `true` | On the first start after an update, post a one-time toast whose button opens What's New (also in the View menu on macOS, the title-bar menu, the About dialog and the command palette: *What's New*) |
+| `whats_new_seen_version` | string | *(absent)* | The last version the app recorded as seen. Written by the app on the first start, when it posts the toast after an update, and whenever What's New opens; omitted until then |
 
 #### Terminal
 
@@ -383,6 +385,7 @@ Set `enabled` to `false` to disable a specific binding without removing it:
 | `ShowSettings` | `Cmd+,` / `Ctrl+,` | Open settings panel |
 | `OpenSettingsFile` | `Cmd+Alt+,` / `Ctrl+Alt+,` | Open settings JSON file |
 | `ShowKeybindings` | `Cmd+K Cmd+S` / `Ctrl+K Ctrl+S` | Show keybindings overlay |
+| `ShowWhatsNew` | *(none)* | Open What's New with the release notes of recent versions |
 | `ShowThemeSelector` | `Cmd+K Cmd+T` / `Ctrl+K Ctrl+T` | Open theme selector |
 | `ShowSessionManager` | `Cmd+K Cmd+W` / `Ctrl+K Ctrl+W` | Open session manager |
 | `ShowFileSearch` | `Cmd+P` / `Ctrl+P` | File search |
