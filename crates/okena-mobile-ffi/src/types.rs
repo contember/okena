@@ -7,7 +7,6 @@
 
 use std::collections::HashMap;
 
-use crate::client::terminal_holder::TerminalActivity as NativeTerminalActivity;
 use crate::api::{
     connection::ConnectionStatus as NativeConnectionStatus,
     state::{
@@ -21,6 +20,7 @@ use crate::api::{
         SelectionBounds as NativeSelectionBounds,
     },
 };
+use crate::client::terminal_holder::TerminalActivity as NativeTerminalActivity;
 
 /// Connection status surfaced to the RN layer.
 ///

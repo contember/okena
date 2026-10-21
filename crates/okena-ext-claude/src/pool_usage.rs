@@ -11,9 +11,10 @@ use okena_extensions::ThemeColors;
 use okena_transport::LOCAL_DAEMON_CONNECTION_ID;
 use okena_ui::tokens::{ui_text_ms, ui_text_sm, ui_text_xs};
 use okena_usage::{
-    GlobalDaemonUsage, HostUsage, SegmentUnit, Segments, format_window_label, TriggerItem, WorkingDays, format_reset_time_epoch,
-    headline_color, now_secs, render_usage_bar, render_usage_row, reset_aligned_segments,
-    usage_body_container, usage_trigger_items, window_points, window_row, window_trigger_item,
+    GlobalDaemonUsage, HostUsage, SegmentUnit, Segments, TriggerItem, WorkingDays,
+    format_reset_time_epoch, format_window_label, headline_color, now_secs, render_usage_bar,
+    render_usage_row, reset_aligned_segments, usage_body_container, usage_trigger_items,
+    window_points, window_row, window_trigger_item,
 };
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
@@ -264,10 +265,13 @@ pub(crate) fn render_body(
     if host.connection_id != LOCAL_DAEMON_CONNECTION_ID {
         title = format!("{} / {title}", host.host_name);
     }
-    let status = account.blocked.as_ref().map(|blocked| match account.blocked_until {
-        Some(until) => format!("{blocked} until {}", format_reset_time_epoch(until, true)),
-        None => blocked.clone(),
-    });
+    let status = account
+        .blocked
+        .as_ref()
+        .map(|blocked| match account.blocked_until {
+            Some(until) => format!("{blocked} until {}", format_reset_time_epoch(until, true)),
+            None => blocked.clone(),
+        });
     let rows = account.windows.iter().map(|window| {
         let period = format_window_label(window.window_seconds);
         let row = window_row(window, window.label.clone(), format!("{marker}-{period}"));

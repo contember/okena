@@ -1243,7 +1243,11 @@ mod tests {
         assert_eq!(mgr.get_usage(&second), None, "usage is per connection");
 
         mgr.set_usage(&first, Some(usage));
-        assert_eq!(mgr.usage_revision(&first), 1, "identical snapshot keeps the revision");
+        assert_eq!(
+            mgr.usage_revision(&first),
+            1,
+            "identical snapshot keeps the revision"
+        );
 
         mgr.disconnect(&first);
         assert_eq!(mgr.get_usage(&first), None, "disconnect drops the snapshot");

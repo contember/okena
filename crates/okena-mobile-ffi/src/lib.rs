@@ -514,9 +514,11 @@ pub async fn request_usage_refresh(
 ) -> Result<bool, MobileFfiError> {
     let provider = match provider.as_deref() {
         None => None,
-        Some(name) => Some(usage::parse_provider(name).ok_or_else(|| MobileFfiError::Action {
-            message: format!("Unknown usage provider: {name}"),
-        })?),
+        Some(name) => Some(
+            usage::parse_provider(name).ok_or_else(|| MobileFfiError::Action {
+                message: format!("Unknown usage provider: {name}"),
+            })?,
+        ),
     };
     Ok(ConnectionManager::get()
         .request_usage_refresh(&conn_id, provider)

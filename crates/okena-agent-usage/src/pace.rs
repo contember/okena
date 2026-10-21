@@ -670,18 +670,68 @@ mod tests {
 
         let cases = [
             // (pct, time_pct, abs, pace, headline)
-            (60.0, Some(55.0), Severity::Normal, Severity::Normal, Severity::Normal),
-            (60.5, Some(55.0), Severity::Warning, Severity::Warning, Severity::Warning),
-            (80.0, Some(64.0), Severity::Warning, Severity::Critical, Severity::Critical),
-            (80.5, Some(90.0), Severity::Critical, Severity::Normal, Severity::Critical),
-            (40.0, Some(25.0), Severity::Normal, Severity::Warning, Severity::Warning),
-            (40.0, Some(24.9), Severity::Normal, Severity::Critical, Severity::Critical),
-            (95.0, None, Severity::Critical, Severity::Normal, Severity::Critical),
+            (
+                60.0,
+                Some(55.0),
+                Severity::Normal,
+                Severity::Normal,
+                Severity::Normal,
+            ),
+            (
+                60.5,
+                Some(55.0),
+                Severity::Warning,
+                Severity::Warning,
+                Severity::Warning,
+            ),
+            (
+                80.0,
+                Some(64.0),
+                Severity::Warning,
+                Severity::Critical,
+                Severity::Critical,
+            ),
+            (
+                80.5,
+                Some(90.0),
+                Severity::Critical,
+                Severity::Normal,
+                Severity::Critical,
+            ),
+            (
+                40.0,
+                Some(25.0),
+                Severity::Normal,
+                Severity::Warning,
+                Severity::Warning,
+            ),
+            (
+                40.0,
+                Some(24.9),
+                Severity::Normal,
+                Severity::Critical,
+                Severity::Critical,
+            ),
+            (
+                95.0,
+                None,
+                Severity::Critical,
+                Severity::Normal,
+                Severity::Critical,
+            ),
         ];
         for (pct, time_pct, abs, pace, headline) in cases {
             assert_eq!(abs_severity(pct), abs, "abs {pct}");
-            assert_eq!(pace_severity(pct, time_pct), pace, "pace {pct} {time_pct:?}");
-            assert_eq!(headline_severity(pct, time_pct), headline, "headline {pct} {time_pct:?}");
+            assert_eq!(
+                pace_severity(pct, time_pct),
+                pace,
+                "pace {pct} {time_pct:?}"
+            );
+            assert_eq!(
+                headline_severity(pct, time_pct),
+                headline,
+                "headline {pct} {time_pct:?}"
+            );
         }
 
         for (secs, label) in [

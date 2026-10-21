@@ -612,7 +612,11 @@ mod tests {
         gate: std::sync::Mutex<std::sync::mpsc::Receiver<FetchOutcome>>,
     }
 
-    fn gated() -> (Arc<GatedFetcher>, std::sync::mpsc::Sender<FetchOutcome>, UsageFetcher) {
+    fn gated() -> (
+        Arc<GatedFetcher>,
+        std::sync::mpsc::Sender<FetchOutcome>,
+        UsageFetcher,
+    ) {
         let (tx, rx) = std::sync::mpsc::channel();
         let state = Arc::new(GatedFetcher {
             calls: AtomicUsize::new(0),

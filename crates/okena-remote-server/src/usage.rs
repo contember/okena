@@ -414,7 +414,11 @@ mod tests {
         assert_eq!(hub.pool_account_history("b"), None);
         hub.set_pool(None);
         hub.set_pool(Some(pool(3600.0)));
-        assert_eq!(hub.pool_account_history("a"), None, "a pool gap drops the histories");
+        assert_eq!(
+            hub.pool_account_history("a"),
+            None,
+            "a pool gap drops the histories"
+        );
     }
 
     #[test]

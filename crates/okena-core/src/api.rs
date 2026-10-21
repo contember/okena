@@ -6,10 +6,9 @@ use serde::{Deserialize, Serialize};
 
 pub use crate::usage::{
     ApiExtraUsage, ApiPool, ApiPoolAccount, ApiPoolAccountHistory, ApiPoolAmount, ApiPoolNonstop,
-    ApiPoolPace,
-    ApiPoolToday, ApiProviderUsage, ApiResetCredit, ApiResetCredits, ApiUsage, ApiUsageCredits,
-    ApiUsagePoint, ApiUsageProvider, ApiUsageStatus, ApiUsageWindow, ApiUsageWindowKind,
-    USAGE_HISTORY_MAX_POINTS, UsageRefreshRequest,
+    ApiPoolPace, ApiPoolToday, ApiProviderUsage, ApiResetCredit, ApiResetCredits, ApiUsage,
+    ApiUsageCredits, ApiUsagePoint, ApiUsageProvider, ApiUsageStatus, ApiUsageWindow,
+    ApiUsageWindowKind, USAGE_HISTORY_MAX_POINTS, UsageRefreshRequest,
 };
 
 // ── API request/response types ──────────────────────────────────────────────

@@ -988,11 +988,15 @@ mod tests {
         assert!(store.revoke_token(&token_id));
 
         assert_eq!(
-            next_frame_type_skipping_periodic(&mut socket).await.as_deref(),
+            next_frame_type_skipping_periodic(&mut socket)
+                .await
+                .as_deref(),
             Some("auth_failed")
         );
         assert!(
-            next_frame_type_skipping_periodic(&mut socket).await.is_none(),
+            next_frame_type_skipping_periodic(&mut socket)
+                .await
+                .is_none(),
             "the daemon must close the revoked stream"
         );
     }

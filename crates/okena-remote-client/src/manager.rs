@@ -729,9 +729,9 @@ impl RemoteConnectionManager {
             )
             .await
             .map_err(|error| match error {
-                okena_transport::remote_action::JsonRequestError::Status { status: 404, .. } => {
-                    "History is unavailable from this host".to_string()
-                }
+                okena_transport::remote_action::JsonRequestError::Status {
+                    status: 404, ..
+                } => "History is unavailable from this host".to_string(),
                 error => error.to_string(),
             })
         });

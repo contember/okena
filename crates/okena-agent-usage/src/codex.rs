@@ -124,9 +124,9 @@ fn classify_refresh_response(
         }
         _ => {}
     }
-    let body: serde_json::Value = response.json().map_err(|_| {
-        RefreshError::Transient("Codex token refresh returned invalid JSON".into())
-    })?;
+    let body: serde_json::Value = response
+        .json()
+        .map_err(|_| RefreshError::Transient("Codex token refresh returned invalid JSON".into()))?;
     let token = |key: &str| {
         body[key]
             .as_str()
@@ -233,7 +233,10 @@ fn persist_refreshed_tokens(
         ));
     };
     let mut set = |key: &str, value: &str| {
-        file_tokens.insert(key.to_string(), serde_json::Value::String(value.to_string()));
+        file_tokens.insert(
+            key.to_string(),
+            serde_json::Value::String(value.to_string()),
+        );
     };
     set("access_token", &tokens.access_token);
     if let Some(refresh) = &tokens.refresh_token {

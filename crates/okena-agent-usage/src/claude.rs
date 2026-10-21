@@ -159,23 +159,22 @@ pub fn read_credentials(claude_dir: &Path) -> Result<ClaudeCredentials, String> 
             // Bounded: a locked keychain waiting on an access prompt that no
             // one can answer must not pin the fetch (and the daemon's
             // shutdown) on the blocking pool.
-            let output = match okena_core::process::safe_output_with_timeout(
-                &mut command,
-                KEYCHAIN_TIMEOUT,
-            ) {
-                Ok(output) => output,
-                Err(error) if error.kind() == std::io::ErrorKind::TimedOut => {
-                    keychain_failure = Some(
+            let output =
+                match okena_core::process::safe_output_with_timeout(&mut command, KEYCHAIN_TIMEOUT)
+                {
+                    Ok(output) => output,
+                    Err(error) if error.kind() == std::io::ErrorKind::TimedOut => {
+                        keychain_failure = Some(
                         "macOS Keychain lookup timed out (locked keychain or pending access prompt)"
                             .to_string(),
                     );
-                    break;
-                }
-                Err(error) => {
-                    keychain_failure = Some(format!("could not run `security`: {error}"));
-                    break;
-                }
-            };
+                        break;
+                    }
+                    Err(error) => {
+                        keychain_failure = Some(format!("could not run `security`: {error}"));
+                        break;
+                    }
+                };
             if output.status.success() {
                 let content = String::from_utf8_lossy(&output.stdout).trim().to_string();
                 match extract_credentials(&content, now) {

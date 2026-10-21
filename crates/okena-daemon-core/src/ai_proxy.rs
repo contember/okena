@@ -185,7 +185,8 @@ pub(crate) async fn run_accounts_poll(
             match read_or_restart(&mut restart).await {
                 Ok((client, current)) => {
                     if routed_endpoint.as_ref() != Some(client.endpoint()) {
-                        backend.set_launch_environment(pane_env.launch_environment(&settings.lock()));
+                        backend
+                            .set_launch_environment(pane_env.launch_environment(&settings.lock()));
                         routed_endpoint = Some(client.endpoint().clone());
                     }
                     Some((client, current))

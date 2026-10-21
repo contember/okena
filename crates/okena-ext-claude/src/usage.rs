@@ -15,8 +15,7 @@ use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::{h_flex, v_flex};
 use okena_core::api::{
-    ApiExtraUsage, ApiPool, ApiProviderUsage, ApiUsageProvider, ApiUsageWindow,
-    ApiUsageWindowKind,
+    ApiExtraUsage, ApiPool, ApiProviderUsage, ApiUsageProvider, ApiUsageWindow, ApiUsageWindowKind,
 };
 use okena_extensions::{ExtensionSettingsStore, ThemeColors};
 use okena_usage::{
@@ -112,9 +111,9 @@ impl ClaudeUsage {
         self.trigger_bounds.retain(|trigger, _| match trigger {
             Trigger::Login => true,
             Trigger::Account(key) => find_account(&hosts, key).is_some(),
-            Trigger::Pool(connection_id) => {
-                hosts.iter().any(|host| &host.connection_id == connection_id)
-            }
+            Trigger::Pool(connection_id) => hosts
+                .iter()
+                .any(|host| &host.connection_id == connection_id),
         });
         if self.active != Trigger::Login && !self.trigger_bounds.contains_key(&self.active) {
             self.hover_token.fetch_add(1, Ordering::SeqCst);
@@ -326,7 +325,9 @@ impl ClaudeUsage {
         let hosts = pool_hosts(self.store.read(cx));
         let (host, account) = find_account(&hosts, key)?;
         let entry = self.pool_history.read(cx).entries.get(key);
-        let detail = entry.map(|entry| entry.windows.as_slice()).unwrap_or_default();
+        let detail = entry
+            .map(|entry| entry.windows.as_slice())
+            .unwrap_or_default();
         let error = entry.and_then(|entry| entry.error.clone());
         Some(
             div()

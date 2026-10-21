@@ -201,7 +201,11 @@ impl From<&ApiUsage> for UsageInfo {
     fn from(usage: &ApiUsage) -> Self {
         Self {
             providers: usage.providers.iter().map(Into::into).collect(),
-            working_days: usage.working_days.iter().map(|&day| u32::from(day)).collect(),
+            working_days: usage
+                .working_days
+                .iter()
+                .map(|&day| u32::from(day))
+                .collect(),
             generated_at: usage.generated_at,
         }
     }
@@ -452,7 +456,10 @@ mod tests {
         assert_eq!(claude.plan.as_deref(), Some("max"));
         assert_eq!(claude.windows[0].kind, "five_hour");
         assert_eq!(claude.windows[0].reset_at, Some(200.0));
-        assert!(claude.windows[0].active, "unscoped windows default to active");
+        assert!(
+            claude.windows[0].active,
+            "unscoped windows default to active"
+        );
         assert_eq!(claude.windows[0].history.len(), 1);
         assert_eq!(claude.windows[1].kind, "weekly_scoped");
         assert_eq!(claude.windows[1].scoped_model.as_deref(), Some("Fable"));

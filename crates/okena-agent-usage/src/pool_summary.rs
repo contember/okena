@@ -578,7 +578,12 @@ mod tests {
         assert_eq!(detail.windows[0].used_percent, 40.0);
 
         let unknown = account_history(&account, &History::default(), now());
-        assert!(unknown.windows.iter().all(|window| window.history.is_empty()));
+        assert!(
+            unknown
+                .windows
+                .iter()
+                .all(|window| window.history.is_empty())
+        );
     }
 
     #[test]
