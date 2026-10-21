@@ -1314,6 +1314,7 @@ pub fn default_workspace() -> WorkspaceData {
     WorkspaceData {
         version: WORKSPACE_VERSION,
         agent_session_history: Default::default(),
+        dismissed_worktree_paths: Vec::new(),
         projects: vec![ProjectData {
             id: project_id.clone(),
             name: "Default".to_string(),
@@ -1775,6 +1776,7 @@ mod tests {
         WorkspaceData {
             version: WORKSPACE_VERSION,
             agent_session_history: Default::default(),
+            dismissed_worktree_paths: Vec::new(),
             projects,
             project_order: order.into_iter().map(String::from).collect(),
             service_panel_heights: HashMap::new(),
@@ -2252,6 +2254,7 @@ mod tests {
         let data = WorkspaceData {
             version: 0,
             agent_session_history: Default::default(),
+            dismissed_worktree_paths: Vec::new(),
             projects: vec![],
             project_order: vec![],
             service_panel_heights: HashMap::new(),
@@ -2623,6 +2626,7 @@ mod tests {
         let data = WorkspaceData {
             version: WORKSPACE_VERSION,
             agent_session_history: Default::default(),
+            dismissed_worktree_paths: Vec::new(),
             projects: vec![],
             project_order: vec![],
             service_panel_heights: HashMap::new(),

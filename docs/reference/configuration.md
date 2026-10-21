@@ -133,7 +133,9 @@ If the file contains invalid JSON, Okena recovers as many fields as possible and
     "default_stash": false,
     "default_fetch": true,
     "default_push": false,
-    "default_delete_branch": false
+    "default_delete_branch": false,
+    "auto_track": false,
+    "auto_track_ignore": [".claude/worktrees/agent-*"]
   }
 }
 ```
@@ -289,6 +291,8 @@ Controls default behavior when creating and closing git worktrees:
 | `worktree.default_fetch` | bool | `true` | Fetch from remote on close |
 | `worktree.default_push` | bool | `false` | Push branch on close |
 | `worktree.default_delete_branch` | bool | `false` | Delete branch after close |
+| `worktree.auto_track` | bool | `false` | Opt-in. Add worktrees created outside Okena to the sidebar. See [worktrees](worktrees.md#worktrees-created-outside-okena) |
+| `worktree.auto_track_ignore` | string[] | `[".claude/worktrees/agent-*"]` | Globs that discovery leaves alone, over the checkout path relative to the repository root |
 
 ---
 

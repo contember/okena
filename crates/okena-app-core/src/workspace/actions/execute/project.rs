@@ -229,6 +229,24 @@ pub(super) fn change_project_path(
     }
 }
 
+/// Root of the linked worktree checkout `project` lives in, if any: the
+/// recorded checkout of a worktree row, else the repository root of the
+/// project path when that is a linked worktree. The second case covers a
+/// linked worktree added as a plain project, and an older worktree row that
+/// never recorded its checkout (a monorepo subdir project would otherwise
+/// dismiss the subdirectory, which discovery never compares against).
+fn linked_checkout_root(project: &crate::workspace::state::ProjectData) -> Option<String> {
+    if let Some(metadata) = &project.worktree_info
+        && !metadata.worktree_path.is_empty()
+    {
+        return Some(metadata.worktree_path.clone());
+    }
+    let root = okena_git::repository::get_repo_root(std::path::Path::new(&project.path))?;
+    root.join(".git")
+        .is_file()
+        .then(|| root.to_string_lossy().into_owned())
+}
+
 pub(super) fn delete_project(
     ws: &mut Workspace,
     focus_manager: &mut FocusManager,
@@ -253,8 +271,14 @@ pub(super) fn delete_project(
     if ws.is_project_closing(&project_id) {
         return ActionResult::Err("project is already being closed".to_string());
     }
+    // Deleting a worktree row leaves its checkout alone. Remember that, or
+    // worktree discovery would add the row straight back on its next scan.
+    let dismissed_checkout = ws.project(&project_id).and_then(linked_checkout_root);
     let global_hooks = settings.hooks.clone();
     ws.delete_project(focus_manager, &project_id, &global_hooks, cx);
+    if let Some(checkout) = dismissed_checkout {
+        ws.dismiss_worktree(&checkout);
+    }
     ActionResult::Ok(None)
 }
 
@@ -541,16 +565,17 @@ pub(super) fn add_discovered_worktree(
     settings: &AppSettings,
     cx: &mut impl WorkspaceCx,
 ) -> ActionResult {
-    if ws.project(&parent_project_id).is_none() {
-        return ActionResult::Err(format!("project not found: {}", parent_project_id));
-    }
-    let new_id =
-        match ws.add_discovered_worktree(&worktree_path, &branch, &parent_project_id, window_id) {
-            Ok(id) => id,
-            Err(error) => return ActionResult::Err(error),
-        };
-    ws.add_to_worktree_ids(&parent_project_id, &new_id);
-    // `add_discovered_worktree` deliberately doesn't notify (caller's job).
+    let new_id = match track_discovered_worktree(
+        ws,
+        window_id,
+        &parent_project_id,
+        &worktree_path,
+        &branch,
+        true,
+    ) {
+        Ok(id) => id,
+        Err(error) => return ActionResult::Err(error),
+    };
     ws.notify_data(cx);
     let result = spawn_uninitialized_terminals(ws, &new_id, backend, terminals, settings, None, cx);
     let terminal_id = ws
@@ -564,6 +589,34 @@ pub(super) fn add_discovered_worktree(
         }))),
         err => err,
     }
+}
+
+/// Put a worktree that already exists on disk under its parent project: the
+/// row, the parent's worktree list, and forgetting an earlier dismissal so the
+/// user's choice to track it again sticks. Shared by the user's add and by
+/// background discovery. Neither notifies nor spawns; that is the caller's
+/// call, since discovery batches a pass and leaves the shell for later.
+pub fn track_discovered_worktree(
+    ws: &mut Workspace,
+    window_id: WindowId,
+    parent_project_id: &str,
+    worktree_path: &str,
+    branch: &str,
+    with_terminal: bool,
+) -> Result<String, String> {
+    if ws.project(parent_project_id).is_none() {
+        return Err(format!("project not found: {parent_project_id}"));
+    }
+    let new_id = ws.add_discovered_worktree(
+        worktree_path,
+        branch,
+        parent_project_id,
+        window_id,
+        with_terminal,
+    )?;
+    ws.undismiss_worktree(std::path::Path::new(worktree_path));
+    ws.add_to_worktree_ids(parent_project_id, &new_id);
+    Ok(new_id)
 }
 
 /// Rerun a lifecycle-hook terminal: kill the old PTY, spawn a fresh shell at the
@@ -882,6 +935,7 @@ mod hook_action_tests {
         Workspace::new(WorkspaceData {
             version: 1,
             agent_session_history: Default::default(),
+            dismissed_worktree_paths: Vec::new(),
             projects: vec![project],
             project_order: vec!["p1".to_string()],
             service_panel_heights: HashMap::new(),
@@ -1118,6 +1172,153 @@ mod hook_action_tests {
     }
 
     #[test]
+    fn deleting_a_worktree_row_dismisses_its_checkout_from_discovery() {
+        let mut workspace = workspace_with_worktree_hook("hook-1");
+        let mut focus_manager = FocusManager::default();
+        let mut cx = TestCx {
+            monitor: HookMonitor::new(),
+        };
+
+        let result = delete_project(
+            &mut workspace,
+            &mut focus_manager,
+            "p1".to_string(),
+            &AppSettings::default(),
+            &mut cx,
+        );
+
+        assert!(matches!(result, ActionResult::Ok(_)));
+        assert!(workspace.is_worktree_dismissed(std::path::Path::new("/tmp/test")));
+    }
+
+    #[test]
+    fn deleting_a_plain_project_dismisses_nothing() {
+        let mut workspace = workspace_with_hook("hook-1");
+        let mut focus_manager = FocusManager::default();
+        let mut cx = TestCx {
+            monitor: HookMonitor::new(),
+        };
+
+        delete_project(
+            &mut workspace,
+            &mut focus_manager,
+            "p1".to_string(),
+            &AppSettings::default(),
+            &mut cx,
+        );
+
+        assert!(workspace.data().dismissed_worktree_paths.is_empty());
+    }
+
+    /// A repository with one commit and a linked worktree of it. Returns the
+    /// fixture directory (remove it when done) and the worktree checkout.
+    fn linked_worktree_fixture(name: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+        let git = |dir: &std::path::Path, args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .current_dir(dir)
+                .args(args)
+                .output()
+                .expect("run git");
+            assert!(
+                output.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        let dir = std::env::temp_dir().join(format!("okena-dismiss-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let main = dir.join("main");
+        std::fs::create_dir_all(main.join("packages/app")).expect("create repo dir");
+        git(&main, &["init", "--initial-branch=main"]);
+        git(&main, &["config", "user.email", "test@example.com"]);
+        git(&main, &["config", "user.name", "Test"]);
+        std::fs::write(main.join("packages/app/README.md"), b"hello").expect("write file");
+        git(&main, &["add", "."]);
+        git(&main, &["commit", "-m", "init"]);
+        let worktree = dir.join("wt");
+        git(
+            &main,
+            &["worktree", "add", worktree.to_str().unwrap(), "-b", "topic"],
+        );
+        let worktree = std::fs::canonicalize(&worktree).expect("canonicalize worktree");
+        (dir, worktree)
+    }
+
+    fn delete_p1(workspace: &mut Workspace) {
+        let mut cx = TestCx {
+            monitor: HookMonitor::new(),
+        };
+        let result = delete_project(
+            workspace,
+            &mut FocusManager::default(),
+            "p1".to_string(),
+            &AppSettings::default(),
+            &mut cx,
+        );
+        assert!(matches!(result, ActionResult::Ok(_)));
+    }
+
+    #[test]
+    fn deleting_a_linked_worktree_added_as_a_plain_project_dismisses_its_checkout() {
+        let (dir, worktree) = linked_worktree_fixture("plain");
+        let mut data = workspace_with_hook("hook-1").data().clone();
+        data.projects[0].path = worktree.to_string_lossy().into_owned();
+        let mut workspace = Workspace::new(data);
+
+        delete_p1(&mut workspace);
+
+        assert!(workspace.is_worktree_dismissed(&worktree));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn deleting_a_worktree_row_without_a_recorded_checkout_dismisses_the_checkout_root() {
+        let (dir, worktree) = linked_worktree_fixture("subdir");
+        let subdir = worktree.join("packages/app");
+        let mut data = workspace_with_worktree_hook("hook-1").data().clone();
+        data.projects[0].path = subdir.to_string_lossy().into_owned();
+        data.projects[0]
+            .worktree_info
+            .as_mut()
+            .unwrap()
+            .worktree_path = String::new();
+        let mut workspace = Workspace::new(data);
+
+        delete_p1(&mut workspace);
+
+        assert!(workspace.is_worktree_dismissed(&worktree));
+        assert!(!workspace.is_worktree_dismissed(&subdir));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn tracking_a_discovered_worktree_without_a_terminal_leaves_a_bookmark() {
+        let (dir, worktree) = linked_worktree_fixture("track");
+        let main = std::fs::canonicalize(dir.join("main")).unwrap();
+        let mut data = workspace_with_hook("hook-1").data().clone();
+        data.projects[0].path = main.to_string_lossy().into_owned();
+        let mut workspace = Workspace::new(data);
+        let worktree_path = worktree.to_string_lossy().into_owned();
+        workspace.dismiss_worktree(&worktree_path);
+
+        let id = super::track_discovered_worktree(
+            &mut workspace,
+            crate::workspace::state::WindowId::Main,
+            "p1",
+            &worktree_path,
+            "topic",
+            false,
+        )
+        .unwrap();
+
+        let project = workspace.project(&id).unwrap();
+        assert!(project.layout.is_none(), "no pane waiting for a PTY");
+        assert!(workspace.project("p1").unwrap().worktree_ids.contains(&id));
+        assert!(!workspace.is_worktree_dismissed(&worktree));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn remove_worktree_project_rejects_an_authoritative_close_in_progress() {
         let mut workspace = workspace_with_worktree_hook("hook-1");
         workspace.mark_closing_project_authoritative("p1");
@@ -1195,6 +1396,7 @@ mod clone_project_tests {
         Workspace::new(WorkspaceData {
             version: 1,
             agent_session_history: Default::default(),
+            dismissed_worktree_paths: Vec::new(),
             projects: vec![],
             project_order: vec![],
             service_panel_heights: HashMap::new(),
@@ -1342,6 +1544,7 @@ mod set_show_in_overview_tests {
         WorkspaceData {
             version: 1,
             agent_session_history: Default::default(),
+            dismissed_worktree_paths: Vec::new(),
             projects: vec![],
             project_order: vec![],
             service_panel_heights: HashMap::new(),

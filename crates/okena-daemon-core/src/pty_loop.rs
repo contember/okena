@@ -1237,6 +1237,7 @@ mod tests {
         let mut workspace = Workspace::new(WorkspaceData {
             version: 1,
             agent_session_history: Default::default(),
+            dismissed_worktree_paths: Vec::new(),
             projects: vec![parent, child],
             project_order: vec!["parent".into()],
             folders: Vec::new(),
@@ -1296,6 +1297,7 @@ mod tests {
         let mut workspace = Workspace::new(WorkspaceData {
             version: 1,
             agent_session_history: Default::default(),
+            dismissed_worktree_paths: Vec::new(),
             projects: vec![project],
             project_order: vec!["project-1".into()],
             folders: Vec::new(),
@@ -1361,6 +1363,7 @@ mod tests {
         let workspace = Workspace::new(WorkspaceData {
             version: 1,
             agent_session_history: Default::default(),
+            dismissed_worktree_paths: Vec::new(),
             projects: vec![project],
             project_order: vec!["project-1".into()],
             folders: Vec::new(),
@@ -1590,6 +1593,7 @@ mod tests {
         let workspace = Workspace::new(WorkspaceData {
             version: 1,
             agent_session_history: Default::default(),
+            dismissed_worktree_paths: Vec::new(),
             projects: vec![project],
             project_order: vec!["project-1".into()],
             folders: Vec::new(),
@@ -2128,6 +2132,7 @@ mod tests {
         let workspace = Workspace::new(WorkspaceData {
             version: 1,
             agent_session_history: Default::default(),
+            dismissed_worktree_paths: Vec::new(),
             projects: vec![project],
             project_order: vec!["project-1".into()],
             folders: Vec::new(),

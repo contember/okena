@@ -616,6 +616,12 @@ impl SettingsState {
         self.save_and_notify(cx);
     }
 
+    /// Set whether worktrees created outside Okena are added to the sidebar
+    pub fn set_worktree_auto_track(&mut self, value: bool, cx: &mut Context<Self>) {
+        self.settings.worktree.auto_track = value;
+        self.save_and_notify(cx);
+    }
+
     /// Replace the local mirror without publishing the change back to the daemon.
     pub fn replace_from_daemon(&mut self, mut settings: AppSettings, cx: &mut Context<Self>) {
         settings.remote_connections = self.settings.remote_connections.clone();
