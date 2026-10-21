@@ -1,5 +1,6 @@
-//! Request relay: `/v1/messages*` is served by a pool account; everything else
-//! (OAuth, profile, telemetry) passes through with the caller's own credentials.
+//! Request relay: `/v1/messages` and `/v1/messages/count_tokens` are served by a
+//! pool account; everything else (OAuth, profile, telemetry) passes through with
+//! the caller's own credentials.
 
 use crate::accounts::{Accounts, Selection};
 use crate::activity::Activity;
@@ -64,6 +65,10 @@ impl Relay {
         // Judge the path the request will reach: parsing resolves `..` segments,
         // percent-encoded ones too, and a pool account must not leave inference.
         let path = target.path();
+        // An upstream may decode what parsing kept, e.g. `..%2f` into a dot segment.
+        if path.contains('%') {
+            return error(StatusCode::BAD_REQUEST, "Invalid request path");
+        }
         let url = target.as_str();
         let context = RequestContext::new(&method, path, project);
         if method != Method::POST || !is_inference_path(path) {
@@ -466,9 +471,9 @@ pub fn error(status: StatusCode, message: &str) -> Response {
         .into_response()
 }
 
-/// `/v1/messages` and its sub-resources (e.g. `count_tokens`).
+/// The endpoints Claude Code sends conversations to.
 fn is_inference_path(path: &str) -> bool {
-    path == "/v1/messages" || path.starts_with("/v1/messages/")
+    matches!(path, "/v1/messages" | "/v1/messages/count_tokens")
 }
 
 fn is_hop_by_hop(name: &str) -> bool {

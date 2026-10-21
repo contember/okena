@@ -1025,6 +1025,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn only_the_inference_endpoints_get_a_pool_account() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let h = harness(vec![account("a", "token-a", "uuid-a")]).await;
+        for path in ["/v1/messages?beta=true", "/v1/messages/count_tokens?beta=true"] {
+            let response = h.post(path).await;
+            assert_eq!(response.text().await.unwrap(), "served by token-a", "{path}");
+        }
+        // Not an endpoint Claude Code calls, so it keeps the caller's credentials.
+        assert_eq!(h.post("/v1/messages/batches").await.status(), 404);
+        assert_eq!(h.served_tokens(), ["token-a", "token-a"]);
+        for escape in ["/v1/messages/..%2f..%2fapi/oauth/profile", "/v1/m%65ssages"] {
+            let mut socket = tokio::net::TcpStream::connect(h.origin.trim_start_matches("http://"))
+                .await
+                .unwrap();
+            let request = format!(
+                "POST /{}{escape} HTTP/1.1\r\nHost: 127.0.0.1\r\n\
+                 Content-Length: 0\r\nConnection: close\r\n\r\n",
+                h.endpoint.token
+            );
+            socket.write_all(request.as_bytes()).await.unwrap();
+            let mut response = String::new();
+            socket.read_to_string(&mut response).await.unwrap();
+            assert!(response.starts_with("HTTP/1.1 400"), "{escape}: {response}");
+        }
+        assert_eq!(h.served_tokens(), ["token-a", "token-a"]);
+    }
+
+    #[tokio::test]
     async fn wrong_token_is_rejected() {
         let h = harness(vec![]).await;
         let url = h.base_url.rsplit_once('/').unwrap().0;
