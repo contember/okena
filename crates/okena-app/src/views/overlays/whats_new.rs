@@ -11,6 +11,7 @@ use crate::ui::tokens::{ui_text_md, ui_text_ms, ui_text_sm};
 use crate::views::components::{modal_backdrop, modal_content, modal_header};
 use gpui::prelude::*;
 use gpui::*;
+use gpui_component::scroll::ScrollableElement;
 use okena_ext_updater::{ReleaseNote, ReleaseNotes};
 use okena_markdown::{MarkdownDocument, RenderedNode};
 use okena_ui::code_block::code_block_container;
@@ -41,6 +42,8 @@ enum NotesState {
         sections: Vec<Section>,
         rows: Vec<Row>,
         list: ListState,
+        /// UI text size the row heights were measured at.
+        measured_text_size: Pixels,
     },
     Failed(String),
 }
@@ -114,13 +117,15 @@ impl WhatsNewModal {
                     .collect();
                 // Only the rows on screen (plus the overdraw) are laid out per
                 // frame; twenty releases of Markdown would otherwise be
-                // re-measured on every scroll tick.
-                let list = ListState::new(rows.len(), ListAlignment::Top, px(400.0));
+                // re-measured on every scroll tick. Unmeasured rows are
+                // zero-height, which would make the scrollbar grow while scrolling.
+                let list = ListState::new(rows.len(), ListAlignment::Top, px(400.0)).measure_all();
                 NotesState::Loaded {
                     current_version: notes.current_version,
                     sections,
                     rows,
                     list,
+                    measured_text_size: ui_text_md(cx),
                 }
             }
             Err(error) => NotesState::Failed(error),
@@ -150,6 +155,22 @@ impl WhatsNewModal {
 
     fn close(&self, cx: &mut Context<Self>) {
         cx.emit(WhatsNewEvent::Close);
+    }
+
+    /// Cached row heights go stale when the UI font size changes.
+    fn ensure_measured(&mut self, cx: &App) {
+        if let NotesState::Loaded {
+            list,
+            measured_text_size,
+            ..
+        } = &mut self.state
+        {
+            let text_size = ui_text_md(cx);
+            if *measured_text_size != text_size {
+                list.remeasure();
+                *measured_text_size = text_size;
+            }
+        }
     }
 
     fn ensure_highlighted(&mut self, is_dark: bool) {
@@ -356,6 +377,7 @@ impl Render for WhatsNewModal {
             window.focus(&focus_handle, cx);
         }
         self.ensure_highlighted(t.is_dark());
+        self.ensure_measured(cx);
 
         let subtitle = match &self.state {
             NotesState::Loaded {
@@ -379,11 +401,16 @@ impl Render for WhatsNewModal {
                 list: list_state, ..
             } => {
                 let view = cx.entity().clone();
-                let rows = list(list_state.clone(), move |idx, _window, cx| {
-                    view.update(cx, |this, cx| this.render_row(idx, cx))
-                })
-                .size_full()
-                .into_any_element();
+                let rows = div()
+                    .size_full()
+                    .child(
+                        list(list_state.clone(), move |idx, _window, cx| {
+                            view.update(cx, |this, cx| this.render_row(idx, cx))
+                        })
+                        .size_full(),
+                    )
+                    .vertical_scrollbar(list_state)
+                    .into_any_element();
                 (rows, true)
             }
         };
