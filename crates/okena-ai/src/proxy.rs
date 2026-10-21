@@ -15,8 +15,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 const MAX_BODY_BYTES: usize = 64 * 1024 * 1024;
-/// Upstream attempts per request (account failover, one refresh retry).
-const MAX_ATTEMPTS: usize = 4;
 const QUOTA_PROBE_MODEL: &str = "claude-haiku-4-5-20251001";
 
 pub struct Relay {
@@ -130,7 +128,11 @@ impl Relay {
         let mut refreshed: Vec<String> = Vec::new();
         let mut rate_limited: Option<ErrorResponse> = None;
         let mut selected = None;
-        for attempt in 1..=MAX_ATTEMPTS {
+        let mut attempt = 0;
+        // Each account gets one attempt, plus one more after its token refresh;
+        // an empty pool still gets the attempt that passes the caller through.
+        while attempt < self.accounts.pool_size().max(1) + refreshed.len() {
+            attempt += 1;
             let account = match selected.take() {
                 Some(account) => account,
                 None => match self
@@ -280,7 +282,7 @@ impl Relay {
             }
         }
         log::warn!(
-            "[ai-proxy] proxy_rejection {context} status=429 reason=attempts_exhausted attempts={MAX_ATTEMPTS}"
+            "[ai-proxy] proxy_rejection {context} status=429 reason=attempts_exhausted attempts={attempt}"
         );
         self.activity.event(project, AiActivityKind::AllRateLimited);
         exhausted(rate_limited, None, None)

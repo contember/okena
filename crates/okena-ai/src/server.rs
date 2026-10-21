@@ -677,6 +677,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn failover_tries_every_account() {
+        let ids = ["a", "b", "c", "d", "e"];
+        let h = harness(
+            ids.iter()
+                .map(|id| account(id, &format!("token-{id}"), &format!("uuid-{id}")))
+                .collect(),
+        )
+        .await;
+        for id in &ids[..4] {
+            h.fake.replies.lock().insert(format!("token-{id}"), vec![429]);
+        }
+        // `a` also needs a refresh first, which must not use up `e`'s attempt.
+        h.fake
+            .replies
+            .lock()
+            .insert("token-a".into(), vec![401]);
+        h.fake
+            .replies
+            .lock()
+            .insert("a-rt-refreshed".into(), vec![429]);
+        let (status, body) = h.message("conv").await;
+        assert_eq!((status, body.as_str()), (200, "served by token-e"));
+        assert_eq!(h.served_tokens().len(), 6);
+    }
+
+    #[tokio::test]
     async fn rejected_access_token_is_refreshed_once() {
         let h = harness(vec![account("a", "token-a", "uuid-a")]).await;
         h.fake.replies.lock().insert("token-a".into(), vec![401]);

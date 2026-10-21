@@ -266,6 +266,11 @@ impl Accounts {
         }
     }
 
+    /// Number of accounts in the pool, in service or not.
+    pub fn pool_size(&self) -> usize {
+        self.state.lock().accounts.len()
+    }
+
     pub fn start_login(&self, label: String) -> anyhow::Result<()> {
         let label = label.trim().to_owned();
         anyhow::ensure!(!label.is_empty(), "Account label is required");
