@@ -48,6 +48,7 @@ struct ProjectPresentation {
     terminal_names: HashMap<String, String>,
     folder_color: FolderColor,
     color_override: Option<FolderColor>,
+    status: Option<String>,
 }
 
 /// The project layouts as they stood before the reconciliation numbered
@@ -2484,7 +2485,8 @@ impl Workspace {
     }
 
     /// What the cached terminal views draw from each project: custom terminal
-    /// names, the project colour and a worktree's colour override. Keyed by
+    /// names, the project colour, a worktree's colour override and the status
+    /// (which tints the pane). Keyed by
     /// project id, compared before and after a snapshot.
     fn project_presentation(&self) -> HashMap<String, ProjectPresentation> {
         self.data
@@ -2497,6 +2499,7 @@ impl Workspace {
                         terminal_names: p.terminal_names.clone(),
                         folder_color: p.folder_color,
                         color_override: p.worktree_info.as_ref().and_then(|wt| wt.color_override),
+                        status: p.status.clone(),
                     },
                 )
             })
@@ -2804,6 +2807,57 @@ mod workspace_tests {
             &mut cx,
         );
         assert_eq!(cx.refreshes, after_first + 1);
+    }
+
+    fn snapshot_with_status(status: Option<&str>) -> crate::remote_apply::RemoteSnapshot {
+        let mut snapshot = snapshot_with(&[], FolderColor::Default);
+        if let Some(state) = snapshot.state.as_mut() {
+            state.projects[0].status = status.map(str::to_string);
+        }
+        snapshot
+    }
+
+    #[test]
+    fn snapshot_that_changes_a_project_status_refreshes_cached_views() {
+        let mut ws = Workspace::new(make_workspace_data(vec![], vec![]));
+        let mut fm = crate::focus::FocusManager::new();
+        let mut cx = RecordingCx::default();
+
+        ws.apply_remote_snapshot(
+            &[snapshot_with_status(Some("todo"))],
+            WindowId::Main,
+            &mut fm,
+            &mut cx,
+        );
+        let after_first = cx.refreshes;
+
+        ws.apply_remote_snapshot(
+            &[snapshot_with_status(Some("todo"))],
+            WindowId::Main,
+            &mut fm,
+            &mut cx,
+        );
+        assert_eq!(
+            cx.refreshes, after_first,
+            "unchanged status must not refresh"
+        );
+
+        // The status tints the pane, so a status set elsewhere must repaint.
+        ws.apply_remote_snapshot(
+            &[snapshot_with_status(Some("review"))],
+            WindowId::Main,
+            &mut fm,
+            &mut cx,
+        );
+        assert_eq!(cx.refreshes, after_first + 1);
+
+        ws.apply_remote_snapshot(
+            &[snapshot_with_status(None)],
+            WindowId::Main,
+            &mut fm,
+            &mut cx,
+        );
+        assert_eq!(cx.refreshes, after_first + 2);
     }
 
     #[test]
