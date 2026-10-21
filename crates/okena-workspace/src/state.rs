@@ -90,6 +90,59 @@ enum PathComponentIdentity {
     CaseFolded(String),
 }
 
+/// A worktree root held by a create, close, merge or removal in flight, which
+/// no other project or worktree may enter while the operation runs.
+pub struct ClaimedWorktreeRoot {
+    project_name: String,
+    root: PhysicalPathIdentity,
+}
+
+impl ClaimedWorktreeRoot {
+    /// Resolve the checkout root of `project` on disk, or `None` when it is not
+    /// a worktree.
+    pub fn resolve(project: &ProjectData) -> Option<Self> {
+        let metadata = project.worktree_info.as_ref()?;
+        let project_path = Path::new(&project.path);
+        let root = okena_git::get_repo_root(project_path).unwrap_or_else(|| {
+            if metadata.worktree_path.is_empty() {
+                project_path.to_path_buf()
+            } else {
+                PathBuf::from(&metadata.worktree_path)
+            }
+        });
+        Some(Self {
+            project_name: project.name.clone(),
+            root: Workspace::physical_path_identity(&root),
+        })
+    }
+
+    /// Reject a project path that would enter this root.
+    pub fn check_project_path(&self, candidate: &PhysicalPathIdentity) -> Result<(), String> {
+        if candidate.starts_with(&self.root) {
+            return Err(format!(
+                "path is reserved by active worktree operation for '{}'",
+                self.project_name
+            ));
+        }
+        Ok(())
+    }
+
+    /// Reject a worktree target that overlaps this root in either direction.
+    pub fn check_worktree_target(&self, candidate: &PhysicalPathIdentity) -> Result<(), String> {
+        if self.overlaps(candidate) {
+            return Err(format!(
+                "worktree target overlaps active operation for '{}'",
+                self.project_name
+            ));
+        }
+        Ok(())
+    }
+
+    fn overlaps(&self, path: &PhysicalPathIdentity) -> bool {
+        path.starts_with(&self.root) || self.root.starts_with(path)
+    }
+}
+
 /// Filesystem-aware path identity used for destructive ownership checks.
 ///
 /// Existing ancestors are identified by their filesystem object IDs, so bind
@@ -1116,59 +1169,31 @@ impl Workspace {
         }
     }
 
-    fn worktree_root_identity(&self, project: &ProjectData) -> Option<PhysicalPathIdentity> {
-        let metadata = project.worktree_info.as_ref()?;
-        let project_path = Path::new(&project.path);
-        let root = okena_git::get_repo_root(project_path).unwrap_or_else(|| {
-            if metadata.worktree_path.is_empty() {
-                project_path.to_path_buf()
-            } else {
-                PathBuf::from(&metadata.worktree_path)
-            }
-        });
-        Some(Self::physical_path_identity(&root))
+    /// Roots held by worktree operations in flight: a create, close, merge or
+    /// removal. Resolving each one reads the disk.
+    pub fn claimed_worktree_roots(&self) -> impl Iterator<Item = ClaimedWorktreeRoot> + '_ {
+        self.projects()
+            .iter()
+            .filter(|project| {
+                self.is_creating_project(&project.id) || self.is_project_closing(&project.id)
+            })
+            .filter_map(ClaimedWorktreeRoot::resolve)
     }
 
     /// Reject a project path that would enter a worktree root currently being
     /// created, closed, merged, or removed.
     pub fn ensure_project_path_claim_allowed(&self, path: &Path) -> Result<(), String> {
         let candidate = Self::physical_path_identity(path);
-        for project in self.projects().iter() {
-            if !(self.is_creating_project(&project.id) || self.is_project_closing(&project.id)) {
-                continue;
-            }
-            let Some(root) = self.worktree_root_identity(project) else {
-                continue;
-            };
-            if candidate.starts_with(&root) {
-                return Err(format!(
-                    "path is reserved by active worktree operation for '{}'",
-                    project.name
-                ));
-            }
-        }
-        Ok(())
+        self.claimed_worktree_roots()
+            .try_for_each(|claim| claim.check_project_path(&candidate))
     }
 
     /// Reject a worktree target whose physical root overlaps an active root in
     /// either direction.
     pub fn ensure_worktree_target_claim_allowed(&self, root: &Path) -> Result<(), String> {
         let candidate = Self::physical_path_identity(root);
-        for project in self.projects().iter() {
-            if !(self.is_creating_project(&project.id) || self.is_project_closing(&project.id)) {
-                continue;
-            }
-            let Some(active_root) = self.worktree_root_identity(project) else {
-                continue;
-            };
-            if candidate.starts_with(&active_root) || active_root.starts_with(&candidate) {
-                return Err(format!(
-                    "worktree target overlaps active operation for '{}'",
-                    project.name
-                ));
-            }
-        }
-        Ok(())
+        self.claimed_worktree_roots()
+            .try_for_each(|claim| claim.check_worktree_target(&candidate))
     }
 
     /// A worktree checkout may only be removed when no other local project owns
@@ -1207,19 +1232,11 @@ impl Workspace {
             .map(|project| Self::physical_path_identity(Path::new(&project.path)))
             .ok_or_else(|| "Project not found".to_string())?;
         let candidate = Self::physical_path_identity(new_path);
-        for project in self.projects().iter() {
-            if !(self.is_creating_project(&project.id) || self.is_project_closing(&project.id)) {
-                continue;
-            }
-            let Some(root) = self.worktree_root_identity(project) else {
-                continue;
-            };
-            let overlaps =
-                |path: &PhysicalPathIdentity| path.starts_with(&root) || root.starts_with(path);
-            if overlaps(&candidate) || overlaps(&existing) {
+        for claim in self.claimed_worktree_roots() {
+            if claim.overlaps(&candidate) || claim.overlaps(&existing) {
                 return Err(format!(
                     "path overlaps active worktree operation for '{}'",
-                    project.name
+                    claim.project_name
                 ));
             }
         }

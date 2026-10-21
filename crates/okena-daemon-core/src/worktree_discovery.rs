@@ -17,10 +17,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
-use okena_app_core::workspace::actions::execute::track_discovered_worktree;
 use okena_hooks::{HookMonitor, HookRunner};
-use okena_workspace::persistence::{AppSettings, worktree_checkout_path};
-use okena_workspace::state::{PhysicalPathIdentity, WindowId, Workspace};
+use okena_workspace::actions::worktree::{DiscoveredWorktree, linked_checkout_root};
+use okena_workspace::persistence::AppSettings;
+use okena_workspace::state::{
+    ClaimedWorktreeRoot, PhysicalPathIdentity, ProjectData, WindowId, Workspace,
+};
 use parking_lot::Mutex;
 use tokio::sync::watch;
 
@@ -70,96 +72,160 @@ async fn scan_once(
     }
     let input = ScanInput::snapshot(&workspace.lock(), config.auto_track_ignore);
 
-    // Opening repositories and statting paths is filesystem work; keep it off
-    // the reactor.
+    // Opening repositories and resolving paths is filesystem work; keep it off
+    // the reactor and outside the workspace lock.
     let Ok(plan) = tokio::task::spawn_blocking(move || plan_scan(input)).await else {
         log::warn!("worktree discovery task panicked");
         return;
     };
-    if plan.discovered.is_empty() && plan.gone_dismissals.is_empty() {
-        return;
-    }
 
     let mut cx = DaemonWorkspaceCx::new(workspace_tick, hook_runner, hook_monitor);
     let mut ws = workspace.lock();
-    let mut changed = ws.forget_dismissed_worktrees(&plan.gone_dismissals);
-    for found in plan.discovered {
-        // The plan was made without the lock. Anything that started in the
-        // meantime wins: a delete of the parent, or the user untracking this
-        // very worktree. A checkout Okena is busy removing or creating is
-        // refused by the path claim checks inside `track_discovered_worktree`.
-        if ws.is_project_closing(&found.parent_id)
-            || ws.is_worktree_dismissed(Path::new(&found.worktree_path))
-        {
-            continue;
-        }
-        match track_discovered_worktree(
-            &mut ws,
-            WindowId::Main,
-            &found.parent_id,
-            &found.worktree_path,
-            &found.branch,
-            false,
-        ) {
-            Ok(_) => {
-                log::info!(
-                    "worktree discovery: tracking {} ({})",
-                    found.worktree_path,
-                    found.branch
-                );
-                changed = true;
-            }
-            // Parent gone, tracked by a project the snapshot didn't cover, or
-            // a path claim the workspace refuses. Either way not ours to add.
-            Err(error) => log::debug!(
-                "worktree discovery: skipping {}: {error}",
-                found.worktree_path
-            ),
-        }
-    }
     // A candidate that keeps failing would otherwise rewrite workspace.json
     // and broadcast a snapshot on every pass.
-    if changed {
+    if apply_plan(&mut ws, plan) {
         ws.notify_data(&mut cx);
+    }
+}
+
+/// Apply `plan` under the workspace lock, comparing only what the plan
+/// resolved. Returns whether the workspace changed.
+///
+/// A plan made from a workspace that has changed since (a project added,
+/// deleted, moved, reordered or started closing, a worktree untracked) is
+/// dropped whole, and the next pass plans against the new state. That keeps
+/// every decision the plan made, including the path claims of Okena's own
+/// creates and closes, valid at the moment it is applied.
+fn apply_plan(workspace: &mut Workspace, plan: ScanPlan) -> bool {
+    if plan.discovered.is_empty() && plan.gone_dismissals.is_empty() {
+        return false;
+    }
+    if WorkspaceShape::of(workspace) != plan.shape {
+        log::debug!("worktree discovery: the workspace changed during the scan");
+        return false;
+    }
+    let mut changed = workspace.forget_dismissed_worktrees(&plan.gone_dismissals);
+    for found in plan.discovered {
+        log::info!(
+            "worktree discovery: tracking {} ({})",
+            found.worktree.worktree_path,
+            found.worktree.branch
+        );
+        let id = workspace.insert_discovered_worktree(
+            found.worktree,
+            &found.parent_id,
+            WindowId::Main,
+            false,
+        );
+        workspace.add_to_worktree_ids(&found.parent_id, &id);
+        changed = true;
+    }
+    changed
+}
+
+/// The parts of the workspace a plan is made from.
+#[derive(Debug, PartialEq)]
+struct WorkspaceShape {
+    projects: Vec<ProjectShape>,
+    project_order: Vec<String>,
+    folders: Vec<(String, Vec<String>)>,
+    dismissed: Vec<String>,
+}
+
+#[derive(Debug, PartialEq)]
+struct ProjectShape {
+    id: String,
+    path: String,
+    /// `Some` for a worktree row: the checkout it recorded, empty on rows
+    /// written before that was persisted.
+    recorded_checkout: Option<String>,
+    remote: bool,
+    /// A create or close is in flight, which claims its worktree root.
+    busy: bool,
+}
+
+impl WorkspaceShape {
+    fn of(workspace: &Workspace) -> Self {
+        let data = workspace.data();
+        Self {
+            projects: data
+                .projects
+                .iter()
+                .map(|project| ProjectShape {
+                    id: project.id.clone(),
+                    path: project.path.clone(),
+                    recorded_checkout: project
+                        .worktree_info
+                        .as_ref()
+                        .map(|metadata| metadata.worktree_path.clone()),
+                    remote: project.connection_id.is_some(),
+                    busy: workspace.is_creating_project(&project.id)
+                        || workspace.is_project_closing(&project.id),
+                })
+                .collect(),
+            project_order: data.project_order.clone(),
+            folders: data
+                .folders
+                .iter()
+                .map(|folder| (folder.id.clone(), folder.project_ids.clone()))
+                .collect(),
+            dismissed: data.dismissed_worktree_paths.clone(),
+        }
+    }
+
+    /// Projects as the sidebar lists them: `project_order`, with each folder
+    /// expanded in place. A project missing from both comes last.
+    fn in_sidebar_order(&self) -> Vec<&ProjectShape> {
+        let mut ordered = Vec::new();
+        let mut placed = HashSet::new();
+        for entry in &self.project_order {
+            let ids = match self
+                .folders
+                .iter()
+                .find(|(folder_id, _)| folder_id == entry)
+            {
+                Some((_, project_ids)) => project_ids.as_slice(),
+                None => std::slice::from_ref(entry),
+            };
+            for id in ids {
+                if let Some(project) = self.projects.iter().find(|project| &project.id == id)
+                    && placed.insert(id.as_str())
+                {
+                    ordered.push(project);
+                }
+            }
+        }
+        ordered.extend(
+            self.projects
+                .iter()
+                .filter(|project| !placed.contains(project.id.as_str())),
+        );
+        ordered
     }
 }
 
 /// Everything a scan needs from the workspace, copied out under the lock.
 struct ScanInput {
-    /// `(project id, project path)` of each project whose repository is scanned.
-    parents: Vec<(String, String)>,
-    /// Project paths and worktree checkout roots already in the workspace.
-    tracked: Vec<PathBuf>,
-    dismissed: Vec<String>,
+    shape: WorkspaceShape,
+    /// Projects whose create or close is in flight, to resolve their claims.
+    busy: Vec<ProjectData>,
     ignore: Vec<String>,
 }
 
 impl ScanInput {
     fn snapshot(workspace: &Workspace, ignore: Vec<String>) -> Self {
-        let data = workspace.data();
-        let parents = data
+        let shape = WorkspaceShape::of(workspace);
+        let busy = workspace
+            .data()
             .projects
             .iter()
-            .filter(|project| project.worktree_info.is_none())
-            .filter(|project| project.connection_id.is_none())
-            .filter(|project| !workspace.is_project_closing(&project.id))
-            .filter(|project| !workspace.is_creating_project(&project.id))
-            .map(|project| (project.id.clone(), project.path.clone()))
-            .collect();
-        let tracked = data
-            .projects
-            .iter()
-            .flat_map(|project| {
-                [
-                    PathBuf::from(&project.path),
-                    worktree_checkout_path(project).to_path_buf(),
-                ]
-            })
+            .zip(&shape.projects)
+            .filter(|(_, project_shape)| project_shape.busy)
+            .map(|(project, _)| project.clone())
             .collect();
         Self {
-            parents,
-            tracked,
-            dismissed: data.dismissed_worktree_paths.clone(),
+            shape,
+            busy,
             ignore,
         }
     }
@@ -168,50 +234,58 @@ impl ScanInput {
 #[derive(Debug, PartialEq)]
 struct Discovered {
     parent_id: String,
-    worktree_path: String,
-    branch: String,
+    worktree: DiscoveredWorktree,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct ScanPlan {
+    shape: WorkspaceShape,
     discovered: Vec<Discovered>,
     /// Dismissed checkouts that no longer exist.
     gone_dismissals: Vec<String>,
 }
 
 fn plan_scan(input: ScanInput) -> ScanPlan {
-    let mut plan = ScanPlan {
-        gone_dismissals: input
-            .dismissed
-            .iter()
-            .filter(|path| checkout_is_gone(Path::new(path)))
-            .cloned()
-            .collect(),
-        ..ScanPlan::default()
-    };
-    if input.parents.is_empty() {
-        return plan;
+    let gone_dismissals = input
+        .shape
+        .dismissed
+        .iter()
+        .filter(|path| checkout_is_gone(Path::new(path)))
+        .cloned()
+        .collect();
+    let discovered = discover(&input);
+    ScanPlan {
+        shape: input.shape,
+        discovered,
+        gone_dismissals,
+    }
+}
+
+fn discover(input: &ScanInput) -> Vec<Discovered> {
+    let shape = &input.shape;
+    let parents: Vec<&ProjectShape> = shape
+        .in_sidebar_order()
+        .into_iter()
+        .filter(|project| project.recorded_checkout.is_none() && !project.remote && !project.busy)
+        .collect();
+    if parents.is_empty() {
+        return Vec::new();
     }
 
     let ignore = build_ignore_set(&input.ignore);
-    let tracked: Vec<PhysicalPathIdentity> = input
-        .tracked
+    let claims: Vec<ClaimedWorktreeRoot> = input
+        .busy
         .iter()
-        .map(|path| Workspace::physical_path_identity(path))
+        .filter_map(ClaimedWorktreeRoot::resolve)
         .collect();
-    let dismissed: Vec<PhysicalPathIdentity> = input
-        .dismissed
-        .iter()
-        .map(|path| Workspace::physical_path_identity(Path::new(path)))
-        .collect();
-    let is_known = |path: &Path| {
-        let identity = Workspace::physical_path_identity(path);
-        tracked.contains(&identity) || dismissed.contains(&identity)
-    };
+    let known = known_paths(shape);
+    let is_known = |identity: &PhysicalPathIdentity| known.contains(identity);
 
+    let mut discovered = Vec::new();
     let mut scanned_roots = HashSet::new();
-    for (parent_id, parent_path) in &input.parents {
-        let Some(git_root) = okena_git::repository::get_repo_root(Path::new(parent_path)) else {
+    for parent in parents {
+        let parent_path = Path::new(&parent.path);
+        let Some(git_root) = okena_git::repository::get_repo_root(parent_path) else {
             continue;
         };
         // A linked worktree added as a plain project shares its repository
@@ -222,24 +296,59 @@ fn plan_scan(input: ScanInput) -> ScanPlan {
         }
         let git_root = std::fs::canonicalize(&git_root).unwrap_or(git_root);
         // Two projects in one repository (monorepo packages): the first in
-        // workspace order is the parent, matching what a manual add picks.
+        // sidebar order is the parent.
         if !scanned_roots.insert(git_root.clone()) {
             continue;
         }
 
+        let mut placement = None;
         for (worktree_path, branch) in okena_git::repository::list_linked_git_worktrees(&git_root) {
             let path = Path::new(&worktree_path);
-            if !path.is_dir() || is_ignored(&ignore, &git_root, path) || is_known(path) {
+            if !path.is_dir() || is_ignored(&ignore, &git_root, path) {
                 continue;
             }
-            plan.discovered.push(Discovered {
-                parent_id: parent_id.clone(),
-                worktree_path,
-                branch,
+            let worktree_identity = Workspace::physical_path_identity(path);
+            if is_known(&worktree_identity) {
+                continue;
+            }
+            let (repo_root, subdir) = placement
+                .get_or_insert_with(|| okena_git::resolve_git_root_and_subdir(parent_path));
+            let worktree = DiscoveredWorktree::new(&worktree_path, &branch, repo_root, subdir);
+            let project_identity =
+                Workspace::physical_path_identity(Path::new(&worktree.project_path));
+            if is_known(&project_identity) {
+                continue;
+            }
+            if let Err(error) = claims.iter().try_for_each(|claim| {
+                claim.check_worktree_target(&worktree_identity)?;
+                claim.check_project_path(&project_identity)
+            }) {
+                log::debug!("worktree discovery: skipping {worktree_path}: {error}");
+                continue;
+            }
+            discovered.push(Discovered {
+                parent_id: parent.id.clone(),
+                worktree,
             });
         }
     }
-    plan
+    discovered
+}
+
+/// Paths a discovered worktree must not land on: every project path, the
+/// linked checkout each local project lives in (its recorded one, or the one
+/// a plain project's path sits inside), and every dismissal.
+fn known_paths(shape: &WorkspaceShape) -> Vec<PhysicalPathIdentity> {
+    let project_paths = shape.projects.iter().flat_map(|project| {
+        let checkout = (!project.remote)
+            .then(|| linked_checkout_root(&project.path, project.recorded_checkout.as_deref()))
+            .flatten();
+        std::iter::once(project.path.clone()).chain(checkout)
+    });
+    project_paths
+        .chain(shape.dismissed.iter().cloned())
+        .map(|path| Workspace::physical_path_identity(Path::new(&path)))
+        .collect()
 }
 
 /// A dismissed checkout counts as gone only when its directory is missing
@@ -354,7 +463,11 @@ fn without_verbatim_prefix(path: PathBuf) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::{default_settings, empty_workspace_data, plain_project};
+    use okena_state::{FolderData, WorktreeMetadata};
     use std::process::Command;
+
+    const SUBAGENT_IGNORE: &str = ".claude/worktrees/agent-*";
 
     struct Repo {
         _dir: tempfile::TempDir,
@@ -413,20 +526,56 @@ mod tests {
             path.to_string_lossy().into_owned()
         }
 
-        fn input(&self) -> ScanInput {
-            ScanInput {
-                parents: vec![("parent".into(), self.root.to_string_lossy().into_owned())],
-                tracked: vec![self.root.clone()],
-                dismissed: Vec::new(),
-                ignore: vec![".claude/worktrees/agent-*".into()],
-            }
+        fn path(&self, relative: &str) -> String {
+            self.root.join(relative).to_string_lossy().into_owned()
         }
+
+        /// A workspace holding the main checkout as its only project.
+        fn workspace(&self) -> Workspace {
+            workspace_with(vec![plain_project("parent", &self.path(""))])
+        }
+    }
+
+    fn workspace_with(projects: Vec<ProjectData>) -> Workspace {
+        let mut data = empty_workspace_data();
+        data.project_order = projects.iter().map(|project| project.id.clone()).collect();
+        data.projects = projects;
+        Workspace::new(data)
+    }
+
+    fn worktree_row(id: &str, parent_id: &str, path: &str) -> ProjectData {
+        ProjectData {
+            worktree_info: Some(WorktreeMetadata {
+                parent_project_id: parent_id.to_string(),
+                color_override: None,
+                main_repo_path: String::new(),
+                worktree_path: path.to_string(),
+                branch_name: String::new(),
+            }),
+            ..plain_project(id, path)
+        }
+    }
+
+    fn plan(workspace: &Workspace) -> ScanPlan {
+        plan_scan(ScanInput::snapshot(
+            workspace,
+            vec![SUBAGENT_IGNORE.to_string()],
+        ))
     }
 
     fn discovered_paths(plan: &ScanPlan) -> Vec<&str> {
         plan.discovered
             .iter()
-            .map(|found| found.worktree_path.as_str())
+            .map(|found| found.worktree.worktree_path.as_str())
+            .collect()
+    }
+
+    fn child_rows(workspace: &Workspace) -> Vec<&ProjectData> {
+        workspace
+            .data()
+            .projects
+            .iter()
+            .filter(|project| project.worktree_info.is_some())
             .collect()
     }
 
@@ -436,16 +585,11 @@ mod tests {
         let session = repo.worktree(".claude/worktrees/fix-login", "worktree-fix-login");
         repo.worktree(".claude/worktrees/agent-a1b2c3", "worktree-agent-a1b2c3");
 
-        let plan = plan_scan(repo.input());
+        let plan = plan(&repo.workspace());
 
-        assert_eq!(
-            plan.discovered,
-            vec![Discovered {
-                parent_id: "parent".into(),
-                worktree_path: session,
-                branch: "worktree-fix-login".into(),
-            }]
-        );
+        assert_eq!(discovered_paths(&plan), vec![session.as_str()]);
+        assert_eq!(plan.discovered[0].parent_id, "parent");
+        assert_eq!(plan.discovered[0].worktree.branch, "worktree-fix-login");
     }
 
     #[test]
@@ -454,11 +598,13 @@ mod tests {
         let tracked = repo.worktree("wt/tracked", "tracked");
         let dismissed = repo.worktree("wt/dismissed", "dismissed");
         let new = repo.worktree("wt/new", "new");
+        let mut workspace = workspace_with(vec![
+            plain_project("parent", &repo.path("")),
+            worktree_row("tracked", "parent", &tracked),
+        ]);
+        workspace.dismiss_worktree(&dismissed);
 
-        let mut input = repo.input();
-        input.tracked.push(PathBuf::from(&tracked));
-        input.dismissed.push(dismissed);
-        let plan = plan_scan(input);
+        let plan = plan(&workspace);
 
         assert_eq!(discovered_paths(&plan), vec![new.as_str()]);
         assert!(plan.gone_dismissals.is_empty());
@@ -467,47 +613,47 @@ mod tests {
     #[test]
     fn a_dismissal_is_forgotten_once_its_checkout_is_gone() {
         let repo = repo();
-        let mut input = repo.input();
         std::fs::create_dir_all(repo.root.join("wt")).unwrap();
-        let gone = repo.root.join("wt/removed").to_string_lossy().into_owned();
-        input.dismissed.push(gone.clone());
+        let gone = repo.path("wt/removed");
+        let mut workspace = repo.workspace();
+        workspace.dismiss_worktree(&gone);
 
-        assert_eq!(plan_scan(input).gone_dismissals, vec![gone]);
+        assert_eq!(plan(&workspace).gone_dismissals, vec![gone]);
     }
 
     #[test]
     fn a_dismissal_on_an_unreachable_volume_is_kept() {
         let repo = repo();
-        let mut input = repo.input();
+        let mut workspace = repo.workspace();
         // Neither the checkout nor its parent: an unmounted drive or share.
-        let unreachable = repo
-            .root
-            .join("unmounted/repo-wt/feature")
-            .to_string_lossy()
-            .into_owned();
-        input.dismissed.push(unreachable);
+        workspace.dismiss_worktree(&repo.path("unmounted/repo-wt/feature"));
 
-        assert!(plan_scan(input).gone_dismissals.is_empty());
+        assert!(plan(&workspace).gone_dismissals.is_empty());
     }
 
     #[test]
-    fn a_monorepo_scans_its_repository_once() {
+    fn a_monorepo_worktree_goes_under_the_first_project_in_sidebar_order() {
         let repo = repo();
-        let new = repo.worktree("wt/new", "new");
         std::fs::create_dir_all(repo.root.join("packages/app")).unwrap();
+        let new = repo.worktree("wt/new", "new");
+        // Added first, but listed after the folder that holds the root.
+        let package = plain_project("package", &repo.path("packages/app"));
+        let root = plain_project("root", &repo.path(""));
+        let mut data = empty_workspace_data();
+        data.projects = vec![package, root];
+        data.folders = vec![FolderData {
+            id: "folder".to_string(),
+            name: "folder".to_string(),
+            project_ids: vec!["root".to_string()],
+            folder_color: Default::default(),
+        }];
+        data.project_order = vec!["folder".to_string(), "package".to_string()];
 
-        let mut input = repo.input();
-        input.parents.push((
-            "package".into(),
-            repo.root
-                .join("packages/app")
-                .to_string_lossy()
-                .into_owned(),
-        ));
-        let plan = plan_scan(input);
+        let plan = plan(&Workspace::new(data));
 
         assert_eq!(discovered_paths(&plan), vec![new.as_str()]);
-        assert_eq!(plan.discovered[0].parent_id, "parent");
+        assert_eq!(plan.discovered[0].parent_id, "root");
+        assert_eq!(plan.discovered[0].worktree.project_path, new);
     }
 
     #[test]
@@ -515,14 +661,181 @@ mod tests {
         let repo = repo();
         let linked = repo.worktree("wt/linked", "linked");
 
-        let input = ScanInput {
-            parents: vec![("linked".into(), linked.clone())],
-            tracked: vec![PathBuf::from(&linked)],
-            dismissed: Vec::new(),
-            ignore: Vec::new(),
-        };
+        let plan = plan(&workspace_with(vec![plain_project("linked", &linked)]));
 
-        assert!(plan_scan(input).discovered.is_empty());
+        assert!(plan.discovered.is_empty());
+    }
+
+    #[test]
+    fn a_plain_project_inside_a_linked_worktree_keeps_it_from_being_added_again() {
+        let repo = repo();
+        let linked = repo.worktree("wt/linked", "linked");
+        let package = Path::new(&linked).join("packages/app");
+        std::fs::create_dir_all(&package).unwrap();
+        let workspace = workspace_with(vec![
+            plain_project("parent", &repo.path("")),
+            plain_project("package", &package.to_string_lossy()),
+        ]);
+
+        assert!(plan(&workspace).discovered.is_empty());
+    }
+
+    #[test]
+    fn a_worktree_inside_a_root_okena_is_creating_is_skipped() {
+        let repo = repo();
+        let nested = repo.worktree("wt/outer/inner", "inner");
+        let mut workspace = workspace_with(vec![
+            plain_project("parent", &repo.path("")),
+            worktree_row("outer", "parent", &repo.path("wt/outer")),
+        ]);
+        workspace.mark_creating_project("outer");
+
+        let plan = plan(&workspace);
+
+        assert!(
+            !discovered_paths(&plan).contains(&nested.as_str()),
+            "{:?}",
+            plan.discovered
+        );
+    }
+
+    #[test]
+    fn applying_a_plan_adds_a_bookmark_under_the_parent() {
+        let repo = repo();
+        let new = repo.worktree("wt/new", "new");
+        let mut workspace = repo.workspace();
+
+        let plan = plan(&workspace);
+        assert!(apply_plan(&mut workspace, plan));
+
+        let rows = child_rows(&workspace);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].path, new);
+        assert!(rows[0].layout.is_none(), "no pane waiting for a PTY");
+        let parent = workspace.project("parent").unwrap();
+        assert_eq!(parent.worktree_ids, vec![rows[0].id.clone()]);
+    }
+
+    #[test]
+    fn a_parent_deleted_after_planning_gets_no_rows() {
+        let repo = repo();
+        repo.worktree("wt/new", "new");
+        let mut workspace = repo.workspace();
+
+        let plan = plan(&workspace);
+        let (tick, _tick_rx) = watch::channel(0);
+        workspace.delete_project(
+            &mut okena_workspace::focus::FocusManager::new(),
+            "parent",
+            &Default::default(),
+            &mut DaemonWorkspaceCx::new(&tick, &None, &None),
+        );
+
+        assert!(!apply_plan(&mut workspace, plan));
+        assert!(workspace.data().projects.is_empty());
+    }
+
+    #[test]
+    fn a_worktree_untracked_after_planning_stays_untracked() {
+        let repo = repo();
+        let new = repo.worktree("wt/new", "new");
+        let mut workspace = repo.workspace();
+
+        let plan = plan(&workspace);
+        workspace.dismiss_worktree(&new);
+
+        assert!(!apply_plan(&mut workspace, plan));
+        assert!(child_rows(&workspace).is_empty());
+    }
+
+    #[test]
+    fn a_worktree_okena_starts_creating_after_planning_is_left_to_it() {
+        let repo = repo();
+        let new = repo.worktree("wt/new", "new");
+        let mut data = repo.workspace().data().clone();
+        let plan = plan(&Workspace::new(data.clone()));
+        data.projects.push(worktree_row("creating", "parent", &new));
+        let mut workspace = Workspace::new(data);
+        workspace.mark_creating_project("creating");
+
+        assert!(!apply_plan(&mut workspace, plan));
+        assert_eq!(child_rows(&workspace).len(), 1);
+    }
+
+    struct Scan {
+        workspace: Arc<Mutex<Workspace>>,
+        settings: Arc<Mutex<AppSettings>>,
+        tick: watch::Sender<u64>,
+        tick_rx: watch::Receiver<u64>,
+    }
+
+    impl Scan {
+        fn new(workspace: Workspace, auto_track: bool) -> Self {
+            let mut settings = default_settings();
+            settings.worktree.auto_track = auto_track;
+            let (tick, tick_rx) = watch::channel(0);
+            Self {
+                workspace: Arc::new(Mutex::new(workspace)),
+                settings: Arc::new(Mutex::new(settings)),
+                tick,
+                tick_rx,
+            }
+        }
+
+        async fn run(&self) {
+            scan_once(&self.workspace, &self.tick, &None, &None, &self.settings).await;
+        }
+
+        fn notified(&self) -> bool {
+            self.tick_rx.has_changed().unwrap()
+        }
+    }
+
+    #[tokio::test]
+    async fn a_scan_with_discovery_off_changes_nothing() {
+        let repo = repo();
+        repo.worktree("wt/new", "new");
+        let gone = repo.path("wt/removed");
+        let mut workspace = repo.workspace();
+        workspace.dismiss_worktree(&gone);
+        let scan = Scan::new(workspace, false);
+
+        scan.run().await;
+
+        let workspace = scan.workspace.lock();
+        assert!(child_rows(&workspace).is_empty());
+        assert_eq!(workspace.data().dismissed_worktree_paths, vec![gone]);
+        assert!(!scan.notified());
+    }
+
+    #[tokio::test]
+    async fn a_scan_that_finds_nothing_new_does_not_notify() {
+        let repo = repo();
+        let tracked = repo.worktree("wt/tracked", "tracked");
+        let scan = Scan::new(
+            workspace_with(vec![
+                plain_project("parent", &repo.path("")),
+                worktree_row("tracked", "parent", &tracked),
+            ]),
+            true,
+        );
+
+        scan.run().await;
+
+        assert_eq!(child_rows(&scan.workspace.lock()).len(), 1);
+        assert!(!scan.notified());
+    }
+
+    #[tokio::test]
+    async fn a_scan_that_adds_a_worktree_notifies() {
+        let repo = repo();
+        repo.worktree("wt/new", "new");
+        let scan = Scan::new(repo.workspace(), true);
+
+        scan.run().await;
+
+        assert_eq!(child_rows(&scan.workspace.lock()).len(), 1);
+        assert!(scan.notified());
     }
 
     #[test]
@@ -561,7 +874,7 @@ mod tests {
 
     #[test]
     fn a_star_does_not_cross_a_path_separator() {
-        let ignore = build_ignore_set(&[".claude/worktrees/agent-*".into()]);
+        let ignore = build_ignore_set(&[SUBAGENT_IGNORE.into()]);
         assert!(is_ignored(
             &ignore,
             Path::new("/repo"),

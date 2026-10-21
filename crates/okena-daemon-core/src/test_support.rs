@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use okena_state::WorkspaceData;
+use okena_state::{ProjectData, WorkspaceData};
 use okena_terminal::backend::TerminalBackend;
 use okena_terminal::shell_config::ShellType;
 use okena_terminal::terminal::TerminalTransport;
@@ -76,4 +76,30 @@ pub(crate) fn empty_workspace_data() -> WorkspaceData {
 
 pub(crate) fn default_settings() -> AppSettings {
     serde_json::from_value::<AppSettings>(serde_json::json!({})).expect("defaults")
+}
+
+pub(crate) fn plain_project(id: &str, path: &str) -> ProjectData {
+    ProjectData {
+        id: id.to_string(),
+        name: id.to_string(),
+        path: path.to_string(),
+        layout: None,
+        terminal_names: Default::default(),
+        status: None,
+        hidden_terminals: Default::default(),
+        worktree_info: None,
+        worktree_ids: Vec::new(),
+        folder_color: Default::default(),
+        hooks: Default::default(),
+        connection_id: None,
+        service_terminals: Default::default(),
+        agent_sessions: Default::default(),
+        default_shell: None,
+        hook_terminals: Default::default(),
+        pinned: false,
+        last_activity_at: None,
+        is_creating: false,
+        is_closing: false,
+        creating_progress: None,
+    }
 }

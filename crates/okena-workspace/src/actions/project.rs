@@ -3258,7 +3258,6 @@ mod gpui_tests {
                         "discovered",
                         "parent",
                         WindowId::Main,
-                        true,
                     )
                     .unwrap_err();
                 let rename_error = ws

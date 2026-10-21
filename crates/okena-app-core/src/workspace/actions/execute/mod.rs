@@ -33,7 +33,6 @@ use std::sync::Arc;
 
 pub use project::{
     MAX_FINISHED_HOOK_TERMINALS, evict_stale_hook_terminals, teardown_hook_terminal,
-    track_discovered_worktree,
 };
 
 pub use files::{
