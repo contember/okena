@@ -444,7 +444,7 @@ impl WindowView {
         if event.action_id == WHATS_NEW_OPEN_ACTION {
             ToastManager::dismiss(&event.toast_id, cx);
             self.overlay_manager
-                .update(cx, |om, cx| om.toggle_whats_new(cx));
+                .update(cx, |om, cx| om.open_whats_new(cx));
             return;
         }
 

@@ -685,7 +685,7 @@ impl OverlayManager {
                 AboutModalEvent::Close => this.close_modal(cx),
                 AboutModalEvent::ShowWhatsNew => {
                     this.close_modal(cx);
-                    this.toggle_whats_new(cx);
+                    this.open_whats_new(cx);
                 }
             },
         )
@@ -738,19 +738,29 @@ impl OverlayManager {
     }
 
     /// Toggle the What's New overlay (release notes from GitHub via the daemon).
-    /// Opening it records the running version as seen, which retires the
-    /// post-update toast.
     pub fn toggle_whats_new(&mut self, cx: &mut Context<Self>) {
-        if !self.is_modal::<WhatsNewModal>()
-            && let Some(running) = cx
-                .try_global::<okena_ext_updater::GlobalUpdateInfo>()
-                .map(|global| global.0.app_version())
+        if self.is_modal::<WhatsNewModal>() {
+            self.close_modal(cx);
+        } else {
+            self.open_whats_new(cx);
+        }
+    }
+
+    /// Open What's New, or keep it open: the toast and About entry points must
+    /// never close it. Opening records the running version as seen.
+    pub fn open_whats_new(&mut self, cx: &mut Context<Self>) {
+        if self.is_modal::<WhatsNewModal>() {
+            return;
+        }
+        if let Some(running) = cx
+            .try_global::<okena_ext_updater::GlobalUpdateInfo>()
+            .map(|global| global.0.app_version())
         {
             crate::settings::settings_entity(cx).update(cx, |state, cx| {
                 state.set_whats_new_seen_version(Some(running), cx);
             });
         }
-        toggle_overlay!(self, cx, WhatsNewModal, WhatsNewEvent, WhatsNewModal::new);
+        open_overlay!(self, cx, WhatsNewEvent, WhatsNewModal::new);
     }
 
     /// Toggle theme selector overlay.
@@ -2608,5 +2618,36 @@ mod send_composer_tests {
             .broker
             .update(cx, |broker, _| broker.drain_send_to_terminal());
         assert_eq!(queued[0].0.format(None), "```\nerror: boom\n```");
+    }
+}
+
+#[cfg(test)]
+mod whats_new_tests {
+    use super::OverlayManager;
+    use crate::views::overlays::whats_new::WhatsNewModal;
+    use crate::workspace::focus::FocusManager;
+    use crate::workspace::request_broker::RequestBroker;
+    use crate::workspace::state::{WindowId, Workspace, WorkspaceData};
+    use gpui::AppContext as _;
+    use gpui::{Entity, TestAppContext};
+
+    fn overlay_manager(cx: &mut TestAppContext) -> Entity<OverlayManager> {
+        cx.update(|cx| {
+            let workspace = cx.new(|_| Workspace::new(WorkspaceData::empty()));
+            let focus = cx.new(|_| FocusManager::new());
+            let broker = cx.new(|_| RequestBroker::new());
+            cx.new(|_| OverlayManager::new(WindowId::Main, workspace, focus, broker))
+        })
+    }
+
+    #[gpui::test]
+    fn opening_an_open_whats_new_keeps_it_open(cx: &mut TestAppContext) {
+        let overlay = overlay_manager(cx);
+        overlay.update(cx, |om, cx| om.open_whats_new(cx));
+        overlay.update(cx, |om, cx| om.open_whats_new(cx));
+        assert!(overlay.read_with(cx, |om, _| om.is_modal::<WhatsNewModal>()));
+
+        overlay.update(cx, |om, cx| om.toggle_whats_new(cx));
+        assert!(!overlay.read_with(cx, |om, _| om.is_modal::<WhatsNewModal>()));
     }
 }
