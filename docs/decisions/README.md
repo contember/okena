@@ -19,3 +19,4 @@ a commit message suffices.
 - 0004 — [Run the AI account proxy as its own process](0004-ai-proxy-process.md) — accepted (2026-10-07)
 - 0005 — [Keep AI routing policies in the proxy, keyed by a project segment in the URL](0005-ai-routing-policies-in-the-proxy.md) — accepted (2026-10-08)
 - 0006 — [Connect claude panes to remote clients through a Bun preload, hooks and an MCP channel](0006-claude-remote-via-bun-preload.md) — accepted (2026-10-16)
+- 0007 — [Serve AI proxy management on a private socket, not the inference port](0007-ai-proxy-management-on-a-private-socket.md) — accepted (2026-10-21)
