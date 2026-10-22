@@ -6191,7 +6191,7 @@ dependencies = [
 
 [[package]]
 name = "okena"
-version = "0.34.0"
+version = "0.35.0"
 dependencies = [
  "anyhow",
  "core-text",
@@ -6230,7 +6230,7 @@ dependencies = [
 
 [[package]]
 name = "okena-agent-harnesses"
-version = "0.34.0"
+version = "0.35.0"
 dependencies = [
  "log",
  "okena-core",
@@ -6253,7 +6253,7 @@ dependencies = [
 
 [[package]]
 name = "okena-ai"
-version = "0.34.0"
+version = "0.35.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -6279,7 +6279,7 @@ dependencies = [
 
 [[package]]
 name = "okena-app"
-version = "0.34.0"
+version = "0.35.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -6349,7 +6349,7 @@ dependencies = [
 
 [[package]]
 name = "okena-cli"
-version = "0.34.0"
+version = "0.35.0"
 dependencies = [
  "base64",
  "clap",
@@ -6386,7 +6386,7 @@ dependencies = [
 
 [[package]]
 name = "okena-daemon"
-version = "0.34.0"
+version = "0.35.0"
 dependencies = [
  "anyhow",
  "env_logger",
@@ -6401,7 +6401,7 @@ dependencies = [
 
 [[package]]
 name = "okena-daemon-core"
-version = "0.34.0"
+version = "0.35.0"
 dependencies = [
  "anyhow",
  "async-channel",
@@ -6662,7 +6662,7 @@ dependencies = [
 
 [[package]]
 name = "okena-remote-server"
-version = "0.34.0"
+version = "0.35.0"
 dependencies = [
  "anyhow",
  "async-channel",
@@ -6803,7 +6803,7 @@ dependencies = [
 
 [[package]]
 name = "okena-tui"
-version = "0.34.0"
+version = "0.35.0"
 dependencies = [
  "anyhow",
  "async-channel",
