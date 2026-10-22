@@ -364,6 +364,12 @@ impl SettingsState {
         self.save_and_notify(cx);
     }
 
+    /// Show or hide the bell on worktree rows whose terminals need attention.
+    pub fn set_sidebar_worktree_attention(&mut self, value: bool, cx: &mut Context<Self>) {
+        self.settings.sidebar.worktree_attention = value;
+        self.save_and_notify(cx);
+    }
+
     /// Switch the status board feature on or off.
     pub fn set_status_board_enabled(&mut self, value: bool, cx: &mut Context<Self>) {
         self.settings.status_board.enabled = value;

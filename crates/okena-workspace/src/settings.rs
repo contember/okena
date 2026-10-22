@@ -295,6 +295,10 @@ pub struct SidebarSettings {
     /// Draw a thin guide in the parent's colour down an expanded family.
     #[serde(default)]
     pub worktree_guide: bool,
+    /// Ring a bell on a worktree row while any of its terminals has an unseen
+    /// bell or notification, so a finished agent shows without expanding it.
+    #[serde(default)]
+    pub worktree_attention: bool,
 }
 
 impl Default for SidebarSettings {
@@ -307,6 +311,7 @@ impl Default for SidebarSettings {
             host_stats: HostStatsStyle::default(),
             worktree_marker: WorktreeMarker::default(),
             worktree_guide: false,
+            worktree_attention: false,
         }
     }
 }

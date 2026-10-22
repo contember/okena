@@ -57,6 +57,8 @@ pub struct SidebarSettings {
     pub worktree_marker: okena_workspace::settings::WorktreeMarker,
     /// Thin guide in the parent's colour down an expanded family.
     pub worktree_guide: bool,
+    /// Bell on a worktree row while one of its terminals needs attention.
+    pub worktree_attention: bool,
 }
 
 /// Snapshot of a remote connection for rendering.
@@ -532,6 +534,21 @@ impl Sidebar {
         .detach();
         self.service_manager = Some(manager);
         cx.notify();
+    }
+
+    /// Whether any of `terminal_ids` has an unseen bell or notification,
+    /// ignoring the terminal the user is looking at.
+    pub(crate) fn terminals_need_attention(
+        &self,
+        terminal_ids: &[String],
+        focused_terminal_id: Option<&str>,
+    ) -> bool {
+        let terminals = self.terminals.lock();
+        any_needs_attention(terminal_ids, focused_terminal_id, |id| {
+            terminals
+                .get(id)
+                .is_some_and(|t| t.has_bell() || t.has_notification())
+        })
     }
 
     /// Count how many terminals from the given IDs are currently waiting for input
@@ -1039,4 +1056,50 @@ pub(crate) enum SidebarItem {
         projects: Vec<SidebarProjectInfo>,
         worktree_children: HashMap<String, Vec<SidebarProjectInfo>>,
     },
+}
+
+/// True when a terminal other than the focused one is ringing. The focused
+/// terminal is skipped because its bell clears on the next pane render, so
+/// counting it would flash the marker for a single frame.
+fn any_needs_attention(
+    terminal_ids: &[String],
+    focused_terminal_id: Option<&str>,
+    is_ringing: impl Fn(&str) -> bool,
+) -> bool {
+    terminal_ids
+        .iter()
+        .any(|id| Some(id.as_str()) != focused_terminal_id && is_ringing(id))
+}
+
+#[cfg(test)]
+mod attention_tests {
+    use super::any_needs_attention;
+
+    fn ids(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn a_ringing_terminal_marks_the_worktree() {
+        let terminals = ids(&["a", "b"]);
+        assert!(any_needs_attention(&terminals, None, |id| id == "b"));
+    }
+
+    #[test]
+    fn quiet_terminals_leave_the_worktree_unmarked() {
+        let terminals = ids(&["a", "b"]);
+        assert!(!any_needs_attention(&terminals, None, |_| false));
+    }
+
+    #[test]
+    fn the_focused_terminal_never_marks_the_worktree() {
+        let terminals = ids(&["a", "b"]);
+        assert!(!any_needs_attention(&terminals, Some("b"), |id| id == "b"));
+        assert!(any_needs_attention(&terminals, Some("a"), |id| id == "b"));
+    }
+
+    #[test]
+    fn a_worktree_without_terminals_is_unmarked() {
+        assert!(!any_needs_attention(&[], None, |_| true));
+    }
 }

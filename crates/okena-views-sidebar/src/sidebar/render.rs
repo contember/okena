@@ -440,31 +440,24 @@ impl Sidebar {
         workspace: &Workspace,
         focused_terminal_id: Option<&str>,
     ) -> Vec<SidebarProjectInfo> {
-        let terminals = self.terminals.lock();
         // Determine attention cheaply from raw layout + terminal state first;
         // only build the (potentially git-touching) `SidebarProjectInfo` for the
         // few projects that actually qualify. Hook terminals are excluded to
         // match the activity view's `terminal_ids` (which filters them out).
         let mut hits: Vec<(Option<u64>, &ProjectData)> = Vec::new();
         for project in &workspace.data().projects {
-            let has_attention = project
+            let terminal_ids: Vec<String> = project
                 .layout
                 .as_ref()
                 .map(|l| l.collect_terminal_ids())
                 .unwrap_or_default()
-                .iter()
-                .any(|tid| {
-                    Some(tid.as_str()) != focused_terminal_id
-                        && !project.hook_terminals.contains_key(tid)
-                        && terminals
-                            .get(tid.as_str())
-                            .is_some_and(|t| t.has_bell() || t.has_notification())
-                });
-            if has_attention {
+                .into_iter()
+                .filter(|tid| !project.hook_terminals.contains_key(tid))
+                .collect();
+            if self.terminals_need_attention(&terminal_ids, focused_terminal_id) {
                 hits.push((project.last_activity_at, project));
             }
         }
-        drop(terminals);
         // Most-recent activity first; `None` (never active) sorts last.
         hits.sort_by_key(|h| std::cmp::Reverse(h.0));
         hits.into_iter()
@@ -775,8 +768,10 @@ impl Render for Sidebar {
             .window(self.window_id)
             .map(|w| w.show_attention_section)
             .unwrap_or(false);
+        // The terminal the user is looking at never counts toward attention,
+        // neither in the section nor on worktree rows.
+        let focused_terminal_id = self.active_focused_terminal_id(workspace, window, cx);
         let attention_infos = if show_attention {
-            let focused_terminal_id = self.active_focused_terminal_id(workspace, window, cx);
             self.collect_attention_infos(workspace, focused_terminal_id.as_deref())
         } else {
             Vec::new()
@@ -1152,6 +1147,7 @@ impl Render for Sidebar {
                                         is_cursor,
                                         is_focused_project,
                                         worktree_marker,
+                                        focused_terminal_id.as_deref(),
                                         window,
                                         cx,
                                     )
@@ -1193,6 +1189,7 @@ impl Render for Sidebar {
                                     is_cursor,
                                     is_focused_project,
                                     worktree_marker,
+                                    focused_terminal_id.as_deref(),
                                     window,
                                     cx,
                                 )
@@ -1373,6 +1370,7 @@ impl Render for Sidebar {
                                                     is_cursor,
                                                     is_focused_project,
                                                     worktree_marker,
+                                                    focused_terminal_id.as_deref(),
                                                     window,
                                                     cx,
                                                 )
@@ -1416,6 +1414,7 @@ impl Render for Sidebar {
                                             is_cursor,
                                             is_focused_project,
                                             worktree_marker,
+                                            focused_terminal_id.as_deref(),
                                             window,
                                             cx,
                                         )

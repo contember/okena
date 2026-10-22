@@ -620,6 +620,7 @@ impl WindowView {
                         host_stats: s.sidebar.host_stats,
                         worktree_marker: s.sidebar.worktree_marker,
                         worktree_guide: s.sidebar.worktree_guide,
+                        worktree_attention: s.sidebar.worktree_attention,
                     }
                 }));
 
