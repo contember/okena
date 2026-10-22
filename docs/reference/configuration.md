@@ -189,6 +189,7 @@ If the file contains invalid JSON, Okena recovers as many fields as possible and
 | `sidebar.host_stats` | string | `"off"` | CPU and memory of the local machine and each remote host in the sidebar: `"off"`, `"text"` (`CPU 41%  MEM 72%` in the status bar's colours) or `"gauge"` (labels with a small vertical gauge each). Shown on the LOCAL row and each host row in `separate`, on the REMOTE connection rows otherwise |
 | `sidebar.worktree_marker` | string | `"project"` | The ring before a worktree row: `"project"` (the project colour) or `"status"` (its status column's colour). Shown in settings while the status board is enabled |
 | `sidebar.worktree_guide` | bool | `false` | Thin guide in the parent's colour down an expanded family |
+| `sidebar.worktree_attention` | bool | `false` | Bell on a worktree row while any of its terminals has an unseen bell or notification. The terminal you are looking at does not count |
 
 #### Status Bar
 

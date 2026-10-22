@@ -59,6 +59,11 @@ impl SettingsPanel {
                 |state, val, cx| state.set_sidebar_worktree_guide(val, cx), cx,
             ))
             .child(self.render_toggle(
+                "sidebar-worktree-attention", "Bell on Worktrees Needing Attention",
+                s.sidebar.worktree_attention, true,
+                |state, val, cx| state.set_sidebar_worktree_attention(val, cx), cx,
+            ))
+            .child(self.render_toggle(
                 "remote-server", "Remote Server", s.remote_server_enabled, true,
                 |state, val, cx| state.set_remote_server_enabled(val, cx), cx,
             ))

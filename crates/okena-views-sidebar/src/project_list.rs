@@ -37,6 +37,9 @@ pub enum ProjectRowStyle {
         is_busy: bool,
         busy_label: String,
         marker: WorktreeMarker,
+        /// A terminal in this worktree has an unseen bell or notification and
+        /// the `sidebar.worktree_attention` setting is on.
+        has_attention: bool,
     },
     /// Child under a group header: plain solid dot, no rename.
     GroupChild,
@@ -61,6 +64,13 @@ impl Sidebar {
         let is_renaming_now = is_renaming(&self.project_rename, &project.id);
         let is_busy = matches!(style, ProjectRowStyle::Worktree { is_busy: true, .. });
         let is_worktree_style = matches!(style, ProjectRowStyle::Worktree { .. });
+        let has_attention = matches!(
+            style,
+            ProjectRowStyle::Worktree {
+                has_attention: true,
+                ..
+            }
+        );
         let supports_rename = !matches!(style, ProjectRowStyle::GroupChild);
 
         let has_expandable = match style {
@@ -233,6 +243,17 @@ impl Sidebar {
             // 4. Idle dot
             .when(idle_count > 0 && !is_busy, |d| {
                 d.child(sidebar_idle_dot(&t))
+            })
+            // 4b. Attention bell (Worktree style, opt-in): the same bell the
+            // terminal row shows, so a finished agent reads on the collapsed row.
+            .when(has_attention && !is_busy, |d| {
+                d.child(
+                    svg()
+                        .flex_shrink_0()
+                        .path("icons/bell.svg")
+                        .size(px(12.0))
+                        .text_color(rgb(t.border_bell)),
+                )
             })
             // 5. Worktree badge (Project style only)
             .when(
@@ -412,6 +433,7 @@ impl Sidebar {
         is_cursor: bool,
         is_focused_project: bool,
         marker: WorktreeMarker,
+        has_attention: bool,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
@@ -541,6 +563,7 @@ impl Sidebar {
                 is_busy,
                 busy_label,
                 marker,
+                has_attention,
             },
             cx,
         )

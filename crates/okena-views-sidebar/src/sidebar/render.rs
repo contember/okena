@@ -775,8 +775,10 @@ impl Render for Sidebar {
             .window(self.window_id)
             .map(|w| w.show_attention_section)
             .unwrap_or(false);
+        // The terminal the user is looking at never counts toward attention,
+        // neither in the section nor on worktree rows.
+        let focused_terminal_id = self.active_focused_terminal_id(workspace, window, cx);
         let attention_infos = if show_attention {
-            let focused_terminal_id = self.active_focused_terminal_id(workspace, window, cx);
             self.collect_attention_infos(workspace, focused_terminal_id.as_deref())
         } else {
             Vec::new()
@@ -971,8 +973,10 @@ impl Render for Sidebar {
         let SidebarSettings {
             worktree_marker,
             worktree_guide,
+            worktree_attention,
             ..
         } = self.sidebar_settings(cx);
+
 
         // Build flat elements with cursor tracking
         let mut flat_elements: Vec<AnyElement> = Vec::new();
@@ -1152,6 +1156,11 @@ impl Render for Sidebar {
                                         is_cursor,
                                         is_focused_project,
                                         worktree_marker,
+                                        worktree_attention
+                                            && self.terminals_need_attention(
+                                                &child.terminal_ids,
+                                                focused_terminal_id.as_deref(),
+                                            ),
                                         window,
                                         cx,
                                     )
@@ -1193,6 +1202,11 @@ impl Render for Sidebar {
                                     is_cursor,
                                     is_focused_project,
                                     worktree_marker,
+                                    worktree_attention
+                                        && self.terminals_need_attention(
+                                            &project.terminal_ids,
+                                            focused_terminal_id.as_deref(),
+                                        ),
                                     window,
                                     cx,
                                 )
@@ -1373,6 +1387,11 @@ impl Render for Sidebar {
                                                     is_cursor,
                                                     is_focused_project,
                                                     worktree_marker,
+                                                    worktree_attention
+                                                        && self.terminals_need_attention(
+                                                            &child.terminal_ids,
+                                                            focused_terminal_id.as_deref(),
+                                                        ),
                                                     window,
                                                     cx,
                                                 )
@@ -1416,6 +1435,11 @@ impl Render for Sidebar {
                                             is_cursor,
                                             is_focused_project,
                                             worktree_marker,
+                                            worktree_attention
+                                                && self.terminals_need_attention(
+                                                    &fp.terminal_ids,
+                                                    focused_terminal_id.as_deref(),
+                                                ),
                                             window,
                                             cx,
                                         )
