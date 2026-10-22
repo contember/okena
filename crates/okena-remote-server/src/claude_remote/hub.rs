@@ -507,7 +507,8 @@ impl ClaudeRemoteHub {
 
     /// Deliver a prompt from a remote client: through the channel when it is
     /// attached, else typed into an idle terminal, else queued for the next
-    /// `Stop` hook.
+    /// `Stop` hook. Slash commands skip the channel, which Claude does not
+    /// parse for them.
     pub(crate) async fn send_prompt(
         self: &Arc<Self>,
         terminal_id: &str,
@@ -526,7 +527,7 @@ impl ClaudeRemoteHub {
             let mut terminals = self.terminals.lock();
             let terminal = terminals.entry(terminal_id.to_string()).or_default();
             let now = Instant::now();
-            if terminal.channel.is_attached(now) {
+            if terminal.channel.is_attached(now) && !is_slash_command(&text) {
                 if terminal.channel.queued() >= MAX_QUEUED_PROMPTS {
                     return Err(ClaudeRemoteError::QueueFull);
                 }
@@ -780,6 +781,10 @@ impl Drop for PollGuard<'_> {
     fn drop(&mut self) {
         self.hub.end_channel_poll(self.terminal_id, self.poll_id);
     }
+}
+
+fn is_slash_command(prompt: &str) -> bool {
+    prompt.trim_start().starts_with('/')
 }
 
 fn runs_claude(info: &ClaudeTerminalInfo) -> bool {
@@ -1148,6 +1153,20 @@ mod tests {
         assert_eq!(session.dialogs[0].permission_suggestions.len(), 1);
     }
 
+    async fn wait_for_channel(hub: &ClaudeRemoteHub, terminal_id: &str) {
+        for _ in 0..200 {
+            let attached = hub
+                .terminals
+                .lock()
+                .get(terminal_id)
+                .is_some_and(|terminal| terminal.channel.is_attached(Instant::now()));
+            if attached {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    }
+
     #[tokio::test]
     async fn prompt_goes_to_the_attached_channel() {
         let (hub, _version, mut pty) = hub_with_daemon(claude_in_pane());
@@ -1155,17 +1174,7 @@ mod tests {
             let hub = Arc::clone(&hub);
             async move { hub.poll_channel_for("t1", Duration::from_secs(5)).await }
         });
-        for _ in 0..200 {
-            let attached = hub
-                .terminals
-                .lock()
-                .get("t1")
-                .is_some_and(|terminal| terminal.channel.is_attached(Instant::now()));
-            if attached {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(1)).await;
-        }
+        wait_for_channel(&hub, "t1").await;
 
         let delivery = hub.send_prompt("t1", "hello".into()).await;
 
@@ -1178,6 +1187,25 @@ mod tests {
             vec!["hello".to_string()]
         );
         assert!(pty.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn slash_command_is_typed_even_with_the_channel_attached() {
+        let (hub, _version, mut pty) = hub_with_daemon(claude_in_pane());
+        hub.hook_event(hook("t1", event("SessionStart")))
+            .expect("valid event");
+        let poll = tokio::spawn({
+            let hub = Arc::clone(&hub);
+            async move { hub.poll_channel_for("t1", Duration::from_millis(50)).await }
+        });
+        wait_for_channel(&hub, "t1").await;
+
+        let delivery = hub.send_prompt("t1", "/compact".into()).await;
+
+        assert_eq!(delivery.expect("delivered"), ApiClaudePromptDelivery::Pty);
+        assert_eq!(pty.recv().await.as_deref(), Some("paste t1 /compact"));
+        assert_eq!(pty.recv().await.as_deref(), Some("enter t1"));
+        assert!(poll.await.expect("poll finished").is_empty());
     }
 
     #[tokio::test]

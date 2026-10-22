@@ -67,16 +67,19 @@ Claude uses the full input.
 
 | `delivery` | When |
 |---|---|
-| `channel` | The channel server is polling. Claude queues the prompt after a running turn. The TUI shows it as `← okena-remote: …`. |
-| `pty` | No channel, Claude is idle: the text is pasted into the pane and submitted. |
-| `queued` | No channel, Claude is in a turn: the prompt is typed in when the `Stop` hook reports the turn ended. |
+| `channel` | The channel server is polling and the prompt is not a slash command. Claude queues the prompt after a running turn. The TUI shows it as `← okena-remote: …`. |
+| `pty` | No channel or a slash command, Claude is idle: the text is pasted into the pane and submitted. |
+| `queued` | No channel or a slash command, Claude is in a turn: the prompt is typed in when the `Stop` hook reports the turn ended. |
 
 `400` means an empty prompt or one over 64 KiB. `409` means the prompt cannot
 be delivered: no `claude` runs in the pane, Claude is busy and no `Stop` hook
 will arrive (no hooks attached), or 32 prompts are already queued. A prompt is
 typed into the pane only while its foreground process is `claude`; queued
-prompts are dropped if `claude` is gone when the turn ends. Channel prompts skip
-slash-command parsing and attachments. **Interrupt** sends Escape to the pane.
+prompts are dropped if `claude` is gone when the turn ends. Claude skips
+slash-command parsing and attachments for channel prompts, so a prompt starting
+with `/` always goes through the pane. A command that opens a picker (`/model`
+without an argument) can be answered only in the terminal. **Interrupt** sends
+Escape to the pane.
 
 ## Dialogs
 
