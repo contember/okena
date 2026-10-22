@@ -433,7 +433,7 @@ impl Sidebar {
         is_cursor: bool,
         is_focused_project: bool,
         marker: WorktreeMarker,
-        has_attention: bool,
+        focused_terminal_id: Option<&str>,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
@@ -563,7 +563,8 @@ impl Sidebar {
                 is_busy,
                 busy_label,
                 marker,
-                has_attention,
+                has_attention: self.sidebar_settings(cx).worktree_attention
+                    && self.terminals_need_attention(&project.terminal_ids, focused_terminal_id),
             },
             cx,
         )

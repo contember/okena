@@ -536,7 +536,6 @@ impl Sidebar {
         cx.notify();
     }
 
-    /// Count how many terminals from the given IDs are currently waiting for input
     /// Whether any of `terminal_ids` has an unseen bell or notification,
     /// ignoring the terminal the user is looking at.
     pub(crate) fn terminals_need_attention(
@@ -552,6 +551,7 @@ impl Sidebar {
         })
     }
 
+    /// Count how many terminals from the given IDs are currently waiting for input
     pub fn count_waiting_terminals(&self, terminal_ids: &[String]) -> usize {
         let terminals = self.terminals.lock();
         terminal_ids
