@@ -286,7 +286,7 @@ emits — is mirrored in [`mobile/rn/src/native/okena.ts`](../../mobile/rn/src/n
 | **RN TS app** (`mobile/rn`) | Scaffold complete — screens, zustand stores (DI-testable), Skia `TerminalView`, packed-cell decoder; type-checks + lints |
 | **ubrn binding generation** | npm scripts generate the local `modules/okena-mobile-ffi` package and apply Android fixes automatically |
 | **Native host projects** (`android/`, `ios/`) | Android and iOS sources versioned |
-| **Android delivery** | `android.yml` builds validation artifacts on changes and signed AABs on manual dispatch; see the mobile README for device verification |
+| **Android delivery** | `android.yml` builds validation artifacts on changes, signed test artifacts on `main`, and signed AABs on manual dispatch; see the mobile README for device verification |
 | **iOS delivery** | `ios.yml` builds an unsigned archive on changes and uploads a cloud-signed build to TestFlight on manual dispatch |
 
 See `mobile/rn/README.md` for the exact device-side steps and `mobile/RN_MIGRATION.md` for the

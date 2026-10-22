@@ -55,10 +55,13 @@ beta uses `cz.mangoweb.okena` (matching its TestFlight build); pass it as the wo
 `application_id` input, or locally as `OKENA_APPLICATION_ID`.
 
 The **Android beta** workflow (`.github/workflows/android.yml`) builds unsigned validation
-artifacts on relevant pushes/PRs. Merge the workflow into the default branch before its
-manual dispatch is available in GitHub Actions. For a signed release, run it manually on the branch to
-release, enable `signed`, and supply a `version_code` greater than every previous Play
-upload. Download the artifact named `okena-android-signed-<application_id>-<version_code>`.
+artifacts on relevant pushes to branches and on PRs. Relevant pushes to `main` build signed
+test artifacts: version code `1000 + run number`, application ID from the
+`ANDROID_APPLICATION_ID` repository variable (default `com.contember.okena`). Merge the
+workflow into the default branch before its manual dispatch is available in GitHub Actions.
+For a signed release, run it manually on the branch to release, enable `signed`, and supply
+a `version_code` greater than every previous Play upload and automatic `main` build.
+Download the artifact named `okena-android-signed-<application_id>-<version_code>`.
 CI cross-compiles Rust, generates the native module, runs TypeScript/lint/Jest, builds the
 AAB/APK, runs Android lint, verifies 16 KB ELF/APK alignment, and checks the AAB signature.
 

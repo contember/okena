@@ -54,10 +54,15 @@ jobs:
     env:
       CARGO_BUILD_JOBS: "4"
       CARGO_INCREMENTAL: "0"
+      OKENA_SIGNED: ${{ inputs.signed || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
       OKENA_VERSION_CODE: ${{ inputs.version_code || '1' }}
-      OKENA_APPLICATION_ID: ${{ inputs.application_id || 'com.contember.okena' }}
+      OKENA_APPLICATION_ID: ${{ inputs.application_id || vars.ANDROID_APPLICATION_ID || 'com.contember.okena' }}
     steps:
       - uses: actions/checkout@v4
+      - name: Derive version code from the run number
+        if: ${{ env.OKENA_SIGNED == 'true' && github.event_name == 'push' }}
+        # The offset keeps automatic main builds above the manually dispatched version codes.
+        run: echo "OKENA_VERSION_CODE=$((1000 + GITHUB_RUN_NUMBER))" >> "$GITHUB_ENV"
       - uses: actions/setup-node@v4
         with:
           node-version: "24"
@@ -72,7 +77,7 @@ jobs:
           packages: platform-tools
       - uses: gradle/actions/setup-gradle@v4
       - name: Prepare upload key
-        if: ${{ inputs.signed }}
+        if: ${{ env.OKENA_SIGNED == 'true' }}
         env:
           KEYSTORE_BASE64: ${{ secrets.ANDROID_UPLOAD_KEYSTORE_BASE64 }}
           STORE_PASSWORD: ${{ secrets.ANDROID_UPLOAD_STORE_PASSWORD }}
@@ -106,10 +111,10 @@ jobs:
         run: npm run ubrn:android
       - name: Build bundle and APK
         env:
-          OKENA_UPLOAD_STORE_FILE: ${{ inputs.signed && format('{0}/okena-upload.p12', runner.temp) || '' }}
-          OKENA_UPLOAD_STORE_PASSWORD: ${{ inputs.signed && secrets.ANDROID_UPLOAD_STORE_PASSWORD || '' }}
-          OKENA_UPLOAD_KEY_ALIAS: ${{ inputs.signed && secrets.ANDROID_UPLOAD_KEY_ALIAS || '' }}
-          OKENA_UPLOAD_KEY_PASSWORD: ${{ inputs.signed && secrets.ANDROID_UPLOAD_KEY_PASSWORD || '' }}
+          OKENA_UPLOAD_STORE_FILE: ${{ env.OKENA_SIGNED == 'true' && format('{0}/okena-upload.p12', runner.temp) || '' }}
+          OKENA_UPLOAD_STORE_PASSWORD: ${{ env.OKENA_SIGNED == 'true' && secrets.ANDROID_UPLOAD_STORE_PASSWORD || '' }}
+          OKENA_UPLOAD_KEY_ALIAS: ${{ env.OKENA_SIGNED == 'true' && secrets.ANDROID_UPLOAD_KEY_ALIAS || '' }}
+          OKENA_UPLOAD_KEY_PASSWORD: ${{ env.OKENA_SIGNED == 'true' && secrets.ANDROID_UPLOAD_KEY_PASSWORD || '' }}
         run: |
           if [ -z "$OKENA_UPLOAD_STORE_FILE" ]; then
             unset OKENA_UPLOAD_STORE_FILE OKENA_UPLOAD_STORE_PASSWORD OKENA_UPLOAD_KEY_ALIAS OKENA_UPLOAD_KEY_PASSWORD
@@ -129,13 +134,13 @@ jobs:
             "$ANDROID_HOME/build-tools/36.0.0/zipalign" -c -P 16 4 "$apk"
           done
       - name: Verify upload signature
-        if: ${{ inputs.signed }}
+        if: ${{ env.OKENA_SIGNED == 'true' }}
         run: |
           jarsigner -verify android/app/build/outputs/bundle/release/app-release.aab | tee "$RUNNER_TEMP/signature.txt"
           grep -q 'jar verified' "$RUNNER_TEMP/signature.txt"
       - uses: actions/upload-artifact@v4
         with:
-          name: okena-android-${{ inputs.signed && 'signed' || 'unsigned-validation' }}-${{ inputs.application_id || 'com.contember.okena' }}-${{ inputs.version_code || '1' }}
+          name: okena-android-${{ env.OKENA_SIGNED == 'true' && 'signed' || 'unsigned-validation' }}-${{ env.OKENA_APPLICATION_ID }}-${{ env.OKENA_VERSION_CODE }}
           path: |
             mobile/rn/android/app/build/outputs/bundle/release/*.aab
             mobile/rn/android/app/build/outputs/apk/release/*.apk
