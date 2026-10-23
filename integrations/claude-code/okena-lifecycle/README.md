@@ -31,7 +31,7 @@ Or enable it non-interactively in `~/.claude/settings.json`:
 | `UserPromptSubmit` | `working` |
 | `PreToolUse` | `working` (about to run a tool) |
 | `PostToolUse` | `working` (tool finished — work resumes) |
-| `Notification` | `blocked` (needs permission / input) |
+| `Notification` | `blocked` (needs permission / input: `permission_prompt`, `elicitation_dialog`, `elicitation_url_dialog` only — `idle_prompt` and other notifications leave the status as is) |
 | `Stop` | `done` |
 | `SessionStart` | `clear` (reset stale status) |
 | `SessionEnd` | `clear` (agent exited) |
