@@ -1024,6 +1024,18 @@ impl PtyManager {
             launch_environment.push(("OKENA_TTY".to_string(), Some(path)));
         }
 
+        // Through `launch_environment` for the same reason as the vars above:
+        // a running tmux server may still carry the parent terminal's identity.
+        // Profile and plan values win over these defaults.
+        for (key, value) in parent_terminal_environment(|name| std::env::var_os(name).is_some()) {
+            if !launch_environment
+                .iter()
+                .any(|(existing, _)| *existing == key)
+            {
+                launch_environment.push((key, value));
+            }
+        }
+
         #[cfg(unix)]
         if self.session_backend() == ResolvedBackend::Dtach {
             crate::session_backend::prepare_dtach_mode_state(
@@ -2607,6 +2619,64 @@ fn slave_pty_path(master: &dyn MasterPty) -> Option<String> {
     Some(master.tty_name()?.to_string_lossy().into_owned())
 }
 
+/// Variables terminal emulators export to identify themselves. Okena inherits
+/// them from whatever terminal launched it, and a pane that keeps them is
+/// detected as that terminal: Claude Code skips OSC 52 under VTE.
+const PARENT_TERMINAL_VARS: &[&str] = &[
+    "VTE_VERSION",
+    "GNOME_TERMINAL_SCREEN",
+    "GNOME_TERMINAL_SERVICE",
+    "KONSOLE_VERSION",
+    "KONSOLE_DBUS_SERVICE",
+    "KONSOLE_DBUS_SESSION",
+    "KONSOLE_DBUS_WINDOW",
+    "XTERM_VERSION",
+    "XTERM_SHELL",
+    "XTERM_LOCALE",
+    "TILIX_ID",
+    "TERMINATOR_UUID",
+    "TERMINATOR_DBUS_NAME",
+    "TERMINATOR_DBUS_PATH",
+    "KITTY_WINDOW_ID",
+    "KITTY_PID",
+    "KITTY_PUBLIC_KEY",
+    "KITTY_LISTEN_ON",
+    "ALACRITTY_WINDOW_ID",
+    "ALACRITTY_LOG",
+    "ALACRITTY_SOCKET",
+    "WEZTERM_PANE",
+    "WEZTERM_UNIX_SOCKET",
+    "WEZTERM_EXECUTABLE",
+    "WEZTERM_EXECUTABLE_DIR",
+    "GHOSTTY_RESOURCES_DIR",
+    "GHOSTTY_BIN_DIR",
+    "ITERM_SESSION_ID",
+    "ITERM_PROFILE",
+    "LC_TERMINAL",
+    "LC_TERMINAL_VERSION",
+    "TERM_SESSION_ID",
+    "TERM_PROGRAM_VERSION",
+    "TERMINAL_EMULATOR",
+    "WT_SESSION",
+    "WT_PROFILE_ID",
+    "COLORFGBG",
+];
+
+/// Pane environment that replaces the parent terminal's identity with
+/// Okena's: removes each inherited [`PARENT_TERMINAL_VARS`] entry that
+/// `is_inherited` reports and names Okena as `TERM_PROGRAM`.
+fn parent_terminal_environment(
+    is_inherited: impl Fn(&str) -> bool,
+) -> Vec<(String, Option<String>)> {
+    let mut environment: Vec<(String, Option<String>)> = PARENT_TERMINAL_VARS
+        .iter()
+        .filter(|name| is_inherited(name))
+        .map(|name| (name.to_string(), None))
+        .collect();
+    environment.push(("TERM_PROGRAM".to_string(), Some("okena".to_string())));
+    environment
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2677,6 +2747,70 @@ mod tests {
             manager.launch_environment(&plain)[0],
             ("PROJECT".to_string(), None)
         );
+    }
+
+    #[test]
+    fn parent_terminal_identity_is_removed_and_okena_named() {
+        let environment =
+            parent_terminal_environment(|name| matches!(name, "VTE_VERSION" | "WT_SESSION"));
+        assert_eq!(
+            environment,
+            [
+                ("VTE_VERSION".to_string(), None),
+                ("WT_SESSION".to_string(), None),
+                ("TERM_PROGRAM".to_string(), Some("okena".to_string())),
+            ]
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn pane_names_okena_unless_the_launch_environment_overrides_it() {
+        let fixture = std::env::temp_dir().join(format!(
+            "okena-pty-term-program-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&fixture).expect("create fixture");
+        let read_term_program = |manager: &PtyManager, name: &str| {
+            let out = fixture.join(name);
+            let plan = TerminalLaunchPlan {
+                route: ShellType::Default,
+                initial_command: Some(crate::backend::TerminalLaunchCommand {
+                    program: "/bin/sh".to_string(),
+                    args: vec![
+                        "-c".to_string(),
+                        "printf %s \"${TERM_PROGRAM-unset}\" > \"$1.tmp\"; mv \"$1.tmp\" \"$1\""
+                            .to_string(),
+                        "okena-test".to_string(),
+                        out.to_string_lossy().into_owned(),
+                    ],
+                }),
+                ..TerminalLaunchPlan::for_shell(ShellType::Default)
+            };
+            let cwd = fixture.to_string_lossy().into_owned();
+            let terminal_id = manager
+                .create_terminal_with_plan(&cwd, &plan)
+                .expect("create PTY");
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            while !out.exists() {
+                assert!(std::time::Instant::now() < deadline, "pane wrote nothing");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            manager.kill(&terminal_id);
+            std::fs::read_to_string(&out).expect("read TERM_PROGRAM")
+        };
+
+        let (manager, _events) = PtyManager::new(SessionBackend::None);
+        assert_eq!(read_term_program(&manager, "default"), "okena");
+
+        manager.set_launch_environment(Arc::new(|_| {
+            vec![("TERM_PROGRAM".to_string(), Some("profile".to_string()))]
+        }));
+        assert_eq!(read_term_program(&manager, "override"), "profile");
+
+        manager.flush_teardown();
+        let _ = std::fs::remove_dir_all(&fixture);
     }
 
     #[test]
