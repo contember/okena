@@ -429,7 +429,7 @@ mod tests {
         assert_eq!(
             project.terminal_display_name(
                 "t1",
-                Some("matej21@matej21-hp: ~/projects/myproject".to_string())
+                Some("alice42@alice-laptop: ~/projects/myproject".to_string())
             ),
             "myproject"
         );
@@ -463,7 +463,7 @@ mod tests {
 
     #[test]
     fn is_bash_prompt_title_detection() {
-        assert!(is_bash_prompt_title("matej21@matej21-hp: ~/projects"));
+        assert!(is_bash_prompt_title("alice42@alice-laptop: ~/projects"));
         assert!(is_bash_prompt_title("root@server:/var/log"));
         assert!(is_bash_prompt_title("user@host:~"));
         assert!(!is_bash_prompt_title("MOJE_JMENO"));
