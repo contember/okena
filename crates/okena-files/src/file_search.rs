@@ -527,11 +527,7 @@ impl Render for FileSearchDialog {
         let project_name = self.project_name.clone();
 
         // Focus search input on first render
-        let input_focus = self.search_input.read(cx).focus_handle(cx);
-        if !input_focus.is_focused(window) {
-            self.search_input
-                .update(cx, |input, cx| input.focus(window, cx));
-        }
+        crate::list_overlay::focus_input(&self.search_input, window, cx);
 
         modal_backdrop("file-search-backdrop", &t)
             .track_focus(&focus_handle)

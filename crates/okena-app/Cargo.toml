@@ -59,6 +59,8 @@ notify-rust = "4"
 # Utilities
 uuid = { version = "1.10", features = ["v4"] }
 dirs = "5.0"
+# Fuzzy matching for the project switcher (same matcher as file search).
+nucleo-matcher = "0.3"
 
 # Logging
 log = "0.4"

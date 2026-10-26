@@ -27,5 +27,4 @@ pub use path_autocomplete::PathAutoCompleteState;
 pub use simple_input::{SimpleInput, SimpleInputState};
 pub use ui_helpers::{
     badge, button, input_container, keyboard_hints_footer, labeled_input, menu_item,
-    search_input_area, search_input_area_selected,
 };

@@ -4,13 +4,12 @@ use crate::keybindings::{
 };
 use crate::theme::theme;
 use crate::ui::tokens::{ui_text, ui_text_md, ui_text_ms, ui_text_sm, ui_text_xl};
-use crate::views::components::{modal_backdrop, modal_content, modal_header, search_input_area};
+use crate::views::components::list_overlay::{focus_input, search_input_row};
+use crate::views::components::{SimpleInputState, modal_backdrop, modal_content, modal_header};
 use gpui::prelude::*;
 use gpui::*;
 use gpui_component::{h_flex, v_flex};
-
-/// Characters allowed in the keybinding search query.
-const SEARCH_CHARS: &str = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 -_+./";
+use okena_ui::simple_input::InputChangedEvent;
 
 /// One displayed binding entry: `(keystroke, entry_idx, is_customized, is_enabled)`.
 type BindingEntry = (String, usize, bool, bool);
@@ -42,13 +41,19 @@ pub struct KeybindingsHelp {
     pending_conflict: Option<String>,
     /// Keystroke interceptor subscription (active during recording)
     _interceptor: Option<Subscription>,
-    /// Search query for filtering keybindings
-    search_query: String,
+    /// Search input for filtering keybindings. While a binding is being
+    /// recorded the keystroke interceptor swallows every key, so the input
+    /// never sees the recorded keys.
+    search_input: Entity<SimpleInputState>,
 }
 
 impl KeybindingsHelp {
     pub fn new(cx: &mut Context<Self>) -> Self {
         let focus_handle = cx.focus_handle();
+        let search_input =
+            cx.new(|cx| SimpleInputState::new(cx).placeholder("Search keybindings…"));
+        cx.subscribe(&search_input, |_, _, _: &InputChangedEvent, cx| cx.notify())
+            .detach();
         Self {
             focus_handle,
             show_reset_confirmation: false,
@@ -56,7 +61,7 @@ impl KeybindingsHelp {
             _chord_timer: None,
             pending_conflict: None,
             _interceptor: None,
-            search_query: String::new(),
+            search_input,
         }
     }
 
@@ -606,9 +611,7 @@ impl Render for KeybindingsHelp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
 
-        if !self.focus_handle.is_focused(window) {
-            window.focus(&self.focus_handle, cx);
-        }
+        focus_input(&self.search_input, window, cx);
 
         let config = get_config();
         let customized = config.get_customized_actions();
@@ -616,7 +619,7 @@ impl Render for KeybindingsHelp {
 
         // Group bindings by category, with per-action entry details
         let descriptions = get_action_descriptions();
-        let query = self.search_query.to_lowercase();
+        let query = self.search_input.read(cx).value().to_lowercase();
         let mut categories: std::collections::HashMap<&str, Vec<ActionBindings>> =
             std::collections::HashMap::new();
 
@@ -689,33 +692,11 @@ impl Render for KeybindingsHelp {
             .on_action(cx.listener(|this, _: &Cancel, _window, cx| {
                 if this.editing.is_some() {
                     this.cancel_recording(cx);
-                } else if !this.search_query.is_empty() {
-                    this.search_query.clear();
-                    cx.notify();
+                } else if !this.search_input.read(cx).value().is_empty() {
+                    this.search_input
+                        .update(cx, |input, cx| input.set_value("", cx));
                 } else {
                     this.close(cx);
-                }
-            }))
-            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
-                // Don't handle typing while recording a keybinding — the interceptor handles that
-                if this.editing.is_some() {
-                    return;
-                }
-                let key = event.keystroke.key.as_str();
-                match key {
-                    "backspace" if this.search_query.pop().is_some() => {
-                        cx.notify();
-                    }
-                    k if k.len() == 1 && !event.keystroke.modifiers.modified() => {
-                        let Some(ch) = k.chars().next() else {
-                            return;
-                        };
-                        if SEARCH_CHARS.contains(ch) {
-                            this.search_query.push(ch);
-                            cx.notify();
-                        }
-                    }
-                    _ => {}
                 }
             }))
             .on_mouse_down(
@@ -745,11 +726,7 @@ impl Render for KeybindingsHelp {
                         cx,
                         cx.listener(|this, _, _window, cx| this.close(cx)),
                     ))
-                    .child(search_input_area(
-                        &self.search_query,
-                        "Search keybindings…",
-                        &t,
-                    ))
+                    .child(search_input_row(&self.search_input, &t, cx))
                     // Conflict/info banners
                     .child(div().when(!conflicts.is_empty(), |d| {
                         d.px(px(16.0))

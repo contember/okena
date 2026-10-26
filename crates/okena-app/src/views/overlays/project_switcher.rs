@@ -3,7 +3,7 @@
 //! Provides keyboard-driven project switching with:
 //! - Enter: Focus the selected project
 //! - Space: Toggle project overview visibility
-//! - Type to filter projects
+//! - Type to filter projects (fuzzy over name and path)
 
 use crate::keybindings::{Cancel, JumpToProjectTerminal};
 use crate::theme::{theme, with_alpha};
@@ -11,16 +11,19 @@ use crate::ui::tokens::{ui_text, ui_text_ms};
 use crate::views::components::list_overlay::FilterResult;
 use crate::views::components::{
     ListOverlayAction, ListOverlayConfig, ListOverlayState, badge, handle_list_overlay_key,
-    keyboard_hints_footer, modal_backdrop, modal_content, modal_header, search_input_area,
+    keyboard_hints_footer, modal_backdrop, modal_content, modal_header,
 };
 use crate::views::project_hover::set_hovered_project;
 use crate::workspace::state::{ProjectData, WindowId, Workspace};
 use gpui::prelude::*;
 use gpui::*;
 use gpui_component::h_flex;
+use nucleo_matcher::pattern::{AtomKind, CaseMatching, Normalization, Pattern};
+use nucleo_matcher::{Config, Matcher, Utf32String};
 use okena_ui::empty_state::empty_state;
 use okena_ui::selectable_list::selectable_list_item;
 use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 
 /// Events emitted by the ProjectSwitcher overlay.
 #[derive(Clone)]
@@ -61,6 +64,11 @@ pub struct ProjectSwitcher {
     open_states: HashMap<String, ProjectOpenState>,
     /// Kept so rows can read the daemon-mirrored git status (branch label).
     workspace: Entity<Workspace>,
+    /// Search haystacks per project (parallel to `state.items`), prepared once:
+    /// the list doesn't change while the switcher is open.
+    search_keys: Vec<ProjectSearchKey>,
+    /// Reused across keystrokes; nucleo's matcher carries a large scratch buffer.
+    matcher: Matcher,
 }
 
 impl ProjectSwitcher {
@@ -77,6 +85,18 @@ impl ProjectSwitcher {
             })
             .collect();
         let open_states = open_states_for(window_id, ws, &projects);
+        let shared = shared_dir(&projects, dirs::home_dir().as_deref());
+        let search_keys = projects
+            .iter()
+            .map(|project| {
+                let parent_name = project
+                    .worktree_info
+                    .as_ref()
+                    .and_then(|info| ws.project(&info.parent_project_id))
+                    .map(|parent| parent.name.clone());
+                ProjectSearchKey::new(project, parent_name, shared.as_deref())
+            })
+            .collect();
 
         let config = ListOverlayConfig::new("Switch Project")
             .subtitle("Type to search, Enter to focus, Space to toggle visibility")
@@ -92,6 +112,8 @@ impl ProjectSwitcher {
 
         let state = ListOverlayState::new(projects, config, cx);
         let focus_handle = state.focus_handle.clone();
+
+        state.on_search_changed(cx, |this: &mut Self, cx| this.filter_projects(cx));
 
         // Space toggles visibility through the workspace: the row emits an
         // event that only lands after this frame, so rows have to follow the
@@ -111,6 +133,8 @@ impl ProjectSwitcher {
             window_id,
             open_states,
             workspace,
+            search_keys,
+            matcher: new_matcher(),
         }
     }
 
@@ -146,8 +170,9 @@ impl ProjectSwitcher {
         }
     }
 
-    fn filter_projects(&mut self) {
-        let filtered = ranked_project_filter(&self.state.items, &self.state.search_query);
+    fn filter_projects(&mut self, cx: &Context<Self>) {
+        let query = self.state.search_query(cx);
+        let filtered = ranked_project_filter(&self.search_keys, &query, &mut self.matcher);
         self.state.set_filtered(filtered);
     }
 
@@ -169,6 +194,9 @@ impl ProjectSwitcher {
             .copied()
             .unwrap_or_default();
         let is_worktree = project.worktree_info.is_some();
+        // A worktree's own name can be anything (often the branch), so the row
+        // says which repo it belongs to.
+        let parent_name = self.search_keys[project_index].parent_name.clone();
         let folder_color = t.get_folder_color(project.folder_color);
         let branch = self
             .workspace
@@ -247,11 +275,22 @@ impl ProjectSwitcher {
                     h_flex()
                         .gap(px(8.0))
                         .child(
-                            div()
+                            h_flex()
+                                .gap(px(4.0))
                                 .text_size(ui_text(13.0, cx))
-                                .font_weight(name_weight)
-                                .text_color(rgb(name_color))
-                                .child(name),
+                                .when_some(parent_name, |d, parent| {
+                                    d.child(
+                                        div()
+                                            .text_color(rgb(t.text_muted))
+                                            .child(format!("{parent} ›")),
+                                    )
+                                })
+                                .child(
+                                    div()
+                                        .font_weight(name_weight)
+                                        .text_color(rgb(name_color))
+                                        .child(name),
+                                ),
                         )
                         .when(is_worktree, |d| d.child(badge("worktree", &t)))
                         .when_some(branch, |d, b| {
@@ -358,18 +397,21 @@ impl ProjectSwitcher {
     }
 }
 
-fn ranked_project_filter(items: &[ProjectData], query: &str) -> Vec<FilterResult> {
+fn ranked_project_filter(
+    keys: &[ProjectSearchKey],
+    query: &str,
+    matcher: &mut Matcher,
+) -> Vec<FilterResult> {
+    let query = query.trim();
     if query.is_empty() {
-        return (0..items.len()).map(FilterResult::new).collect();
+        return (0..keys.len()).map(FilterResult::new).collect();
     }
 
-    let query_lower = query.to_lowercase();
-    let mut scored: Vec<(usize, i32)> = items
+    let query = ProjectQuery::new(query);
+    let mut scored: Vec<(usize, (i32, i32))> = keys
         .iter()
         .enumerate()
-        .filter_map(|(index, project)| {
-            project_match_score(project, &query_lower).map(|score| (index, score))
-        })
+        .filter_map(|(index, key)| query.score(key, matcher).map(|score| (index, score)))
         .collect();
 
     scored.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
@@ -426,21 +468,148 @@ fn compute_open_state(
     state
 }
 
-fn project_match_score(project: &ProjectData, query: &str) -> Option<i32> {
-    let name = project.name.to_lowercase();
-    let path = project.path.to_lowercase();
-    let base_dir = std::path::Path::new(&project.path)
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or_default()
-        .to_lowercase();
+fn new_matcher() -> Matcher {
+    Matcher::new(Config::DEFAULT.match_paths())
+}
+
+/// Lowercase, then strip diacritics, so `zluty`, `žluty` and `Žlutý` compare
+/// equal. Done by hand on both sides: nucleo's own normalization turns off as
+/// soon as the query has one accented letter, and its table lacks some
+/// capitals (`Ž`), which lowercasing first sidesteps.
+fn fold(text: &str) -> String {
+    text.to_lowercase()
+        .chars()
+        .map(nucleo_matcher::chars::normalize)
+        .collect()
+}
+
+/// The directory every project lives under (`~/Developer`, typically), whose
+/// letters must not take part in matching: any query spelled from them would
+/// match the whole list. Falls back to the home directory when the projects
+/// share nothing but the root.
+fn shared_dir(projects: &[ProjectData], home: Option<&Path>) -> Option<PathBuf> {
+    let mut paths = projects.iter().map(|project| Path::new(&project.path));
+    let mut shared = paths.next()?.to_path_buf();
+    for path in paths {
+        while !path.starts_with(&shared) {
+            if !shared.pop() {
+                break;
+            }
+        }
+    }
+    if shared.parent().is_some() {
+        Some(shared)
+    } else {
+        home.map(Path::to_path_buf)
+    }
+}
+
+/// `path` below `shared`, or all of it when it lies elsewhere.
+fn relative_path<'a>(path: &'a str, shared: Option<&Path>) -> std::borrow::Cow<'a, str> {
+    match shared.and_then(|shared| Path::new(path).strip_prefix(shared).ok()) {
+        Some(rest) => rest.to_string_lossy(),
+        None => std::borrow::Cow::Borrowed(path),
+    }
+}
+
+/// What a project is searched by, folded once when the switcher opens.
+struct ProjectSearchKey {
+    name: String,
+    /// The path below the projects' shared directory.
+    path: String,
+    base_dir: String,
+    /// A worktree's parent project name; empty for everything else.
+    parent: String,
+    /// The same, as written, for the row.
+    parent_name: Option<String>,
+    fuzzy_name: Utf32String,
+    /// Name, parent name and path, for queries whose words land in different
+    /// places.
+    fuzzy_anywhere: Utf32String,
+}
+
+impl ProjectSearchKey {
+    fn new(project: &ProjectData, parent_name: Option<String>, shared: Option<&Path>) -> Self {
+        let name = fold(&project.name);
+        let path = fold(&relative_path(&project.path, shared));
+        let base_dir = fold(
+            Path::new(&project.path)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or_default(),
+        );
+        let parent = fold(parent_name.as_deref().unwrap_or_default());
+        Self {
+            fuzzy_name: Utf32String::from(name.as_str()),
+            fuzzy_anywhere: Utf32String::from(format!("{name} {parent} {path}").as_str()),
+            name,
+            path,
+            base_dir,
+            parent,
+            parent_name,
+        }
+    }
+}
+
+/// A search query, compiled once per keystroke and scored against every project.
+struct ProjectQuery {
+    folded: String,
+    pattern: Pattern,
+}
+
+impl ProjectQuery {
+    fn new(query: &str) -> Self {
+        let folded = fold(query);
+        Self {
+            // Each whitespace-separated word is matched on its own, fuzzily.
+            pattern: Pattern::new(
+                &folded,
+                CaseMatching::Ignore,
+                Normalization::Smart,
+                AtomKind::Fuzzy,
+            ),
+            folded,
+        }
+    }
+
+    /// `(contiguous, fuzzy)`, compared in that order. Any contiguous hit
+    /// (exact, prefix, substring) outranks every fuzzy-only one, so loosening
+    /// the search never reshuffles a precise query; the fuzzy score only
+    /// orders projects whose contiguous scores tie, and is the only thing
+    /// that lets `rkt` find `rocket` or `acmerock` find `~/…/acme/rocket`.
+    fn score(&self, key: &ProjectSearchKey, matcher: &mut Matcher) -> Option<(i32, i32)> {
+        let contiguous = substring_match_score(key, &self.folded);
+        let fuzzy = self.fuzzy_score(key, matcher);
+        if contiguous == 0 && fuzzy.is_none() {
+            return None;
+        }
+        Some((contiguous, fuzzy.unwrap_or(0)))
+    }
+
+    fn fuzzy_score(&self, key: &ProjectSearchKey, matcher: &mut Matcher) -> Option<i32> {
+        let score = |haystack: &Utf32String, matcher: &mut Matcher| {
+            self.pattern
+                .score(haystack.slice(..), matcher)
+                .map(|score| score as i32)
+        };
+        // Name hits count double: the name is what the user is looking at.
+        let name = score(&key.fuzzy_name, matcher).map(|score| score * 2);
+        // The words may be split between name and path, so the fallback
+        // haystack holds both.
+        let anywhere = score(&key.fuzzy_anywhere, matcher);
+        name.max(anywhere)
+    }
+}
+
+fn substring_match_score(key: &ProjectSearchKey, query: &str) -> i32 {
+    let (name, path, base_dir) = (key.name.as_str(), key.path.as_str(), key.base_dir.as_str());
 
     let primary_score = [
-        text_match_score(&name, query, 700, 420, 220),
+        text_match_score(name, query, 700, 420, 220),
         if base_dir == name {
             None
         } else {
-            text_match_score(&base_dir, query, 650, 380, 200)
+            text_match_score(base_dir, query, 650, 380, 200)
         },
     ]
     .into_iter()
@@ -462,6 +631,13 @@ fn project_match_score(project: &ProjectData, query: &str) -> Option<i32> {
         .max()
         .unwrap_or(0);
 
+    // A worktree's parent counts like its deepest path segment: `acme` lists
+    // the worktrees, but below the `acme` project itself.
+    let parent_score = text_match_score(&key.parent, query, 240, 140, 70)
+        .map(|score| score + 90)
+        .unwrap_or(0);
+    let best_segment_score = best_segment_score.max(parent_score);
+
     let path_score = if path.contains(query) {
         let tail_bias = path
             .rfind(query)
@@ -472,8 +648,7 @@ fn project_match_score(project: &ProjectData, query: &str) -> Option<i32> {
         0
     };
 
-    let total_score = primary_score + best_segment_score + path_score;
-    (total_score > 0).then_some(total_score)
+    primary_score + best_segment_score + path_score
 }
 
 fn text_match_score(
@@ -503,22 +678,13 @@ impl Render for ProjectSwitcher {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
         let focus_handle = self.focus_handle.clone();
-        let search_query = self.state.search_query.clone();
         let config_width = self.state.config.width;
         let config_max_height = self.state.config.max_height;
         let config_title = self.state.config.title.clone();
         let config_subtitle = self.state.config.subtitle.clone();
-        let search_placeholder = self
-            .state
-            .config
-            .search_placeholder
-            .clone()
-            .unwrap_or_default();
         let empty_message = self.state.config.empty_message.clone();
 
-        if !focus_handle.is_focused(window) {
-            window.focus(&focus_handle, cx);
-        }
+        self.state.focus_search(window, cx);
 
         modal_backdrop("project-switcher-backdrop", &t)
             .track_focus(&focus_handle)
@@ -534,21 +700,22 @@ impl Render for ProjectSwitcher {
             .on_action(cx.listener(|this, _: &JumpToProjectTerminal, _window, cx| {
                 this.jump_into_selected(cx);
             }))
+            // Space toggles visibility rather than typing into the search
+            // input, so it has to be taken in the capture phase, before the
+            // focused input sees it.
+            .capture_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
+                if event.keystroke.key == "space" && !event.keystroke.modifiers.modified() {
+                    this.toggle_visibility_selected(cx);
+                    cx.stop_propagation();
+                }
+            }))
+            // Keys the input leaves alone (up/down, Enter) bubble up to here.
+            // Escape arrives earlier, as the Cancel action above.
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
-                match handle_list_overlay_key(&mut this.state, event, &[("space", "toggle")]) {
+                match handle_list_overlay_key(&mut this.state, event) {
                     ListOverlayAction::Close => this.close(cx),
-                    ListOverlayAction::SelectPrev | ListOverlayAction::SelectNext => {
-                        this.state.scroll_to_selected();
-                        cx.notify();
-                    }
+                    ListOverlayAction::SelectPrev | ListOverlayAction::SelectNext => cx.notify(),
                     ListOverlayAction::Confirm => this.focus_selected(cx),
-                    ListOverlayAction::QueryChanged => {
-                        this.filter_projects();
-                        cx.notify();
-                    }
-                    ListOverlayAction::Custom(action) if action == "toggle" => {
-                        this.toggle_visibility_selected(cx);
-                    }
                     _ => {}
                 }
             }))
@@ -568,7 +735,7 @@ impl Render for ProjectSwitcher {
                         cx,
                         cx.listener(|this, _, _window, cx| this.close(cx)),
                     ))
-                    .child(search_input_area(&search_query, &search_placeholder, &t))
+                    .children(self.state.search_row(&t, cx))
                     .child(
                         // Project list
                         div()
@@ -602,13 +769,40 @@ impl_focusable!(ProjectSwitcher);
 
 #[cfg(test)]
 mod tests {
-    use super::{compute_open_state, project_match_score, ranked_project_filter};
+    use super::{
+        ProjectQuery, ProjectSearchKey, compute_open_state, new_matcher, ranked_project_filter,
+        relative_path, shared_dir,
+    };
     use crate::terminal::shell_config::ShellType;
     use crate::theme::FolderColor;
     use crate::workspace::settings::HooksConfig;
     use crate::workspace::state::WindowId;
     use crate::workspace::state::{HookTerminalEntry, LayoutNode, ProjectData, WorktreeMetadata};
     use std::collections::{HashMap, HashSet};
+    use std::path::Path;
+
+    /// Stands in for the shared directory in single-project scoring tests.
+    fn key(project: &ProjectData, parent_name: Option<&str>) -> ProjectSearchKey {
+        let shared = Path::new("/Users/me");
+        ProjectSearchKey::new(project, parent_name.map(str::to_string), Some(shared))
+    }
+
+    fn project_match_score(project: &ProjectData, query: &str) -> Option<(i32, i32)> {
+        ProjectQuery::new(query).score(&key(project, None), &mut new_matcher())
+    }
+
+    /// Ranks like the switcher does, shared directory included.
+    fn rank(items: &[ProjectData], query: &str) -> Vec<usize> {
+        let shared = shared_dir(items, None);
+        let keys: Vec<_> = items
+            .iter()
+            .map(|project| ProjectSearchKey::new(project, None, shared.as_deref()))
+            .collect();
+        ranked_project_filter(&keys, query, &mut new_matcher())
+            .into_iter()
+            .map(|result| result.index)
+            .collect()
+    }
 
     fn make_project(name: &str, path: &str) -> ProjectData {
         ProjectData {
@@ -638,8 +832,8 @@ mod tests {
 
     #[test]
     fn prefers_project_name_over_generic_path_match() {
-        let target = make_project("roj", "/home/matej21/projects/oss/roj");
-        let generic = make_project("alpha", "/home/matej21/projects/oss/projects-alpha");
+        let target = make_project("roj", "/home/user/projects/oss/roj");
+        let generic = make_project("alpha", "/home/user/projects/oss/projects-alpha");
 
         let target_score = project_match_score(&target, "roj").unwrap();
         let generic_score = project_match_score(&generic, "roj").unwrap();
@@ -649,7 +843,7 @@ mod tests {
 
     #[test]
     fn prefers_more_nested_segment_matches() {
-        let nested = make_project("alpha", "/home/matej21/projects/oss/roj");
+        let nested = make_project("alpha", "/home/user/projects/oss/roj");
         let shallow = make_project("alpha", "/roj/worktrees/demo");
 
         let nested_score = project_match_score(&nested, "roj").unwrap();
@@ -729,17 +923,147 @@ mod tests {
     }
 
     #[test]
-    fn ranked_filter_sorts_best_match_first() {
+    fn matches_non_contiguous_abbreviation() {
+        let rocket = make_project("rocket", "/Users/me/Developer/acme/rocket");
+        let anvil = make_project("anvil", "/Users/me/Developer/acme/anvil");
+
+        assert!(project_match_score(&rocket, "rkt").is_some());
+        assert!(project_match_score(&anvil, "rkt").is_none());
+    }
+
+    /// A query can run from the path into the name (Space is the visibility
+    /// toggle, so this is typed without one).
+    #[test]
+    fn matches_across_name_and_path() {
+        let rocket = make_project("rocket", "/Users/me/Developer/acme/rocket");
+        let anvil = make_project("anvil", "/Users/me/Developer/globex/anvil");
+
+        assert!(project_match_score(&rocket, "acmerock").is_some());
+        assert!(project_match_score(&anvil, "acmerock").is_none());
+    }
+
+    /// Every project lives under the same directory; its letters must not
+    /// make a query match the whole list, fuzzily or as a substring.
+    #[test]
+    fn shared_directory_does_not_match_everything() {
         let items = vec![
-            make_project("alpha", "/home/matej21/projects/oss/projects-alpha"),
-            make_project("roj", "/home/matej21/projects/oss/roj"),
-            make_project("beta", "/home/matej21/projects/oss/other"),
+            make_project("rocket", "/Users/me/Developer/acme/rocket"),
+            make_project("anvil", "/Users/me/Developer/globex/anvil"),
         ];
 
-        let filtered = ranked_project_filter(&items, "roj");
+        assert!(rank(&items, "usd").is_empty());
+        assert!(rank(&items, "dvl").is_empty());
+        assert!(rank(&items, "dev").is_empty());
+        assert_eq!(rank(&items, "acme"), vec![0]);
+    }
 
-        assert_eq!(filtered.len(), 3);
-        assert_eq!(filtered[0].index, 1);
-        assert_eq!(filtered[1].index, 0);
+    #[test]
+    fn shared_dir_is_the_common_ancestor_else_home() {
+        let shared = |paths: &[&str], home: Option<&str>| {
+            let items: Vec<_> = paths.iter().map(|p| make_project("p", p)).collect();
+            shared_dir(&items, home.map(Path::new))
+        };
+
+        assert_eq!(
+            shared(
+                &["/Users/me/Developer/a/x", "/Users/me/Developer/b/y"],
+                None
+            ),
+            Some(Path::new("/Users/me/Developer").to_path_buf())
+        );
+        // Component-wise: `/Users/me` is not an ancestor of `/Users/meow`.
+        assert_eq!(
+            shared(&["/Users/me/x", "/Users/meow/y"], None),
+            Some(Path::new("/Users").to_path_buf())
+        );
+        assert_eq!(
+            shared(&["/a/x", "/b/y"], Some("/Users/me")),
+            Some(Path::new("/Users/me").to_path_buf())
+        );
+        assert_eq!(shared(&["/a/x", "/b/y"], None), None);
+    }
+
+    #[test]
+    fn relative_path_strips_only_a_real_ancestor() {
+        let me = Some(Path::new("/Users/me"));
+        assert_eq!(relative_path("/Users/me/dev/x", me), "dev/x");
+        assert_eq!(relative_path("/Users/meow/x", me), "/Users/meow/x");
+        assert_eq!(relative_path("/opt/x", None), "/opt/x");
+    }
+
+    /// Whitespace alone (Shift+Space, a paste) filters nothing and keeps the
+    /// recency order.
+    #[test]
+    fn whitespace_only_query_keeps_full_list() {
+        let items = vec![make_project("a", "/a"), make_project("b", "/b")];
+
+        assert_eq!(rank(&items, "   "), vec![0, 1]);
+    }
+
+    #[test]
+    fn ignores_case_and_diacritics() {
+        let project = make_project("Žlutý kůň", "/projects/kun");
+
+        assert!(project_match_score(&project, "zluty").is_some());
+        assert!(project_match_score(&project, "ZLUTY").is_some());
+        // Diacritics typed only in part: the query has some, the name more.
+        assert!(project_match_score(&project, "žluty").is_some());
+        assert!(project_match_score(&project, "kůn").is_some());
+    }
+
+    /// A contiguous hit must outrank a project that only matches fuzzily, or
+    /// loosening the search would reshuffle precise queries.
+    #[test]
+    fn exact_name_outranks_fuzzy_match() {
+        let items = vec![
+            make_project("oak-knife", "/projects/oak-knife"),
+            make_project("okn", "/projects/okn"),
+        ];
+
+        assert_eq!(rank(&items, "okn"), vec![1, 0]);
+    }
+
+    /// Long queries give nucleo large scores; they still must not lift a
+    /// fuzzy-only name above a contiguous hit that is only in the path.
+    #[test]
+    fn path_substring_outranks_long_fuzzy_name_match() {
+        let items = vec![
+            make_project("rocket-launch-pad", "/projects/rocket-launch-pad"),
+            make_project("archive", "/projects/rocketlaunchpad/archive"),
+        ];
+
+        assert_eq!(rank(&items, "rocketlaunchpad"), vec![1, 0]);
+    }
+
+    /// A worktree's name can be anything, so its parent's name finds it,
+    /// ranked below the parent project itself.
+    #[test]
+    fn parent_name_finds_worktrees_below_the_parent() {
+        let parent = make_project("acme", "/Users/me/Developer/acme");
+        let worktree = make_project("feature/login", "/Users/me/Developer/wt/login");
+        let unrelated = make_project("globex", "/Users/me/Developer/globex");
+        let mut matcher = new_matcher();
+        let query = ProjectQuery::new("acme");
+
+        let parent_score = query.score(&key(&parent, None), &mut matcher);
+        let worktree_score = query.score(&key(&worktree, Some("Acme")), &mut matcher);
+        let unrelated_score = query.score(&key(&unrelated, None), &mut matcher);
+
+        assert!(worktree_score.is_some());
+        assert!(parent_score > worktree_score);
+        assert!(unrelated_score.is_none());
+    }
+
+    #[test]
+    fn ranked_filter_sorts_best_match_first() {
+        let items = vec![
+            make_project("alpha", "/home/user/projects/oss/projects-alpha"),
+            make_project("roj", "/home/user/projects/oss/roj"),
+            make_project("beta", "/home/user/projects/oss/other"),
+        ];
+
+        // `beta` used to match through the shared `projects` directory; with
+        // that stripped, only the two real hits remain.
+        assert_eq!(rank(&items, "roj"), vec![1, 0]);
     }
 }

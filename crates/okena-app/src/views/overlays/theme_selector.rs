@@ -399,7 +399,7 @@ impl Render for ThemeSelector {
                 this.close(cx);
             }))
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
-                match handle_list_overlay_key(&mut this.state, event, &[]) {
+                match handle_list_overlay_key(&mut this.state, event) {
                     ListOverlayAction::Close => this.close(cx),
                     ListOverlayAction::SelectPrev | ListOverlayAction::SelectNext => {
                         this.preview_theme(this.state.selected_index, cx);
