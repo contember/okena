@@ -36,7 +36,8 @@ shown verbatim.
   free-form status text.
 - **Sidebar → AGENTS** — a flat, cross-project list of every pane currently
   reporting a status, sorted by attention (blocked → error → done → working →
-  idle).
+  idle), then by project. The title is not a sort key, so rows don't swap places
+  while agents retitle their panes.
   Each row shows the lifecycle dot, the terminal name, its project, and the
   free-form text. Click a row to jump straight to that pane. The section hides
   itself when no agent is active.
