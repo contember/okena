@@ -14,6 +14,17 @@ describe('parseInlines', () => {
     ]);
   });
 
+  it('splits italic, strikethrough and links', () => {
+    expect(parseInlines('*a* ~~b~~ [c](https://x.y/z) snake_case_name')).toEqual([
+      { kind: 'italic', text: 'a' },
+      { kind: 'text', text: ' ' },
+      { kind: 'strike', text: 'b' },
+      { kind: 'text', text: ' ' },
+      { kind: 'link', text: 'c', url: 'https://x.y/z' },
+      { kind: 'text', text: ' snake_case_name' },
+    ]);
+  });
+
   it('keeps unmatched markers literal', () => {
     expect(parseInlines('a ` b ** c')).toEqual([
       { kind: 'text', text: 'a ` b ** c' },
@@ -42,6 +53,7 @@ describe('parseChatMarkdown', () => {
       {
         kind: 'item',
         marker: '•',
+        depth: 0,
         inlines: [
           { kind: 'bold', text: 'File:' },
           { kind: 'text', text: ' ' },
@@ -51,6 +63,7 @@ describe('parseChatMarkdown', () => {
       {
         kind: 'item',
         marker: '2.',
+        depth: 0,
         inlines: [{ kind: 'text', text: 'tests' }],
       },
       {
@@ -65,6 +78,73 @@ describe('parseChatMarkdown', () => {
   it('runs an unclosed fence to the end', () => {
     expect(parseChatMarkdown('```\nls -la')).toEqual([
       { kind: 'code', text: 'ls -la' },
+    ]);
+  });
+
+  it('parses a GFM table with alignment, escaped pipes and ragged rows', () => {
+    const source = [
+      'Intro',
+      '| Name | Size |',
+      '|:-----|-----:|',
+      '| `a\\|b` | 1 |',
+      '| c |',
+      '| d | 2 | extra |',
+      'After',
+    ].join('\n');
+    expect(parseChatMarkdown(source)).toEqual([
+      { kind: 'paragraph', inlines: [{ kind: 'text', text: 'Intro' }] },
+      {
+        kind: 'table',
+        align: ['left', 'right'],
+        header: [
+          [{ kind: 'text', text: 'Name' }],
+          [{ kind: 'text', text: 'Size' }],
+        ],
+        rows: [
+          [[{ kind: 'code', text: 'a|b' }], [{ kind: 'text', text: '1' }]],
+          [[{ kind: 'text', text: 'c' }], []],
+          [[{ kind: 'text', text: 'd' }], [{ kind: 'text', text: '2' }]],
+        ],
+      },
+      { kind: 'paragraph', inlines: [{ kind: 'text', text: 'After' }] },
+    ]);
+  });
+
+  it('keeps a pipe line without a delimiter row as a paragraph', () => {
+    expect(parseChatMarkdown('a | b\nc')).toEqual([
+      { kind: 'paragraph', inlines: [{ kind: 'text', text: 'a | b\nc' }] },
+    ]);
+  });
+
+  it('parses quotes, rules, nested and task items', () => {
+    expect(
+      parseChatMarkdown('> **Note**\n> - x\n\n---\n- [x] done\n  - [ ] todo'),
+    ).toEqual([
+      {
+        kind: 'quote',
+        blocks: [
+          { kind: 'paragraph', inlines: [{ kind: 'bold', text: 'Note' }] },
+          {
+            kind: 'item',
+            marker: '•',
+            depth: 0,
+            inlines: [{ kind: 'text', text: 'x' }],
+          },
+        ],
+      },
+      { kind: 'rule' },
+      {
+        kind: 'item',
+        marker: '☑',
+        depth: 0,
+        inlines: [{ kind: 'text', text: 'done' }],
+      },
+      {
+        kind: 'item',
+        marker: '☐',
+        depth: 1,
+        inlines: [{ kind: 'text', text: 'todo' }],
+      },
     ]);
   });
 });
