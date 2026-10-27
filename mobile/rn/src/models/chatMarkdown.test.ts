@@ -15,7 +15,9 @@ describe('parseInlines', () => {
   });
 
   it('splits italic, strikethrough and links', () => {
-    expect(parseInlines('*a* ~~b~~ [c](https://x.y/z) snake_case_name')).toEqual([
+    expect(
+      parseInlines('*a* ~~b~~ [c](https://x.y/z) snake_case_name'),
+    ).toEqual([
       { kind: 'italic', text: 'a' },
       { kind: 'text', text: ' ' },
       { kind: 'strike', text: 'b' },

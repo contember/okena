@@ -71,7 +71,9 @@ const Blocks: React.FC<{
             </Text>
           );
         case 'quote':
-          return <Blocks key={index} blocks={block.blocks} style={styles.quote} />;
+          return (
+            <Blocks key={index} blocks={block.blocks} style={styles.quote} />
+          );
         case 'rule':
           return <View key={index} style={styles.rule} />;
         case 'table':
@@ -96,7 +98,7 @@ function columnWidths(table: TableBlock): number[] {
   return table.header.map((head, column) => {
     const longest = Math.max(
       inlinesLength(head),
-      ...table.rows.map(row => inlinesLength(row[column] ?? [])),
+      ...table.rows.map((row) => inlinesLength(row[column] ?? [])),
     );
     return Math.min(
       CELL_MAX_WIDTH,

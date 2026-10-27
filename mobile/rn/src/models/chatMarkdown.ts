@@ -147,9 +147,7 @@ export function parseChatMarkdown(source: string): MdBlock[] {
         if (row.trim().length === 0 || !row.includes('|')) break;
         const cells = splitTableRow(row);
         // GFM pads short rows and drops the excess of long ones.
-        rows.push(
-          header.map((_, column) => parseInlines(cells[column] ?? '')),
-        );
+        rows.push(header.map((_, column) => parseInlines(cells[column] ?? '')));
       }
       i--;
       blocks.push({
@@ -169,7 +167,10 @@ export function parseChatMarkdown(source: string): MdBlock[] {
         if (!next) break;
         quoted.push(next[1] ?? '');
       }
-      blocks.push({ kind: 'quote', blocks: parseChatMarkdown(quoted.join('\n')) });
+      blocks.push({
+        kind: 'quote',
+        blocks: parseChatMarkdown(quoted.join('\n')),
+      });
       continue;
     }
     if (RULE.test(line)) {
