@@ -32,6 +32,7 @@ mod logging;
 pub mod render;
 mod text_export;
 mod types;
+mod upload;
 mod usage;
 
 use okena_core::api::ActionRequest;
@@ -1112,6 +1113,15 @@ pub async fn move_pane_to(
     .await
 }
 
+// ── File upload (async) ─────────────────────────────────────────────
+
+/// Upload a file picked on the phone (a plain filesystem path, at most
+/// 64 MiB) to the server host and return its path there.
+#[uniffi::export(async_runtime = "tokio")]
+pub async fn upload_file(conn_id: String, local_path: String) -> Result<String, MobileFfiError> {
+    upload::upload(&conn_id, &local_path).await
+}
+
 // ── Claude remote (async — return JSON strings) ─────────────────────
 
 /// The Claude session in a pane, as JSON `ApiClaudeSession`.
@@ -1126,15 +1136,32 @@ pub async fn claude_get_session(
 /// One transcript page, the server's JSON `ApiClaudeTranscriptPage` forwarded
 /// unchanged (entry kinds are left to the RN parser). Cursor 0 asks for
 /// the first page; pass back the previous page's `cursor` and `session_id` to
-/// get only newer entries.
+/// get only newer entries. `agent_id` reads that subagent's transcript.
 #[uniffi::export(async_runtime = "tokio")]
 pub async fn claude_get_transcript(
     conn_id: String,
     terminal_id: String,
     cursor: u64,
     session_id: Option<String>,
+    agent_id: Option<String>,
 ) -> Result<String, MobileFfiError> {
-    claude::get_transcript(&conn_id, &terminal_id, cursor, session_id.as_deref()).await
+    claude::get_transcript(
+        &conn_id,
+        &terminal_id,
+        cursor,
+        session_id.as_deref(),
+        agent_id.as_deref(),
+    )
+    .await
+}
+
+/// The subagents of the pane's session, as JSON `ApiClaudeSubagentList`.
+#[uniffi::export(async_runtime = "tokio")]
+pub async fn claude_get_subagents(
+    conn_id: String,
+    terminal_id: String,
+) -> Result<String, MobileFfiError> {
+    claude::get_subagents(&conn_id, &terminal_id).await
 }
 
 /// Send a prompt to Claude, as JSON `ApiClaudePromptResponse`. An undeliverable

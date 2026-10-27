@@ -30,6 +30,28 @@ export interface ApiClaudeSession {
   queued_prompts: number;
   /** Oldest first. */
   dialogs: ApiClaudeDialog[];
+  /** Between their start and stop hooks, oldest first. */
+  running_subagents: ApiClaudeRunningSubagent[];
+}
+
+export interface ApiClaudeRunningSubagent {
+  agent_id: string;
+  agent_type: string;
+}
+
+export interface ApiClaudeSubagent {
+  agent_id: string;
+  /** The `Agent` tool call that started it, when Claude recorded it. */
+  tool_use_id?: string;
+  agent_type?: string;
+  description?: string;
+  running: boolean;
+}
+
+export interface ApiClaudeSubagentList {
+  session_id?: string;
+  /** Oldest first. */
+  subagents: ApiClaudeSubagent[];
 }
 
 export type ApiClaudeDecision =
@@ -198,6 +220,40 @@ export function parseClaudeSession(json: string): ApiClaudeSession {
     queued_prompts: count(session.queued_prompts, 'session.queued_prompts'),
     dialogs: array(session.dialogs, 'session.dialogs').map((dialog, index) =>
       parseDialog(dialog, `session.dialogs[${index}]`),
+    ),
+    // An older server sends none.
+    running_subagents:
+      session.running_subagents === undefined
+        ? []
+        : array(session.running_subagents, 'session.running_subagents').map(
+            (value, index) => {
+              const path = `session.running_subagents[${index}]`;
+              const subagent = record(value, path);
+              return {
+                agent_id: str(subagent.agent_id, `${path}.agent_id`),
+                agent_type: str(subagent.agent_type, `${path}.agent_type`),
+              };
+            },
+          ),
+  };
+}
+
+export function parseClaudeSubagentList(json: string): ApiClaudeSubagentList {
+  const list = record(parseJson(json, 'subagents'), 'subagents');
+  return {
+    session_id: optionalStr(list.session_id, 'subagents.session_id'),
+    subagents: array(list.subagents, 'subagents.subagents').map(
+      (value, index) => {
+        const path = `subagents.subagents[${index}]`;
+        const subagent = record(value, path);
+        return {
+          agent_id: str(subagent.agent_id, `${path}.agent_id`),
+          tool_use_id: optionalStr(subagent.tool_use_id, `${path}.tool_use_id`),
+          agent_type: optionalStr(subagent.agent_type, `${path}.agent_type`),
+          description: optionalStr(subagent.description, `${path}.description`),
+          running: bool(subagent.running, `${path}.running`),
+        };
+      },
     ),
   };
 }

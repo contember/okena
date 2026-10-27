@@ -74,6 +74,8 @@ const EVENT_HOOKS = [
   ["PostToolUseFailure", "*"],
   ["Stop", null],
   ["SessionEnd", null],
+  ["SubagentStart", null],
+  ["SubagentStop", null],
 ];
 
 // The permission hook waits until a remote client answers, or the terminal

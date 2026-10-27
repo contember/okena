@@ -429,7 +429,7 @@ pub async fn get_json_async<T: serde::de::DeserializeOwned>(
     let (client, origin) = crate::remote_http::async_client_and_url(config, "")
         .map_err(JsonRequestError::Transport)?;
     let url = route_url(&origin, segments, query).map_err(JsonRequestError::Transport)?;
-    send_json_request(client.get(url), token).await
+    send_json_request(client.get(url), token, FAST_TIMEOUT).await
 }
 
 /// `POST` a JSON body to a route; see [`get_json_async`].
@@ -443,8 +443,37 @@ pub async fn post_json_async<T: serde::de::DeserializeOwned, B: serde::Serialize
     let (client, origin) = crate::remote_http::async_client_and_url(config, "")
         .map_err(JsonRequestError::Transport)?;
     let url = route_url(&origin, segments, &[]).map_err(JsonRequestError::Transport)?;
-    send_json_request(client.post(url).json(body), token).await
+    send_json_request(client.post(url).json(body), token, FAST_TIMEOUT).await
 }
+
+/// `POST` raw bytes (a file upload) to a route and parse its JSON answer; see
+/// [`get_json_async`]. `headers` are added as they are.
+#[cfg(feature = "client")]
+pub async fn post_bytes_async<T: serde::de::DeserializeOwned>(
+    config: &RemoteConnectionConfig,
+    token: &str,
+    segments: &[&str],
+    headers: &[(&str, &str)],
+    body: Vec<u8>,
+) -> Result<T, JsonRequestError> {
+    let (client, origin) = crate::remote_http::async_client_and_url(config, "")
+        .map_err(JsonRequestError::Transport)?;
+    let url = route_url(&origin, segments, &[]).map_err(JsonRequestError::Transport)?;
+    let mut request = client
+        .post(url)
+        .header("Content-Type", "application/octet-stream")
+        .body(body);
+    for (name, value) in headers {
+        request = request.header(*name, *value);
+    }
+    send_json_request(request, token, UPLOAD_TIMEOUT).await
+}
+
+#[cfg(feature = "client")]
+const FAST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(FAST_TIMEOUT_SECS);
+/// Long enough for tens of MiB over a phone's uplink.
+#[cfg(feature = "client")]
+const UPLOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 
 #[cfg(feature = "client")]
 fn route_url(
@@ -468,10 +497,11 @@ fn route_url(
 async fn send_json_request<T: serde::de::DeserializeOwned>(
     request: reqwest::RequestBuilder,
     token: &str,
+    timeout: std::time::Duration,
 ) -> Result<T, JsonRequestError> {
     let mut response = request
         .bearer_auth(token)
-        .timeout(std::time::Duration::from_secs(FAST_TIMEOUT_SECS))
+        .timeout(timeout)
         .send()
         .await
         .map_err(|e| JsonRequestError::Transport(format!("HTTP request failed: {e}")))?;

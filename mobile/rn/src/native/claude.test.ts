@@ -5,6 +5,7 @@ import {
   ClaudeWireError,
   parseClaudePromptResponse,
   parseClaudeSession,
+  parseClaudeSubagentList,
   parseClaudeTranscriptPage,
   previewClaudeToolInput,
   readClaudePlan,
@@ -31,7 +32,35 @@ const SESSION = {
       created_at_ms: 1700000000000,
     },
   ],
+  running_subagents: [{ agent_id: 'a1', agent_type: 'Explore' }],
 };
+
+describe('parseClaudeSubagentList', () => {
+  it('accepts the wire shape with optional fields left out', () => {
+    const list = {
+      session_id: 's1',
+      subagents: [
+        {
+          agent_id: 'a1',
+          tool_use_id: 'toolu_1',
+          agent_type: 'Explore',
+          description: 'Find callers',
+          running: true,
+        },
+        { agent_id: 'b2', running: false },
+      ],
+    };
+    expect(parseClaudeSubagentList(JSON.stringify(list))).toEqual(list);
+  });
+
+  it('rejects a subagent without its running flag', () => {
+    expect(() =>
+      parseClaudeSubagentList('{"subagents":[{"agent_id":"a1"}]}'),
+    ).toThrow(
+      new ClaudeWireError('subagents.subagents[0].running: expected a boolean'),
+    );
+  });
+});
 
 describe('parseClaudeSession', () => {
   it('accepts the wire shape', () => {
@@ -53,6 +82,7 @@ describe('parseClaudeSession', () => {
     expect(parsed.session_id).toBeUndefined();
     expect(parsed.busy).toBeUndefined();
     expect(parsed.dialogs[0]!.permission_suggestions).toEqual([]);
+    expect(parsed.running_subagents).toEqual([]);
   });
 
   it('accepts any JSON value as tool_input, but requires one', () => {

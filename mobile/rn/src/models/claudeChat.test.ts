@@ -193,6 +193,7 @@ describe('claudeActivity', () => {
     busy: false,
     queued_prompts: 0,
     dialogs: [],
+    running_subagents: [],
   };
   const dialog: ApiClaudeDialog = {
     id: 'd1',

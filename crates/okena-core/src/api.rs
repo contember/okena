@@ -14,6 +14,13 @@ pub use crate::usage::{
 // ── API request/response types ──────────────────────────────────────────────
 
 /// GET /health response
+/// `POST /v1/files/upload`: where the uploaded file was stored on the server
+/// host.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ApiUploadResponse {
+    pub path: String,
+}
+
 #[derive(Serialize, Deserialize)]
 pub struct HealthResponse {
     pub status: String,

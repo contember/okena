@@ -26,6 +26,7 @@ function session(terminalId: string, dialogs: ApiClaudeDialog[]): string {
     channel_attached: false,
     queued_prompts: 0,
     dialogs,
+    running_subagents: [],
   };
   return JSON.stringify(value);
 }

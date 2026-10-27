@@ -1,5 +1,6 @@
 //! Materialize pasted images and dropped files on the daemon host, then paste
-//! their server-local paths into the target terminal.
+//! their server-local paths into the target terminal (or, for a plain upload,
+//! only return the path).
 //!
 //! The image must live where the terminal's process runs: the client's local
 //! clipboard isn't reachable from here, and a client-local path would point at
@@ -14,6 +15,7 @@ use axum::body::Bytes;
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode, header::CONTENT_TYPE};
 use axum::response::{IntoResponse, Response};
+use okena_core::api::ApiUploadResponse;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Max accepted image upload (20 MiB). Clipboard screenshots — especially
@@ -52,6 +54,51 @@ pub async fn post_paste_file(
     materialize_and_paste(state, terminal_id, body, extension, true, "file").await
 }
 
+/// Store a file the client uploads, without pasting it anywhere, and return
+/// its server-local path (for a Claude remote prompt, for example).
+pub async fn post_upload_file(headers: HeaderMap, body: Bytes) -> Response {
+    let extension = headers
+        .get("x-okena-file-extension")
+        .and_then(|value| value.to_str().ok())
+        .and_then(safe_file_extension)
+        .unwrap_or("bin");
+    match materialize(&body, extension, "file").await {
+        Ok(path) => Json(ApiUploadResponse {
+            path: path.to_string_lossy().into_owned(),
+        })
+        .into_response(),
+        Err(response) => response,
+    }
+}
+
+/// Write the upload to a temp file on the daemon host.
+async fn materialize(
+    body: &Bytes,
+    extension: &str,
+    kind: &str,
+) -> Result<std::path::PathBuf, Response> {
+    if body.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": format!("empty {kind} body")})),
+        )
+            .into_response());
+    }
+
+    let filename = format!("okena-remote-paste-{}.{}", next_token(), extension);
+    let path = std::env::temp_dir().join(filename);
+
+    if let Err(e) = tokio::fs::write(&path, body).await {
+        log::error!("paste upload: failed to write {}: {}", path.display(), e);
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": format!("failed to write {kind}: {e}")})),
+        )
+            .into_response());
+    }
+    Ok(path)
+}
+
 async fn materialize_and_paste(
     state: AppState,
     terminal_id: String,
@@ -60,25 +107,10 @@ async fn materialize_and_paste(
     append_space: bool,
     kind: &str,
 ) -> Response {
-    if body.is_empty() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": format!("empty {kind} body")})),
-        )
-            .into_response();
-    }
-
-    let filename = format!("okena-remote-paste-{}.{}", next_token(), extension);
-    let path = std::env::temp_dir().join(filename);
-
-    if let Err(e) = tokio::fs::write(&path, &body).await {
-        log::error!("paste upload: failed to write {}: {}", path.display(), e);
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": format!("failed to write {kind}: {e}")})),
-        )
-            .into_response();
-    }
+    let path = match materialize(&body, extension, kind).await {
+        Ok(path) => path,
+        Err(response) => return response,
+    };
 
     let path_str = path.to_string_lossy().into_owned();
     let text = if append_space {

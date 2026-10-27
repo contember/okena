@@ -33,6 +33,7 @@ function session(overrides: Partial<ApiClaudeSession> = {}): ApiClaudeSession {
     busy: false,
     queued_prompts: 0,
     dialogs: [],
+    running_subagents: [],
     ...overrides,
   };
 }
@@ -87,6 +88,9 @@ function stubNative(
     ),
     claudeSendPrompt: jest.fn(async () =>
       JSON.stringify({ delivery: 'channel' }),
+    ),
+    claudeGetSubagents: jest.fn(async () =>
+      JSON.stringify({ session_id: 's1', subagents: [] }),
     ),
     claudeAnswerDialog: jest.fn(async () => {}),
     sendSpecialKey: jest.fn(async () => {}),
@@ -509,5 +513,109 @@ describe('claude store', () => {
     await useClaudeStore.getState().interrupt();
 
     expect(native.sendSpecialKey).toHaveBeenCalledWith('conn', 't1', 'Escape');
+  });
+
+  it('lists subagents once an Agent call shows up and polls an open one', async () => {
+    const agentCall: ApiClaudeEntry = {
+      kind: 'tool_use',
+      uuid: 'u1',
+      tool_use_id: 'toolu_1',
+      name: 'Agent',
+      summary: 'Find callers',
+    };
+    const { native } = stubNative([
+      page({ entries: [assistant('a')], cursor: 10, reset: true }),
+    ]);
+    const getSubagents = jest.fn(async () =>
+      JSON.stringify({
+        session_id: 's1',
+        subagents: [
+          {
+            agent_id: 'ag1',
+            tool_use_id: 'toolu_1',
+            agent_type: 'Explore',
+            running: true,
+          },
+        ],
+      }),
+    );
+    const getTranscript = jest.fn(
+      async (
+        _conn: string,
+        _terminal: string,
+        _cursor: bigint,
+        _sessionId: string | undefined,
+        agentId: string | undefined,
+      ) =>
+        JSON.stringify(
+          agentId === 'ag1'
+            ? page({ entries: [assistant('inner')], cursor: 7, reset: true })
+            : page({ entries: [agentCall], cursor: 10, reset: true }),
+        ),
+    );
+    configureClaudeStore({
+      native: {
+        ...native,
+        claudeGetSubagents: getSubagents,
+        claudeGetTranscript: getTranscript,
+      },
+    });
+
+    useClaudeStore.getState().open('conn', 't1');
+    await jest.advanceTimersByTimeAsync(0);
+    expect(getSubagents).toHaveBeenCalledTimes(1);
+    expect(useClaudeStore.getState().subagents.map((s) => s.agent_id)).toEqual([
+      'ag1',
+    ]);
+
+    // Listed now: further polls do not ask again.
+    await jest.advanceTimersByTimeAsync(5 * CLAUDE_POLL_MS);
+    expect(getSubagents).toHaveBeenCalledTimes(1);
+
+    useClaudeStore.getState().openSubagent('ag1');
+    await jest.advanceTimersByTimeAsync(0);
+    expect(useClaudeStore.getState().subagent).toMatchObject({
+      agentId: 'ag1',
+      cursor: 7,
+      entries: [{ uuid: 'inner' }],
+    });
+    await jest.advanceTimersByTimeAsync(CLAUDE_POLL_MS);
+    expect(getTranscript).toHaveBeenLastCalledWith(
+      'conn',
+      't1',
+      7n,
+      's1',
+      'ag1',
+    );
+
+    useClaudeStore.getState().closeSubagent();
+    expect(useClaudeStore.getState().subagent).toBeNull();
+  });
+
+  it('keeps working when the server has no subagent list', async () => {
+    const agentCall: ApiClaudeEntry = {
+      kind: 'tool_use',
+      uuid: 'u1',
+      tool_use_id: 'toolu_1',
+      name: 'Agent',
+      summary: 'x',
+    };
+    const { native } = stubNative([
+      page({ entries: [agentCall], cursor: 10, reset: true }),
+    ]);
+    const getSubagents = jest.fn(async () => {
+      throw new Error('Server returned 404');
+    });
+    configureClaudeStore({
+      native: { ...native, claudeGetSubagents: getSubagents },
+    });
+
+    useClaudeStore.getState().open('conn', 't1');
+    await jest.advanceTimersByTimeAsync(0);
+    await jest.advanceTimersByTimeAsync(CLAUDE_POLL_MS);
+    // Throttled, not refetched every poll.
+    expect(getSubagents).toHaveBeenCalledTimes(1);
+    expect(useClaudeStore.getState().transcriptError).toBeNull();
+    expect(useClaudeStore.getState().entries).toHaveLength(1);
   });
 });

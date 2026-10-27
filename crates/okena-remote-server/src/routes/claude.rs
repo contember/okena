@@ -97,6 +97,9 @@ pub struct TranscriptQuery {
     cursor: Option<u64>,
     #[serde(default)]
     session_id: Option<String>,
+    /// Read this subagent's transcript instead of the session's.
+    #[serde(default)]
+    agent_id: Option<String>,
 }
 
 pub async fn get_transcript(
@@ -106,9 +109,16 @@ pub async fn get_transcript(
 ) -> Result<impl IntoResponse, ClaudeRemoteError> {
     state
         .claude_hub
-        .transcript(&terminal_id, query.cursor, query.session_id)
+        .transcript(&terminal_id, query.cursor, query.session_id, query.agent_id)
         .await
         .map(Json)
+}
+
+pub async fn get_subagents(
+    State(state): State<AppState>,
+    Path(terminal_id): Path<String>,
+) -> Result<impl IntoResponse, ClaudeRemoteError> {
+    state.claude_hub.subagents(&terminal_id).await.map(Json)
 }
 
 pub async fn post_prompt(
@@ -276,6 +286,7 @@ mod tests {
         let calls = [
             ("GET", "/v1/claude/terminals/t1"),
             ("GET", "/v1/claude/terminals/t1/transcript?cursor=0"),
+            ("GET", "/v1/claude/terminals/t1/subagents"),
             ("POST", "/v1/claude/terminals/t1/prompt"),
             ("POST", "/v1/claude/terminals/t1/dialogs/1"),
         ];

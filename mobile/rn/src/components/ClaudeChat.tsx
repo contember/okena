@@ -2,14 +2,17 @@
  * ClaudeChat.tsx — the chat view of the `claude` session in one terminal,
  * shown by the workspace in place of the terminal.
  *
- * Top to bottom: a status strip (what Claude is doing), a notice when the
- * session is not connected to Okena, the transcript, the open dialog cards and
- * the composer. It opens {@link useClaudeStore} for its terminal on mount and
- * closes it on unmount; the store does the polling.
+ * Top to bottom: a status strip (what Claude is doing, its running
+ * subagents), a notice when the session is not connected to Okena, the
+ * transcript, the open dialog cards and the composer. An open subagent
+ * replaces the transcript and the composer with its own read-only transcript.
+ * It opens {@link useClaudeStore} for its terminal on mount and closes it on
+ * unmount; the store does the polling.
  */
 
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
+  BackHandler,
   FlatList,
   Keyboard,
   Pressable,
@@ -23,6 +26,7 @@ import {
 import { ChatMarkdown } from './ChatMarkdown';
 import { ClaudeDialogCard } from './ClaudeDialogCard';
 import { Icon } from './Icon';
+import { appendPath, useFileAttach } from './useFileAttach';
 import {
   buildClaudeChatRows,
   claudeActivity,
@@ -30,9 +34,14 @@ import {
   type ClaudeActivity,
   type ClaudeChatRow,
 } from '../models/claudeChat';
-import type { ApiClaudePromptDelivery } from '../native/claude';
+import type {
+  ApiClaudePromptDelivery,
+  ApiClaudeSubagent,
+} from '../native/claude';
 import type { ConnId, TerminalId } from '../native/okena';
+import { getOkenaNative } from '../native/okena';
 import { useClaudeStore } from '../state';
+import { CLAUDE_AGENT_TOOLS } from '../state/claudeStore';
 import { OkenaColors, TerminalTheme } from '../theme';
 
 const ACTIVITY: Record<ClaudeActivity, { label: string; color: string }> = {
@@ -78,6 +87,7 @@ export const ClaudeChat: React.FC<ClaudeChatProps> = ({
   const open = useClaudeStore((s) => s.open);
   const close = useClaudeStore((s) => s.close);
   const answerDialog = useClaudeStore((s) => s.answerDialog);
+  const subagentOpen = useClaudeStore((s) => s.subagent !== null);
 
   useEffect(() => {
     open(connId, terminalId);
@@ -102,6 +112,7 @@ export const ClaudeChat: React.FC<ClaudeChatProps> = ({
   return (
     <View style={styles.root}>
       <StatusStrip activity={activity} queued={session?.queued_prompts ?? 0} />
+      <RunningSubagents />
       {activity === 'unhooked' ? (
         <View style={styles.notice}>
           <Text style={styles.noticeText}>{UNHOOKED_HINT}</Text>
@@ -118,7 +129,9 @@ export const ClaudeChat: React.FC<ClaudeChatProps> = ({
         <Text style={[styles.notice, styles.errorText]}>{pollError}</Text>
       ) : null}
 
-      {rows.length === 0 ? (
+      {subagentOpen ? (
+        <SubagentTranscript />
+      ) : rows.length === 0 ? (
         // Outside the list: an inverted list draws its empty component upside down.
         <View style={styles.empty}>
           <Text style={styles.emptyText}>
@@ -164,7 +177,7 @@ export const ClaudeChat: React.FC<ClaudeChatProps> = ({
         </ScrollView>
       ) : null}
 
-      <Composer />
+      {subagentOpen ? null : <Composer connId={connId} />}
     </View>
   );
 };
@@ -188,15 +201,150 @@ const StatusStrip: React.FC<{ activity: ClaudeActivity; queued: number }> = ({
   );
 };
 
-const WorkingRow: React.FC = () => (
+/** A subagent's label: its description, else its type. */
+function subagentTitle(
+  subagent: Pick<ApiClaudeSubagent, 'description' | 'agent_type'> | undefined,
+): string {
+  return subagent?.description ?? subagent?.agent_type ?? 'Subagent';
+}
+
+/** One line per running subagent; a tap opens its transcript. */
+const RunningSubagents: React.FC = () => {
+  const running = useClaudeStore((s) => s.session?.running_subagents);
+  const subagents = useClaudeStore((s) => s.subagents);
+  const openSubagent = useClaudeStore((s) => s.openSubagent);
+  if (!running || running.length === 0) return null;
+  return (
+    <View style={styles.agents}>
+      {running.map((agent) => {
+        const listed = subagents.find(
+          (subagent) => subagent.agent_id === agent.agent_id,
+        );
+        return (
+          <Pressable
+            key={agent.agent_id}
+            style={({ pressed }) => [
+              styles.agentLine,
+              pressed && styles.pressed,
+            ]}
+            onPress={() => openSubagent(agent.agent_id)}
+            accessibilityRole="button"
+            accessibilityLabel={`Open subagent ${subagentTitle(listed)}`}
+          >
+            <View style={[styles.dot, styles.runningDot]} />
+            <Text style={styles.agentType} numberOfLines={1}>
+              {agent.agent_type || 'agent'}
+            </Text>
+            <Text style={styles.agentTitle} numberOfLines={1}>
+              {listed?.description ?? ''}
+            </Text>
+            <Icon
+              name="chevronRight"
+              size={14}
+              color={OkenaColors.textTertiary}
+            />
+          </Pressable>
+        );
+      })}
+    </View>
+  );
+};
+
+/** The open subagent's transcript, read-only; back returns to the session. */
+const SubagentTranscript: React.FC = () => {
+  const subagent = useClaudeStore((s) => s.subagent);
+  const listed = useClaudeStore((s) =>
+    s.subagents.find((agent) => agent.agent_id === s.subagent?.agentId),
+  );
+  const running = useClaudeStore(
+    (s) =>
+      s.session?.running_subagents.some(
+        (agent) => agent.agent_id === s.subagent?.agentId,
+      ) === true,
+  );
+  const closeSubagent = useClaudeStore((s) => s.closeSubagent);
+
+  useEffect(() => {
+    const subscription = BackHandler.addEventListener(
+      'hardwareBackPress',
+      () => {
+        closeSubagent();
+        return true;
+      },
+    );
+    return () => subscription.remove();
+  }, [closeSubagent]);
+
+  const entries = subagent?.entries;
+  const rows = useMemo(
+    () => buildClaudeChatRows(entries ?? []).reverse(),
+    [entries],
+  );
+  if (subagent === null) return null;
+
+  return (
+    <View style={styles.flex}>
+      <View style={styles.subagentBar}>
+        <Pressable
+          hitSlop={10}
+          onPress={closeSubagent}
+          accessibilityRole="button"
+          accessibilityLabel="Back to the session"
+        >
+          <Icon name="chevronLeft" size={20} color={OkenaColors.accent} />
+        </Pressable>
+        <View style={styles.subagentHeading}>
+          <Text style={styles.subagentTitle} numberOfLines={1}>
+            {subagentTitle(listed)}
+          </Text>
+          <Text style={styles.stripMeta} numberOfLines={1}>
+            {[listed?.agent_type, running ? 'running' : 'finished']
+              .filter(Boolean)
+              .join(' · ')}
+          </Text>
+        </View>
+      </View>
+      {subagent.error ? (
+        <Text style={[styles.notice, styles.errorText]}>{subagent.error}</Text>
+      ) : null}
+      {rows.length === 0 ? (
+        <View style={styles.empty}>
+          <Text style={styles.emptyText}>
+            {subagent.cursor === 0 ? 'Loading…' : 'No messages yet'}
+          </Text>
+        </View>
+      ) : (
+        <FlatList
+          style={styles.flex}
+          contentContainerStyle={styles.listContent}
+          inverted
+          data={rows}
+          keyExtractor={(row) => row.key}
+          renderItem={({ item }) => <ChatRow row={item} />}
+          ListHeaderComponent={
+            running ? <WorkingRow label="Subagent is working" /> : null
+          }
+        />
+      )}
+    </View>
+  );
+};
+
+const WorkingRow: React.FC<{ label?: string }> = ({
+  label = 'Claude is working',
+}) => (
   <View style={styles.working}>
     <View style={[styles.dot, { backgroundColor: OkenaColors.accent }]} />
-    <Text style={styles.workingText}>Claude is working</Text>
+    <Text style={styles.workingText}>{label}</Text>
   </View>
 );
 
-const Composer: React.FC = () => {
+const Composer: React.FC<{ connId: ConnId }> = ({ connId }) => {
   const [text, setText] = useState('');
+  const native = useMemo(() => getOkenaNative(), []);
+  const attachment = useFileAttach(native, connId, (path) =>
+    setText((current) => appendPath(current, path)),
+  );
   const busy = useClaudeStore((s) => s.session?.busy === true);
   const sending = useClaudeStore((s) => s.sending);
   const lastDelivery = useClaudeStore((s) => s.lastDelivery);
@@ -222,18 +370,40 @@ const Composer: React.FC = () => {
     return () => clearTimeout(timer);
   }, [lastDelivery]);
 
-  const status = promptError ?? deliveryNote;
+  const status =
+    attachment.error ??
+    (attachment.uploading ? 'Uploading file…' : null) ??
+    promptError ??
+    deliveryNote;
   // While Claude works and nothing is typed, the button stops the turn.
   const showStop = busy && !hasText;
 
   return (
     <View style={styles.composer}>
       {status ? (
-        <Text style={[styles.status, promptError ? styles.errorText : null]}>
+        <Text
+          style={[
+            styles.status,
+            attachment.error || promptError ? styles.errorText : null,
+          ]}
+        >
           {status}
         </Text>
       ) : null}
       <View style={styles.composerRow}>
+        <Pressable
+          style={({ pressed }) => [
+            styles.attachBtn,
+            (pressed || attachment.uploading) && styles.pressed,
+          ]}
+          disabled={attachment.uploading}
+          onPress={attachment.attach}
+          accessibilityRole="button"
+          accessibilityLabel="Attach a file"
+          accessibilityHint="Uploads it to the server and adds its path to the message"
+        >
+          <Icon name="plus" size={22} color={OkenaColors.textSecondary} />
+        </Pressable>
         <TextInput
           style={styles.input}
           value={text}
@@ -321,11 +491,66 @@ const ToolRow: React.FC<{ row: Extract<ClaudeChatRow, { kind: 'tool' }> }> = ({
   const [expanded, setExpanded] = useState(false);
   const pending = row.result === undefined;
   const failed = row.result?.is_error === true;
+  const toolUseId =
+    row.use && CLAUDE_AGENT_TOOLS.has(row.use.name)
+      ? row.use.tool_use_id
+      : undefined;
+  return (
+    <View>
+      <ToolCall
+        row={row}
+        expanded={expanded}
+        pending={pending}
+        failed={failed}
+        onToggle={() => setExpanded((value) => !value)}
+      />
+      {toolUseId === undefined ? null : <SubagentLink toolUseId={toolUseId} />}
+    </View>
+  );
+};
+
+/** Opens the subagent an `Agent` call started, once the server lists it. */
+const SubagentLink: React.FC<{ toolUseId: string }> = ({ toolUseId }) => {
+  const subagent = useClaudeStore((s) =>
+    s.subagents.find((agent) => agent.tool_use_id === toolUseId),
+  );
+  const running = useClaudeStore(
+    (s) =>
+      subagent !== undefined &&
+      s.session?.running_subagents.some(
+        (agent) => agent.agent_id === subagent.agent_id,
+      ) === true,
+  );
+  const openSubagent = useClaudeStore((s) => s.openSubagent);
+  if (subagent === undefined) return null;
+  return (
+    <Pressable
+      style={({ pressed }) => [styles.subagentLink, pressed && styles.pressed]}
+      onPress={() => openSubagent(subagent.agent_id)}
+      accessibilityRole="button"
+      accessibilityLabel={`Open subagent ${subagentTitle(subagent)}`}
+    >
+      {running ? <View style={[styles.dot, styles.runningDot]} /> : null}
+      <Text style={styles.subagentLinkText}>
+        {running ? 'Subagent running · view' : 'View subagent'}
+      </Text>
+      <Icon name="chevronRight" size={12} color={OkenaColors.accent} />
+    </Pressable>
+  );
+};
+
+const ToolCall: React.FC<{
+  row: Extract<ClaudeChatRow, { kind: 'tool' }>;
+  expanded: boolean;
+  pending: boolean;
+  failed: boolean;
+  onToggle: () => void;
+}> = ({ row, expanded, pending, failed, onToggle }) => {
   return (
     <Pressable
       style={styles.tool}
       disabled={pending}
-      onPress={() => setExpanded((value) => !value)}
+      onPress={onToggle}
       accessibilityRole="button"
       accessibilityState={{ expanded, disabled: pending }}
     >
@@ -419,6 +644,54 @@ const styles = StyleSheet.create({
   listContent: { paddingHorizontal: 14, paddingVertical: 12 },
   working: { flexDirection: 'row', alignItems: 'center', paddingVertical: 8 },
   workingText: { color: OkenaColors.textTertiary, fontSize: 13 },
+  runningDot: { backgroundColor: OkenaColors.accent },
+  agents: {
+    paddingHorizontal: 14,
+    paddingVertical: 4,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: OkenaColors.border,
+  },
+  agentLine: { flexDirection: 'row', alignItems: 'center', paddingVertical: 5 },
+  agentType: {
+    color: OkenaColors.textSecondary,
+    fontSize: 12,
+    fontWeight: '600',
+    maxWidth: '40%',
+  },
+  agentTitle: {
+    flex: 1,
+    color: OkenaColors.textTertiary,
+    fontSize: 12,
+    marginLeft: 8,
+  },
+  subagentBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: OkenaColors.border,
+    backgroundColor: OkenaColors.surface,
+  },
+  subagentHeading: { flex: 1, marginLeft: 10 },
+  subagentTitle: {
+    color: OkenaColors.textPrimary,
+    fontSize: 14,
+    fontWeight: '600',
+  },
+  subagentLink: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    alignSelf: 'flex-start',
+    marginLeft: 20,
+    paddingVertical: 4,
+  },
+  subagentLinkText: {
+    color: OkenaColors.accent,
+    fontSize: 12,
+    fontWeight: '600',
+    marginRight: 2,
+  },
   userBubble: {
     alignSelf: 'flex-end',
     maxWidth: '85%',
@@ -495,6 +768,13 @@ const styles = StyleSheet.create({
     paddingBottom: 10,
     color: OkenaColors.textPrimary,
     fontSize: 15,
+  },
+  attachBtn: {
+    width: 36,
+    height: 40,
+    marginRight: 4,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   roundBtn: {
     width: 40,
