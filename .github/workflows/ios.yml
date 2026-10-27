@@ -94,8 +94,20 @@ jobs:
       - name: Build Rust and generate bindings
         run: npm run ubrn:ios -- --no-sim
       - name: Install pods
+        id: pods
         working-directory: mobile/rn/ios
         run: bundle exec pod install --deployment
+      # A stale lock fails the job either way; this hands out the updated one to commit.
+      - name: Regenerate stale Podfile.lock
+        if: failure() && steps.pods.outcome == 'failure'
+        working-directory: mobile/rn/ios
+        run: bundle exec pod install
+      - name: Upload regenerated Podfile.lock
+        if: failure() && steps.pods.outcome == 'failure'
+        uses: actions/upload-artifact@v4
+        with:
+          name: Podfile.lock
+          path: mobile/rn/ios/Podfile.lock
       - name: Archive
         working-directory: mobile/rn/ios
         run: |
