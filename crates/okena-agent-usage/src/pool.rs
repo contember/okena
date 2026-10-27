@@ -576,8 +576,9 @@ struct DayPlan<'a> {
 
 impl DayPlan<'_> {
     /// When the pool first cannot serve `per_day` on every working day (and
-    /// the usual use of the others), drawing the quota that resets first.
-    /// Today's remainder spreads over the rest of today.
+    /// the usual use of the others). A day may use its amount at any time
+    /// within it, so a quota that resets that day serves it both before and
+    /// after the reset. Today's remainder falls within the rest of today.
     fn shortage(&self, per_day: f64) -> Option<i64> {
         let mut quotas = self.quotas.to_vec();
         for (index, day) in self.days.iter().enumerate() {
@@ -588,50 +589,58 @@ impl DayPlan<'_> {
                 (day.start_ms, budget)
             };
             let end = day.end_ms;
-            if end <= start {
+            if end <= start || amount <= 0.0 {
                 continue;
             }
-            let per_ms = amount / (end - start) as f64;
-            let mut t = start;
-            while t < end {
-                for quota in &mut quotas {
-                    if let Some(reset) = quota.reset_ms.filter(|reset| *reset <= t) {
-                        quota.used = 0.0;
-                        quota.reset_ms = Some(reset + WEEK_MS);
-                    }
-                }
-                let next = quotas
-                    .iter()
-                    .filter_map(|quota| quota.reset_ms)
-                    .filter(|reset| *reset > t)
-                    .min()
-                    .unwrap_or(end)
-                    .min(end);
-                let mut need = per_ms * (next - t) as f64;
-                let available: f64 = quotas
-                    .iter()
-                    .map(|quota| (100.0 - quota.used).max(0.0) * quota.weight)
-                    .sum();
-                if need > available + 1e-9 {
-                    return Some(t + (available / per_ms) as i64);
-                }
-                quotas.sort_by_key(|quota| quota.reset_ms.unwrap_or(i64::MAX));
-                for quota in &mut quotas {
-                    if need <= 0.0 {
-                        break;
-                    }
-                    let take = need.min((100.0 - quota.used).max(0.0) * quota.weight);
-                    if take > 0.0 {
-                        quota.used += take / quota.weight;
-                        quota.reset_ms.get_or_insert(t + WEEK_MS);
-                        need -= take;
-                    }
-                }
-                t = next;
+            refill(&mut quotas, start);
+            // The leftover a reset today would discard goes first.
+            let need = draw(&mut quotas, amount, start, |reset| {
+                reset.is_some_and(|reset| reset <= end)
+            });
+            refill(&mut quotas, end);
+            let short = draw(&mut quotas, need, end, |_| true);
+            if short > 1e-9 {
+                // The moment the day's use, spread evenly, exhausts what it got.
+                let served = (amount - short) / amount;
+                return Some(start + ((end - start) as f64 * served) as i64);
             }
         }
         None
     }
+}
+
+/// Resets every quota whose weekly reset is due by `at`.
+fn refill(quotas: &mut [WeeklyQuota], at: i64) {
+    for quota in quotas {
+        while let Some(reset) = quota.reset_ms.filter(|reset| *reset <= at) {
+            quota.used = 0.0;
+            quota.reset_ms = Some(reset + WEEK_MS);
+        }
+    }
+}
+
+/// Takes `need` from the quotas whose reset `from` accepts, the one resetting
+/// first first; returns what they could not serve. A quota without a known
+/// reset starts its week at `at`.
+fn draw(
+    quotas: &mut [WeeklyQuota],
+    mut need: f64,
+    at: i64,
+    from: impl Fn(Option<i64>) -> bool,
+) -> f64 {
+    quotas.sort_by_key(|quota| quota.reset_ms.unwrap_or(i64::MAX));
+    for quota in quotas.iter_mut().filter(|quota| from(quota.reset_ms)) {
+        if need <= 0.0 {
+            break;
+        }
+        let take = need.min((100.0 - quota.used).max(0.0) * quota.weight);
+        if take > 0.0 {
+            quota.used += take / quota.weight;
+            quota.reset_ms.get_or_insert(at + WEEK_MS);
+            need -= take;
+        }
+    }
+    need
 }
 
 #[cfg(test)]
@@ -870,13 +879,54 @@ mod tests {
             now,
             &TimeZone::UTC,
         );
-        // The rest of Wednesday, Thursday and half of Friday share A's 100
-        // weighted points: 2.5 days of 40.
-        assert!((today.safe_per_day - 40.0).abs() < 0.01);
+        // The rest of Wednesday and Thursday share A's 100 weighted points;
+        // Friday may wait for A's reset at noon: 2 days of 50.
+        assert!((today.safe_per_day - 50.0).abs() < 0.01);
+        // More runs out at the end of Thursday.
         let bottleneck = today.bottleneck_ms.unwrap();
-        assert!((bottleneck - (now.as_millisecond() + 2 * 24 * HOUR_MS)).abs() < HOUR_MS);
+        assert!((bottleneck - (now.as_millisecond() + 36 * HOUR_MS)).abs() < HOUR_MS);
         assert_eq!(today.used, 0.0);
         assert_eq!(today.wall_at_recent_pace_ms, None);
+    }
+
+    #[test]
+    fn a_reset_during_the_day_serves_that_day_and_today_moves_one_to_one() {
+        // Tuesday 17:00. A has 5 left until Wednesday 05:00, B is out until
+        // Wednesday 22:00; both are Max 5x.
+        let now = jiff::civil::date(2026, 10, 27)
+            .at(17, 0, 0, 0)
+            .to_zoned(TimeZone::UTC)
+            .unwrap()
+            .timestamp();
+        let wednesday = now.as_millisecond() + 7 * HOUR_MS;
+        let left_today = |a_used: f64| {
+            let a = AiAccount {
+                seven_day: usage(a_used, Some(wednesday + 5 * HOUR_MS)),
+                ..account(None)
+            };
+            let b = AiAccount {
+                seven_day: usage(100.0, Some(wednesday + 22 * HOUR_MS)),
+                ..account(None)
+            };
+            let history = History::from_samples(vec![sample(
+                secs(now) - 17.0 * 3600.0,
+                None,
+                Some((90.0, (wednesday + 5 * HOUR_MS) as f64 / 1000.0)),
+            )]);
+            let empty = History::default();
+            today(
+                &[(&a, &history), (&b, &empty)],
+                WorkingDays::all(),
+                now,
+                &TimeZone::UTC,
+            )
+            .left()
+        };
+        // Wednesday waits for the resets, so only today's remainder is tight:
+        // the 25 weighted points A has left.
+        assert!((left_today(95.0) - 25.0).abs() < 0.01);
+        // Each weekly point used today takes one off what is left.
+        assert!((left_today(96.0) - 20.0).abs() < 0.01);
     }
 
     #[test]
