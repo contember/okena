@@ -35,8 +35,11 @@ use std::time::Instant;
 
 // The web client is built into `<repo>/web/dist`. This crate's manifest dir is
 // `<repo>/crates/okena-remote-server`, so reach the repo root via `../../`.
+// `web/dist` is gitignored; `allow_missing` keeps fresh checkouts building and
+// `serve_web_asset` reports the missing client instead.
 #[derive(RustEmbed)]
 #[folder = "$CARGO_MANIFEST_DIR/../../web/dist"]
+#[allow_missing = true]
 struct WebAssets;
 
 /// Shared state available to all route handlers.
@@ -329,7 +332,11 @@ async fn serve_web_asset(uri: axum::http::Uri) -> axum::response::Response {
             // SPA fallback: serve index.html for unmatched routes
             match WebAssets::get("index.html") {
                 Some(content) => serve_embedded_file("index.html", content),
-                None => (StatusCode::NOT_FOUND, "web client not available").into_response(),
+                None => (
+                    StatusCode::NOT_FOUND,
+                    "web client not built (run: cd web && bun install && bun run build)",
+                )
+                    .into_response(),
             }
         }
     }
