@@ -189,12 +189,95 @@ pub enum Command {
         cmd: UpdateCmd,
     },
 
+    /// Follow and steer the `claude` sessions running in terminals
+    Claude {
+        #[command(subcommand)]
+        cmd: ClaudeCmd,
+    },
+
     /// Claude Code integration for remote clients; run by `claude`, not by people
     #[command(name = crate::CLAUDE_REMOTE_SUBCOMMAND, hide = true)]
     ClaudeRemote {
         #[command(subcommand)]
         cmd: ClaudeRemoteCmd,
     },
+}
+
+#[derive(Subcommand)]
+pub enum ClaudeCmd {
+    /// List terminals whose `claude` is connected (or has an open dialog)
+    Ls {
+        /// Output JSON instead of tab-separated text
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show a session's status and open dialogs
+    Show {
+        /// Terminal address (id, project/name, or project:index)
+        terminal: String,
+        /// Output JSON instead of tab-separated text
+        #[arg(long)]
+        json: bool,
+    },
+    /// List the session's subagents (ids for `claude log --agent`)
+    Subagents {
+        /// Terminal address (id, project/name, or project:index)
+        terminal: String,
+        /// Output JSON instead of tab-separated text
+        #[arg(long)]
+        json: bool,
+    },
+    /// Print a transcript page and the cursor for the next one
+    Log {
+        /// Terminal address (id, project/name, or project:index)
+        terminal: String,
+        /// Cursor printed by the previous `log`; omit for the whole transcript
+        #[arg(long)]
+        cursor: Option<String>,
+        /// Read this subagent's transcript instead of the session's
+        #[arg(long)]
+        agent: Option<String>,
+        /// Output JSON instead of tab-separated text
+        #[arg(long)]
+        json: bool,
+    },
+    /// Send a prompt to the session; prints how it was delivered
+    Prompt {
+        /// Terminal address (id, project/name, or project:index)
+        terminal: String,
+        /// Prompt text (joined with spaces)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, required = true)]
+        text: Vec<String>,
+    },
+    /// Answer an open dialog (permission, AskUserQuestion, plan approval)
+    Answer {
+        /// Terminal address (id, project/name, or project:index)
+        terminal: String,
+        /// Dialog id from `claude show`
+        dialog: String,
+        decision: ClaudeDecisionArg,
+        /// With allow: also allow for the rest of the session
+        #[arg(long)]
+        always: bool,
+        /// With deny: the reason Claude sees
+        #[arg(long)]
+        message: Option<String>,
+        /// With answer: JSON object of question text -> chosen label or free text
+        #[arg(long)]
+        answers: Option<String>,
+    },
+    /// Interrupt the running turn (sends Escape to the terminal)
+    Interrupt {
+        /// Terminal address (id, project/name, or project:index)
+        terminal: String,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum ClaudeDecisionArg {
+    Allow,
+    Deny,
+    Answer,
 }
 
 #[derive(Subcommand)]
@@ -578,6 +661,7 @@ pub fn subcommand_names() -> &'static [&'static str] {
         "theme",
         "command",
         "update",
+        "claude",
         "claude-remote",
     ]
 }
@@ -692,6 +776,17 @@ mod tests {
             ])
             .is_ok()
         );
+        assert!(Cli::try_parse_from(["okena", "claude", "ls", "--json"]).is_ok());
+        assert!(Cli::try_parse_from(["okena", "claude", "log", "p:0", "--cursor", "s:12"]).is_ok());
+        assert!(Cli::try_parse_from(["okena", "claude", "prompt", "p:0", "-n", "fix it"]).is_ok());
+        assert!(
+            Cli::try_parse_from([
+                "okena", "claude", "answer", "p:0", "d1", "allow", "--always"
+            ])
+            .is_ok()
+        );
+        assert!(Cli::try_parse_from(["okena", "claude", "answer", "p:0", "d1", "maybe"]).is_err());
+        assert!(Cli::try_parse_from(["okena", "claude", "prompt", "p:0"]).is_err());
         assert!(Cli::try_parse_from(["okena", "claude-remote", "hook", "permission"]).is_ok());
         assert!(Cli::try_parse_from(["okena", "claude-remote", "hook", "event"]).is_ok());
         assert!(Cli::try_parse_from(["okena", "claude-remote", "channel"]).is_ok());

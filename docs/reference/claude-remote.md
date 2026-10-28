@@ -32,6 +32,10 @@ channel attached; `claude_sessions` in `GET /v1/state`) or has an open dialog
   drawer's **Chat** pill opens a terminal straight in the chat. A project with
   an open dialog is listed under Needs attention.
 - **Desktop**: settings only; dialogs are answered in the terminal.
+- **CLI**: `okena claude ls | show | subagents | log | prompt | answer |
+  interrupt` uses the same endpoints, for people and for agents driving other
+  sessions. `log` prints a cursor (`<session_id>:<offset>`) to pass back with
+  `--cursor` for only the newer entries. See `okena skill show`.
 
 ## How a session is connected
 

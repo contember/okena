@@ -688,7 +688,7 @@ fn resolve_project_id_in_state(
 /// Fetch state and run a closure that builds an action JSON body, then POST it.
 /// `build` receives the parsed state so it can resolve filters → ids/paths.
 /// Returns the (possibly empty) response body on success.
-fn with_state_post<F>(build: F) -> i32
+pub(crate) fn with_state_post<F>(build: F) -> i32
 where
     F: FnOnce(&StateResponse) -> Result<serde_json::Value, String>,
 {
