@@ -43,7 +43,7 @@ export interface ApiProject {
 }
 
 // serde(rename_all = "snake_case")
-export type AgentLifecycle = "working" | "blocked" | "done" | "idle";
+export type AgentLifecycle = "working" | "blocked" | "done" | "idle" | "error" | "unknown";
 
 export interface AgentStatus {
   lifecycle: AgentLifecycle;

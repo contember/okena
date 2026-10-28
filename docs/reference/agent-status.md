@@ -5,6 +5,12 @@ indicator, a dedicated **Agents** section in the sidebar that lists every active
 agent across all projects, a matching field in the [remote API](remote.md), and a
 desktop notification when an agent finishes or gets blocked.
 
+Two sequences feed it. Programs that speak the **Program Status Protocol**
+([`OSC 7501`](#the-program-status-protocol-osc-7501)) report natively — Claude
+Code does once Okena answers its support probe. Okena's private
+[`OSC 9001`](#the-wire-format-osc-9001) carries the rest, plus the session
+identity used for resume.
+
 Claude Code is supported out of the box via a [bundled plugin](#claude-code-integration).
 The protocol is agent-agnostic and the resume logic is per-harness, so adding
 another agent is additive — but today Claude Code is the only one that ships
@@ -25,11 +31,12 @@ shown verbatim.
 
 ## What you see
 
-- **Tab** — the pane's icon is recolored by lifecycle (blocked = red, working =
-  yellow, done = green, idle = muted). Hovering the tab shows the agent's
+- **Tab** — the pane's icon is recolored by lifecycle (blocked = red, error =
+  terminal red, working = yellow, done = green, idle = muted). Hovering the tab shows the agent's
   free-form status text.
 - **Sidebar → AGENTS** — a flat, cross-project list of every pane currently
-  reporting a status, sorted by attention (blocked → done → working → idle).
+  reporting a status, sorted by attention (blocked → error → done → working →
+  idle).
   Each row shows the lifecycle dot, the terminal name, its project, and the
   free-form text. Click a row to jump straight to that pane. The section hides
   itself when no agent is active.
@@ -47,7 +54,7 @@ shown verbatim.
   for any pane that has a tab bar. A pane *not* in a tab group (a new project,
   or any leaf of a plain split) therefore shows its agent only in AGENTS and in
   the notification.
-- **Notification** — entering `blocked` or `done` raises a desktop notification
+- **Notification** — entering `blocked`, `error` or `done` raises a desktop notification
   (+ sound), suppressed for the pane you're actively looking at. Gated by the
   normal notification settings.
 
@@ -65,7 +72,12 @@ persisted.)
 
 ### Stale status
 
-A status is removed only by an explicit `st=clear` or by the pane going away.
+An `OSC 7501` record in `working` or `blocked` ends at the next shell prompt
+(`OSC 133 ; A`), and `RIS` (`ESC c`) removes every record, so a program that
+dies mid-turn under a shell with prompt marks does not stay tinted. The rest of
+this section is about `OSC 9001`.
+
+A `9001` status is removed only by an explicit `st=clear` or by the pane going away.
 Nothing ties it to the pane's process, so an agent that dies without sending
 `clear` — a crash, `kill -9`, an `exit` that skips its `SessionEnd` hook —
 leaves the tab tinted and the pane listed in AGENTS indefinitely. Closing the
@@ -79,9 +91,47 @@ label you sort projects and worktrees by — the [status board](status-board.md)
 
 | Field | Meaning |
 |-------|---------|
-| `lifecycle` | One of `working`, `blocked`, `done`, `idle`. Drives color / sort / notifications. |
+| `lifecycle` | One of `working`, `blocked`, `done`, `idle`, `error`. Drives color / sort / notifications. A client deserializes a value from a newer daemon as `unknown` (muted, never notifies). |
 | `custom` | Optional free-form text, e.g. `"running tests 3/5"`. Shown in the tab tooltip and the AGENTS row, flattened to one line and clipped. |
 | `labels` | Optional flat `{ "key": "value" }` map of extras. Carried on the wire; no UI renders them yet. The three reserved session keys are stripped out before this map is built. Raw terminal output can still contain the original OSC sequence. |
+
+## The Program Status Protocol (OSC 7501)
+
+The general-purpose protocol from the
+[spec](https://mitchellh.com/writing/program-status-osc7501): any program can
+report `idle`, `working`, `blocked`, `done` or `error` over its pty.
+
+```
+ESC ] 7501 ; state=blocked:kind=permission:app=terraform:msg=<base64> ST
+ESC ] 7501 ; ? ST        # support probe; Okena replies ESC ] 7501 ; ? ST
+```
+
+- **Probe.** Programs (Claude Code among them) emit reports only after the
+  terminal answers `?`. Only the pty owner — the daemon — answers, the same as
+  `XTVERSION`. Under `session_backend = tmux` / `screen` the probe never reaches
+  Okena, so there `OSC 9001` is the only path. dtach passes it through.
+- **Records.** A pane holds up to 256 records keyed by `id` (`a/b/c`, no `id` =
+  the root record); the least recently updated is evicted. Each report replaces
+  its record whole. `state=clear` removes the addressed record and everything
+  beneath it, or every record when it has no `id`.
+- **Effective status.** The record with the highest attention priority, newest
+  on a tie, becomes the pane's agent status: `msg` (else `title`) is `custom`;
+  `app` (inherited from the nearest ancestor), `kind`, `progress` and `title`
+  are `labels`.
+- **Precedence over `9001`.** While a pane has any `7501` record it wins over the
+  `9001` status, which keeps being tracked underneath and shows again once the
+  records are gone. `9001` still captures the session identity either way, so
+  Claude Code with the bundled plugin reports status once, not twice.
+- **Lifetime.** `working` / `blocked` end at `OSC 133 ; A`; `done` / `error`
+  stay until replaced or cleared. `RIS` removes all records. Process exit is not
+  tracked: Okena sees only the pane's shell exit, not a program's inside it.
+- **Validation.** A report is checked whole before any record changes. It is
+  discarded for a missing or unknown `state`, an invalid `id`, a key over 16
+  bytes, a sequence over 4096 bytes, or a `title` / `msg` that is over its limit
+  (192 / 2048 bytes decoded), not base64 or carries control characters. A
+  malformed pair or an invalid `kind` / `progress` / `app` is dropped and the
+  rest applies. Bidi overrides and invisible formatting characters are removed
+  from `title` / `msg`.
 
 ## The wire format (OSC 9001)
 

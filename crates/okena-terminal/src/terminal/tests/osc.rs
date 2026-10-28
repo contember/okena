@@ -2057,3 +2057,128 @@ fn test_pending_notifications_are_bounded() {
         "the most recent notification must survive the flood"
     );
 }
+
+// ── Program status (OSC 7501) ────────────────────────────────────────────
+
+fn null_terminal() -> Terminal {
+    Terminal::new(
+        "t".into(),
+        TerminalSize::default(),
+        Arc::new(NullTransport),
+        "/tmp".into(),
+    )
+}
+
+#[test]
+fn test_program_status_query_is_answered_with_the_bare_probe() {
+    let transport = Arc::new(CapturingTransport::new());
+    let terminal = Terminal::new(
+        "t".into(),
+        TerminalSize::default(),
+        transport.clone(),
+        "/tmp".into(),
+    );
+
+    terminal.process_output(b"\x1b]7501;?\x1b\\");
+
+    assert_eq!(transport.writes(), vec![b"\x1b]7501;?\x1b\\".to_vec()]);
+}
+
+#[test]
+fn test_program_status_sets_the_agent_status_and_notifies_on_error() {
+    use okena_core::agent_status::AgentLifecycle;
+    let terminal = null_terminal();
+
+    terminal.process_output(b"\x1b]7501;state=working:app=claude-code:progress=30\x07");
+    let status = terminal.agent_status().expect("status set");
+    assert_eq!(status.lifecycle, AgentLifecycle::Working);
+    assert_eq!(
+        status.labels.get("progress").map(String::as_str),
+        Some("30")
+    );
+    assert!(terminal.take_pending_notifications().is_empty());
+    assert!(terminal.take_remote_dirty());
+
+    terminal.process_output(
+        format!("\x1b]7501;state=error:msg={}\x07", b64("tests failed")).as_bytes(),
+    );
+    assert_eq!(
+        terminal.agent_status().map(|s| s.lifecycle),
+        Some(AgentLifecycle::Error)
+    );
+    assert_eq!(
+        terminal.take_pending_notifications(),
+        vec![body("tests failed")]
+    );
+
+    terminal.process_output(b"\x1b]7501;state=clear\x07");
+    assert_eq!(terminal.agent_status(), None);
+}
+
+#[test]
+fn test_program_status_wins_over_the_hook_status_until_cleared() {
+    use okena_core::agent_status::AgentLifecycle;
+    let terminal = null_terminal();
+
+    terminal.process_output(b"\x1b]9001;st=working\x07");
+    terminal.process_output(b"\x1b]7501;state=blocked:kind=permission\x07");
+    // A hook report arriving after the native one does not override it.
+    terminal.process_output(b"\x1b]9001;st=done\x07");
+    assert_eq!(
+        terminal.agent_status().map(|s| s.lifecycle),
+        Some(AgentLifecycle::Blocked)
+    );
+    assert_eq!(
+        terminal.take_pending_notifications(),
+        vec![body("Agent needs your input")]
+    );
+
+    // Once the program clears its records, the hook status shows again.
+    terminal.process_output(b"\x1b]7501;state=clear\x07");
+    assert_eq!(
+        terminal.agent_status().map(|s| s.lifecycle),
+        Some(AgentLifecycle::Done)
+    );
+}
+
+#[test]
+fn test_program_status_prompt_ends_working_but_keeps_done() {
+    use okena_core::agent_status::AgentLifecycle;
+    let terminal = null_terminal();
+
+    terminal.process_output(b"\x1b]7501;state=working\x07\x1b]133;A\x07");
+    assert_eq!(terminal.agent_status(), None);
+
+    terminal.process_output(b"\x1b]7501;state=done\x07\x1b]133;A;redraw=0\x07");
+    assert_eq!(
+        terminal.agent_status().map(|s| s.lifecycle),
+        Some(AgentLifecycle::Done)
+    );
+}
+
+#[test]
+fn test_program_status_is_cleared_by_ris() {
+    let terminal = null_terminal();
+
+    terminal.process_output(b"\x1b]7501;state=done:id=build\x07");
+    assert!(terminal.agent_status().is_some());
+    terminal.process_output(b"\x1bc");
+    assert_eq!(terminal.agent_status(), None);
+}
+
+#[test]
+fn test_program_status_clear_uncovering_the_hook_status_does_not_notify() {
+    use okena_core::agent_status::AgentLifecycle;
+    let terminal = null_terminal();
+
+    terminal.process_output(b"\x1b]9001;st=done\x07");
+    terminal.process_output(b"\x1b]7501;state=working\x07");
+    terminal.take_pending_notifications();
+
+    terminal.process_output(b"\x1b]7501;state=clear\x07");
+    assert_eq!(
+        terminal.agent_status().map(|s| s.lifecycle),
+        Some(AgentLifecycle::Done)
+    );
+    assert!(terminal.take_pending_notifications().is_empty());
+}

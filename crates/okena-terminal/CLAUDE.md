@@ -20,7 +20,17 @@ Wraps `alacritty_terminal` for ANSI processing and `portable-pty` for cross-plat
 stream as the main processor, for sequences alacritty ignores or answers
 differently than Okena wants: `OSC 7` / `OSC 1337 CurrentDir` (cwd), `OSC 9` /
 `OSC 777` / `OSC 99` (notifications), `OSC 9;4` (progress), `OSC 133` (shell
-marks, via a separate prompt sidecar), and `XTVERSION`.
+marks, via a separate prompt sidecar), `OSC 7501` / `OSC 9001` (agent status),
+and `XTVERSION`.
+
+### `OSC 7501` — Program Status Protocol
+
+Parsed and stored per pane in `terminal/program_status.rs`; the sidecar answers
+the `?` probe (pty owner only), ends `working` / `blocked` records on
+`OSC 133 ; A` and clears all on `RIS`. While a pane has any `7501` record, its
+top record is the pane's agent status and the `OSC 9001` status waits
+underneath (`SidecarPerform::publish_status`). See
+`docs/reference/agent-status.md`.
 
 ### `OSC 9001` — agent status (Okena private)
 
