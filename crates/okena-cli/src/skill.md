@@ -41,6 +41,21 @@ okena read okena:0                     # see the screen
 okena key okena:0 ctrl-c               # interrupt
 ```
 
+## Drive other Claude sessions
+
+For terminals running `claude` with Claude Remote on (Settings → Terminal).
+
+- `okena claude ls` — `term<TAB>project<TAB>name<TAB>session<TAB>busy|idle|-<TAB>dialogs<TAB>queued<TAB>subagents`.
+- `okena claude show <term>` — status lines plus `dialog<TAB>id<TAB>tool<TAB>tool_input-json` per open dialog.
+- `okena claude log <term> [--cursor <c>] [--agent <id>]` — one line per entry
+  (`user|assistant|tool_use|tool_result`, newlines escaped as `\n`), last line
+  `cursor<TAB><c>`. Pass `<c>` back to get only newer entries; a `reset` line
+  means drop what you had. `okena claude subagents <term>` lists `--agent` ids.
+- `okena claude prompt <term> <text…>` — prints `channel`, `pty` or `queued`;
+  exits 1 with the daemon's reason when it cannot be delivered.
+- `okena claude answer <term> <dialog> allow [--always] | deny [--message <m>] | answer --answers '{"<question>":"<label>"}'`
+- `okena claude interrupt <term>` — Escape, ends the running turn.
+
 ## Manage the workspace
 
 - Projects: `okena project add <path> | clone <url> | rm | rename | color | focus | show | hide`

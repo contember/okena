@@ -2787,6 +2787,7 @@ mod workspace_tests {
                 hooks: Vec::new(),
                 claude_dialogs: Default::default(),
                 claude_sessions: Vec::new(),
+                claude_pr_links: Default::default(),
             }),
         }
     }
@@ -4426,6 +4427,7 @@ mod gpui_tests {
                 hooks: Vec::new(),
                 claude_dialogs: Default::default(),
                 claude_sessions: Vec::new(),
+                claude_pr_links: Default::default(),
             }),
         }
     }

@@ -17,6 +17,8 @@ function lifecycleColor(lifecycle: AgentLifecycle | undefined): string {
       return OkenaColors.warning;
     case 'done':
       return OkenaColors.success;
+    case 'error':
+      return OkenaColors.error;
     case 'idle':
     case undefined:
       return OkenaColors.textTertiary;

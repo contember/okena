@@ -15,6 +15,7 @@ import {
   BackHandler,
   FlatList,
   Keyboard,
+  Linking,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -35,6 +36,7 @@ import {
   type ClaudeChatRow,
 } from '../models/claudeChat';
 import type {
+  ApiClaudePrLink,
   ApiClaudePromptDelivery,
   ApiClaudeSubagent,
 } from '../native/claude';
@@ -111,7 +113,11 @@ export const ClaudeChat: React.FC<ClaudeChatProps> = ({
 
   return (
     <View style={styles.root}>
-      <StatusStrip activity={activity} queued={session?.queued_prompts ?? 0} />
+      <StatusStrip
+        activity={activity}
+        queued={session?.queued_prompts ?? 0}
+        prLinks={session?.pr_links ?? []}
+      />
       <RunningSubagents />
       {activity === 'unhooked' ? (
         <View style={styles.notice}>
@@ -182,10 +188,11 @@ export const ClaudeChat: React.FC<ClaudeChatProps> = ({
   );
 };
 
-const StatusStrip: React.FC<{ activity: ClaudeActivity; queued: number }> = ({
-  activity,
-  queued,
-}) => {
+const StatusStrip: React.FC<{
+  activity: ClaudeActivity;
+  queued: number;
+  prLinks: ApiClaudePrLink[];
+}> = ({ activity, queued, prLinks }) => {
   const { label, color } = ACTIVITY[activity];
   return (
     <View style={styles.strip} accessibilityRole="summary">
@@ -197,6 +204,18 @@ const StatusStrip: React.FC<{ activity: ClaudeActivity; queued: number }> = ({
       {queued > 0 ? (
         <Text style={styles.stripMeta}>{`${queued} queued`}</Text>
       ) : null}
+      {prLinks.map((link) => (
+        <Pressable
+          key={link.url}
+          hitSlop={6}
+          style={({ pressed }) => [styles.prChip, pressed && styles.pressed]}
+          onPress={() => void Linking.openURL(link.url).catch(() => {})}
+          accessibilityRole="link"
+          accessibilityLabel={`Open pull request ${link.repository}#${link.number}`}
+        >
+          <Text style={styles.prChipText}>{`#${link.number}`}</Text>
+        </Pressable>
+      ))}
     </View>
   );
 };
@@ -611,6 +630,15 @@ const styles = StyleSheet.create({
     fontWeight: '500',
   },
   stripMeta: { color: OkenaColors.textTertiary, fontSize: 12 },
+  prChip: {
+    marginLeft: 6,
+    paddingHorizontal: 6,
+    paddingVertical: 1,
+    borderRadius: 4,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: OkenaColors.border,
+  },
+  prChipText: { color: OkenaColors.textSecondary, fontSize: 12 },
   notice: {
     paddingHorizontal: 14,
     paddingVertical: 10,

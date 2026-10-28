@@ -181,7 +181,7 @@ impl From<NativeServiceInfo> for ServiceInfo {
 /// AI agent status reported by a terminal (`OSC 9001`).
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct AgentStatusInfo {
-    /// `working` | `blocked` | `done` | `idle`.
+    /// `working` | `blocked` | `done` | `idle` | `error` | `unknown`.
     pub lifecycle: String,
     /// Free-form text the agent set, e.g. "running tests 3/5".
     pub custom: Option<String>,

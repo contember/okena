@@ -34,6 +34,7 @@ function session(overrides: Partial<ApiClaudeSession> = {}): ApiClaudeSession {
     queued_prompts: 0,
     dialogs: [],
     running_subagents: [],
+    pr_links: [],
     ...overrides,
   };
 }

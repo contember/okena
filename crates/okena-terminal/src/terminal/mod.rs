@@ -22,6 +22,7 @@ mod meta;
 mod modes;
 mod mouse;
 mod osc_sidecar;
+mod program_status;
 mod prompt_jump;
 mod prompt_marks;
 mod render;

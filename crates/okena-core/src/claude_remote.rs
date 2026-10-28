@@ -68,6 +68,22 @@ pub struct ApiClaudeSession {
     /// oldest first. Empty when hooks are not attached.
     #[serde(default)]
     pub running_subagents: Vec<ApiClaudeRunningSubagent>,
+    /// Pull requests the session created or touched, newest first.
+    #[serde(default)]
+    pub pr_links: Vec<ApiClaudePrLink>,
+}
+
+/// A pull request Claude Code recorded in the session transcript (a `pr-link`
+/// record), deduplicated by `url`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApiClaudePrLink {
+    pub number: u64,
+    /// Always `https://`.
+    pub url: String,
+    /// `owner/repo`.
+    pub repository: String,
+    /// The newest record's timestamp, RFC 3339 as Claude Code wrote it.
+    pub last_seen_at: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -208,4 +224,24 @@ pub enum ApiClaudeEntry {
         text: String,
         is_error: bool,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn session_from_a_server_without_pr_links_has_none() {
+        let session: ApiClaudeSession = serde_json::from_value(json!({
+            "terminal_id": "t1",
+            "has_transcript": true,
+            "hooks_attached": true,
+            "channel_attached": false,
+            "queued_prompts": 0,
+            "dialogs": [],
+        }))
+        .expect("session");
+        assert_eq!(session.pr_links, Vec::new());
+    }
 }

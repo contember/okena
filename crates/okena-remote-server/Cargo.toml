@@ -57,7 +57,7 @@ sysinfo = "0.33"
 # Embed the built web client into the binary. `interpolate-folder-path` lets
 # the `#[folder]` attribute expand `$CARGO_MANIFEST_DIR` so we can point at the
 # repo-root `web/dist` from inside this crate.
-rust-embed = { version = "8.5", features = ["interpolate-folder-path"] }
+rust-embed = { version = "8.11", features = ["interpolate-folder-path"] }
 
 # `geteuid` for the same-user checks on the local daemon socket.
 [target.'cfg(unix)'.dependencies]

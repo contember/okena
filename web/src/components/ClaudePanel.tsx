@@ -1,6 +1,6 @@
 import { useEffect } from "react";
 import { createPortal } from "react-dom";
-import type { AgentLifecycle, ApiClaudeSession, ApiProject } from "../api/types";
+import type { AgentLifecycle, ApiClaudePrLink, ApiClaudeSession, ApiProject } from "../api/types";
 import { useClaudeSession } from "../hooks/useClaudeSession";
 import { useApp } from "../state/store";
 import { collectTerminalIds } from "../utils/layout";
@@ -124,6 +124,9 @@ function PanelHeader({
               <Indicator label="channel" on={session.channel_attached} />
               <Indicator label="hooks" on={session.hooks_attached} />
               {session.queued_prompts > 0 && <span>{session.queued_prompts} queued</span>}
+              {session.pr_links?.map((link) => (
+                <PrChip key={link.url} link={link} />
+              ))}
             </>
           )}
         </div>
@@ -145,5 +148,19 @@ function Indicator({ label, on }: { label: string; on: boolean }) {
     >
       {label}
     </span>
+  );
+}
+
+function PrChip({ link }: { link: ApiClaudePrLink }) {
+  return (
+    <a
+      href={link.url}
+      target="_blank"
+      rel="noopener noreferrer"
+      className="rounded-[3px] border border-[var(--ok-border)] px-1 text-[var(--ok-text-secondary)] hover:text-[var(--ok-text)]"
+      title={`${link.repository}#${link.number}`}
+    >
+      #{link.number}
+    </a>
   );
 }

@@ -64,6 +64,11 @@ pub struct StateResponse {
     /// channel attached), sorted. Runtime-only.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub claude_sessions: Vec<String>,
+    /// Pull requests of the sessions in `claude_sessions`, newest first, per
+    /// terminal id; terminals without one are absent. Runtime-only.
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub claude_pr_links:
+        std::collections::HashMap<String, Vec<crate::claude_remote::ApiClaudePrLink>>,
 }
 
 /// OS window bounds in screen pixels.
@@ -898,6 +903,25 @@ pub enum ActionRequest {
         #[serde(default)]
         ignore_whitespace: bool,
     },
+    /// The changed files of a comparison without their hunks; the hunks of one
+    /// file come from `GitFileDiff`.
+    GitDiffFiles {
+        project_id: String,
+        #[serde(default)]
+        mode: DiffMode,
+        #[serde(default)]
+        ignore_whitespace: bool,
+    },
+    /// One file of a `GitDiffFiles` listing, identified by both of its paths.
+    GitFileDiff {
+        project_id: String,
+        #[serde(default)]
+        mode: DiffMode,
+        #[serde(default)]
+        ignore_whitespace: bool,
+        old_path: Option<String>,
+        new_path: Option<String>,
+    },
     /// What the comparison is made of: every changed file's role, and how much
     /// of the implementation volume is tests written inside implementation files.
     ReviewComposition {
@@ -1618,6 +1642,7 @@ mod tests {
             hooks: Vec::new(),
             claude_dialogs: Default::default(),
             claude_sessions: Vec::new(),
+            claude_pr_links: Default::default(),
         };
         let json = serde_json::to_string(&resp).unwrap();
         let parsed: StateResponse = serde_json::from_str(&json).unwrap();
@@ -1686,6 +1711,32 @@ mod tests {
             parsed.projects[0].folder_color,
             FolderColor::Default
         ));
+    }
+
+    #[test]
+    fn claude_pr_links_are_keyed_by_terminal_and_omitted_when_empty() {
+        let state: StateResponse = serde_json::from_value(serde_json::json!({
+            "state_version": 1,
+            "projects": [],
+            "focused_project_id": null,
+            "fullscreen_terminal": null,
+            "claude_sessions": ["t1"],
+            "claude_pr_links": {"t1": [{
+                "number": 7,
+                "url": "https://github.com/acme/widgets/pull/7",
+                "repository": "acme/widgets",
+                "last_seen_at": "2026-01-01T10:00:00Z",
+            }]},
+        }))
+        .unwrap();
+        assert_eq!(state.claude_pr_links["t1"][0].number, 7);
+
+        let empty = StateResponse {
+            claude_pr_links: Default::default(),
+            ..state
+        };
+        let json = serde_json::to_value(&empty).unwrap();
+        assert!(json.get("claude_pr_links").is_none());
     }
 
     #[test]
@@ -1908,6 +1959,18 @@ mod tests {
                 project_id: "p1".into(),
                 mode: DiffMode::WorkingTree,
                 ignore_whitespace: false,
+            },
+            ActionRequest::GitDiffFiles {
+                project_id: "p1".into(),
+                mode: DiffMode::Staged,
+                ignore_whitespace: true,
+            },
+            ActionRequest::GitFileDiff {
+                project_id: "p1".into(),
+                mode: DiffMode::WorkingTree,
+                ignore_whitespace: false,
+                old_path: Some("src/old.rs".into()),
+                new_path: Some("src/new.rs".into()),
             },
             ActionRequest::GitBranches {
                 project_id: "p1".into(),

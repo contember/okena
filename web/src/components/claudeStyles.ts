@@ -16,4 +16,6 @@ export const LIFECYCLE_COLOR: Record<AgentLifecycle, string> = {
   working: "var(--ok-yellow)",
   done: "var(--ok-green)",
   idle: "var(--ok-text-muted)",
+  error: "var(--ok-red)",
+  unknown: "var(--ok-text-muted)",
 };
