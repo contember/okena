@@ -495,6 +495,7 @@ mod tests {
                 agent_id: "a1".into(),
                 agent_type: "Explore".into(),
             }],
+            pr_links: vec![],
         }
     }
 

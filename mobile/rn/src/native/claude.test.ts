@@ -33,6 +33,14 @@ const SESSION = {
     },
   ],
   running_subagents: [{ agent_id: 'a1', agent_type: 'Explore' }],
+  pr_links: [
+    {
+      number: 582,
+      url: 'https://github.com/acme/widgets/pull/582',
+      repository: 'acme/widgets',
+      last_seen_at: '2026-01-01T10:00:00.000Z',
+    },
+  ],
 };
 
 describe('parseClaudeSubagentList', () => {
@@ -83,6 +91,17 @@ describe('parseClaudeSession', () => {
     expect(parsed.busy).toBeUndefined();
     expect(parsed.dialogs[0]!.permission_suggestions).toEqual([]);
     expect(parsed.running_subagents).toEqual([]);
+    expect(parsed.pr_links).toEqual([]);
+  });
+
+  it('rejects a PR link that is not an https URL', () => {
+    const bad = {
+      ...SESSION,
+      pr_links: [{ ...SESSION.pr_links[0], url: 'http://github.com/acme/widgets/pull/582' }],
+    };
+    expect(() => parseClaudeSession(JSON.stringify(bad))).toThrow(
+      new ClaudeWireError('session.pr_links[0].url: expected an https URL'),
+    );
   });
 
   it('accepts any JSON value as tool_input, but requires one', () => {

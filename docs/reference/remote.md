@@ -83,8 +83,9 @@ out: `terminal_agent_status` maps terminal id → `{ "lifecycle", "custom"?,
 "labels"? }` for panes running an AI agent (see [Agent Status](agent-status.md)).
 It is **runtime-only** — omitted entirely for terminals with no status, and
 absent after a daemon restart — and a change to it bumps `state_version`.
-`claude_dialogs` (terminal id → open dialog count) and `claude_sessions`
-(terminals with a connected `claude`) are runtime-only too; see
+`claude_dialogs` (terminal id → open dialog count), `claude_sessions`
+(terminals with a connected `claude`) and `claude_pr_links` (terminal id → the
+session's pull requests) are runtime-only too; see
 [Claude remote](claude-remote.md).
 
 ```json

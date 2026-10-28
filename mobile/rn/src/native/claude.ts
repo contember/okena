@@ -32,6 +32,18 @@ export interface ApiClaudeSession {
   dialogs: ApiClaudeDialog[];
   /** Between their start and stop hooks, oldest first. */
   running_subagents: ApiClaudeRunningSubagent[];
+  /** Pull requests the session created or touched, newest first. */
+  pr_links: ApiClaudePrLink[];
+}
+
+export interface ApiClaudePrLink {
+  number: number;
+  /** Always `https://`. */
+  url: string;
+  /** `owner/repo`. */
+  repository: string;
+  /** RFC 3339. */
+  last_seen_at: string;
 }
 
 export interface ApiClaudeRunningSubagent {
@@ -236,6 +248,25 @@ export function parseClaudeSession(json: string): ApiClaudeSession {
               };
             },
           ),
+    // An older server sends none.
+    pr_links:
+      session.pr_links === undefined
+        ? []
+        : array(session.pr_links, 'session.pr_links').map((value, index) =>
+            parsePrLink(value, `session.pr_links[${index}]`),
+          ),
+  };
+}
+
+function parsePrLink(value: unknown, path: string): ApiClaudePrLink {
+  const link = record(value, path);
+  const url = str(link.url, `${path}.url`);
+  return {
+    number: count(link.number, `${path}.number`),
+    // The app opens it; nothing but a web page may come through.
+    url: url.startsWith('https://') ? url : fail(`${path}.url`, 'an https URL'),
+    repository: str(link.repository, `${path}.repository`),
+    last_seen_at: str(link.last_seen_at, `${path}.last_seen_at`),
   };
 }
 

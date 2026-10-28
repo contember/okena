@@ -4284,12 +4284,16 @@ pub async fn daemon_command_loop(
             // ── GetState: full workspace snapshot ────────────────────────────
             RemoteCommand::GetState => {
                 // Taken before the state locks: the hub has its own lock.
-                let (claude_dialogs, claude_sessions) = claude_hub
+                let (claude_dialogs, claude_sessions, claude_pr_links) = claude_hub
                     .upgrade()
                     .map(|hub| {
                         // Terminals close through many paths; this sees all of them.
                         hub.retain_terminals(&known_terminal_ids(&terminals, &workspace));
-                        (hub.dialog_counts(), hub.session_terminals())
+                        (
+                            hub.dialog_counts(),
+                            hub.session_terminals(),
+                            hub.session_pr_links(),
+                        )
                     })
                     .unwrap_or_default();
                 // Lock order: workspace first, then service manager (kept
@@ -4391,6 +4395,7 @@ pub async fn daemon_command_loop(
                 );
                 resp.claude_dialogs = claude_dialogs;
                 resp.claude_sessions = claude_sessions;
+                resp.claude_pr_links = claude_pr_links;
 
                 // `match` (not `.expect`) so the daemon-core crate stays clean
                 // under `clippy::expect_used` had it been enabled — the serialize

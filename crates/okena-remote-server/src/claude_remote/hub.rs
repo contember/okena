@@ -7,9 +7,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use okena_core::agent_session::is_valid_transcript_path;
 use okena_core::agent_status::AgentLifecycle;
 use okena_core::claude_remote::{
-    ApiClaudeDecision, ApiClaudeDialog, ApiClaudePromptDelivery, ApiClaudeRunningSubagent,
-    ApiClaudeSession, ApiClaudeSubagentList, ApiClaudeTranscriptPage, ClaudeHookRequest,
-    ClaudeTerminalInfo,
+    ApiClaudeDecision, ApiClaudeDialog, ApiClaudePrLink, ApiClaudePromptDelivery,
+    ApiClaudeRunningSubagent, ApiClaudeSession, ApiClaudeSubagentList, ApiClaudeTranscriptPage,
+    ClaudeHookRequest, ClaudeTerminalInfo,
 };
 use okena_core::keys::SpecialKey;
 use parking_lot::Mutex;
@@ -20,7 +20,8 @@ use super::channel::{ChannelState, PollStart};
 use super::decision::{cancelled_output, decided_output};
 use super::hook_input::{HookEvent, HookInput, is_valid_agent_id};
 use super::transcript::{
-    has_transcript_extension, list_subagents, read_transcript, subagent_transcript_path,
+    PrLinkScan, has_transcript_extension, list_subagents, read_pr_links, read_transcript,
+    subagent_transcript_path,
 };
 use crate::bridge::{BridgeMessage, BridgeSender, CommandResult, RemoteCommand};
 use crate::types::ActionRequest;
@@ -80,6 +81,8 @@ struct TerminalState {
     /// Recently stopped ids: async hooks of a short subagent may report its
     /// stop before its start.
     stopped_subagents: VecDeque<String>,
+    /// Pull requests of the transcript last read for this pane.
+    pr_links: PrLinkScan,
 }
 
 struct TypedPrompt {
@@ -298,6 +301,23 @@ impl ClaudeRemoteHub {
         terminal_ids
     }
 
+    /// Pull requests of the terminals in [`Self::session_terminals`], for
+    /// [`okena_core::api::StateResponse::claude_pr_links`]. Reads no files:
+    /// hook events and session reads keep them current.
+    pub fn session_pr_links(&self) -> HashMap<String, Vec<ApiClaudePrLink>> {
+        let now = Instant::now();
+        self.terminals
+            .lock()
+            .iter()
+            .filter(|(_, terminal)| terminal.has_session(now))
+            .filter_map(|(terminal_id, terminal)| {
+                let path = terminal.transcript_path.as_deref()?;
+                let links = terminal.pr_links.links(Path::new(path));
+                (!links.is_empty()).then(|| (terminal_id.clone(), links))
+            })
+            .collect()
+    }
+
     /// Register the dialog a `PermissionRequest` hook reports and wait until a
     /// remote client answers it or it is cancelled. Returns what the hook
     /// prints. Dropping the future removes the dialog.
@@ -360,6 +380,7 @@ impl ClaudeRemoteHub {
         let mut cancelled = Vec::new();
         let mut prompt_to_type = None;
         let session_changed;
+        let transcript_to_scan;
         {
             let mut terminals = self.terminals.lock();
             let terminal = terminals.entry(request.terminal_id.clone()).or_default();
@@ -415,11 +436,26 @@ impl ClaudeRemoteHub {
                 HookEvent::Other => {}
             }
             session_changed = had_session != terminal.has_session(Instant::now());
+            // Claude records a PR after the tool call that touched it.
+            let may_add_pr_links = matches!(
+                input.event,
+                HookEvent::SessionStart
+                    | HookEvent::PostToolUse
+                    | HookEvent::PostToolUseFailure
+                    | HookEvent::Stop
+            );
+            transcript_to_scan = terminal
+                .transcript_path
+                .clone()
+                .filter(|_| may_add_pr_links);
         }
 
         if !cancelled.is_empty() || session_changed {
             cancelled.into_iter().for_each(OpenDialog::cancel);
             self.bump_state_version();
+        }
+        if let Some(path) = transcript_to_scan {
+            self.spawn_pr_link_refresh(request.terminal_id.clone(), path);
         }
         if let Some((prompt, generation)) = prompt_to_type {
             self.spawn_queued_typing(request.terminal_id, prompt, generation);
@@ -495,6 +531,7 @@ impl ClaudeRemoteHub {
                 }),
                 running_subagents: terminal
                     .map_or_else(Vec::new, |terminal| terminal.running_subagents.clone()),
+                pr_links: Vec::new(),
             }
         };
 
@@ -504,7 +541,7 @@ impl ClaudeRemoteHub {
         if session.session_id.is_none() {
             session.session_id = source.session_id;
         }
-        session.has_transcript = match source.path {
+        session.has_transcript = match &source.path {
             Some(path) => {
                 has_transcript_extension(Path::new(&path))
                     && tokio::fs::metadata(&path)
@@ -513,7 +550,58 @@ impl ClaudeRemoteHub {
             }
             None => false,
         };
+        if session.has_transcript
+            && let Some(path) = &source.path
+        {
+            session.pr_links = self
+                .refresh_pr_links(terminal_id, PathBuf::from(path))
+                .await;
+        }
         Ok(session)
+    }
+
+    /// Read the `pr-link` records appended to the pane's transcript since the
+    /// last read and return its pull requests. A failed read keeps the known
+    /// ones.
+    async fn refresh_pr_links(&self, terminal_id: &str, path: PathBuf) -> Vec<ApiClaudePrLink> {
+        let from = self
+            .terminals
+            .lock()
+            .get(terminal_id)
+            .map_or(0, |terminal| terminal.pr_links.resume_from(&path));
+        let read_path = path.clone();
+        let read = tokio::task::spawn_blocking(move || read_pr_links(&read_path, from)).await;
+
+        let (links, visible_change) = {
+            let mut terminals = self.terminals.lock();
+            let terminal = terminals.entry(terminal_id.to_string()).or_default();
+            let changed = match read {
+                Ok(Ok(read)) => terminal.pr_links.apply(&path, from, read),
+                Ok(Err(error)) => {
+                    log::debug!("claude remote: reading PR links of {terminal_id}: {error}");
+                    false
+                }
+                Err(error) => {
+                    log::warn!("claude remote: PR link read of {terminal_id} panicked: {error}");
+                    false
+                }
+            };
+            let in_state = terminal.has_session(Instant::now())
+                && terminal.transcript_path.as_deref() == path.to_str();
+            (terminal.pr_links.links(&path), changed && in_state)
+        };
+        if visible_change {
+            self.bump_state_version();
+        }
+        links
+    }
+
+    fn spawn_pr_link_refresh(self: &Arc<Self>, terminal_id: String, path: String) {
+        let hub = Arc::clone(self);
+        drop(tokio::spawn(async move {
+            hub.refresh_pr_links(&terminal_id, PathBuf::from(path))
+                .await;
+        }));
     }
 
     /// Transcript entries after `cursor`, or a first page.
@@ -1432,6 +1520,73 @@ mod tests {
         assert_eq!(other_session.entries.len(), 1);
 
         assert!(hub.session("t1").await.expect("session").has_transcript);
+    }
+
+    #[tokio::test]
+    async fn pr_links_reach_the_session_and_the_state() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let path = directory.path().join("s1.jsonl");
+        let pr_link = |number: u64, timestamp: &str| {
+            format!(
+                "{}\n",
+                json!({
+                    "type": "pr-link",
+                    "sessionId": "s1",
+                    "prNumber": number,
+                    "prUrl": format!("https://github.com/acme/widgets/pull/{number}"),
+                    "prRepository": "acme/widgets",
+                    "timestamp": timestamp,
+                })
+            )
+        };
+        std::fs::write(
+            &path,
+            pr_link(1, "2026-01-01T10:00:00Z") + &pr_link(1, "2026-01-01T11:00:00Z"),
+        )
+        .expect("write transcript");
+        let (hub, version, _pty) = hub_with_daemon(claude_in_pane());
+        let mut start = event("SessionStart");
+        start["transcript_path"] = json!(path.to_string_lossy());
+        hub.hook_event(hook("t1", start)).expect("valid event");
+
+        let session = hub.session("t1").await.expect("session");
+        assert_eq!(
+            serde_json::to_value(&session.pr_links).expect("json"),
+            json!([{
+                "number": 1,
+                "url": "https://github.com/acme/widgets/pull/1",
+                "repository": "acme/widgets",
+                "last_seen_at": "2026-01-01T11:00:00Z",
+            }])
+        );
+        assert_eq!(hub.session_pr_links()["t1"], session.pr_links);
+
+        let before = *version.borrow();
+        let mut transcript = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .expect("open transcript");
+        std::io::Write::write_all(
+            &mut transcript,
+            pr_link(2, "2026-01-01T12:00:00Z").as_bytes(),
+        )
+        .expect("append");
+        hub.hook_event(hook("t1", event("Stop")))
+            .expect("valid event");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while hub.session_pr_links()["t1"].len() < 2 {
+            assert!(
+                Instant::now() < deadline,
+                "Stop did not rescan the transcript"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(hub.session_pr_links()["t1"][0].number, 2);
+        assert!(*version.borrow() > before);
+
+        hub.hook_event(hook("t1", event("SessionEnd")))
+            .expect("valid event");
+        assert!(hub.session_pr_links().is_empty());
     }
 
     #[tokio::test]

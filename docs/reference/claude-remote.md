@@ -60,7 +60,7 @@ All take the bearer token. Errors have a plain-text body.
 
 | Endpoint | Purpose |
 |---|---|
-| `GET /v1/claude/terminals/{id}` | Session: `session_id`, `hooks_attached`, `busy`, open `dialogs`, `running_subagents` |
+| `GET /v1/claude/terminals/{id}` | Session: `session_id`, `hooks_attached`, `busy`, open `dialogs`, `running_subagents`, `pr_links` |
 | `GET /v1/claude/terminals/{id}/transcript?cursor=&session_id=&agent_id=` | Transcript page, see [Transcript](#transcript) |
 | `GET /v1/claude/terminals/{id}/subagents` | The session's subagents, see [Subagents](#subagents) |
 | `POST /v1/claude/terminals/{id}/prompt` | `{ "text" }` → `{ "delivery" }`, see [Prompts](#prompts) |
@@ -113,6 +113,22 @@ session JSONL from `transcript_path` incrementally. Entries are `user`,
 `assistant`, `tool_use` and `tool_result`. User entries carry `origin`
 (`channel` for remote prompts). `reset: true` means the client must drop what
 it has (new session or rewritten file).
+
+## Pull requests
+
+Claude Code records each pull request a session creates or touches as a
+`pr-link` line in the transcript. The session's `pr_links` lists them, newest
+first, one per `url`, with `number`, `repository` (`owner/repo`) and
+`last_seen_at` (the newest record's timestamp); at most 50, and only `https://`
+URLs. `claude_pr_links` in `GET /v1/state` carries the same lists for the
+terminals in `claude_sessions`.
+
+The web chat panel's header and the mobile chat's status strip show each as a
+`#<number>` chip that opens the PR.
+
+The daemon reads only the lines appended since its last read, after the
+`SessionStart`, `PostToolUse`, `PostToolUseFailure` and `Stop` hooks and on
+every session read; `/v1/state` reads no files. A new PR bumps `state_version`.
 
 ## Subagents
 

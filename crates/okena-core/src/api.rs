@@ -64,6 +64,11 @@ pub struct StateResponse {
     /// channel attached), sorted. Runtime-only.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub claude_sessions: Vec<String>,
+    /// Pull requests of the sessions in `claude_sessions`, newest first, per
+    /// terminal id; terminals without one are absent. Runtime-only.
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub claude_pr_links:
+        std::collections::HashMap<String, Vec<crate::claude_remote::ApiClaudePrLink>>,
 }
 
 /// OS window bounds in screen pixels.
@@ -1637,6 +1642,7 @@ mod tests {
             hooks: Vec::new(),
             claude_dialogs: Default::default(),
             claude_sessions: Vec::new(),
+            claude_pr_links: Default::default(),
         };
         let json = serde_json::to_string(&resp).unwrap();
         let parsed: StateResponse = serde_json::from_str(&json).unwrap();
@@ -1705,6 +1711,32 @@ mod tests {
             parsed.projects[0].folder_color,
             FolderColor::Default
         ));
+    }
+
+    #[test]
+    fn claude_pr_links_are_keyed_by_terminal_and_omitted_when_empty() {
+        let state: StateResponse = serde_json::from_value(serde_json::json!({
+            "state_version": 1,
+            "projects": [],
+            "focused_project_id": null,
+            "fullscreen_terminal": null,
+            "claude_sessions": ["t1"],
+            "claude_pr_links": {"t1": [{
+                "number": 7,
+                "url": "https://github.com/acme/widgets/pull/7",
+                "repository": "acme/widgets",
+                "last_seen_at": "2026-01-01T10:00:00Z",
+            }]},
+        }))
+        .unwrap();
+        assert_eq!(state.claude_pr_links["t1"][0].number, 7);
+
+        let empty = StateResponse {
+            claude_pr_links: Default::default(),
+            ..state
+        };
+        let json = serde_json::to_value(&empty).unwrap();
+        assert!(json.get("claude_pr_links").is_none());
     }
 
     #[test]
