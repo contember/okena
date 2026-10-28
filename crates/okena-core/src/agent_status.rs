@@ -78,6 +78,11 @@ pub enum AgentLifecycle {
     Done,
     /// The agent is idle / at rest.
     Idle,
+    /// The agent's turn ended in failure.
+    Error,
+    /// A lifecycle added by a newer daemon. Never parsed from a pane.
+    #[serde(other)]
+    Unknown,
 }
 
 impl AgentLifecycle {
@@ -90,27 +95,30 @@ impl AgentLifecycle {
             "blocked" => Some(Self::Blocked),
             "done" => Some(Self::Done),
             "idle" => Some(Self::Idle),
+            "error" => Some(Self::Error),
             _ => None,
         }
     }
 
     /// Sort / attention priority, highest first: a blocked agent needs you now,
-    /// a done agent wants acknowledging, working is in flight, idle is at rest.
+    /// a failed one next, a done agent wants acknowledging, working is in
+    /// flight, idle is at rest.
     pub fn priority(self) -> u8 {
         match self {
-            Self::Blocked => 3,
+            Self::Blocked => 4,
+            Self::Error => 3,
             Self::Done => 2,
             Self::Working => 1,
-            Self::Idle => 0,
+            Self::Idle | Self::Unknown => 0,
         }
     }
 
     /// Whether a transition *into* this state should raise a desktop
-    /// notification. `blocked` and `done` are the actionable edges; `working`
-    /// and `idle` are silent. (Visibility gating — e.g. not pinging for the
+    /// notification. `blocked`, `error` and `done` are the actionable edges;
+    /// `working` and `idle` are silent. (Visibility gating — e.g. not pinging for the
     /// pane you're watching — is the GPUI layer's job, not this enum's.)
     pub fn notifies(self) -> bool {
-        matches!(self, Self::Blocked | Self::Done)
+        matches!(self, Self::Blocked | Self::Error | Self::Done)
     }
 
     /// The `st=` wire token for this lifecycle — the inverse of
@@ -127,6 +135,8 @@ impl AgentLifecycle {
             Self::Blocked => "blocked",
             Self::Done => "done",
             Self::Idle => "idle",
+            Self::Error => "error",
+            Self::Unknown => "unknown",
         }
     }
 
@@ -139,12 +149,14 @@ impl AgentLifecycle {
             Self::Blocked => "blocked",
             Self::Done => "done",
             Self::Idle => "idle",
+            Self::Error => "error",
+            Self::Unknown => "unknown",
         }
     }
 
     /// The theme palette slot this lifecycle maps to: blocked needs attention
-    /// (error), working is in flight (warning yellow), done is finished
-    /// (success), idle is at rest (muted). The single source of truth for agent
+    /// (error), a failed turn is red, working is in flight (warning yellow),
+    /// done is finished (success), idle is at rest (muted). The single source of truth for agent
     /// coloring, shared by the tab indicator and the sidebar Agents list.
     /// Returns the raw `u32` color so `okena-core` needn't depend on gpui;
     /// callers wrap it with `rgb(..)`.
@@ -152,8 +164,9 @@ impl AgentLifecycle {
         match self {
             Self::Blocked => theme.error,
             Self::Working => theme.term_yellow,
+            Self::Error => theme.term_red,
             Self::Done => theme.success,
-            Self::Idle => theme.text_muted,
+            Self::Idle | Self::Unknown => theme.text_muted,
         }
     }
 }
@@ -282,6 +295,7 @@ mod tests {
             ("blocked", AgentLifecycle::Blocked),
             ("done", AgentLifecycle::Done),
             ("idle", AgentLifecycle::Idle),
+            ("error", AgentLifecycle::Error),
         ] {
             assert_eq!(AgentLifecycle::from_token(tok), Some(life));
             // Pins the wire values themselves: the mobile FFI and the RN UI
@@ -295,14 +309,17 @@ mod tests {
 
     #[test]
     fn priority_orders_blocked_first() {
-        assert!(AgentLifecycle::Blocked.priority() > AgentLifecycle::Done.priority());
+        assert!(AgentLifecycle::Blocked.priority() > AgentLifecycle::Error.priority());
+        assert!(AgentLifecycle::Error.priority() > AgentLifecycle::Done.priority());
         assert!(AgentLifecycle::Done.priority() > AgentLifecycle::Working.priority());
         assert!(AgentLifecycle::Working.priority() > AgentLifecycle::Idle.priority());
     }
 
     #[test]
-    fn only_blocked_and_done_notify() {
+    fn only_blocked_error_and_done_notify() {
         assert!(AgentLifecycle::Blocked.notifies());
+        assert!(AgentLifecycle::Error.notifies());
+        assert!(!AgentLifecycle::Unknown.notifies());
         assert!(AgentLifecycle::Done.notifies());
         assert!(!AgentLifecycle::Working.notifies());
         assert!(!AgentLifecycle::Idle.notifies());
@@ -380,6 +397,14 @@ mod tests {
         truncate_to_bytes(&mut s, 4); // cap lands inside the 2nd char
         assert_eq!(s, "€"); // only the first whole char survives
         assert!(s.is_char_boundary(s.len()));
+    }
+
+    #[test]
+    fn a_lifecycle_from_a_newer_daemon_deserializes_as_unknown() {
+        let parsed: AgentStatus =
+            serde_json::from_str(r#"{"lifecycle":"hibernating"}"#).expect("deserialize");
+        assert_eq!(parsed.lifecycle, AgentLifecycle::Unknown);
+        assert_eq!(AgentLifecycle::from_token("unknown"), None);
     }
 
     #[test]

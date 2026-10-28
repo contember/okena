@@ -8,7 +8,7 @@
  * {@link ClaudeWireError} on anything else.
  */
 
-export type AgentLifecycle = 'working' | 'blocked' | 'done' | 'idle';
+export type AgentLifecycle = 'working' | 'blocked' | 'done' | 'idle' | 'error';
 
 export interface ApiClaudeDialog {
   id: string;
@@ -175,6 +175,7 @@ const AGENT_LIFECYCLES: readonly AgentLifecycle[] = [
   'blocked',
   'done',
   'idle',
+  'error',
 ];
 const DELIVERIES: readonly ApiClaudePromptDelivery[] = [
   'channel',

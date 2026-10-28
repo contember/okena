@@ -906,7 +906,10 @@ fn truncate_long_strings(value: &serde_json::Value) -> serde_json::Value {
 fn lifecycle_is_busy(lifecycle: AgentLifecycle) -> bool {
     match lifecycle {
         AgentLifecycle::Working | AgentLifecycle::Blocked => true,
-        AgentLifecycle::Done | AgentLifecycle::Idle => false,
+        AgentLifecycle::Done
+        | AgentLifecycle::Idle
+        | AgentLifecycle::Error
+        | AgentLifecycle::Unknown => false,
     }
 }
 
