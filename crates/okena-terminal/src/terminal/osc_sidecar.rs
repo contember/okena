@@ -8,6 +8,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use super::app_version::app_version;
+use super::program_status::{self, ProgramStatus, Report};
 use super::transport::TerminalTransport;
 use super::types::{TerminalProgress, TerminalProgressState};
 
@@ -85,6 +86,8 @@ impl OscSidecar {
                 transport,
                 terminal_id,
                 osc99_pending: HashMap::new(),
+                hook_status: None,
+                program_status: ProgramStatus::default(),
             },
         }
     }
@@ -103,9 +106,9 @@ struct SidecarPerform {
     /// `None` when cleared (`st=0`). Overwritten on each progress sequence and
     /// read by the GPUI thread via `Terminal::progress`.
     progress: Arc<Mutex<Option<TerminalProgress>>>,
-    /// Latest agent status reported via the agent-status OSC, or `None` when
-    /// never set / cleared (`st=clear`). Overwritten on each sequence and read
-    /// by the GPUI thread via `Terminal::agent_status`.
+    /// The pane's effective agent status, read by the GPUI thread via
+    /// `Terminal::agent_status`: the top `OSC 7501` record when there is one,
+    /// else the latest `OSC 9001` status. Written by [`Self::publish_status`].
     agent_status: Arc<Mutex<Option<AgentStatus>>>,
     /// One-shot "remote-visible state changed since last drain" edge, shared
     /// with `Terminal`. Set whenever a runtime-only signal here changes state
@@ -127,6 +130,12 @@ struct SidecarPerform {
     /// In-progress `OSC 99` notifications keyed by `i=` id, awaiting their
     /// final (`d=1`) chunk. GPUI-thread only (process_output is serialized).
     osc99_pending: HashMap<String, Osc99Accumulator>,
+    /// Latest `OSC 9001` status, or `None` when never set / cleared.
+    hook_status: Option<AgentStatus>,
+    /// `OSC 7501` records. While any exist they win over `hook_status`: a
+    /// program that reports natively knows its state better than a hook, and
+    /// Claude Code with the bundled plugin sends both.
+    program_status: ProgramStatus,
 }
 
 impl SidecarPerform {
@@ -410,17 +419,9 @@ impl SidecarPerform {
         }
 
         if st == "clear" {
-            let mut slot = self.agent_status.lock();
-            let changed = slot.is_some();
-            *slot = None;
-            drop(slot);
-            if changed {
-                self.remote_dirty.store(true, Ordering::Relaxed);
-            }
-            log::debug!(
-                "agent-status[{}]: clear (changed={changed})",
-                self.terminal_id
-            );
+            log::debug!("agent-status[{}]: clear", self.terminal_id);
+            self.hook_status = None;
+            self.publish_status(false);
             return;
         }
         let Some(lifecycle) = AgentLifecycle::from_token(st) else {
@@ -436,32 +437,79 @@ impl SidecarPerform {
         // maps an empty `msg=` to `None` so a notifying state keeps its default
         // body instead of an empty string.
         let custom = msg_b64.and_then(decode_osc_base64);
-        let new_status = AgentStatus::new_clamped(lifecycle, custom, labels);
+        self.hook_status = Some(AgentStatus::new_clamped(lifecycle, custom, labels));
+        self.publish_status(true);
+    }
 
-        // Notify only on a *transition* into a notifying state, so repeated
-        // identical reports don't ping. Decide while holding the slot (we need
-        // the previous value), then release it before touching the notification
-        // queue to keep lock scopes from overlapping.
+    /// Handle the Program Status Protocol, `OSC 7501` (see [`program_status`]).
+    fn handle_program_status(&mut self, params: &[&[u8]]) {
+        // `;` cannot appear in a valid body, so a split body is malformed and
+        // rejoining it lets the pair parser skip the damaged pairs.
+        let body = params[1..].join(&b';');
+        let Some(report) = program_status::parse(&body) else {
+            log::debug!("program-status[{}]: report ignored", self.terminal_id);
+            return;
+        };
+        if report == Report::Query {
+            if self.transport.answers_terminal_queries() {
+                self.transport
+                    .send_response(&self.terminal_id, program_status::QUERY_REPLY);
+            }
+            return;
+        }
+        let reported = matches!(report, Report::Set { .. });
+        if self.program_status.apply(report) {
+            self.publish_status(reported);
+        }
+    }
+
+    /// Drop `working` / `blocked` program-status records at a new prompt.
+    fn end_program_turns(&mut self) {
+        if self.program_status.end_transient() {
+            self.publish_status(false);
+        }
+    }
+
+    /// Store the effective agent status — the top `OSC 7501` record, else the
+    /// `OSC 9001` status — and raise the remote edge and notification it implies.
+    ///
+    /// Notify only on a *transition* into a notifying state, so repeated
+    /// identical reports don't ping, and only when `reported` — a clear that
+    /// uncovers an older `done` underneath is not a new event.
+    fn publish_status(&mut self, reported: bool) {
+        let new_status = if self.program_status.is_empty() {
+            self.hook_status.clone()
+        } else {
+            self.program_status.top()
+        };
+        let new_lifecycle = new_status.as_ref().map(|s| s.lifecycle);
+
+        // Decide while holding the slot (we need the previous value), then
+        // release it before touching the notification queue to keep lock
+        // scopes from overlapping.
         let mut slot = self.agent_status.lock();
         let previous_lifecycle = slot.as_ref().map(|s| s.lifecycle);
-        let notify_body =
-            (previous_lifecycle != Some(lifecycle) && lifecycle.notifies()).then(|| {
-                new_status
-                    .custom
+        let notify_body = new_status
+            .as_ref()
+            .filter(|s| {
+                reported && previous_lifecycle != Some(s.lifecycle) && s.lifecycle.notifies()
+            })
+            .map(|s| {
+                s.custom
                     .clone()
-                    .unwrap_or_else(|| agent_default_body(lifecycle))
+                    .unwrap_or_else(|| agent_default_body(s.lifecycle))
             });
         // Any change to the stored status (lifecycle, custom text, or labels)
         // is worth pushing to remote clients.
-        let changed = slot.as_ref() != Some(&new_status);
-        *slot = Some(new_status);
+        let changed = *slot != new_status;
+        *slot = new_status;
         drop(slot);
 
         log::debug!(
             "agent-status[{}]: {:?} -> {:?} (changed={changed}, notify={})",
             self.terminal_id,
             previous_lifecycle,
-            lifecycle,
+            new_lifecycle,
             notify_body.is_some()
         );
 
@@ -548,8 +596,9 @@ fn agent_default_body(lifecycle: AgentLifecycle) -> String {
     match lifecycle {
         AgentLifecycle::Blocked => "Agent needs your input".to_string(),
         AgentLifecycle::Done => "Agent finished".to_string(),
+        AgentLifecycle::Error => "Agent failed".to_string(),
         // Non-notifying states never reach here (guarded by `notifies()`).
-        AgentLifecycle::Working | AgentLifecycle::Idle => String::new(),
+        AgentLifecycle::Working | AgentLifecycle::Idle | AgentLifecycle::Unknown => String::new(),
     }
 }
 
@@ -652,7 +701,19 @@ impl Perform for SidecarPerform {
             b"99" => self.handle_osc99(params),
             // Okena's private agent-status protocol; see `handle_agent_status`.
             b"9001" => self.handle_agent_status(params),
+            b"7501" => self.handle_program_status(params),
+            // A new shell prompt (`OSC 133 ; A`) ends `working` / `blocked`
+            // program-status records, so an agent that died mid-turn does not
+            // stay tinted. The prompt marks themselves are `prompt_marks`' job.
+            b"133" if params[1].starts_with(b"A") => self.end_program_turns(),
             _ => {}
+        }
+    }
+
+    fn esc_dispatch(&mut self, intermediates: &[u8], _ignore: bool, byte: u8) {
+        // RIS (`ESC c`) resets the terminal, program-status records included.
+        if byte == b'c' && intermediates.is_empty() && self.program_status.clear() {
+            self.publish_status(false);
         }
     }
 
