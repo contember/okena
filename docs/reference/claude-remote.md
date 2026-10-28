@@ -123,6 +123,9 @@ first, one per `url`, with `number`, `repository` (`owner/repo`) and
 URLs. `claude_pr_links` in `GET /v1/state` carries the same lists for the
 terminals in `claude_sessions`.
 
+The web chat panel's header and the mobile chat's status strip show each as a
+`#<number>` chip that opens the PR.
+
 The daemon reads only the lines appended since its last read, after the
 `SessionStart`, `PostToolUse`, `PostToolUseFailure` and `Stop` hooks and on
 every session read; `/v1/state` reads no files. A new PR bumps `state_version`.

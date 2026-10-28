@@ -412,6 +412,18 @@ export interface ApiClaudeSession {
   queued_prompts: number;
   /** Oldest first. */
   dialogs: ApiClaudeDialog[];
+  /** Pull requests the session created or touched, newest first. Absent from older servers. */
+  pr_links?: ApiClaudePrLink[];
+}
+
+export interface ApiClaudePrLink {
+  number: number;
+  /** Always `https://`. */
+  url: string;
+  /** `owner/repo`. */
+  repository: string;
+  /** RFC 3339. */
+  last_seen_at: string;
 }
 
 export interface ApiClaudeDialog {
