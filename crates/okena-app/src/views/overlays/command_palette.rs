@@ -3,8 +3,7 @@ use crate::theme::theme;
 use crate::ui::tokens::{ui_text, ui_text_ms};
 use crate::views::components::{
     ListOverlayAction, ListOverlayConfig, ListOverlayState, badge, handle_list_overlay_key,
-    keyboard_hints_footer, modal_backdrop, modal_content, search_input_area_selected,
-    substring_filter,
+    keyboard_hints_footer, modal_backdrop, modal_content, substring_filter,
 };
 use gpui::prelude::*;
 use gpui::*;
@@ -49,8 +48,6 @@ pub struct CommandPalette {
     window_id: okena_workspace::state::WindowId,
     focus_handle: FocusHandle,
     state: ListOverlayState<CommandEntry>,
-    /// When true, the entire query is "selected" — first keystroke replaces it.
-    select_all: bool,
 }
 
 impl CommandPalette {
@@ -90,7 +87,6 @@ impl CommandPalette {
             .try_global::<CommandPaletteMemory>()
             .map(|m| (m.query.clone(), m.recent.clone()))
             .unwrap_or_default();
-        let select_all = !query.is_empty();
 
         // Sort: most-recently-used first (in MRU order), then remaining by category + name.
         let recent_rank: std::collections::HashMap<&'static str, usize> = recent
@@ -117,20 +113,26 @@ impl CommandPalette {
         let state = ListOverlayState::new(commands, config, cx);
         let focus_handle = state.focus_handle.clone();
 
+        // The last query comes back selected, so typing replaces it and
+        // arrows/Enter reuse it.
+        if let Some(input) = &state.search_input
+            && !query.is_empty()
+        {
+            input.update(cx, |input, cx| {
+                input.set_value(&query, cx);
+                input.select_all(cx);
+            });
+        }
+        state.on_search_changed(cx, |this: &mut Self, cx| this.filter_commands(cx));
+
         let mut palette = Self {
             workspace,
             focus_manager,
             window_id,
             focus_handle,
             state,
-            select_all,
         };
-
-        if !query.is_empty() {
-            palette.state.search_query = query;
-            palette.filter_commands();
-        }
-
+        palette.filter_commands(cx);
         palette
     }
 
@@ -140,7 +142,7 @@ impl CommandPalette {
             .map(|m| m.recent.clone())
             .unwrap_or_default();
         cx.set_global(CommandPaletteMemory {
-            query: self.state.search_query.clone(),
+            query: self.state.search_query(cx),
             recent,
         });
     }
@@ -154,7 +156,7 @@ impl CommandPalette {
         recent.insert(0, action_key);
         recent.truncate(RECENT_COMMANDS_LIMIT);
         cx.set_global(CommandPaletteMemory {
-            query: self.state.search_query.clone(),
+            query: self.state.search_query(cx),
             recent,
         });
     }
@@ -187,8 +189,9 @@ impl CommandPalette {
         }
     }
 
-    fn filter_commands(&mut self) {
-        let filtered = substring_filter(&self.state.items, &self.state.search_query, |cmd| {
+    fn filter_commands(&mut self, cx: &App) {
+        let query = self.state.search_query(cx);
+        let filtered = substring_filter(&self.state.items, &query, |cmd| {
             vec![
                 cmd.name.clone(),
                 cmd.description.clone(),
@@ -278,21 +281,11 @@ impl Render for CommandPalette {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
         let focus_handle = self.focus_handle.clone();
-        let search_query = self.state.search_query.clone();
         let config_width = self.state.config.width;
         let config_max_height = self.state.config.max_height;
-        let search_placeholder = self
-            .state
-            .config
-            .search_placeholder
-            .clone()
-            .unwrap_or_default();
         let empty_message = self.state.config.empty_message.clone();
 
-        // Focus on first render
-        if !focus_handle.is_focused(window) {
-            window.focus(&focus_handle, cx);
-        }
+        self.state.focus_search(window, cx);
 
         modal_backdrop("command-palette-backdrop", &t)
             .track_focus(&focus_handle)
@@ -303,48 +296,18 @@ impl Render for CommandPalette {
                 this.close(cx);
             }))
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
-                let key = event.keystroke.key.as_str();
-                // Handle select_all: on typing or backspace, clear query first
-                if this.select_all {
-                    match key {
-                        "backspace" => {
-                            this.state.search_query.clear();
-                            this.select_all = false;
-                            this.filter_commands();
-                            cx.notify();
-                            return;
-                        }
-                        k if k.len() == 1 => {
-                            let Some(ch) = k.chars().next() else {
-                                return;
-                            };
-                            if "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 -_./"
-                                .contains(ch)
-                            {
-                                this.state.search_query.clear();
-                                this.select_all = false;
-                                // Fall through to handle_list_overlay_key which will push the char
-                            }
-                        }
-                        "up" | "down" => {
-                            this.select_all = false;
-                        }
-                        _ => {}
-                    }
+                // An arrow means the restored query is being kept, so the next
+                // keystroke narrows it instead of replacing it. Also when the
+                // highlight can't move (Up on the first row, where it opens).
+                if matches!(event.keystroke.key.as_str(), "up" | "down") {
+                    this.state.deselect_search(cx);
                 }
-                match handle_list_overlay_key(&mut this.state, event, &[]) {
+                match handle_list_overlay_key(&mut this.state, event) {
                     ListOverlayAction::Close => this.close(cx),
-                    ListOverlayAction::SelectPrev | ListOverlayAction::SelectNext => {
-                        this.state.scroll_to_selected();
-                        cx.notify();
-                    }
+                    ListOverlayAction::SelectPrev | ListOverlayAction::SelectNext => cx.notify(),
                     ListOverlayAction::Confirm => {
                         let index = this.state.selected_index;
                         this.execute_command(index, window, cx);
-                    }
-                    ListOverlayAction::QueryChanged => {
-                        this.filter_commands();
-                        cx.notify();
                     }
                     _ => {}
                 }
@@ -360,12 +323,7 @@ impl Render for CommandPalette {
                     .w(px(config_width))
                     .max_h(px(config_max_height))
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .child(search_input_area_selected(
-                        &search_query,
-                        &search_placeholder,
-                        self.select_all,
-                        &t,
-                    ))
+                    .children(self.state.search_row(&t, cx))
                     .child(
                         // Command list
                         div()

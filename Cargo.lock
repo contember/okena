@@ -6291,6 +6291,7 @@ dependencies = [
  "gpui-component",
  "log",
  "notify-rust",
+ "nucleo-matcher",
  "okena-app-core",
  "okena-core",
  "okena-ext-claude",

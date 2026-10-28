@@ -9,6 +9,7 @@
 
 use gpui::prelude::FluentBuilder;
 use gpui::*;
+use okena_ui::simple_input::SimpleInputState;
 
 /// Configuration for a list overlay.
 #[derive(Clone)]
@@ -21,7 +22,8 @@ pub struct ListOverlayConfig {
     pub title: String,
     /// Optional subtitle shown below the title.
     pub subtitle: Option<String>,
-    /// Placeholder text for the search input. If None, search is disabled.
+    /// Placeholder text for the search input. If None, search is disabled and
+    /// the state has no input.
     pub search_placeholder: Option<String>,
     /// Message shown when the list is empty after filtering.
     pub empty_message: String,
@@ -97,11 +99,6 @@ impl ListOverlayConfig {
             .collect();
         self
     }
-
-    /// Check if search is enabled.
-    pub fn has_search(&self) -> bool {
-        self.search_placeholder.is_some()
-    }
 }
 
 /// Result of filtering an item.
@@ -129,8 +126,11 @@ pub struct ListOverlayState<T: Clone> {
     pub filtered: Vec<FilterResult>,
     /// Currently selected index (into filtered list).
     pub selected_index: usize,
-    /// Current search query.
-    pub search_query: String,
+    /// Search input, present iff the config is searchable. A real text input
+    /// (cursor, selection, Cmd+A, word deletion); the owner subscribes to its
+    /// `InputChangedEvent` to refilter, renders it with `search_input_row` and
+    /// focuses it with `focus_search`.
+    pub search_input: Option<Entity<SimpleInputState>>,
     /// Configuration.
     pub config: ListOverlayConfig,
 }
@@ -139,6 +139,10 @@ impl<T: Clone> ListOverlayState<T> {
     /// Create a new state with the given items and config.
     pub fn new(items: Vec<T>, config: ListOverlayConfig, cx: &mut App) -> Self {
         let filtered: Vec<FilterResult> = (0..items.len()).map(FilterResult::new).collect();
+        let search_input = config
+            .search_placeholder
+            .clone()
+            .map(|placeholder| cx.new(|cx| SimpleInputState::new(cx).placeholder(placeholder)));
 
         Self {
             focus_handle: cx.focus_handle(),
@@ -146,7 +150,7 @@ impl<T: Clone> ListOverlayState<T> {
             items,
             filtered,
             selected_index: 0,
-            search_query: String::new(),
+            search_input,
             config,
         }
     }
@@ -199,18 +203,60 @@ impl<T: Clone> ListOverlayState<T> {
         }
     }
 
-    /// Add a character to the search query.
-    pub fn push_search_char(&mut self, ch: char) {
-        self.search_query.push(ch);
+    /// Current search query (empty when the overlay is not searchable).
+    pub fn search_query(&self, cx: &App) -> String {
+        self.search_input
+            .as_ref()
+            .map(|input| input.read(cx).value().to_string())
+            .unwrap_or_default()
     }
 
-    /// Remove the last character from the search query.
-    pub fn pop_search_char(&mut self) -> bool {
-        if !self.search_query.is_empty() {
-            self.search_query.pop();
-            true
-        } else {
-            false
+    /// Refilter whenever the search input changes. Every searchable overlay
+    /// needs exactly this, so it lives here rather than in each owner.
+    pub fn on_search_changed<V: 'static>(
+        &self,
+        cx: &mut Context<V>,
+        refilter: impl Fn(&mut V, &mut Context<V>) + 'static,
+    ) {
+        if let Some(input) = &self.search_input {
+            cx.subscribe(
+                input,
+                move |this, _, _: &okena_ui::simple_input::InputChangedEvent, cx| {
+                    refilter(this, cx);
+                    cx.notify();
+                },
+            )
+            .detach();
+        }
+    }
+
+    /// The search row, when the overlay is searchable.
+    pub fn search_row(&self, t: &okena_core::theme::ThemeColors, cx: &App) -> Option<Div> {
+        self.search_input
+            .as_ref()
+            .map(|input| search_input_row(input, t, cx))
+    }
+
+    /// Drop the search input's selection, so the next keystroke extends the
+    /// query instead of replacing it.
+    pub fn deselect_search(&self, cx: &mut App) {
+        if let Some(input) = &self.search_input {
+            input.update(cx, |input, cx| {
+                input.clear_selection(cx);
+            });
+        }
+    }
+
+    /// Keep keyboard focus where typing belongs: the search input when there
+    /// is one, otherwise the overlay itself. Call on every render.
+    pub fn focus_search(&self, window: &mut Window, cx: &mut App) {
+        match &self.search_input {
+            Some(input) => focus_input(input, window, cx),
+            None => {
+                if !self.focus_handle.is_focused(window) {
+                    window.focus(&self.focus_handle, cx);
+                }
+            }
         }
     }
 
@@ -237,43 +283,26 @@ pub enum ListOverlayAction {
     SelectNext,
     /// Confirm the current selection.
     Confirm,
-    /// Search query changed (character added or removed).
-    QueryChanged,
-    /// A custom action was triggered (e.g., "space" for toggle visibility).
-    Custom(String),
     /// No action taken.
     None,
 }
 
-/// Characters allowed in search queries.
-const SEARCH_CHARS: &str = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 -_./";
-
 /// Handle keyboard events for a list overlay.
 ///
-/// # Arguments
+/// Navigation and confirm/close only. Text editing belongs to the state's
+/// search input, which consumes the keys it handles before they bubble here.
+/// An overlay that needs a key of its own the input would otherwise type
+/// (the project switcher's Space) takes it in a `capture_key_down` handler.
 ///
-/// * `state` - The list overlay state
-/// * `event` - The key down event
-/// * `extra_keys` - Additional key handlers as (key, action_name) pairs
-///
-/// # Returns
-///
-/// The action to take in response to the key event.
+/// Escape normally never gets here: the default keymap binds it to `Cancel`,
+/// and gpui dispatches bindings before key listeners, so it closes the overlay
+/// even while the input has a selection. The arm below covers a keymap where
+/// Escape was rebound.
 pub fn handle_list_overlay_key<T: Clone>(
     state: &mut ListOverlayState<T>,
     event: &KeyDownEvent,
-    extra_keys: &[(&str, &str)],
 ) -> ListOverlayAction {
-    let key = event.keystroke.key.as_str();
-
-    // Check extra keys first
-    for &(k, action) in extra_keys {
-        if key == k {
-            return ListOverlayAction::Custom(action.to_string());
-        }
-    }
-
-    match key {
+    match event.keystroke.key.as_str() {
         "escape" => ListOverlayAction::Close,
         "up" => {
             if state.select_prev() {
@@ -290,24 +319,6 @@ pub fn handle_list_overlay_key<T: Clone>(
             }
         }
         "enter" => ListOverlayAction::Confirm,
-        "backspace" => {
-            if state.config.has_search() && state.pop_search_char() {
-                ListOverlayAction::QueryChanged
-            } else {
-                ListOverlayAction::None
-            }
-        }
-        key if key.len() == 1 && state.config.has_search() => {
-            let Some(ch) = key.chars().next() else {
-                return ListOverlayAction::None;
-            };
-            if SEARCH_CHARS.contains(ch) {
-                state.push_search_char(ch);
-                ListOverlayAction::QueryChanged
-            } else {
-                ListOverlayAction::None
-            }
-        }
         _ => ListOverlayAction::None,
     }
 }
@@ -341,33 +352,44 @@ pub fn select_next(
     }
 }
 
+/// Focus `input` unless it already has focus. Overlays call this on every
+/// render so typing always lands in their search field.
+pub fn focus_input(input: &Entity<SimpleInputState>, window: &mut Window, cx: &mut App) {
+    if !input.read(cx).focus_handle(cx).is_focused(window) {
+        input.update(cx, |input, cx| input.focus(window, cx));
+    }
+}
+
 /// Render a search input row with ">" prompt prefix and a SimpleInput.
+///
+/// The one search field every list overlay uses, sized as the prominent line
+/// at the top of a quick-pick dialog.
 pub fn search_input_row(
     input: &Entity<okena_ui::simple_input::SimpleInputState>,
     t: &okena_core::theme::ThemeColors,
     cx: &App,
 ) -> Div {
     use okena_ui::simple_input::SimpleInput;
-    use okena_ui::tokens::{ui_text, ui_text_ms};
+    use okena_ui::tokens::{SPACE_LG, SPACE_MD, ui_text_xl};
 
     div()
-        .px(px(12.0))
-        .py(px(6.0))
+        .px(SPACE_LG)
+        .py(px(10.0))
         .border_b_1()
         .border_color(rgb(t.border))
         .flex()
         .items_center()
-        .gap(px(8.0))
+        .gap(SPACE_MD)
         .child(
             div()
-                .text_size(ui_text_ms(cx))
+                .text_size(ui_text_xl(cx))
                 .text_color(rgb(t.text_muted))
                 .child(">"),
         )
         .child(
             div()
                 .flex_1()
-                .child(SimpleInput::new(input).text_size(ui_text(13.0, cx))),
+                .child(SimpleInput::new(input).text_size(ui_text_xl(cx))),
         )
 }
 

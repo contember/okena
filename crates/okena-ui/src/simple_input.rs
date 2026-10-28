@@ -399,7 +399,9 @@ impl SimpleInputState {
     }
 
     /// Clear selection without other side effects
-    fn clear_selection(&mut self, cx: &mut Context<Self>) -> bool {
+    /// Drop the selection, leaving the cursor where it is. Returns whether
+    /// there was one.
+    pub fn clear_selection(&mut self, cx: &mut Context<Self>) -> bool {
         if self.selection.is_some() {
             self.selection = None;
             cx.notify();

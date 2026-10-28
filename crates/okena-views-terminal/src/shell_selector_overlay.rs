@@ -110,7 +110,7 @@ impl Render for ShellSelectorOverlay {
                 this.close(cx);
             }))
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
-                match handle_list_overlay_key(&mut this.state, event, &[]) {
+                match handle_list_overlay_key(&mut this.state, event) {
                     ListOverlayAction::Close => this.close(cx),
                     ListOverlayAction::Confirm => this.select_current(cx),
                     ListOverlayAction::SelectPrev | ListOverlayAction::SelectNext => cx.notify(),
