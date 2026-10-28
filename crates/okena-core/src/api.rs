@@ -898,6 +898,25 @@ pub enum ActionRequest {
         #[serde(default)]
         ignore_whitespace: bool,
     },
+    /// The changed files of a comparison without their hunks; the hunks of one
+    /// file come from `GitFileDiff`.
+    GitDiffFiles {
+        project_id: String,
+        #[serde(default)]
+        mode: DiffMode,
+        #[serde(default)]
+        ignore_whitespace: bool,
+    },
+    /// One file of a `GitDiffFiles` listing, identified by both of its paths.
+    GitFileDiff {
+        project_id: String,
+        #[serde(default)]
+        mode: DiffMode,
+        #[serde(default)]
+        ignore_whitespace: bool,
+        old_path: Option<String>,
+        new_path: Option<String>,
+    },
     /// What the comparison is made of: every changed file's role, and how much
     /// of the implementation volume is tests written inside implementation files.
     ReviewComposition {
@@ -1908,6 +1927,18 @@ mod tests {
                 project_id: "p1".into(),
                 mode: DiffMode::WorkingTree,
                 ignore_whitespace: false,
+            },
+            ActionRequest::GitDiffFiles {
+                project_id: "p1".into(),
+                mode: DiffMode::Staged,
+                ignore_whitespace: true,
+            },
+            ActionRequest::GitFileDiff {
+                project_id: "p1".into(),
+                mode: DiffMode::WorkingTree,
+                ignore_whitespace: false,
+                old_path: Some("src/old.rs".into()),
+                new_path: Some("src/new.rs".into()),
             },
             ActionRequest::GitBranches {
                 project_id: "p1".into(),

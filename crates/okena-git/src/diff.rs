@@ -86,6 +86,43 @@ impl FileDiff {
     }
 }
 
+/// A changed file without its hunks: one row of a diff listing.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiffFileEntry {
+    /// Old file path (None for new files).
+    pub old_path: Option<String>,
+    /// New file path (None for deleted files).
+    pub new_path: Option<String>,
+    /// Whether this is a binary file.
+    pub is_binary: bool,
+    /// Number of lines added.
+    pub lines_added: usize,
+    /// Number of lines removed.
+    pub lines_removed: usize,
+}
+
+impl DiffFileEntry {
+    /// Get the display name for this file.
+    pub fn display_name(&self) -> &str {
+        self.new_path
+            .as_deref()
+            .or(self.old_path.as_deref())
+            .unwrap_or("unknown")
+    }
+}
+
+impl From<&FileDiff> for DiffFileEntry {
+    fn from(file: &FileDiff) -> Self {
+        Self {
+            old_path: file.old_path.clone(),
+            new_path: file.new_path.clone(),
+            is_binary: file.is_binary,
+            lines_added: file.lines_added,
+            lines_removed: file.lines_removed,
+        }
+    }
+}
+
 pub use okena_core::types::DiffMode;
 
 /// Result of a diff operation.
@@ -559,9 +596,83 @@ pub fn get_diff_with_options(
     mode: DiffMode,
     ignore_whitespace: bool,
 ) -> crate::GitResult<DiffResult> {
+    let t_total = std::time::Instant::now();
+    let mut result = run_diff(path, &mode, ignore_whitespace, &[])?;
+
+    // For unstaged mode, also include untracked files
+    if matches!(mode, DiffMode::WorkingTree) {
+        let t2 = std::time::Instant::now();
+        let untracked = get_untracked_files(path);
+        log::debug!(
+            "[get_diff_with_options] get_untracked_files: {:?}, count: {}",
+            t2.elapsed(),
+            untracked.len()
+        );
+        for file_path in untracked {
+            if let Some(file_diff) = create_untracked_file_diff(path, &file_path) {
+                result.files.push(file_diff);
+            }
+        }
+    }
+
+    log::debug!("[get_diff_with_options] total: {:?}", t_total.elapsed());
+    Ok(result)
+}
+
+/// The changed files of a comparison, without their hunks.
+pub fn get_diff_files(
+    path: &Path,
+    mode: DiffMode,
+    ignore_whitespace: bool,
+) -> crate::GitResult<Vec<DiffFileEntry>> {
+    let diff = get_diff_with_options(path, mode, ignore_whitespace)?;
+    Ok(diff.files.iter().map(DiffFileEntry::from).collect())
+}
+
+/// The diff of one file listed by [`get_diff_files`]; `None` when the file no
+/// longer differs. Pass both paths of a rename so git still pairs them.
+pub fn get_file_diff(
+    path: &Path,
+    mode: DiffMode,
+    ignore_whitespace: bool,
+    old_path: Option<&str>,
+    new_path: Option<&str>,
+) -> crate::GitResult<Option<FileDiff>> {
+    let paths: Vec<&str> = old_path.into_iter().chain(new_path).collect();
+    if paths.is_empty() {
+        return Err(crate::error::GitError::ParseError(
+            "file diff needs a path".to_string(),
+        ));
+    }
+    let diff = run_diff(path, &mode, ignore_whitespace, &paths)?;
+    let matches = |file: &FileDiff| {
+        file.old_path.as_deref() == old_path && file.new_path.as_deref() == new_path
+    };
+    if let Some(file) = diff.files.into_iter().find(matches) {
+        return Ok(Some(file));
+    }
+    if matches!(mode, DiffMode::WorkingTree)
+        && old_path.is_none()
+        && let Some(new_path) = new_path
+        && get_untracked_files(path)
+            .iter()
+            .any(|file| file == new_path)
+    {
+        return Ok(create_untracked_file_diff(path, new_path));
+    }
+    Ok(None)
+}
+
+/// Run `git diff` for `mode`, limited to `paths` (worktree-root relative)
+/// when any are given. Untracked files are not included.
+fn run_diff(
+    path: &Path,
+    mode: &DiffMode,
+    ignore_whitespace: bool,
+    paths: &[&str],
+) -> crate::GitResult<DiffResult> {
     use crate::error::GitError;
 
-    let t_total = std::time::Instant::now();
     let path_str = path
         .to_str()
         .ok_or_else(|| GitError::InvalidPath(path.to_path_buf()))?;
@@ -572,7 +683,7 @@ pub fn get_diff_with_options(
     // --no-color: prevent ANSI codes when user has color.ui=always
     // --no-ext-diff: prevent external diff tools from intercepting output
     let range_str;
-    let mut args = match mode {
+    let mut args = match *mode {
         DiffMode::WorkingTree => vec!["-C", path_str, "diff", "--no-color", "--no-ext-diff"],
         DiffMode::Staged => vec![
             "-C",
@@ -627,10 +738,21 @@ pub fn get_diff_with_options(
         args.push("-w");
     }
 
+    // `top` resolves against the worktree root even when `path` is a project
+    // subdirectory; `literal` keeps glob characters in names from matching.
+    let pathspecs: Vec<String> = paths
+        .iter()
+        .map(|file| format!(":(top,literal){file}"))
+        .collect();
+    if !pathspecs.is_empty() {
+        args.push("--");
+        args.extend(pathspecs.iter().map(String::as_str));
+    }
+
     let t0 = std::time::Instant::now();
     let output = safe_output(command("git").args(&args))?;
     log::debug!(
-        "[get_diff_with_options] git diff command: {:?}, stdout: {} bytes",
+        "[run_diff] git diff command: {:?}, stdout: {} bytes",
         t0.elapsed(),
         output.stdout.len()
     );
@@ -645,30 +767,12 @@ pub fn get_diff_with_options(
 
     let t1 = std::time::Instant::now();
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let mut result = parse_unified_diff(&stdout);
+    let result = parse_unified_diff(&stdout);
     log::debug!(
-        "[get_diff_with_options] parse_unified_diff: {:?}, files: {}",
+        "[run_diff] parse_unified_diff: {:?}, files: {}",
         t1.elapsed(),
         result.files.len()
     );
-
-    // For unstaged mode, also include untracked files
-    if matches!(mode, DiffMode::WorkingTree) {
-        let t2 = std::time::Instant::now();
-        let untracked = get_untracked_files(path);
-        log::debug!(
-            "[get_diff_with_options] get_untracked_files: {:?}, count: {}",
-            t2.elapsed(),
-            untracked.len()
-        );
-        for file_path in untracked {
-            if let Some(file_diff) = create_untracked_file_diff(path, &file_path) {
-                result.files.push(file_diff);
-            }
-        }
-    }
-
-    log::debug!("[get_diff_with_options] total: {:?}", t_total.elapsed());
     Ok(result)
 }
 
@@ -1839,5 +1943,90 @@ diff --git a/b.rs b/b.rs
         assert_eq!(result.files.len(), 1);
         assert_eq!(result.files[0].lines_added, 1);
         assert_eq!(result.files[0].lines_removed, 1);
+    }
+
+    #[test]
+    fn a_file_diff_matches_its_entry_in_the_full_diff() {
+        use crate::repository::test_support::{git_in, init_temp_repo};
+
+        // A subdirectory project, a rename, a glob-like name, a staged-only
+        // file and an untracked file: each per-file diff must equal the
+        // file's slice of the full diff.
+        let (_tmp, repo) = init_temp_repo();
+        let project = repo.join("packages").join("app");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(repo.join("root.txt"), "root\n").unwrap();
+        std::fs::write(project.join("[ab].txt"), "glob\n").unwrap();
+        std::fs::write(project.join("a.txt"), "glob sibling\n").unwrap();
+        std::fs::write(project.join("old.txt"), "one\ntwo\nthree\nfour\n").unwrap();
+        std::fs::write(project.join("staged.txt"), "before\n").unwrap();
+        git_in(&repo, &["add", "."]);
+        git_in(
+            &repo,
+            &["-c", "commit.gpgsign=false", "commit", "-m", "base"],
+        );
+        std::fs::write(repo.join("root.txt"), "root edited\n").unwrap();
+        std::fs::write(project.join("[ab].txt"), "glob edited\n").unwrap();
+        std::fs::write(project.join("a.txt"), "sibling edited\n").unwrap();
+        git_in(
+            &repo,
+            &["mv", "packages/app/old.txt", "packages/app/new.txt"],
+        );
+        std::fs::write(project.join("new.txt"), "one\ntwo\nthree\nfive\n").unwrap();
+        git_in(&repo, &["add", "packages/app/new.txt"]);
+        std::fs::write(project.join("staged.txt"), "after\n").unwrap();
+        git_in(&repo, &["add", "packages/app/staged.txt"]);
+        std::fs::write(project.join("fresh.txt"), "untracked\n").unwrap();
+
+        for mode in [DiffMode::WorkingTree, DiffMode::Staged] {
+            let full = get_diff_with_options(&project, mode.clone(), false).expect("full diff");
+            let entries = get_diff_files(&project, mode.clone(), false).expect("diff files");
+            assert_eq!(entries.len(), full.files.len());
+            assert!(!entries.is_empty(), "{mode:?} has changes");
+            for (entry, expected) in entries.iter().zip(&full.files) {
+                assert_eq!(*entry, DiffFileEntry::from(expected));
+                let file = get_file_diff(
+                    &project,
+                    mode.clone(),
+                    false,
+                    entry.old_path.as_deref(),
+                    entry.new_path.as_deref(),
+                )
+                .expect("file diff")
+                .unwrap_or_else(|| panic!("{} differs in {mode:?}", entry.display_name()));
+                assert_eq!(
+                    serde_json::to_value(&file).unwrap(),
+                    serde_json::to_value(expected).unwrap(),
+                    "{} in {mode:?}",
+                    entry.display_name()
+                );
+            }
+        }
+
+        let staged = get_diff_files(&project, DiffMode::Staged, false).unwrap();
+        assert!(
+            staged.iter().any(
+                |entry| entry.old_path.as_deref() == Some("packages/app/old.txt")
+                    && entry.new_path.as_deref() == Some("packages/app/new.txt")
+            ),
+            "the rename stays paired: {staged:?}"
+        );
+    }
+
+    #[test]
+    fn a_file_without_changes_has_no_file_diff() {
+        use crate::repository::test_support::{git_in, init_temp_repo};
+
+        let (_tmp, repo) = init_temp_repo();
+        std::fs::write(repo.join("clean.txt"), "clean\n").unwrap();
+        git_in(&repo, &["add", "."]);
+        git_in(
+            &repo,
+            &["-c", "commit.gpgsign=false", "commit", "-m", "base"],
+        );
+
+        let file = get_file_diff(&repo, DiffMode::WorkingTree, false, None, Some("clean.txt"))
+            .expect("file diff");
+        assert!(file.is_none(), "a tracked, unchanged file is not untracked");
     }
 }

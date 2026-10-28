@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 pub use okena_core::types::DiffViewMode;
 pub use okena_files::syntax::HighlightedSpan;
-use okena_git::{DiffLineType, FileDiff};
+use okena_git::{DiffFileEntry, DiffLineType};
 
 pub use okena_files::file_tree::FileTreeNode;
 
@@ -25,8 +25,8 @@ pub struct FileStats {
     pub is_deleted: bool,
 }
 
-impl From<&FileDiff> for FileStats {
-    fn from(file: &FileDiff) -> Self {
+impl From<&DiffFileEntry> for FileStats {
+    fn from(file: &DiffFileEntry) -> Self {
         Self {
             path: file.display_name().to_string(),
             added: file.lines_added,

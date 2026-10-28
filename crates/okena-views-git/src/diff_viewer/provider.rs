@@ -1,12 +1,31 @@
 //! GitProvider trait and the remote-server (HTTP) implementation.
 
 use okena_core::review::ChangeComposition;
-use okena_git::{BranchList, CommitLogEntry, DiffMode, DiffResult, FileDiffSummary};
+use okena_git::{
+    BranchList, CommitLogEntry, DiffFileEntry, DiffMode, DiffResult, FileDiff, FileDiffSummary,
+};
 use serde::de::DeserializeOwned;
 
 pub struct BinaryFileContents {
     pub old: Option<Vec<u8>>,
     pub new: Option<Vec<u8>>,
+}
+
+/// The files of a comparison, as the daemon can deliver them.
+pub enum DiffListing {
+    /// Hunks load per file through [`GitProvider::get_file_diff`].
+    Files(Vec<DiffFileEntry>),
+    /// A daemon predating per-file diffs sent every hunk at once.
+    Full(DiffResult),
+}
+
+impl DiffListing {
+    pub fn is_empty(&self) -> bool {
+        match self {
+            Self::Files(files) => files.is_empty(),
+            Self::Full(result) => result.is_empty(),
+        }
+    }
 }
 
 /// Provides git data from either local git commands or a remote server.
@@ -18,7 +37,18 @@ pub trait GitProvider: Send + Sync + 'static {
     fn supports_mutations(&self) -> bool {
         true
     }
-    fn get_diff(&self, mode: DiffMode, ignore_whitespace: bool) -> Result<DiffResult, String>;
+    fn get_diff_files(
+        &self,
+        mode: DiffMode,
+        ignore_whitespace: bool,
+    ) -> Result<DiffListing, String>;
+    /// `None` when the file no longer differs.
+    fn get_file_diff(
+        &self,
+        file: &DiffFileEntry,
+        mode: DiffMode,
+        ignore_whitespace: bool,
+    ) -> Result<Option<FileDiff>, String>;
     /// Role volumes for the same comparison `get_diff` returns.
     fn get_review_composition(
         &self,
@@ -129,6 +159,12 @@ impl RemoteGitProvider {
     }
 }
 
+/// An older daemon rejects an action it does not know while deserializing the
+/// request, naming the action's tag.
+fn is_unknown_action(error: &str, action: &str) -> bool {
+    error.contains(&format!("unknown variant `{action}`"))
+}
+
 impl GitProvider for RemoteGitProvider {
     fn is_git_repo(&self) -> bool {
         true
@@ -138,13 +174,44 @@ impl GitProvider for RemoteGitProvider {
         true
     }
 
-    fn get_diff(&self, mode: DiffMode, ignore_whitespace: bool) -> Result<DiffResult, String> {
-        let action = okena_core::api::ActionRequest::GitDiff {
+    fn get_diff_files(
+        &self,
+        mode: DiffMode,
+        ignore_whitespace: bool,
+    ) -> Result<DiffListing, String> {
+        let action = okena_core::api::ActionRequest::GitDiffFiles {
+            project_id: self.project_id.clone(),
+            mode: mode.clone(),
+            ignore_whitespace,
+        };
+        match self.post_json(action, "diff files") {
+            Ok(files) => Ok(DiffListing::Files(files)),
+            Err(error) if is_unknown_action(&error, "git_diff_files") => {
+                let action = okena_core::api::ActionRequest::GitDiff {
+                    project_id: self.project_id.clone(),
+                    mode,
+                    ignore_whitespace,
+                };
+                self.post_json(action, "diff").map(DiffListing::Full)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    fn get_file_diff(
+        &self,
+        file: &DiffFileEntry,
+        mode: DiffMode,
+        ignore_whitespace: bool,
+    ) -> Result<Option<FileDiff>, String> {
+        let action = okena_core::api::ActionRequest::GitFileDiff {
             project_id: self.project_id.clone(),
             mode,
             ignore_whitespace,
+            old_path: file.old_path.clone(),
+            new_path: file.new_path.clone(),
         };
-        self.post_json(action, "diff")
+        self.post_json(action, "file diff")
     }
 
     fn get_review_composition(
@@ -319,5 +386,30 @@ impl GitProvider for RemoteGitProvider {
         }
         let base = self.root.trim_end_matches(['/', '\\']);
         Some(format!("{}/{}", base, file_path))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_unknown_action;
+    use okena_core::api::ActionRequest;
+
+    #[test]
+    fn an_action_the_daemon_does_not_know_is_recognised() {
+        // An older daemon parses the request like this and returns serde's
+        // message in the error body.
+        let error = serde_json::from_value::<ActionRequest>(serde_json::json!({
+            "action": "git_future_action",
+            "project_id": "p1",
+        }))
+        .expect_err("the daemon does not know the action")
+        .to_string();
+
+        assert!(is_unknown_action(&error, "git_future_action"), "{error}");
+        assert!(!is_unknown_action(&error, "git_diff_files"), "{error}");
+        assert!(!is_unknown_action(
+            "project not found: p1",
+            "git_diff_files"
+        ));
     }
 }
