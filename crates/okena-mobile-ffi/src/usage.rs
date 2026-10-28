@@ -135,7 +135,7 @@ pub struct PoolTodayInfo {
     pub safe_per_day: PoolAmountInfo,
     pub off_day: PoolAmountInfo,
     pub runs_short_at: Option<f64>,
-    /// Label of the account whose weekly reset is at `runs_short_at`.
+    /// Label of the account whose weekly reset next follows `runs_short_at`.
     pub runs_short_before: Option<String>,
     pub runs_out_at_recent_pace: Option<f64>,
 }

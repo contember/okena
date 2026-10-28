@@ -303,7 +303,7 @@ export interface PoolTodayInfo {
   offDay: PoolAmountInfo;
   /** Using more than `safePerDay` makes the pool run short at this time; unset: it only takes from later weeks. */
   runsShortAt?: number;
-  /** Label of the account whose weekly reset is at `runsShortAt`. */
+  /** Label of the account whose weekly reset next follows `runsShortAt`. */
   runsShortBefore?: string;
   /** At the last 24 hours' pace the pool runs out at this time; unset: it lasts the week. */
   runsOutAtRecentPace?: number;

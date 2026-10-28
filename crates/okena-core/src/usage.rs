@@ -348,11 +348,11 @@ pub struct ApiPoolToday {
     /// when [`ApiUsage::working_days`] is not every day and it is above zero.
     pub off_day: ApiPoolAmount,
     /// Using more than `safe_per_day` makes the pool run short at this time
-    /// (epoch seconds), the tightest weekly reset. `None`: more only takes
-    /// from what the pool refills for later weeks.
+    /// (epoch seconds). `None`: more only takes from what the pool refills
+    /// for later weeks.
     #[serde(default)]
     pub runs_short_at: Option<f64>,
-    /// Label of the account whose weekly reset is at `runs_short_at`.
+    /// Label of the account whose weekly reset next follows `runs_short_at`.
     #[serde(default)]
     pub runs_short_before: Option<String>,
     /// At the last 24 hours' pace the pool runs out at this time (epoch

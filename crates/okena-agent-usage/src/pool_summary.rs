@@ -16,9 +16,7 @@ use std::collections::HashMap;
 const HOUR_SECS: f64 = 3600.0;
 const FIVE_HOUR_SECS: f64 = 5.0 * HOUR_SECS;
 const SEVEN_DAY_SECS: f64 = 7.0 * 24.0 * HOUR_SECS;
-/// A weekly reset this close to the moment the pool runs short names the
-/// account that causes it.
-const RUNS_SHORT_RESET_TOLERANCE_MS: i64 = 30 * 60 * 1000;
+const WEEK_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 
 /// Summarize the pool at `now`. `histories` holds each account's usage history
 /// by account id; a missing one counts as empty. Every account is listed, but
@@ -63,14 +61,17 @@ pub fn summarize(
         work_seconds: work_seconds(pace, points),
         account_week_percent: points / mean_weight,
     };
+    // The shortage lasts until the next weekly reset refills the pool.
     let runs_short_before = today.bottleneck_ms.and_then(|at| {
         in_service
             .iter()
-            .find(|account| {
-                weekly_reset_ms(account)
-                    .is_some_and(|reset| (reset - at).abs() < RUNS_SHORT_RESET_TOLERANCE_MS)
+            .filter_map(|account| {
+                let reset = weekly_reset_ms(account)?;
+                let weeks_behind = ((at - reset).max(0) as u64).div_ceil(WEEK_MS as u64) as i64;
+                Some((reset + weeks_behind * WEEK_MS, account))
             })
-            .map(|account| account.label.clone())
+            .min_by_key(|(reset, _)| *reset)
+            .map(|(_, account)| account.label.clone())
     });
     Some(ApiPool {
         today: ApiPoolToday {
@@ -482,19 +483,23 @@ mod tests {
     }
 
     #[test]
-    fn running_short_names_the_account_whose_weekly_reset_it_is() {
-        // Nearly spent until its reset in three days: a working day using the
-        // long-run share runs the pool short at that reset.
+    fn running_short_names_the_account_whose_weekly_reset_follows() {
+        // Nearly spent until its reset on Monday 08:00: a working day using
+        // more than the safe share runs the pool short at the end of Sunday.
         let tight = AiAccount {
             seven_day: usage(95.0, NOW_MS + 72 * HOUR_MS),
             ..account("tight")
         };
-        let summary = summarize_at(&[tight], &HashMap::new());
+        let other = AiAccount {
+            seven_day: usage(100.0, NOW_MS + 96 * HOUR_MS),
+            ..account("other")
+        };
+        let summary = summarize_at(&[tight, other], &HashMap::new());
         let at = summary.today.runs_short_at.expect("the pool runs short");
-        let reset = (NOW_MS + 72 * HOUR_MS) as f64 / 1000.0;
+        let sunday_end = (NOW_MS + 64 * HOUR_MS) as f64 / 1000.0;
         assert!(
-            (at - reset).abs() < 60.0,
-            "runs short at {at}, reset {reset}"
+            (at - sunday_end).abs() < 60.0,
+            "runs short at {at}, Sunday ends {sunday_end}"
         );
         assert_eq!(summary.today.runs_short_before.as_deref(), Some("TIGHT"));
     }
@@ -647,9 +652,10 @@ mod tests {
         let today = &summary.today;
         assert_eq!(today.used.account_week_percent, 50.0);
         assert_eq!(today.off_day.account_week_percent, 10.0);
-        // The weekend alone needs more than the 10% left before the reset.
-        assert_eq!(today.safe_per_day.account_week_percent, 0.0);
-        assert_eq!(today.left.account_week_percent, -50.0);
+        // Saturday takes the 10% left and Sunday waits for its 08:00 reset, so
+        // only the long-run share limits: (100 - 2 * 10) / 5 working days.
+        assert!((today.safe_per_day.account_week_percent - 16.0).abs() < 1e-6);
+        assert!((today.left.account_week_percent + 34.0).abs() < 1e-6);
         assert!(today.left.work_seconds < 0.0);
         let runs_out = today
             .runs_out_at_recent_pace
