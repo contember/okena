@@ -64,6 +64,42 @@ pub struct ApiClaudeSession {
     pub queued_prompts: u32,
     /// Open dialogs, oldest first.
     pub dialogs: Vec<ApiClaudeDialog>,
+    /// Subagents between their `SubagentStart` and `SubagentStop` hooks,
+    /// oldest first. Empty when hooks are not attached.
+    #[serde(default)]
+    pub running_subagents: Vec<ApiClaudeRunningSubagent>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApiClaudeRunningSubagent {
+    pub agent_id: String,
+    /// `general-purpose`, `Explore`, a custom agent's name, ...
+    pub agent_type: String,
+}
+
+/// The subagents of the pane's current session, from Claude's metadata files.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ApiClaudeSubagentList {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    /// Oldest first.
+    pub subagents: Vec<ApiClaudeSubagent>,
+}
+
+/// A subagent started in the session. Its transcript is read with the
+/// transcript route's `agent_id`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ApiClaudeSubagent {
+    pub agent_id: String,
+    /// The `Agent` tool call that started it, when Claude recorded it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_use_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Listed in [`ApiClaudeSession::running_subagents`].
+    pub running: bool,
 }
 
 /// A permission dialog Claude is showing in the terminal, mirrored from a

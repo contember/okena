@@ -9,6 +9,7 @@
 
 use okena_core::claude_remote::{
     ApiClaudeDecision, ApiClaudePromptRequest, ApiClaudePromptResponse, ApiClaudeSession,
+    ApiClaudeSubagentList,
 };
 use okena_transport::remote_action::{JsonRequestError, get_json_async, post_json_async};
 
@@ -27,10 +28,17 @@ fn terminal_route<'a>(terminal_id: &'a str, rest: &[&'a str]) -> Vec<&'a str> {
     segments
 }
 
-fn transcript_query<'a>(cursor: &'a str, session_id: Option<&'a str>) -> Vec<(&'a str, &'a str)> {
+fn transcript_query<'a>(
+    cursor: &'a str,
+    session_id: Option<&'a str>,
+    agent_id: Option<&'a str>,
+) -> Vec<(&'a str, &'a str)> {
     let mut query = vec![("cursor", cursor)];
     if let Some(session_id) = session_id {
         query.push(("session_id", session_id));
+    }
+    if let Some(agent_id) = agent_id {
+        query.push(("agent_id", agent_id));
     }
     query
 }
@@ -83,6 +91,7 @@ pub(crate) async fn get_transcript(
     terminal_id: &str,
     cursor: u64,
     session_id: Option<&str>,
+    agent_id: Option<&str>,
 ) -> Result<String, MobileFfiError> {
     let (config, token) = ConnectionManager::get().http_auth(conn_id)?;
     let cursor = cursor.to_string();
@@ -90,11 +99,27 @@ pub(crate) async fn get_transcript(
         &config,
         &token,
         &terminal_route(terminal_id, &["transcript"]),
-        &transcript_query(&cursor, session_id),
+        &transcript_query(&cursor, session_id, agent_id),
     )
     .await
     .map_err(|error| request_error(error, None))?;
     serde_json::to_string(&page).map_err(encode_error)
+}
+
+pub(crate) async fn get_subagents(
+    conn_id: &str,
+    terminal_id: &str,
+) -> Result<String, MobileFfiError> {
+    let (config, token) = ConnectionManager::get().http_auth(conn_id)?;
+    let list: ApiClaudeSubagentList = get_json_async(
+        &config,
+        &token,
+        &terminal_route(terminal_id, &["subagents"]),
+        &[],
+    )
+    .await
+    .map_err(|error| request_error(error, None))?;
+    serde_json::to_string(&list).map_err(encode_error)
 }
 
 pub(crate) async fn send_prompt(
@@ -158,10 +183,14 @@ mod tests {
 
     #[test]
     fn transcript_query_sends_the_session_only_when_known() {
-        assert_eq!(transcript_query("0", None), [("cursor", "0")]);
+        assert_eq!(transcript_query("0", None, None), [("cursor", "0")]);
         assert_eq!(
-            transcript_query("42", Some("s1")),
+            transcript_query("42", Some("s1"), None),
             [("cursor", "42"), ("session_id", "s1")]
+        );
+        assert_eq!(
+            transcript_query("0", Some("s1"), Some("a1")),
+            [("cursor", "0"), ("session_id", "s1"), ("agent_id", "a1")]
         );
     }
 

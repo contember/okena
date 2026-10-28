@@ -55,13 +55,20 @@ describe("injection", () => {
       async: true,
       timeout: 10,
     };
-    for (const event of ["SessionStart", "UserPromptSubmit", "Stop", "SessionEnd"]) {
+    for (const event of [
+      "SessionStart",
+      "UserPromptSubmit",
+      "Stop",
+      "SessionEnd",
+      "SubagentStart",
+      "SubagentStop",
+    ]) {
       expect(settings.hooks[event]).toEqual([{ hooks: [eventHook] }]);
     }
     for (const event of ["PreToolUse", "PostToolUse", "PostToolUseFailure"]) {
       expect(settings.hooks[event]).toEqual([{ matcher: "*", hooks: [eventHook] }]);
     }
-    expect(Object.keys(settings.hooks)).toHaveLength(8);
+    expect(Object.keys(settings.hooks)).toHaveLength(10);
   });
 
   test("quotes OKENA_BIN for sh", () => {

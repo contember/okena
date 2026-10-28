@@ -699,6 +699,14 @@ export interface OkenaNative {
     zone: string,
   ): Promise<void>;
 
+  // ── File upload ─────────────────────────────────────────────────────────
+
+  /**
+   * Upload the file at `localPath` (a filesystem path, not a URI; at most
+   * 64 MiB) to the server host; resolves to its path there.
+   */
+  uploadFile(connId: ConnId, localPath: string): Promise<string>;
+
   // ── Claude remote (lib.rs; JSON strings — parse them with ./claude) ──────
 
   /** Open Claude dialogs per terminal, from the cached state (sync). */
@@ -710,6 +718,7 @@ export interface OkenaNative {
   /**
    * JSON `ApiClaudeTranscriptPage`. Cursor `0n` asks for the first page; pass
    * back the previous page's `cursor` and `session_id` for newer entries.
+   * `agentId` reads that subagent's transcript.
    * (`u64` Rust-side, which ubrn maps to `bigint`.)
    */
   claudeGetTranscript(
@@ -717,7 +726,10 @@ export interface OkenaNative {
     terminalId: TerminalId,
     cursor: bigint,
     sessionId: string | undefined,
+    agentId: string | undefined,
   ): Promise<string>;
+  /** JSON `ApiClaudeSubagentList`. */
+  claudeGetSubagents(connId: ConnId, terminalId: TerminalId): Promise<string>;
   /** JSON `ApiClaudePromptResponse`; rejects with the server's reason (400 / 409). */
   claudeSendPrompt(connId: ConnId, terminalId: TerminalId, text: string): Promise<string>;
   /**

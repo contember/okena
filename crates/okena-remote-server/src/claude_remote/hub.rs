@@ -7,8 +7,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use okena_core::agent_session::is_valid_transcript_path;
 use okena_core::agent_status::AgentLifecycle;
 use okena_core::claude_remote::{
-    ApiClaudeDecision, ApiClaudeDialog, ApiClaudePromptDelivery, ApiClaudeSession,
-    ApiClaudeTranscriptPage, ClaudeHookRequest, ClaudeTerminalInfo,
+    ApiClaudeDecision, ApiClaudeDialog, ApiClaudePromptDelivery, ApiClaudeRunningSubagent,
+    ApiClaudeSession, ApiClaudeSubagentList, ApiClaudeTranscriptPage, ClaudeHookRequest,
+    ClaudeTerminalInfo,
 };
 use okena_core::keys::SpecialKey;
 use parking_lot::Mutex;
@@ -17,8 +18,10 @@ use tokio::sync::{oneshot, watch};
 use super::ClaudeRemoteError;
 use super::channel::{ChannelState, PollStart};
 use super::decision::{cancelled_output, decided_output};
-use super::hook_input::{HookEvent, HookInput};
-use super::transcript::{has_transcript_extension, read_transcript};
+use super::hook_input::{HookEvent, HookInput, is_valid_agent_id};
+use super::transcript::{
+    has_transcript_extension, list_subagents, read_transcript, subagent_transcript_path,
+};
 use crate::bridge::{BridgeMessage, BridgeSender, CommandResult, RemoteCommand};
 use crate::types::ActionRequest;
 
@@ -38,6 +41,9 @@ const MAX_PROMPT_BYTES: usize = 64 * 1024;
 /// the session every second; a `Write` can carry a whole file.
 const MAX_DIALOG_STRING_BYTES: usize = 16 * 1024;
 const TRUNCATION_MARK: &str = "\n… (truncated)";
+/// Per terminal, for the running and the recently stopped ids each; a
+/// `SubagentStop` lost with a crashed hook must not grow them.
+const MAX_RUNNING_SUBAGENTS: usize = 64;
 /// `comm` of the native `claude` binary in the pane's foreground.
 const CLAUDE_COMMAND: &str = "claude";
 
@@ -69,6 +75,11 @@ struct TerminalState {
     typed_prompt: Option<TypedPrompt>,
     pty_queue: VecDeque<String>,
     channel: ChannelState,
+    /// Between `SubagentStart` and `SubagentStop`, oldest first.
+    running_subagents: Vec<ApiClaudeRunningSubagent>,
+    /// Recently stopped ids: async hooks of a short subagent may report its
+    /// stop before its start.
+    stopped_subagents: VecDeque<String>,
 }
 
 struct TypedPrompt {
@@ -175,6 +186,37 @@ impl TerminalState {
                 && dialog.tool_input == input.tool_input
         })?;
         Some(self.dialogs.remove(index))
+    }
+
+    fn start_subagent(&mut self, input: &HookInput) {
+        let Some(agent_id) = input.agent_id.clone() else {
+            return;
+        };
+        if self.running_subagents.len() >= MAX_RUNNING_SUBAGENTS
+            || self.stopped_subagents.contains(&agent_id)
+            || self
+                .running_subagents
+                .iter()
+                .any(|subagent| subagent.agent_id == agent_id)
+        {
+            return;
+        }
+        self.running_subagents.push(ApiClaudeRunningSubagent {
+            agent_id,
+            agent_type: input.agent_type.clone().unwrap_or_default(),
+        });
+    }
+
+    fn stop_subagent(&mut self, input: &HookInput) {
+        let Some(agent_id) = input.agent_id.clone() else {
+            return;
+        };
+        self.running_subagents
+            .retain(|subagent| subagent.agent_id != agent_id);
+        if self.stopped_subagents.len() >= MAX_RUNNING_SUBAGENTS {
+            self.stopped_subagents.pop_front();
+        }
+        self.stopped_subagents.push_back(agent_id);
     }
 
     fn take_dialog(&mut self, dialog_id: &str) -> Option<OpenDialog> {
@@ -331,6 +373,7 @@ impl ClaudeRemoteHub {
                 HookEvent::SessionStart if input.source.as_deref() == Some("compact") => {}
                 HookEvent::SessionStart => {
                     terminal.busy = Some(false);
+                    terminal.running_subagents.clear();
                     terminal.drop_undelivered_prompts();
                     cancelled = terminal.take_all_dialogs();
                 }
@@ -362,10 +405,13 @@ impl ClaudeRemoteHub {
                     terminal.busy = None;
                     terminal.hooks_attached = false;
                     terminal.session_ended = true;
+                    terminal.running_subagents.clear();
                     terminal.channel.detach();
                     terminal.drop_undelivered_prompts();
                     cancelled = terminal.take_all_dialogs();
                 }
+                HookEvent::SubagentStart => terminal.start_subagent(&input),
+                HookEvent::SubagentStop => terminal.stop_subagent(&input),
                 HookEvent::Other => {}
             }
             session_changed = had_session != terminal.has_session(Instant::now());
@@ -447,6 +493,8 @@ impl ClaudeRemoteHub {
                 dialogs: terminal.map_or_else(Vec::new, |terminal| {
                     terminal.dialogs.iter().map(OpenDialog::to_api).collect()
                 }),
+                running_subagents: terminal
+                    .map_or_else(Vec::new, |terminal| terminal.running_subagents.clone()),
             }
         };
 
@@ -474,34 +522,77 @@ impl ClaudeRemoteHub {
         terminal_id: &str,
         cursor: Option<u64>,
         session_id: Option<String>,
+        agent_id: Option<String>,
     ) -> Result<ApiClaudeTranscriptPage, ClaudeRemoteError> {
-        let source = match self.hooked_transcript_source(terminal_id) {
-            Some(source) => source,
-            None => {
-                TranscriptSource::from_terminal_info(&self.terminal_info(terminal_id, false).await?)
-            }
-        };
+        let source = self.transcript_source(terminal_id).await?;
         let Some(path) = source.path else {
             return Err(ClaudeRemoteError::NoTranscript);
+        };
+        let path = match agent_id {
+            None => PathBuf::from(path),
+            Some(agent_id) if is_valid_agent_id(&agent_id) => {
+                subagent_transcript_path(Path::new(&path), &agent_id)
+            }
+            Some(_) => return Err(ClaudeRemoteError::NoTranscript),
         };
         // A cursor is only meaningful together with the session it came from.
         let same_session = session_id.is_some() && session_id == source.session_id;
         let resume_from = cursor.filter(|_| same_session);
 
-        let chunk =
-            tokio::task::spawn_blocking(move || read_transcript(&PathBuf::from(path), resume_from))
-                .await
-                .map_err(|error| ClaudeRemoteError::Io(std::io::Error::other(error)))?
-                .map_err(|error| match error.kind() {
-                    std::io::ErrorKind::NotFound => ClaudeRemoteError::NoTranscript,
-                    _ => ClaudeRemoteError::Io(error),
-                })?;
+        let chunk = tokio::task::spawn_blocking(move || read_transcript(&path, resume_from))
+            .await
+            .map_err(|error| ClaudeRemoteError::Io(std::io::Error::other(error)))?
+            .map_err(|error| match error.kind() {
+                std::io::ErrorKind::NotFound => ClaudeRemoteError::NoTranscript,
+                _ => ClaudeRemoteError::Io(error),
+            })?;
 
         Ok(ApiClaudeTranscriptPage {
             session_id: source.session_id,
             entries: chunk.entries,
             cursor: chunk.cursor,
             reset: chunk.reset,
+        })
+    }
+
+    /// The subagents Claude recorded for the pane's session, each marked
+    /// running while its hooks say so.
+    pub(crate) async fn subagents(
+        &self,
+        terminal_id: &str,
+    ) -> Result<ApiClaudeSubagentList, ClaudeRemoteError> {
+        let source = self.transcript_source(terminal_id).await?;
+        let Some(path) = source.path else {
+            return Err(ClaudeRemoteError::NoTranscript);
+        };
+        let mut subagents = tokio::task::spawn_blocking(move || list_subagents(Path::new(&path)))
+            .await
+            .map_err(|error| ClaudeRemoteError::Io(std::io::Error::other(error)))?
+            .map_err(ClaudeRemoteError::Io)?;
+
+        if let Some(terminal) = self.terminals.lock().get(terminal_id) {
+            for subagent in &mut subagents {
+                subagent.running = terminal
+                    .running_subagents
+                    .iter()
+                    .any(|running| running.agent_id == subagent.agent_id);
+            }
+        }
+        Ok(ApiClaudeSubagentList {
+            session_id: source.session_id,
+            subagents,
+        })
+    }
+
+    async fn transcript_source(
+        &self,
+        terminal_id: &str,
+    ) -> Result<TranscriptSource, ClaudeRemoteError> {
+        Ok(match self.hooked_transcript_source(terminal_id) {
+            Some(source) => source,
+            None => {
+                TranscriptSource::from_terminal_info(&self.terminal_info(terminal_id, false).await?)
+            }
         })
     }
 
@@ -1311,27 +1402,27 @@ mod tests {
         start["transcript_path"] = json!(path.to_string_lossy());
         hub.hook_event(hook("t1", start)).expect("valid event");
 
-        let page = hub.transcript("t1", None, None).await.expect("page");
+        let page = hub.transcript("t1", None, None, None).await.expect("page");
         assert!(page.reset);
         assert_eq!(page.session_id.as_deref(), Some("s1"));
         assert_eq!(page.entries.len(), 1);
 
         let next = hub
-            .transcript("t1", Some(page.cursor), Some("s1".into()))
+            .transcript("t1", Some(page.cursor), Some("s1".into()), None)
             .await
             .expect("page");
         assert!(!next.reset);
         assert!(next.entries.is_empty());
 
         let without_session = hub
-            .transcript("t1", Some(page.cursor), None)
+            .transcript("t1", Some(page.cursor), None, None)
             .await
             .expect("page");
         assert!(without_session.reset);
         assert_eq!(without_session.entries.len(), 1);
 
         let other_session = hub
-            .transcript("t1", Some(page.cursor), Some("s0".into()))
+            .transcript("t1", Some(page.cursor), Some("s0".into()), None)
             .await
             .expect("page");
         assert!(other_session.reset);
@@ -1341,10 +1432,107 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn subagents_are_listed_read_and_tracked_by_their_hooks() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let path = directory.path().join("s1.jsonl");
+        std::fs::write(&path, "").expect("write transcript");
+        let subagents = directory.path().join("s1").join("subagents");
+        std::fs::create_dir_all(&subagents).expect("subagents dir");
+        std::fs::write(
+            subagents.join("agent-a1.jsonl"),
+            format!(
+                "{}\n",
+                json!({"type": "assistant", "uuid": "x1", "message": {"content": [{"type": "text", "text": "found it"}]}})
+            ),
+        )
+        .expect("write subagent transcript");
+        std::fs::write(
+            subagents.join("agent-a1.meta.json"),
+            json!({"agentType": "Explore", "description": "Find callers", "toolUseId": "toolu_1"})
+                .to_string(),
+        )
+        .expect("write meta");
+        // An older Claude Code wrote no metadata.
+        std::fs::write(subagents.join("agent-b2.jsonl"), "").expect("write subagent transcript");
+
+        let (hub, _version, _pty) = hub_with_daemon(claude_in_pane());
+        let mut start = event("SessionStart");
+        start["transcript_path"] = json!(path.to_string_lossy());
+        hub.hook_event(hook("t1", start)).expect("valid event");
+        let mut subagent_start = event("SubagentStart");
+        subagent_start["agent_id"] = json!("a1");
+        subagent_start["agent_type"] = json!("Explore");
+        hub.hook_event(hook("t1", subagent_start))
+            .expect("valid event");
+
+        assert_eq!(
+            hub.session("t1").await.expect("session").running_subagents,
+            vec![ApiClaudeRunningSubagent {
+                agent_id: "a1".into(),
+                agent_type: "Explore".into(),
+            }]
+        );
+        let mut listed = hub.subagents("t1").await.expect("list").subagents;
+        listed.sort_by(|a, b| a.agent_id.cmp(&b.agent_id));
+        assert_eq!(
+            listed,
+            vec![
+                okena_core::claude_remote::ApiClaudeSubagent {
+                    agent_id: "a1".into(),
+                    tool_use_id: Some("toolu_1".into()),
+                    agent_type: Some("Explore".into()),
+                    description: Some("Find callers".into()),
+                    running: true,
+                },
+                okena_core::claude_remote::ApiClaudeSubagent {
+                    agent_id: "b2".into(),
+                    tool_use_id: None,
+                    agent_type: None,
+                    description: None,
+                    running: false,
+                },
+            ]
+        );
+        let page = hub
+            .transcript("t1", None, None, Some("a1".into()))
+            .await
+            .expect("subagent page");
+        assert_eq!(page.entries.len(), 1);
+        assert!(matches!(
+            hub.transcript("t1", None, None, Some("../s1".into())).await,
+            Err(ClaudeRemoteError::NoTranscript)
+        ));
+
+        let mut subagent_stop = event("SubagentStop");
+        subagent_stop["agent_id"] = json!("a1");
+        hub.hook_event(hook("t1", subagent_stop))
+            .expect("valid event");
+        assert!(
+            hub.session("t1")
+                .await
+                .expect("session")
+                .running_subagents
+                .is_empty()
+        );
+
+        let mut late_start = event("SubagentStart");
+        late_start["agent_id"] = json!("a1");
+        hub.hook_event(hook("t1", late_start)).expect("valid event");
+        assert!(
+            hub.session("t1")
+                .await
+                .expect("session")
+                .running_subagents
+                .is_empty(),
+            "a start reported after its stop stays stopped"
+        );
+    }
+
+    #[tokio::test]
     async fn transcript_without_a_source_is_not_found() {
         let (hub, _version, _pty) = hub_with_daemon(claude_in_pane());
         assert!(matches!(
-            hub.transcript("t1", None, None).await,
+            hub.transcript("t1", None, None, None).await,
             Err(ClaudeRemoteError::NoTranscript)
         ));
     }
@@ -1636,7 +1824,7 @@ mod tests {
             hub.hook_event(hook("t1", start)).expect("valid event");
 
             assert!(matches!(
-                hub.transcript("t1", None, None).await,
+                hub.transcript("t1", None, None, None).await,
                 Err(ClaudeRemoteError::NoTranscript)
             ));
             assert!(!hub.session("t1").await.expect("session").has_transcript);
@@ -1831,7 +2019,7 @@ mod tests {
         });
 
         hub.session("t1").await.expect("session");
-        hub.transcript("t1", None, None).await.expect("page");
+        hub.transcript("t1", None, None, None).await.expect("page");
         assert_eq!(daemon.probes.load(Ordering::Relaxed), 0);
 
         let delivery = hub.send_prompt("t1", "hi".into()).await;

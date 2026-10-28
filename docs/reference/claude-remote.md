@@ -23,7 +23,11 @@ channel attached; `claude_sessions` in `GET /v1/state`) or has an open dialog
 
 - **Web**: the **Claude** button in a terminal's header opens the chat panel: a
   drawer on wide screens, full screen on phones.
-- **Mobile**: the terminal gets a Terminal / Chat switch in the app bar; the chat replaces the terminal and its key toolbar. Terminal tabs and
+- **Mobile**: the terminal gets a Terminal / Chat switch in the app bar; the chat replaces the terminal and its key toolbar. The composer's **+** uploads a
+  picked file to the daemon host (`POST /v1/files/upload`) and adds its path
+  to the message; the terminal's compose sheet has the same **Attach**. Running
+  subagents are listed under the status strip, and an `Agent` call links to its
+  subagent's transcript. Terminal tabs and
   drawer rows show the agent state and the count of open dialogs, and the
   drawer's **Chat** pill opens a terminal straight in the chat. A project with
   an open dialog is listed under Needs attention.
@@ -52,8 +56,9 @@ All take the bearer token. Errors have a plain-text body.
 
 | Endpoint | Purpose |
 |---|---|
-| `GET /v1/claude/terminals/{id}` | Session: `session_id`, `hooks_attached`, `busy`, open `dialogs` |
-| `GET /v1/claude/terminals/{id}/transcript?cursor=&session_id=` | Transcript page, see [Transcript](#transcript) |
+| `GET /v1/claude/terminals/{id}` | Session: `session_id`, `hooks_attached`, `busy`, open `dialogs`, `running_subagents` |
+| `GET /v1/claude/terminals/{id}/transcript?cursor=&session_id=&agent_id=` | Transcript page, see [Transcript](#transcript) |
+| `GET /v1/claude/terminals/{id}/subagents` | The session's subagents, see [Subagents](#subagents) |
 | `POST /v1/claude/terminals/{id}/prompt` | `{ "text" }` → `{ "delivery" }`, see [Prompts](#prompts) |
 | `POST /v1/claude/terminals/{id}/dialogs/{dialog_id}` | `{ "decision": "allow" \| "deny" \| "answer", "always"?, "message"?, "answers"? }`; `404` once the dialog is answered or gone |
 
@@ -105,6 +110,20 @@ session JSONL from `transcript_path` incrementally. Entries are `user`,
 (`channel` for remote prompts). `reset: true` means the client must drop what
 it has (new session or rewritten file).
 
+## Subagents
+
+The `SubagentStart` and `SubagentStop` hooks keep the session's
+`running_subagents` (`agent_id`, `agent_type`). A stop that arrives before its
+start, as async hooks may, wins.
+
+`GET /v1/claude/terminals/{id}/subagents` lists the subagents Claude Code
+recorded next to the session transcript (`<session>/subagents/agent-<id>.jsonl`),
+oldest first, at most 200. `tool_use_id`, `agent_type` and `description` come
+from `agent-<id>.meta.json` and are missing when Claude wrote none; `running`
+mirrors `running_subagents`. The transcript route with `agent_id` reads that
+subagent's transcript; an id that is not ASCII letters, digits, `-` or `_` is a
+`404`. Workflow agents (`subagents/workflows/`) are not listed.
+
 ## Limitations
 
 - State lives in daemon memory. After a daemon restart the channel reconnects
@@ -122,5 +141,7 @@ it has (new session or rewritten file).
 - An interrupt (Escape) fires no `Stop` hook, so `queued` prompts wait for the
   next finished turn.
 - Clients poll (1 s); there are no push notifications.
+- `running_subagents` lives in daemon memory like the rest; after a restart it
+  fills again only with subagents started afterwards.
 - The Claude Code JSONL format and channel API are undocumented and may change
   between versions. Verified on Claude Code 2.1.301.

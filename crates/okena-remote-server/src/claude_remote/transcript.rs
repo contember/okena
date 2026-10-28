@@ -5,10 +5,13 @@
 
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
-use okena_core::claude_remote::{ApiClaudeEntry, ApiClaudePromptOrigin};
+use okena_core::claude_remote::{ApiClaudeEntry, ApiClaudePromptOrigin, ApiClaudeSubagent};
 use serde::Deserialize;
+
+use super::hook_input::is_valid_agent_id;
 
 /// The first page reads at most this much of the transcript's tail. A cursor
 /// further behind than this also gets a first page instead of a huge read.
@@ -16,6 +19,10 @@ const PAGE_WINDOW: u64 = 4 * 1024 * 1024;
 const FIRST_PAGE_ENTRIES: usize = 200;
 const TOOL_RESULT_MAX_CHARS: usize = 2000;
 const SUMMARY_MAX_CHARS: usize = 200;
+/// The newest subagents listed for a session.
+const MAX_LISTED_SUBAGENTS: usize = 200;
+/// A metadata file is a few hundred bytes; a bigger one is not Claude's.
+const MAX_SUBAGENT_META_BYTES: u64 = 64 * 1024;
 
 #[derive(Debug)]
 pub(super) struct TranscriptChunk {
@@ -61,6 +68,93 @@ pub(super) fn read_transcript(
         cursor,
         reset: true,
     })
+}
+
+/// `<session>.jsonl` → `<session>/subagents`, where Claude Code keeps one
+/// `agent-<id>.jsonl` (and `agent-<id>.meta.json`) per subagent.
+fn subagents_dir(session_transcript: &Path) -> PathBuf {
+    session_transcript.with_extension("").join("subagents")
+}
+
+/// `agent_id` must pass [`is_valid_agent_id`].
+pub(super) fn subagent_transcript_path(session_transcript: &Path, agent_id: &str) -> PathBuf {
+    subagents_dir(session_transcript).join(format!("agent-{agent_id}.jsonl"))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SubagentMeta {
+    #[serde(default)]
+    agent_type: Option<String>,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    tool_use_id: Option<String>,
+}
+
+/// The session's subagents, oldest first, none marked running. A session
+/// without subagents has no directory, which is an empty list.
+pub(super) fn list_subagents(session_transcript: &Path) -> io::Result<Vec<ApiClaudeSubagent>> {
+    let dir = subagents_dir(session_transcript);
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error),
+    };
+
+    let mut found: Vec<(SystemTime, String)> = Vec::new();
+    for entry in entries {
+        let entry = entry?;
+        let name = entry.file_name();
+        let Some(agent_id) = name
+            .to_str()
+            .and_then(|name| name.strip_prefix("agent-"))
+            .and_then(|name| name.strip_suffix(".jsonl"))
+            .filter(|agent_id| is_valid_agent_id(agent_id))
+        else {
+            continue;
+        };
+        let metadata = entry.metadata()?;
+        if !metadata.is_file() {
+            continue;
+        }
+        let started = metadata.created().or_else(|_| metadata.modified())?;
+        found.push((started, agent_id.to_string()));
+    }
+    found.sort();
+    let excess = found.len().saturating_sub(MAX_LISTED_SUBAGENTS);
+
+    Ok(found
+        .into_iter()
+        .skip(excess)
+        .map(|(_, agent_id)| {
+            let meta = read_subagent_meta(&dir.join(format!("agent-{agent_id}.meta.json")));
+            ApiClaudeSubagent {
+                agent_id,
+                tool_use_id: meta.as_ref().and_then(|meta| meta.tool_use_id.clone()),
+                agent_type: meta.as_ref().and_then(|meta| meta.agent_type.clone()),
+                description: meta.and_then(|meta| meta.description),
+                running: false,
+            }
+        })
+        .collect())
+}
+
+/// `None` for a missing, oversized or unreadable file: older Claude Code
+/// versions wrote no metadata.
+fn read_subagent_meta(path: &Path) -> Option<SubagentMeta> {
+    let file = File::open(path).ok()?;
+    if !file.metadata().ok()?.is_file() {
+        return None;
+    }
+    let mut bytes = Vec::new();
+    file.take(MAX_SUBAGENT_META_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    if bytes.len() as u64 > MAX_SUBAGENT_META_BYTES {
+        return None;
+    }
+    serde_json::from_slice(&bytes).ok()
 }
 
 pub(super) fn has_transcript_extension(path: &Path) -> bool {

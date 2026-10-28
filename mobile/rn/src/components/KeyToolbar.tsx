@@ -4,7 +4,8 @@
  * Layout (see `PRIMARY_KEYS` / `MORE_ROWS` in `keyInput.ts`):
  *   - one always-visible row of eight equal keys tuned for driving Claude Code:
  *     esc · ^C · tab · edit · up · down · return · more. "edit" opens the
- *     compose sheet, a native text field with autocorrect and dictation,
+ *     compose sheet, a native text field with autocorrect and dictation, which
+ *     can also attach a file (uploaded to the server host, its path inserted),
  *   - "more" expands a three-row panel above it (same 8-column grid) with
  *     paste/shift+tab/select text, `/ @ | ~ \ \``, ctrl/alt modifiers, ^D ^Z ^R, paging,
  *     home/end, `- _`, left/right, forward delete and the keyboard toggle.
@@ -53,6 +54,7 @@ import {
   type ToolbarKey,
 } from './keyInput';
 import { KeyIcon } from './KeyIcons';
+import { appendPath, useFileAttach } from './useFileAttach';
 
 // Re-exported for existing importers (WorkspaceScreen, LayoutRenderer, tests).
 export {
@@ -264,6 +266,8 @@ export const KeyToolbar: React.FC<KeyToolbarProps> = ({
       <ComposeSheet
         visible={composeOpen}
         initialText={composeInitialText}
+        native={native}
+        connId={connId}
         onClose={() => {
           setComposeOpen(false);
           setComposeInitialText('');
@@ -381,10 +385,15 @@ const KeyCap: React.FC<{
 const ComposeSheet: React.FC<{
   visible: boolean;
   initialText: string;
+  native: OkenaNative;
+  connId: string;
   onClose: () => void;
   onSubmit: (text: string, sendEnter: boolean) => void;
-}> = ({ visible, initialText, onClose, onSubmit }) => {
+}> = ({ visible, initialText, native, connId, onClose, onSubmit }) => {
   const [text, setText] = useState('');
+  const attachment = useFileAttach(native, connId, (path) =>
+    setText((current) => appendPath(current, path)),
+  );
 
   useEffect(() => {
     if (visible) setText(initialText);
@@ -437,7 +446,26 @@ const ComposeSheet: React.FC<{
             >
               <Text style={styles.composePasteText}>Paste</Text>
             </Pressable>
+            <Pressable
+              style={({ pressed }) => [
+                styles.composePaste,
+                styles.composeAttach,
+                (pressed || attachment.uploading) && styles.pressedDim,
+              ]}
+              disabled={attachment.uploading}
+              onPress={attachment.attach}
+              accessibilityRole="button"
+              accessibilityLabel="Attach a file"
+              accessibilityHint="Uploads it to the server and inserts its path"
+            >
+              <Text style={styles.composePasteText}>
+                {attachment.uploading ? 'Uploading…' : 'Attach'}
+              </Text>
+            </Pressable>
           </View>
+          {attachment.error ? (
+            <Text style={styles.composeError}>{attachment.error}</Text>
+          ) : null}
           <TextInput
             style={styles.composeInput}
             value={text}
@@ -587,6 +615,12 @@ const styles = StyleSheet.create({
     backgroundColor: OkenaColors.surfaceElevated,
     borderWidth: StyleSheet.hairlineWidth,
     borderColor: OkenaColors.borderLight,
+  },
+  composeAttach: { marginLeft: 8 },
+  composeError: {
+    color: OkenaColors.error,
+    fontSize: 12,
+    marginBottom: 8,
   },
   composePasteText: {
     color: OkenaColors.accent,

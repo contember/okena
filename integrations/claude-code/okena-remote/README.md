@@ -36,7 +36,7 @@ For an interactive run of the `claude` binary only, the preload appends:
 
 - `--settings <json>` with hooks that run `okena claude-remote hook permission`
   (`PermissionRequest`) and `okena claude-remote hook event` (session, prompt,
-  tool and stop events);
+  tool, subagent and stop events);
 - with the channel on: `--mcp-config <json>` for the `okena claude-remote channel`
   MCP server and `--dangerously-load-development-channels server:okena-remote`.
   Claude asks for confirmation of the development channel at every start.

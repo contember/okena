@@ -15,6 +15,8 @@ pub(super) enum HookEvent {
     PostToolUseFailure,
     Stop,
     SessionEnd,
+    SubagentStart,
+    SubagentStop,
     /// An event the hub does not act on beyond noting that hooks are attached.
     Other,
 }
@@ -30,6 +32,8 @@ impl HookEvent {
             "PostToolUseFailure" => Self::PostToolUseFailure,
             "Stop" => Self::Stop,
             "SessionEnd" => Self::SessionEnd,
+            "SubagentStart" => Self::SubagentStart,
+            "SubagentStop" => Self::SubagentStop,
             _ => Self::Other,
         }
     }
@@ -50,6 +54,10 @@ struct RawHookInput {
     permission_suggestions: Option<Vec<serde_json::Value>>,
     #[serde(default)]
     source: Option<String>,
+    #[serde(default)]
+    agent_id: Option<String>,
+    #[serde(default)]
+    agent_type: Option<String>,
 }
 
 #[derive(Debug)]
@@ -64,6 +72,18 @@ pub(super) struct HookInput {
     pub permission_suggestions: Vec<serde_json::Value>,
     /// `SessionStart` only: `startup`, `resume`, `clear` or `compact`.
     pub source: Option<String>,
+    /// `SubagentStart`/`SubagentStop` only. Only an id that passes
+    /// [`is_valid_agent_id`]: clients build a file name from it.
+    pub agent_id: Option<String>,
+    pub agent_type: Option<String>,
+}
+
+/// Claude's subagent ids are short hex strings; anything else is refused.
+pub(super) fn is_valid_agent_id(agent_id: &str) -> bool {
+    (1..=64).contains(&agent_id.len())
+        && agent_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
 }
 
 impl HookInput {
@@ -80,6 +100,8 @@ impl HookInput {
             tool_input: raw.tool_input,
             permission_suggestions: raw.permission_suggestions.unwrap_or_default(),
             source: raw.source,
+            agent_id: raw.agent_id.filter(|agent_id| is_valid_agent_id(agent_id)),
+            agent_type: raw.agent_type,
         })
     }
 }
@@ -125,6 +147,28 @@ mod tests {
         assert_eq!(input.event, HookEvent::Stop);
         assert_eq!(input.transcript_path, None);
         assert!(input.permission_suggestions.is_empty());
+    }
+
+    #[test]
+    fn parses_subagent_hooks_and_drops_unsafe_agent_ids() {
+        let input = HookInput::parse(&json!({
+            "hook_event_name": "SubagentStart",
+            "agent_id": "a9eb272c70f1f2ec7",
+            "agent_type": "Explore"
+        }))
+        .expect("valid input");
+        assert_eq!(input.event, HookEvent::SubagentStart);
+        assert_eq!(input.agent_id.as_deref(), Some("a9eb272c70f1f2ec7"));
+        assert_eq!(input.agent_type.as_deref(), Some("Explore"));
+
+        for agent_id in ["../../etc/passwd", "a/b", "", &"a".repeat(65)] {
+            let input = HookInput::parse(&json!({
+                "hook_event_name": "SubagentStop",
+                "agent_id": agent_id
+            }))
+            .expect("valid input");
+            assert_eq!(input.agent_id, None, "{agent_id}");
+        }
     }
 
     #[test]

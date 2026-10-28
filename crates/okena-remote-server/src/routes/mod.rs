@@ -188,6 +188,10 @@ pub fn build_router(
             axum::routing::get(claude::get_transcript),
         )
         .route(
+            "/v1/claude/terminals/{terminal_id}/subagents",
+            axum::routing::get(claude::get_subagents),
+        )
+        .route(
             "/v1/claude/terminals/{terminal_id}/prompt",
             axum::routing::post(claude::post_prompt),
         )
@@ -199,6 +203,11 @@ pub fn build_router(
         .route(
             "/v1/files/download",
             axum::routing::post(download::post_download),
+        )
+        .route(
+            "/v1/files/upload",
+            axum::routing::post(paste_image::post_upload_file)
+                .layer(DefaultBodyLimit::max(paste_image::FILE_UPLOAD_LIMIT)),
         )
         .route(
             "/v1/terminals/{terminal_id}/paste-image",

@@ -9,6 +9,10 @@
  * `reset`; the page's `cursor` and `session_id` are sent back on the next poll.
  * Polls that change nothing leave the state objects untouched.
  *
+ * The subagent list is refetched when the transcript shows an `Agent` call or
+ * the session a running subagent the list does not have yet. While a subagent
+ * is open ({@link ClaudeState.openSubagent}) its transcript is polled too.
+ *
  * Results of a poll or an answer that finish after {@link ClaudeState.close}
  * (or after another terminal was opened) are dropped. Per-dialog state (the
  * hidden answered dialogs, {@link ClaudeState.dialogAnswers}) is trimmed after
@@ -23,11 +27,13 @@ import { create, type StoreApi, type UseBoundStore } from 'zustand';
 import {
   parseClaudePromptResponse,
   parseClaudeSession,
+  parseClaudeSubagentList,
   parseClaudeTranscriptPage,
   type ApiClaudeDecision,
   type ApiClaudeEntry,
   type ApiClaudePromptDelivery,
   type ApiClaudeSession,
+  type ApiClaudeSubagent,
   type ApiClaudeTranscriptPage,
 } from '../native/claude';
 import type { ConnId, OkenaNative, TerminalId } from '../native/okena';
@@ -43,11 +49,21 @@ export const CLAUDE_POLL_MS = 1000;
 /** Transcript entries kept in memory; older ones are dropped. */
 export const CLAUDE_MAX_ENTRIES = 1000;
 
+/** Least time (ms) between two subagent list fetches. */
+export const CLAUDE_SUBAGENTS_REFRESH_MS = 3000;
+
+/** Tools that start a subagent. */
+export const CLAUDE_AGENT_TOOLS: ReadonlySet<string> = new Set([
+  'Agent',
+  'Task',
+]);
+
 /** The slice of the native surface this store calls. */
 export type ClaudeNative = Pick<
   OkenaNative,
   | 'claudeGetSession'
   | 'claudeGetTranscript'
+  | 'claudeGetSubagents'
   | 'claudeSendPrompt'
   | 'claudeAnswerDialog'
   | 'sendSpecialKey'
@@ -81,6 +97,10 @@ export interface ClaudeState {
   lastDelivery: ApiClaudePromptDelivery | null;
   /** Why the last prompt (or interrupt) was not accepted. */
   promptError: string | null;
+  /** The session's subagents, oldest first; empty for a server without them. */
+  subagents: ApiClaudeSubagent[];
+  /** The subagent whose transcript is shown, or `null`. */
+  subagent: ClaudeSubagentView | null;
   /**
    * Answers per listed dialog id; a failure other than "already answered"
    * stays until the next answer or until the dialog is gone.
@@ -100,6 +120,18 @@ export interface ClaudeState {
   answerDialog(dialogId: string, decision: ApiClaudeDecision): Promise<void>;
   /** Press Escape in the terminal; a failure lands in `promptError`. */
   interrupt(): Promise<void>;
+  /** Show a subagent's transcript; polled with the session. */
+  openSubagent(agentId: string): void;
+  closeSubagent(): void;
+}
+
+export interface ClaudeSubagentView {
+  agentId: string;
+  /** Oldest first. */
+  entries: ApiClaudeEntry[];
+  cursor: number;
+  sessionId: string | undefined;
+  error: string | null;
 }
 
 let injectedDeps: Partial<ClaudeDeps> = {};
@@ -130,6 +162,8 @@ const CLOSED = {
   lastDelivery: null,
   promptError: null,
   dialogAnswers: {},
+  subagents: [],
+  subagent: null,
 } satisfies Partial<ClaudeState>;
 
 // ── polling: one chain per open terminal ────────────────────────────────────
@@ -139,6 +173,8 @@ let generation = 0;
 let pollTimer: ReturnType<typeof setTimeout> | null = null;
 /** Dialogs answered (or found gone) in this generation, hidden until the server drops them. */
 let answeredDialogIds = new Set<string>();
+/** When the subagent list was last requested (ms since epoch). */
+let subagentsFetchedAt = 0;
 
 function stopPolling(): void {
   generation += 1;
@@ -147,6 +183,100 @@ function stopPolling(): void {
     pollTimer = null;
   }
   answeredDialogIds = new Set();
+  subagentsFetchedAt = 0;
+}
+
+/** Whether the transcript or the session name a subagent the list lacks. */
+function subagentsOutdated(
+  subagents: readonly ApiClaudeSubagent[],
+  entries: readonly ApiClaudeEntry[],
+  session: ApiClaudeSession,
+): boolean {
+  const agentIds = new Set(subagents.map((subagent) => subagent.agent_id));
+  const toolUseIds = new Set(subagents.map((subagent) => subagent.tool_use_id));
+  return (
+    session.running_subagents.some(
+      (running) => !agentIds.has(running.agent_id),
+    ) ||
+    entries.some(
+      (entry) =>
+        entry.kind === 'tool_use' &&
+        CLAUDE_AGENT_TOOLS.has(entry.name) &&
+        !toolUseIds.has(entry.tool_use_id),
+    )
+  );
+}
+
+async function pollSubagents(
+  pollGeneration: number,
+  session: ApiClaudeSession,
+  get: StoreApi<ClaudeState>['getState'],
+  set: StoreApi<ClaudeState>['setState'],
+): Promise<void> {
+  const { connId, terminalId, subagents, entries } = get();
+  if (connId === null || terminalId === null) return;
+  const now = Date.now();
+  if (
+    !subagentsOutdated(subagents, entries, session) ||
+    now - subagentsFetchedAt < CLAUDE_SUBAGENTS_REFRESH_MS
+  )
+    return;
+  subagentsFetchedAt = now;
+  try {
+    const list = parseClaudeSubagentList(
+      await deps().native.claudeGetSubagents(connId, terminalId),
+    );
+    if (pollGeneration === generation) set({ subagents: list.subagents });
+  } catch {
+    // An older server has no subagent list; the chat then shows plain tool rows.
+  }
+}
+
+async function pollSubagentTranscript(
+  pollGeneration: number,
+  get: StoreApi<ClaudeState>['getState'],
+  set: StoreApi<ClaudeState>['setState'],
+): Promise<void> {
+  const { connId, terminalId, subagent } = get();
+  if (connId === null || terminalId === null || subagent === null) return;
+  const { agentId } = subagent;
+  const stillOpen = () =>
+    pollGeneration === generation && get().subagent?.agentId === agentId;
+  try {
+    const page = parseClaudeTranscriptPage(
+      await deps().native.claudeGetTranscript(
+        connId,
+        terminalId,
+        BigInt(subagent.cursor),
+        subagent.sessionId,
+        agentId,
+      ),
+    );
+    if (!stillOpen()) return;
+    const current = get().subagent;
+    if (current === null) return;
+    const entries = nextEntries(current.entries, page);
+    if (
+      entries !== current.entries ||
+      page.cursor !== current.cursor ||
+      page.session_id !== current.sessionId ||
+      current.error !== null
+    ) {
+      set({
+        subagent: {
+          agentId,
+          entries,
+          cursor: page.cursor,
+          sessionId: page.session_id,
+          error: null,
+        },
+      });
+    }
+  } catch (error) {
+    const current = get().subagent;
+    if (stillOpen() && current !== null)
+      set({ subagent: { ...current, error: nativeErrorMessage(error) } });
+  }
 }
 
 /** `answers` without the dialogs the server no longer lists; the same object when nothing goes. */
@@ -261,6 +391,7 @@ async function poll(
         terminalId,
         BigInt(previous.cursor),
         previous.sessionId,
+        undefined,
       ),
     );
     if (pollGeneration !== generation) return;
@@ -283,6 +414,13 @@ async function poll(
     if (pollGeneration === generation)
       set({ transcriptError: nativeErrorMessage(error) });
   }
+
+  if (pollGeneration !== generation) return;
+  // Both swallow their own failures: they must not fail the poll.
+  await Promise.all([
+    pollSubagents(pollGeneration, session, get, set),
+    pollSubagentTranscript(pollGeneration, get, set),
+  ]);
 }
 
 function schedulePoll(
@@ -378,6 +516,25 @@ export const useClaudeStore: UseBoundStore<StoreApi<ClaudeState>> =
           current.session === null ? null : withoutAnswered(current.session),
         dialogAnswers: withAnswer(current.dialogAnswers, dialogId, null),
       });
+    },
+
+    openSubagent(agentId) {
+      if (get().subagent?.agentId === agentId) return;
+      set({
+        subagent: {
+          agentId,
+          entries: [],
+          cursor: 0,
+          sessionId: undefined,
+          error: null,
+        },
+      });
+      // Load it now rather than at the next poll.
+      void pollSubagentTranscript(generation, get, set);
+    },
+
+    closeSubagent() {
+      set({ subagent: null });
     },
 
     async interrupt() {
