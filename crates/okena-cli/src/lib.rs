@@ -1,3 +1,4 @@
+pub mod claude;
 pub mod claude_remote;
 pub mod commands;
 pub mod parser;
@@ -9,8 +10,8 @@ use okena_core::process::is_process_alive;
 use okena_transport::client::{LocalEndpoint, RemoteConnectionConfig};
 use okena_workspace::persistence::config_dir;
 use parser::{
-    ClaudeHookCmd, ClaudeRemoteCmd, Cli, Command, FolderCmd, PaletteCmd, ProjectCmd, ServiceCmd,
-    SettingsCmd, SkillCmd, TermCmd, ThemeCmd, UpdateCmd, WorktreeCmd,
+    ClaudeCmd, ClaudeHookCmd, ClaudeRemoteCmd, Cli, Command, FolderCmd, PaletteCmd, ProjectCmd,
+    ServiceCmd, SettingsCmd, SkillCmd, TermCmd, ThemeCmd, UpdateCmd, WorktreeCmd,
 };
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -228,6 +229,34 @@ fn dispatch(cli: Cli) -> i32 {
                 json,
             } => commands::cli_update_revert(&version, keep_config, dry_run, yes, restart, json),
         },
+        Command::Claude { cmd } => match cmd {
+            ClaudeCmd::Ls { json } => claude::cli_ls(json),
+            ClaudeCmd::Show { terminal, json } => claude::cli_show(&terminal, json),
+            ClaudeCmd::Subagents { terminal, json } => claude::cli_subagents(&terminal, json),
+            ClaudeCmd::Log {
+                terminal,
+                cursor,
+                agent,
+                json,
+            } => claude::cli_log(&terminal, cursor.as_deref(), agent.as_deref(), json),
+            ClaudeCmd::Prompt { terminal, text } => claude::cli_prompt(&terminal, &text),
+            ClaudeCmd::Answer {
+                terminal,
+                dialog,
+                decision,
+                always,
+                message,
+                answers,
+            } => claude::cli_answer(
+                &terminal,
+                &dialog,
+                decision,
+                always,
+                message.as_deref(),
+                answers.as_deref(),
+            ),
+            ClaudeCmd::Interrupt { terminal } => claude::cli_interrupt(&terminal),
+        },
         Command::ClaudeRemote { cmd } => match cmd {
             ClaudeRemoteCmd::Hook { cmd } => match cmd {
                 ClaudeHookCmd::Permission => claude_remote::cli_hook_permission(),
@@ -374,20 +403,45 @@ fn ensure_token() -> Result<String, String> {
 }
 
 fn api_get(path: &str, token: &str) -> Result<String, String> {
+    api_request(path, token, None)
+}
+
+/// POST a JSON body to a REST route (not an `ActionRequest`).
+fn api_post_json(path: &str, token: &str, body: &serde_json::Value) -> Result<String, String> {
+    api_request(path, token, Some(body))
+}
+
+/// GET `path`, or POST `body` to it. A failure carries the server's plain-text
+/// error body, so callers can show the daemon's reason.
+fn api_request(
+    path: &str,
+    token: &str,
+    body: Option<&serde_json::Value>,
+) -> Result<String, String> {
     let server = discover_server()?;
     let (client, url) = server.client_and_url(path)?;
-    let resp = client
-        .get(&url)
+    let request = match body {
+        Some(body) => client.post(&url).json(body),
+        None => client.get(&url),
+    };
+    let resp = request
         .header("Authorization", format!("Bearer {}", token))
         .timeout(std::time::Duration::from_secs(10))
         .send()
         .map_err(|e| format!("Request failed: {e}"))?;
 
-    if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
+    let status = resp.status();
+    if status == reqwest::StatusCode::UNAUTHORIZED {
         return Err("Token expired or revoked. Delete ~/.config/okena/cli.json and retry.".into());
     }
-    if !resp.status().is_success() {
-        return Err(format!("Server returned {}", resp.status()));
+    if !status.is_success() {
+        let message = resp.text().unwrap_or_default();
+        let message = message.trim();
+        return Err(if message.is_empty() {
+            format!("Server returned {status}")
+        } else {
+            format!("Server returned {status}: {message}")
+        });
     }
 
     resp.text().map_err(|e| format!("Failed to read body: {e}"))
