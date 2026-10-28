@@ -24,9 +24,9 @@ use okena_core::selection::SelectionState;
 use okena_core::types::DiffViewMode;
 use okena_files::file_renderer::FileRenderer;
 use okena_files::syntax::load_syntax_set;
-use okena_git::{CommitLogEntry, DiffMode, FileDiff};
+use okena_git::{CommitLogEntry, DiffFileEntry, DiffMode, FileDiff};
 use okena_ui::resizable_sidebar::ResizableSidebarState;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use syntect::parsing::SyntaxSet;
 
@@ -74,8 +74,10 @@ pub struct DiffViewer {
     pub(super) loading: bool,
     /// Prevents stale async diff and file results from updating the viewer.
     pub(super) request_generation: u64,
-    /// Raw diff data for all files (not syntax highlighted).
-    pub(super) raw_files: Vec<FileDiff>,
+    /// Changed files of the comparison, without their hunks.
+    pub(super) files: Vec<DiffFileEntry>,
+    /// Hunks fetched so far, by index into `files`.
+    pub(super) file_diffs: HashMap<usize, FileDiff>,
     /// Lightweight file stats for sidebar display.
     pub(super) file_stats: Vec<FileStats>,
     /// Currently processed file with syntax highlighting (lazy loaded).
@@ -218,7 +220,8 @@ impl DiffViewer {
             provider: provider.clone(),
             loading: false,
             request_generation: 0,
-            raw_files: Vec::new(),
+            files: Vec::new(),
+            file_diffs: HashMap::new(),
             file_stats: Vec::new(),
             current_file: None,
             binary_preview_loading: false,
@@ -345,7 +348,7 @@ impl okena_ui::overlay::CloseEvent for DiffViewerEvent {
 #[cfg(test)]
 mod tests {
     use okena_files::file_viewer::FileSource;
-    use okena_git::{DiffMode, FileDiff};
+    use okena_git::{DiffFileEntry, DiffMode};
     use okena_ui::overlay::CloseEvent;
 
     use super::{DiffViewer, DiffViewerEvent};
@@ -358,10 +361,9 @@ mod tests {
 
     #[test]
     fn file_target_uses_the_result_side_of_a_commit() {
-        let file = FileDiff {
+        let file = DiffFileEntry {
             old_path: Some("old.rs".to_string()),
             new_path: Some("new.rs".to_string()),
-            hunks: Vec::new(),
             is_binary: false,
             lines_added: 1,
             lines_removed: 1,
@@ -375,10 +377,9 @@ mod tests {
 
     #[test]
     fn file_target_uses_the_parent_side_for_a_deleted_file() {
-        let file = FileDiff {
+        let file = DiffFileEntry {
             old_path: Some("deleted.rs".to_string()),
             new_path: None,
-            hunks: Vec::new(),
             is_binary: false,
             lines_added: 0,
             lines_removed: 1,
@@ -395,10 +396,9 @@ mod tests {
 
     #[test]
     fn file_target_uses_the_merge_base_for_a_branch_deletion() {
-        let file = FileDiff {
+        let file = DiffFileEntry {
             old_path: Some("deleted.rs".to_string()),
             new_path: None,
-            hunks: Vec::new(),
             is_binary: false,
             lines_added: 0,
             lines_removed: 1,

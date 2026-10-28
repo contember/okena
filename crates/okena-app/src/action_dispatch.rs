@@ -787,6 +787,28 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
             mode,
             ignore_whitespace,
         },
+        ActionRequest::GitDiffFiles {
+            project_id,
+            mode,
+            ignore_whitespace,
+        } => ActionRequest::GitDiffFiles {
+            project_id: s(&project_id),
+            mode,
+            ignore_whitespace,
+        },
+        ActionRequest::GitFileDiff {
+            project_id,
+            mode,
+            ignore_whitespace,
+            old_path,
+            new_path,
+        } => ActionRequest::GitFileDiff {
+            project_id: s(&project_id),
+            mode,
+            ignore_whitespace,
+            old_path,
+            new_path,
+        },
         ActionRequest::ReviewComposition {
             project_id,
             mode,

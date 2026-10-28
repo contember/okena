@@ -1,13 +1,14 @@
 //! Async loading and processing for the diff viewer: fetching the diff,
 //! syntax-highlighting the selected file, and (re-)building the file tree.
 
+use super::provider::DiffListing;
 use super::syntax::process_file;
 use super::types::{DiffDisplayFile, DisplayItem, FileStats, FileTreeNode};
 use super::{BinaryDiffPreview, BinaryPreviewSide, DiffViewer};
 
 use okena_files::file_renderer::{FileRenderer, PreparedFile};
 use okena_files::file_tree::build_file_tree;
-use okena_git::{DiffMode, DiffResult};
+use okena_git::{DiffFileEntry, DiffMode, FileDiff};
 
 use gpui::*;
 use std::collections::HashSet;
@@ -60,7 +61,8 @@ impl DiffViewer {
         self.diff_mode = mode.clone();
         self.loading = true;
         self.error_message = None;
-        self.raw_files.clear();
+        self.files.clear();
+        self.file_diffs.clear();
         self.file_stats.clear();
         self.current_file = None;
         self.release_binary_preview(cx);
@@ -82,7 +84,8 @@ impl DiffViewer {
 
         cx.spawn(async move |this, cx| {
             let mode_for_fallback = mode.clone();
-            let result = smol::unblock(move || provider.get_diff(mode, ignore_whitespace)).await;
+            let result =
+                smol::unblock(move || provider.get_diff_files(mode, ignore_whitespace)).await;
 
             let _ = this.update(cx, |this, cx| {
                 if this.request_generation != request_generation {
@@ -90,8 +93,8 @@ impl DiffViewer {
                 }
                 this.loading = false;
                 match result {
-                    Ok(diff_result) => {
-                        if diff_result.is_empty() {
+                    Ok(listing) => {
+                        if listing.is_empty() {
                             // Auto-fallback: if WorkingTree is empty, try Staged
                             if mode_for_fallback == DiffMode::WorkingTree {
                                 this.load_diff_async(DiffMode::Staged, select_file, cx);
@@ -102,7 +105,7 @@ impl DiffViewer {
                                 mode_for_fallback.display_name().to_lowercase()
                             ));
                         } else {
-                            this.store_diff_result(diff_result);
+                            this.store_diff_listing(listing);
                             this.build_file_tree();
 
                             // Select specific file if requested
@@ -129,21 +132,29 @@ impl DiffViewer {
         .detach();
     }
 
-    /// Store raw diff data and extract lightweight stats (no syntax highlighting).
-    fn store_diff_result(&mut self, result: DiffResult) {
-        let mut files = result.files;
-        files.sort_by(|a, b| a.display_name().cmp(b.display_name()));
-        for file in files {
-            self.file_stats.push(FileStats::from(&file));
-            self.raw_files.push(file);
+    /// Store the changed files and extract lightweight stats (no syntax highlighting).
+    fn store_diff_listing(&mut self, listing: DiffListing) {
+        match listing {
+            DiffListing::Files(mut files) => {
+                files.sort_by(|a, b| a.display_name().cmp(b.display_name()));
+                self.files = files;
+            }
+            DiffListing::Full(result) => {
+                let mut files = result.files;
+                files.sort_by(|a, b| a.display_name().cmp(b.display_name()));
+                self.files = files.iter().map(DiffFileEntry::from).collect();
+                self.file_diffs = files.into_iter().enumerate().collect();
+            }
         }
+        self.file_stats = self.files.iter().map(FileStats::from).collect();
     }
 
     /// Process the currently selected file with syntax highlighting (async).
     pub(super) fn process_current_file_async(&mut self, cx: &mut Context<Self>) {
         self.request_generation = self.request_generation.wrapping_add(1);
         let request_generation = self.request_generation;
-        let Some(raw_file) = self.raw_files.get(self.selected_file_index).cloned() else {
+        let file_index = self.selected_file_index;
+        let Some(entry) = self.files.get(file_index).cloned() else {
             self.current_file = None;
             self.release_binary_preview(cx);
             self.binary_preview_loading = false;
@@ -152,19 +163,23 @@ impl DiffViewer {
             return;
         };
 
+        let cached = self.file_diffs.get(&file_index).cloned();
         let provider = self.provider.clone();
-        let file_path = raw_file.display_name().to_string();
+        let file_path = entry.display_name().to_string();
         let diff_mode = self.diff_mode.clone();
+        let ignore_whitespace = self.ignore_whitespace;
         let syntax_set = self.syntax_set.clone();
         let is_dark = self.is_dark;
         let svg_renderer = cx.svg_renderer();
         self.release_binary_preview(cx);
-        self.binary_preview_loading = raw_file.is_binary;
+        self.binary_preview_loading = entry.is_binary;
         self.error_message = None;
 
         cx.spawn(async move |this, cx| {
             let result = smol::unblock(move || {
-                if raw_file.is_binary {
+                if entry.is_binary {
+                    // Git prints no hunks for a binary file; the entry is all of it.
+                    let raw_file = cached.unwrap_or_else(|| without_hunks(&entry));
                     let supports = |path: &String| FileRenderer::supports_path(Path::new(path));
                     let old_request = raw_file.old_path.as_ref().filter(|path| supports(path));
                     let new_request = raw_file.new_path.as_ref().filter(|path| supports(path));
@@ -202,14 +217,30 @@ impl DiffViewer {
                         None,
                         is_dark,
                     );
-                    return Ok::<_, String>(ProcessedFile::Binary {
+                    let processed = ProcessedFile::Binary {
                         display_file,
-                        old: prepare_side(raw_file.old_path, contents.old).map(Box::new),
-                        new: prepare_side(raw_file.new_path, contents.new).map(Box::new),
-                    });
+                        old: prepare_side(raw_file.old_path.clone(), contents.old).map(Box::new),
+                        new: prepare_side(raw_file.new_path.clone(), contents.new).map(Box::new),
+                    };
+                    return Ok::<_, String>((raw_file, processed));
                 }
-                let (old_content, new_content) =
-                    provider.get_file_contents(&file_path, diff_mode)?;
+                // The hunks and the full contents are independent round trips.
+                let (raw_file, contents) = std::thread::scope(|scope| {
+                    let contents =
+                        scope.spawn(|| provider.get_file_contents(&file_path, diff_mode.clone()));
+                    let raw_file = match cached {
+                        Some(raw_file) => Ok(raw_file),
+                        None => provider
+                            .get_file_diff(&entry, diff_mode.clone(), ignore_whitespace)
+                            .map(|file| file.unwrap_or_else(|| without_hunks(&entry))),
+                    };
+                    let contents = contents
+                        .join()
+                        .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+                    (raw_file, contents)
+                });
+                let raw_file = raw_file?;
+                let (old_content, new_content) = contents?;
                 let mut max_line_num = 0usize;
                 let display_file = process_file(
                     &raw_file,
@@ -219,29 +250,34 @@ impl DiffViewer {
                     new_content.clone(),
                     is_dark,
                 );
-                Ok::<_, String>(ProcessedFile::Text {
+                let processed = ProcessedFile::Text {
                     old_content,
                     new_content,
                     display_file,
                     max_line_num,
-                })
+                };
+                Ok::<_, String>((raw_file, processed))
             })
             .await;
 
             let Some(this) = this.upgrade() else {
-                if let Ok(processed) = result {
+                if let Ok((_, processed)) = result {
                     cx.update(|cx| processed.release(cx));
                 }
                 return;
             };
             this.update(cx, |this, cx| {
                 if this.request_generation != request_generation {
-                    if let Ok(processed) = result {
+                    if let Ok((_, processed)) = result {
                         processed.release(cx);
                     }
                     return;
                 }
                 this.binary_preview_loading = false;
+                let result = result.map(|(raw_file, processed)| {
+                    this.file_diffs.insert(file_index, raw_file);
+                    processed
+                });
                 match result {
                     Ok(ProcessedFile::Text {
                         old_content,
@@ -302,7 +338,7 @@ impl DiffViewer {
 
     /// Re-highlight current file using cached content (for theme changes).
     pub(super) fn rehighlight_current_file(&mut self) {
-        let Some(raw_file) = self.raw_files.get(self.selected_file_index) else {
+        let Some(raw_file) = self.file_diffs.get(&self.selected_file_index) else {
             return;
         };
 
@@ -415,5 +451,17 @@ impl DiffViewer {
             .iter()
             .filter(|file| self.composition.accepts(&file.path))
             .count()
+    }
+}
+
+/// The file as it appears with no hunks: binary, or no longer differing.
+fn without_hunks(entry: &DiffFileEntry) -> FileDiff {
+    FileDiff {
+        old_path: entry.old_path.clone(),
+        new_path: entry.new_path.clone(),
+        hunks: Vec::new(),
+        is_binary: entry.is_binary,
+        lines_added: entry.lines_added,
+        lines_removed: entry.lines_removed,
     }
 }

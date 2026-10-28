@@ -310,6 +310,18 @@ pub fn execute_action(
             mode,
             ignore_whitespace,
         } => git::diff(ws, project_id, mode, ignore_whitespace),
+        ActionRequest::GitDiffFiles {
+            project_id,
+            mode,
+            ignore_whitespace,
+        } => git::diff_files(ws, project_id, mode, ignore_whitespace),
+        ActionRequest::GitFileDiff {
+            project_id,
+            mode,
+            ignore_whitespace,
+            old_path,
+            new_path,
+        } => git::file_diff(ws, project_id, mode, ignore_whitespace, old_path, new_path),
         ActionRequest::ReviewComposition {
             project_id,
             mode,

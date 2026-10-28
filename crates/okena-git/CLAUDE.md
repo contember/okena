@@ -37,6 +37,10 @@ Git status, diff parsing, and worktree operations for project directories.
   `git add`; `update-index` re-reads it under `index.lock`.
 - **Worktree workflow**: Worktrees are managed as lightweight branch checkouts alongside the main repo.
 - **Diff views**: UI for diffs lives in `crates/okena-views-git/src/diff_viewer/`.
+- **The diff viewer loads per file**: `get_diff_files` lists the comparison
+  without hunks, `get_file_diff` returns one listed file (both paths, so a rename
+  stays paired; `:(top,literal)` pathspecs). The two must agree — the listing is
+  the full diff minus hunks, and a test pins every per-file diff to its slice of it.
 - **One path base for diffs and per-file mutations**: `FileDiff.old_path`/`new_path`
   and the `file_path` arguments of `get_file_*`, `stage_file`, `unstage_file` and
   `discard_file_changes` are **relative to the git worktree root**; `repo_path`

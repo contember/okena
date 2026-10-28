@@ -64,7 +64,7 @@ fn older_revision_target(
 
 impl DiffViewer {
     pub(super) fn open_current_file(&self, cx: &mut Context<Self>) {
-        let Some(file) = self.raw_files.get(self.selected_file_index) else {
+        let Some(file) = self.files.get(self.selected_file_index) else {
             return;
         };
         if let Some(target) = Self::file_target(file, &self.diff_mode) {
@@ -73,7 +73,7 @@ impl DiffViewer {
     }
 
     pub(super) fn file_target(
-        file: &okena_git::FileDiff,
+        file: &okena_git::DiffFileEntry,
         mode: &okena_git::DiffMode,
     ) -> Option<okena_files::file_viewer::FileTarget> {
         use okena_files::file_viewer::{FilePosition, FileSource, FileTarget};

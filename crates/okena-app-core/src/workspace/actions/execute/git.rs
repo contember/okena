@@ -75,6 +75,46 @@ pub(super) fn diff(
     }
 }
 
+pub(super) fn diff_files(
+    ws: &Workspace,
+    project_id: String,
+    mode: DiffMode,
+    ignore_whitespace: bool,
+) -> ActionResult {
+    with_project_path(ws, project_id, |path| {
+        match okena_git::get_diff_files(path, mode, ignore_whitespace) {
+            Ok(files) => ActionResult::Ok(Some(
+                serde_json::to_value(files).expect("BUG: DiffFileEntry must serialize"),
+            )),
+            Err(e) => ActionResult::Err(e.to_string()),
+        }
+    })
+}
+
+pub(super) fn file_diff(
+    ws: &Workspace,
+    project_id: String,
+    mode: DiffMode,
+    ignore_whitespace: bool,
+    old_path: Option<String>,
+    new_path: Option<String>,
+) -> ActionResult {
+    with_project_path(ws, project_id, |path| {
+        match okena_git::get_file_diff(
+            path,
+            mode,
+            ignore_whitespace,
+            old_path.as_deref(),
+            new_path.as_deref(),
+        ) {
+            Ok(file) => ActionResult::Ok(Some(
+                serde_json::to_value(file).expect("BUG: FileDiff must serialize"),
+            )),
+            Err(e) => ActionResult::Err(e.to_string()),
+        }
+    })
+}
+
 pub(super) fn branches(ws: &Workspace, project_id: String) -> ActionResult {
     with_project_path(ws, project_id, |path| {
         let branches = okena_git::get_available_branches_for_worktree(path);
