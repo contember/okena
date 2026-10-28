@@ -118,7 +118,9 @@ pub fn first_terminal_id(project: &ApiProject) -> Option<String> {
 /// Accepted forms:
 /// - a bare terminal UUID — searched across every project's layout;
 /// - `"<project>/<name>"` — resolve the project, then the terminal whose
-///   `terminal_names` value equals `<name>` (case-insensitive);
+///   `terminal_names` value equals `<name>` (case-insensitive). `<project>`
+///   may itself contain '/' (a branch-named worktree, an absolute path);
+///   every split point is tried and more than one match is an error;
 /// - `"<project>:<index>"` — the Nth terminal (0-based) in that project's
 ///   layout, in DFS order.
 pub fn resolve_terminal(state: &StateResponse, filter: &str) -> Result<(String, String), String> {
@@ -138,27 +140,11 @@ pub fn resolve_terminal(state: &StateResponse, filter: &str) -> Result<(String, 
         };
     }
 
-    // Form: <project>/<name>
-    if let Some((proj_part, name_part)) = filter.split_once('/') {
-        let project = resolve_project(state, proj_part)?;
-        for (tid, tname) in &project.terminal_names {
-            if tname.eq_ignore_ascii_case(name_part) {
-                return Ok((project.id.clone(), tid.clone()));
-            }
-        }
-        // Unnamed terminals aren't in `terminal_names`, but `term ls` shows
-        // their id in the name column — so accept a bare terminal id scoped to
-        // this project too (matches what the listing displays).
-        if let Some(layout) = &project.layout
-            && layout_contains_terminal(layout, name_part)
-        {
-            return Ok((project.id.clone(), name_part.to_string()));
-        }
-        return Err(format!(
-            "No terminal named '{name_part}' in project '{}'.\nTerminals: {}",
-            project.name,
-            terminal_names_list(project)
-        ));
+    // Form: <project>/<name>. Project names (worktrees named after their
+    // branch) and absolute paths contain '/' too, so try every split point,
+    // longest project prefix first.
+    if filter.contains('/') {
+        return resolve_project_slash_name(state, filter);
     }
 
     // Form: bare terminal id — search every project's layout.
@@ -171,6 +157,73 @@ pub fn resolve_terminal(state: &StateResponse, filter: &str) -> Result<(String, 
     }
 
     Err(format!("Terminal not found: {filter}"))
+}
+
+fn resolve_project_slash_name(
+    state: &StateResponse,
+    filter: &str,
+) -> Result<(String, String), String> {
+    let mut matches: Vec<(&ApiProject, String)> = Vec::new();
+    // The longest prefix that names a project, for the "no such terminal" error.
+    let mut longest_project: Option<(&ApiProject, &str)> = None;
+    for (split, _) in filter.rmatch_indices('/') {
+        let (proj_part, name_part) = (&filter[..split], &filter[split + 1..]);
+        if proj_part.is_empty() || name_part.is_empty() {
+            continue;
+        }
+        let Ok(project) = resolve_project(state, proj_part) else {
+            continue;
+        };
+        if longest_project.is_none() {
+            longest_project = Some((project, name_part));
+        }
+        if let Some(tid) = find_terminal_in_project(project, name_part)
+            && !matches.iter().any(|(p, t)| p.id == project.id && *t == tid)
+        {
+            matches.push((project, tid));
+        }
+    }
+
+    match matches.as_slice() {
+        [(project, tid)] => Ok((project.id.clone(), tid.clone())),
+        [] => match longest_project {
+            Some((project, name_part)) => Err(format!(
+                "No terminal named '{name_part}' in project '{}'.\nTerminals: {}",
+                project.name,
+                terminal_names_list(project)
+            )),
+            None => Err(format!(
+                "No project matches a prefix of '{filter}'.\nAvailable: {}",
+                available_project_names(state)
+            )),
+        },
+        many => Err(format!(
+            "Ambiguous terminal address '{filter}' — matches terminals in projects: {}",
+            many.iter()
+                .map(|(p, _)| p.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
+    }
+}
+
+/// Find a terminal in a project by its `terminal_names` value
+/// (case-insensitive), falling back to a terminal id in its layout.
+fn find_terminal_in_project(project: &ApiProject, name: &str) -> Option<String> {
+    for (tid, tname) in &project.terminal_names {
+        if tname.eq_ignore_ascii_case(name) {
+            return Some(tid.clone());
+        }
+    }
+    // Unnamed terminals aren't in `terminal_names`, but `term ls` shows
+    // their id in the name column — so accept a bare terminal id scoped to
+    // this project too (matches what the listing displays).
+    if let Some(layout) = &project.layout
+        && layout_contains_terminal(layout, name)
+    {
+        return Some(name.to_string());
+    }
+    None
 }
 
 fn terminal_names_list(project: &ApiProject) -> String {
@@ -441,6 +494,61 @@ mod tests {
         let (pid, tid) = resolve_terminal(&state, "Proj/t4").unwrap();
         assert_eq!(pid, "p1");
         assert_eq!(tid, "t4");
+    }
+
+    #[test]
+    fn resolve_terminal_project_name_with_slash() {
+        let main = project("p1", "feat", "/tmp/feat", Some(term("t9")));
+        let wt = project("p2", "feat/cli-claude", "/tmp/wt", Some(nested_layout()));
+        let state = state_with(vec![main, wt], vec![]);
+        assert_eq!(
+            resolve_terminal(&state, "feat/cli-claude/logs").unwrap(),
+            ("p2".to_string(), "t2".to_string())
+        );
+        // Unnamed terminal by id behind a slashed project name.
+        assert_eq!(
+            resolve_terminal(&state, "feat/cli-claude/t4").unwrap().1,
+            "t4"
+        );
+        // A shorter project prefix still works when it is the only match.
+        assert_eq!(
+            resolve_terminal(&state, "feat/t9").unwrap(),
+            ("p1".to_string(), "t9".to_string())
+        );
+
+        let err = resolve_terminal(&state, "feat/cli-claude/missing").unwrap_err();
+        assert!(err.contains("project 'feat/cli-claude'"), "{err}");
+        let err = resolve_terminal(&state, "nope/cli-claude/logs").unwrap_err();
+        assert!(err.contains("No project matches"), "{err}");
+    }
+
+    #[test]
+    fn resolve_terminal_absolute_project_path() {
+        let p = project(
+            "p1",
+            "Proj",
+            "/tmp/okena-no-such-dir/p1",
+            Some(nested_layout()),
+        );
+        let state = state_with(vec![p], vec![]);
+        assert_eq!(
+            resolve_terminal(&state, "/tmp/okena-no-such-dir/p1/editor").unwrap(),
+            ("p1".to_string(), "t3".to_string())
+        );
+    }
+
+    #[test]
+    fn resolve_terminal_ambiguous_split_is_an_error() {
+        // "a/b/shell" is both project "a/b" + "shell" and project "a" + a
+        // terminal literally named "b/shell".
+        let mut short = project("p1", "a", "/tmp/a", Some(term("t1")));
+        short
+            .terminal_names
+            .insert("t1".to_string(), "b/shell".to_string());
+        let long = project("p2", "a/b", "/tmp/ab", Some(nested_layout()));
+        let state = state_with(vec![short, long], vec![]);
+        let err = resolve_terminal(&state, "a/b/shell").unwrap_err();
+        assert!(err.contains("Ambiguous"), "{err}");
     }
 
     #[test]

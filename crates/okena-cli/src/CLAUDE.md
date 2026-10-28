@@ -22,7 +22,7 @@ handling untouched.
 ## Addressing (agent-friendly)
 
 - **Projects**: exact id, case-insensitive name, or absolute path (canonicalized).
-- **Terminals**: a bare terminal id, `<project>/<name>`, or `<project>:<index>` (DFS order). `<name>` matches a `terminal_names` entry first, then falls back to a terminal id scoped to that project (so the id `term ls` shows for unnamed terminals also works after the `/`).
+- **Terminals**: a bare terminal id, `<project>/<name>`, or `<project>:<index>` (DFS order). `<name>` matches a `terminal_names` entry first, then falls back to a terminal id scoped to that project (so the id `term ls` shows for unnamed terminals also works after the `/`). `<project>` may contain `/` (branch-named worktrees, absolute paths): every `/` split point is tried, and a filter that matches terminals under more than one split is an ambiguity error.
 - **Windows** (`--window`): `"main"`, a full id, or a unique id prefix → resolved to the exact id put in the action's `window` field. The flag is `global` but only `project add/clone/show/hide/focus` and `term focus/fullscreen` honor it; `dispatch` warns when any other command receives it. It must come **after** the subcommand (`okena term focus X --window main`) — the gate only engages when `args[1]` is a subcommand, so `--window` *before* the subcommand falls through to GUI launch.
 - **Layout `path`** for `term split`/`term tab` is resolved client-side from a terminal id (`resolve_terminal_path`), mirroring `okena_layout::LayoutNode::find_terminal_path` — agents never compute tree paths. `term tab` sends `in_group: false` (wrap-or-join, mirroring the UI), never `true` (which needs `path` to point at a Tabs node).
 
