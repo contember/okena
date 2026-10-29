@@ -158,6 +158,8 @@ pub enum WindowViewEvent {
     RebuildLocal,
     /// Restart the UI-owned daemon and app with the rebuilt release binary.
     RestartLocalBuild,
+    /// The OS window gained or lost focus.
+    ActivationChanged,
 }
 
 pub struct WindowView {
@@ -439,6 +441,7 @@ impl WindowView {
             // Refresh key-window chrome while activity-driven presentation stays
             // live in every visible window.
             cx.notify();
+            cx.emit(WindowViewEvent::ActivationChanged);
         })
         .detach();
 

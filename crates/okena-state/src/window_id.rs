@@ -30,12 +30,27 @@ impl WindowId {
             Uuid::parse_str(s).ok().map(WindowId::Extra)
         }
     }
+
+    /// The wire form [`Self::from_wire`] parses.
+    pub fn to_wire(&self) -> String {
+        match self {
+            WindowId::Main => "main".to_string(),
+            WindowId::Extra(uuid) => uuid.to_string(),
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::collections::HashMap;
+
+    #[test]
+    fn wire_form_round_trips() {
+        for id in [WindowId::Main, WindowId::Extra(Uuid::new_v4())] {
+            assert_eq!(WindowId::from_wire(&id.to_wire()), Some(id));
+        }
+    }
 
     #[test]
     fn from_wire_maps_main_and_uuids() {

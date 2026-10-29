@@ -530,7 +530,8 @@ pub enum ProjectCmd {
 
 #[derive(Subcommand)]
 pub enum WorktreeCmd {
-    /// Create a worktree from a branch
+    /// Create a worktree from a branch. Attached desktops show it in the
+    /// --window target only, else in the first window showing the parent.
     Add {
         /// Parent project (id / name / path)
         project: String,

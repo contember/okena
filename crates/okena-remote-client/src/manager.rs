@@ -6,7 +6,7 @@ use okena_workspace::settings::{AppSettings, load_settings, update_remote_connec
 use okena_workspace::state::WindowId;
 use okena_workspace::toast::{Toast, ToastManager};
 
-use okena_core::api::{ActionRequest, ApiSystemStats, StateResponse};
+use okena_core::api::{ActionRequest, ApiSystemStats, ApiWindow, StateResponse};
 use okena_core::soft_close::{
     SOFT_CLOSE_KILL_PREFIX, SOFT_CLOSE_UNDO_PREFIX, decode_action, encode_action,
 };
@@ -241,6 +241,14 @@ pub enum RemoteManagerEvent {
         project_id: String,
         terminal_id: Option<String>,
         window: Option<WindowId>,
+    },
+
+    /// An external API client created a project (`okena worktree add --window`)
+    /// for one window: the desktop shows it there and hides it elsewhere. The
+    /// project id is already prefixed for this manager connection.
+    ProjectPlacementRequested {
+        project_id: String,
+        window: WindowId,
     },
 
     /// The implicit local-daemon loopback connection reached a terminal failed
@@ -631,6 +639,15 @@ impl RemoteConnectionManager {
                 .collect();
             project_ids.sort();
             connection.set_visible_projects(project_ids);
+        }
+    }
+
+    /// Tell every connection which windows this client has. `windows` carry
+    /// client-side (prefixed) project ids; each connection receives the list
+    /// with only its own projects, unprefixed.
+    pub fn publish_windows(&self, windows: &[ApiWindow]) {
+        for (connection_id, connection) in &self.connections {
+            connection.set_windows(windows_for_connection(windows, connection_id));
         }
     }
 
@@ -1253,6 +1270,22 @@ fn now_unix_timestamp() -> i64 {
         .as_secs() as i64
 }
 
+fn windows_for_connection(windows: &[ApiWindow], connection_id: &str) -> Vec<ApiWindow> {
+    windows
+        .iter()
+        .map(|window| {
+            let mut window = window.clone();
+            window.visible_project_ids = window
+                .visible_project_ids
+                .iter()
+                .filter(|id| is_remote_terminal(id, connection_id))
+                .map(|id| strip_prefix(id, connection_id))
+                .collect();
+            window
+        })
+        .collect()
+}
+
 /// Map a daemon's presentation request onto this client: prefix its ids for
 /// `connection_id` and parse its window. `Err` carries a malformed window id.
 fn presentation_event(
@@ -1285,6 +1318,12 @@ fn presentation_event(
                 .map(|terminal_id| make_prefixed_id(connection_id, &terminal_id)),
             window: parse_window(request.window)?,
         },
+        ClientPresentationRequest::ProjectPlacement(request) => {
+            RemoteManagerEvent::ProjectPlacementRequested {
+                project_id: make_prefixed_id(connection_id, &request.project_id),
+                window: WindowId::from_wire(&request.window).ok_or(request.window)?,
+            }
+        }
     })
 }
 
@@ -1293,9 +1332,12 @@ mod tests {
     use super::{
         ActionQueues, QueuedAction, RemoteConnectionManager, RemoteManagerEvent, activity_changed,
         coalesce_settings_actions, is_local_connection_terminal_failure, merge_settings_patches,
-        presentation_event, run_action_queue,
+        presentation_event, run_action_queue, windows_for_connection,
     };
-    use okena_core::api::{ActionRequest, ApiFullscreenRequest, ApiProjectVisibilityRequest};
+    use okena_core::api::{
+        ActionRequest, ApiFullscreenRequest, ApiProjectPlacementRequest,
+        ApiProjectVisibilityRequest, ApiWindow,
+    };
     use okena_core::ws::ClientPresentationRequest;
     use okena_transport::client::{ConnectionStatus, LOCAL_DAEMON_CONNECTION_ID};
     use okena_workspace::state::WindowId;
@@ -1859,6 +1901,57 @@ mod tests {
                 project_id: "p1".into(),
                 show: true,
                 window: Some("second".into()),
+            }),
+        );
+        assert!(matches!(event, Err(window) if window == "second"));
+    }
+
+    #[test]
+    fn windows_for_connection_keeps_only_its_own_unprefixed_projects() {
+        let window = ApiWindow {
+            id: "main".into(),
+            kind: "main".into(),
+            active: true,
+            focused_project_id: None,
+            focused_terminal_id: None,
+            fullscreen: None,
+            visible_project_ids: vec![
+                "remote:conn:p1".into(),
+                "remote:other:p2".into(),
+                "remote:conn:p3".into(),
+            ],
+            folder_filter: None,
+            bounds: None,
+            sidebar_open: None,
+        };
+        let windows = windows_for_connection(&[window], "conn");
+        assert_eq!(windows.len(), 1);
+        assert_eq!(windows[0].id, "main");
+        assert!(windows[0].active);
+        assert_eq!(windows[0].visible_project_ids, ["p1", "p3"]);
+    }
+
+    #[test]
+    fn presentation_event_maps_project_placement() {
+        let extra = uuid::Uuid::new_v4();
+        let event = presentation_event(
+            "conn",
+            ClientPresentationRequest::ProjectPlacement(ApiProjectPlacementRequest {
+                project_id: "p1".into(),
+                window: extra.to_string(),
+            }),
+        );
+        assert!(matches!(
+            event,
+            Ok(RemoteManagerEvent::ProjectPlacementRequested { project_id, window: WindowId::Extra(id) })
+                if project_id == "remote:conn:p1" && id == extra
+        ));
+
+        let event = presentation_event(
+            "conn",
+            ClientPresentationRequest::ProjectPlacement(ApiProjectPlacementRequest {
+                project_id: "p1".into(),
+                window: "second".into(),
             }),
         );
         assert!(matches!(event, Err(window) if window == "second"));

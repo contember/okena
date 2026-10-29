@@ -62,7 +62,8 @@ For terminals running `claude` with Claude Remote on (Settings → Terminal).
   (`clone` takes `--into <parent-dir>` (default CWD), `--dir <name>`, `--name <n>`)
 - Layout: `okena term new | close | rename | split <h|v> | tab | focus | minimize | fullscreen`
   (`split h` = stacked top/bottom, `split v` = side by side left/right)
-- Worktrees: `okena worktree add <project> <branch> [--new-branch] | rm`
+- Worktrees: `okena worktree add <project> <branch> [--new-branch] [--window <w>] | rm`
+  (desktops show the new worktree in `--window` only, else in the first window showing the parent)
 - Services: `okena services [project]`, `okena service start|stop|restart <name> [project]`
 - Settings: `okena settings show [key] | schema | set <key> <value>` (dotted keys, e.g. `sidebar.width`).
 - Theme: `okena theme list | show [id] | set <id> | save <id> <json>`. To recolor
@@ -92,8 +93,10 @@ Commands that create things (`term new/split/tab`, `project add`, `project clone
   and return before the checkout exists on disk (the reply carries `pending: true`).
   Don't `cd` into the path immediately — poll `okena ls`/`okena state` until the
   project's terminal appears; if creation fails the row disappears from state.
-- **`--window` is honored only by** `project add/clone/show/hide/focus` and
-  `term focus/fullscreen`, and must come AFTER the subcommand; others just warn.
+- **Find a window**: `okena ls` (or `ls --json` → `windows[].id`, `visible_project_ids`)
+  lists attached desktops' windows; pass a full id or a unique prefix to `--window`.
+- **`--window` is honored only by** `project add/clone/show/hide/focus`, `worktree add`
+  and `term focus/fullscreen`, and must come AFTER the subcommand; others just warn.
 - **`project show/hide`, `--hidden` and `term fullscreen` also reach attached
   desktops**: each applies them to the `--window` target, else its active window.
 - Default output is tab-separated (grep/awk friendly); add `--json` for structured.

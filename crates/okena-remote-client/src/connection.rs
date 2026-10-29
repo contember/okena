@@ -206,6 +206,10 @@ impl RemoteConnection {
         self.client.set_visible_projects(project_ids);
     }
 
+    pub fn set_windows(&self, windows: Vec<okena_core::api::ApiWindow>) {
+        self.client.set_windows(windows);
+    }
+
     pub fn remote_state(&self) -> Option<&StateResponse> {
         self.client.remote_state()
     }

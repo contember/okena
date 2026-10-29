@@ -3602,10 +3602,19 @@ pub async fn daemon_command_loop(
                     // run the git on a blocking thread with NO lock held, then do the
                     // fast workspace mutation (register project + fire on_worktree_create
                     // + spawn PTYs) under the lock.
+                    // `window` is desktop placement, pushed by the server after
+                    // success; the daemon only rejects a malformed id.
+                    ActionRequest::CreateWorktree {
+                        window: Some(ref raw),
+                        ..
+                    } if WindowId::from_wire(raw).is_none() => {
+                        CommandResult::Err(format!("invalid window id: {raw}"))
+                    }
                     ActionRequest::CreateWorktree {
                         project_id,
                         branch,
                         create_branch,
+                        window: _,
                     } => {
                         // Phase 0: resolve paths. Read settings first, then the
                         // workspace (settings-before-workspace lock order), and drop
@@ -10501,6 +10510,7 @@ mod tests {
                 project_id: "p1".to_string(),
                 branch: "neumie/tezky-medovnik".to_string(),
                 create_branch: true,
+                window: None,
             },
             &mut workspace,
             WindowId::Main,

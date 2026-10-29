@@ -171,6 +171,7 @@ impl Okena {
         for window_id in to_open {
             self.open_extra_window(window_id, cx);
         }
+        self.publish_windows(cx);
     }
 
     /// React to an OS-level close of an extra window: arm a deferred forget
@@ -231,6 +232,7 @@ impl Okena {
             }
             WindowViewEvent::RebuildLocal => self.rebuild_local(cx),
             WindowViewEvent::RestartLocalBuild => self.restart_local_build(cx),
+            WindowViewEvent::ActivationChanged => self.publish_windows(cx),
         }
     }
 

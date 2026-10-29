@@ -6,7 +6,7 @@ use crate::client::state::{
 use crate::client::types::{
     ConnectionEvent, ConnectionStatus, SessionError, TOKEN_REFRESH_AGE_SECS, WsClientMessage,
 };
-use okena_core::api::{ActionRequest, ApiSystemStats, ApiUsage, StateResponse};
+use okena_core::api::{ActionRequest, ApiSystemStats, ApiUsage, ApiWindow, StateResponse};
 use okena_core::ws::ClientPresentationRequest;
 
 use futures::{Sink, Stream};
@@ -609,6 +609,9 @@ pub struct RemoteClient<H: ConnectionHandler> {
     /// server drops a connection's entry on close, and a client that never
     /// re-sends would silently fall out of the `gh` PR/CI scope.
     visible_projects: Arc<std::sync::RwLock<Vec<String>>>,
+    /// Last declared window list (unprefixed project ids), re-declared on
+    /// every reconnect for the same reason as `visible_projects`.
+    windows: Arc<std::sync::RwLock<Vec<ApiWindow>>>,
     /// Lifecycle signals into the background task (retry now, probe, pause).
     control: SessionControl,
 }
@@ -636,6 +639,7 @@ impl<H: ConnectionHandler> RemoteClient<H> {
             ws_abort_handle: None,
             shared_token,
             visible_projects: Arc::new(std::sync::RwLock::new(Vec::new())),
+            windows: Arc::new(std::sync::RwLock::new(Vec::new())),
             control: SessionControl::new(),
         }
     }
@@ -674,6 +678,20 @@ impl<H: ConnectionHandler> RemoteClient<H> {
         }
         if let Some(tx) = self.ws_tx.as_ref() {
             let _ = tx.try_send(WsClientMessage::SetVisibleProjects { project_ids });
+        }
+    }
+
+    /// Declare this client's windows (full replacement list, unprefixed
+    /// project ids) so `GET /v1/state` lists them. Stored for reconnects.
+    pub fn set_windows(&self, windows: Vec<ApiWindow>) {
+        if let Ok(mut stored) = self.windows.write() {
+            if *stored == windows {
+                return;
+            }
+            stored.clone_from(&windows);
+        }
+        if let Some(tx) = self.ws_tx.as_ref() {
+            let _ = tx.try_send(WsClientMessage::SetWindows { windows });
         }
     }
 
@@ -772,6 +790,7 @@ impl<H: ConnectionHandler> RemoteClient<H> {
         let (ws_tx, ws_rx) = ws_message_channel();
         self.ws_tx = Some(ws_tx.clone());
         let visible_projects = self.visible_projects.clone();
+        let windows = self.windows.clone();
         let control = self.control.clone();
 
         let task = self.runtime.spawn(async move {
@@ -984,6 +1003,7 @@ impl<H: ConnectionHandler> RemoteClient<H> {
                             handler,
                             shared_token,
                             visible_projects,
+                            windows,
                             control,
                         )
                         .await;
@@ -1058,6 +1078,7 @@ impl<H: ConnectionHandler> RemoteClient<H> {
         let (ws_tx, ws_rx) = ws_message_channel();
         self.ws_tx = Some(ws_tx.clone());
         let visible_projects = self.visible_projects.clone();
+        let windows = self.windows.clone();
         let control = self.control.clone();
 
         self.status = ConnectionStatus::Connecting;
@@ -1139,6 +1160,7 @@ impl<H: ConnectionHandler> RemoteClient<H> {
                                 handler,
                                 shared_token,
                                 visible_projects,
+                                windows,
                                 control,
                             )
                             .await;
@@ -1230,6 +1252,7 @@ impl<H: ConnectionHandler> RemoteClient<H> {
         handler: Arc<H>,
         shared_token: Arc<std::sync::RwLock<Option<String>>>,
         visible_projects: Arc<std::sync::RwLock<Vec<String>>>,
+        windows: Arc<std::sync::RwLock<Vec<ApiWindow>>>,
         control: SessionControl,
     ) {
         let config = session_config.into_inner();
@@ -1263,6 +1286,7 @@ impl<H: ConnectionHandler> RemoteClient<H> {
                 &ws_rx,
                 &handler,
                 &visible_projects,
+                &windows,
                 &control,
             );
             let outcome = tokio::select! {
@@ -1368,6 +1392,7 @@ impl<H: ConnectionHandler> RemoteClient<H> {
         ws_rx: &async_channel::Receiver<WsClientMessage>,
         handler: &Arc<H>,
         visible_projects: &Arc<std::sync::RwLock<Vec<String>>>,
+        windows: &Arc<std::sync::RwLock<Vec<ApiWindow>>>,
         control: &SessionControl,
     ) -> Result<(), SessionError> {
         // Shared stream maps: terminal_id -> stream_id (for writer) and reverse (for reader)
@@ -1606,6 +1631,22 @@ impl<H: ConnectionHandler> RemoteClient<H> {
                 SessionError::Transient(format!("Failed to send visible projects: {}", e))
             })?;
         }
+        let declared_windows = windows
+            .read()
+            .map(|windows| windows.clone())
+            .unwrap_or_default();
+        if !declared_windows.is_empty() {
+            let windows_msg = serde_json::json!({
+                "type": "set_windows",
+                "windows": declared_windows,
+            });
+            futures::SinkExt::send(
+                &mut ws_write,
+                tungstenite::Message::Text(windows_msg.to_string()),
+            )
+            .await
+            .map_err(|e| SessionError::Transient(format!("Failed to send windows: {}", e)))?;
+        }
 
         // Notify connected
         *reached_connected = true;
@@ -1701,6 +1742,12 @@ impl<H: ConnectionHandler> RemoteClient<H> {
                         serde_json::json!({
                             "type": "set_visible_projects",
                             "project_ids": project_ids,
+                        })
+                    }
+                    WsClientMessage::SetWindows { windows } => {
+                        serde_json::json!({
+                            "type": "set_windows",
+                            "windows": windows,
                         })
                     }
                     WsClientMessage::Ping => serde_json::json!({ "type": "ping" }),
@@ -2116,6 +2163,19 @@ impl<H: ConnectionHandler> RemoteClient<H> {
                                     if let Some(request) = parse_presentation_request(
                                         &value,
                                         ClientPresentationRequest::Fullscreen,
+                                    ) {
+                                        let _ = event_tx_clone
+                                            .send(ConnectionEvent::PresentationRequested {
+                                                connection_id: config_id.clone(),
+                                                request,
+                                            })
+                                            .await;
+                                    }
+                                }
+                                "project_placement_requested" => {
+                                    if let Some(request) = parse_presentation_request(
+                                        &value,
+                                        ClientPresentationRequest::ProjectPlacement,
                                     ) {
                                         let _ = event_tx_clone
                                             .send(ConnectionEvent::PresentationRequested {

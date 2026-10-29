@@ -1,6 +1,6 @@
 use crate::api::{
-    ApiFullscreenRequest, ApiGitStatus, ApiProjectVisibilityRequest, ApiSystemStats,
-    ApiTerminalFocusRequest, ApiToast, ApiUsage,
+    ApiFullscreenRequest, ApiGitStatus, ApiProjectPlacementRequest, ApiProjectVisibilityRequest,
+    ApiSystemStats, ApiTerminalFocusRequest, ApiToast, ApiUsage, ApiWindow,
 };
 use crate::keys::SpecialKey;
 use serde::{Deserialize, Serialize};
@@ -28,6 +28,13 @@ pub enum WsInbound {
     /// — clients subscribe to every terminal, not just the ones they render.
     SetVisibleProjects {
         project_ids: Vec<String>,
+    },
+    /// This client's windows, as a complete replacement list (unprefixed
+    /// project ids). Windows are client-owned, so `GET /v1/state` can only
+    /// list a desktop's windows — and the CLI can only resolve `--window` to
+    /// one — once the desktop declares them.
+    SetWindows {
+        windows: Vec<ApiWindow>,
     },
     SendText {
         terminal_id: String,
@@ -102,6 +109,9 @@ pub enum WsOutbound {
     /// One-shot request for a connected desktop client to enter or exit
     /// fullscreen in one of its windows after an external API action succeeds.
     FullscreenRequested(ApiFullscreenRequest),
+    /// One-shot request for a connected desktop client to show a newly created
+    /// project in one of its windows only.
+    ProjectPlacementRequested(ApiProjectPlacementRequest),
     TerminalResized {
         terminal_id: String,
         cols: u16,
@@ -123,6 +133,7 @@ pub enum ClientPresentationRequest {
     FocusTerminal(ApiTerminalFocusRequest),
     ProjectVisibility(ApiProjectVisibilityRequest),
     Fullscreen(ApiFullscreenRequest),
+    ProjectPlacement(ApiProjectPlacementRequest),
 }
 
 impl From<ClientPresentationRequest> for WsOutbound {
@@ -136,6 +147,9 @@ impl From<ClientPresentationRequest> for WsOutbound {
             }
             ClientPresentationRequest::Fullscreen(request) => {
                 WsOutbound::FullscreenRequested(request)
+            }
+            ClientPresentationRequest::ProjectPlacement(request) => {
+                WsOutbound::ProjectPlacementRequested(request)
             }
         }
     }
@@ -335,6 +349,20 @@ mod tests {
         assert_eq!(
             serde_json::from_value::<ApiFullscreenRequest>(value).unwrap(),
             fullscreen
+        );
+
+        let placement = ApiProjectPlacementRequest {
+            project_id: "p1".into(),
+            window: "main".into(),
+        };
+        let value = serde_json::to_value(WsOutbound::from(
+            ClientPresentationRequest::ProjectPlacement(placement.clone()),
+        ))
+        .unwrap();
+        assert_eq!(value["type"], "project_placement_requested");
+        assert_eq!(
+            serde_json::from_value::<ApiProjectPlacementRequest>(value).unwrap(),
+            placement
         );
     }
 

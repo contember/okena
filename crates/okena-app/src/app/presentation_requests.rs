@@ -1,5 +1,5 @@
 //! External presentation requests (`okena project show|hide`, `okena term
-//! fullscreen`) pushed by the daemon after the action succeeded there. The
+//! fullscreen`; `okena worktree add --window` is applied by the workspace) pushed by the daemon after the action succeeded there. The
 //! desktop owns per-window presentation, so it applies each request to its own
 //! window here; the daemon's copy only serves its synthetic main window.
 
@@ -19,7 +19,7 @@ impl Okena {
 
     /// The main or extra window that has OS focus. `None` when another
     /// window (a detached terminal or overlay) or no Okena window is active.
-    fn active_window_id(&self, cx: &App) -> Option<WindowId> {
+    pub(super) fn active_window_id(&self, cx: &App) -> Option<WindowId> {
         let active = cx.active_window()?;
         if active == self.main_window_handle {
             return Some(WindowId::Main);

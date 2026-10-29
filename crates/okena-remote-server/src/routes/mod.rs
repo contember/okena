@@ -23,7 +23,7 @@ use axum::extract::Request;
 use axum::http::StatusCode;
 use axum::middleware::{self, Next};
 use axum::response::Response;
-use okena_core::api::{ApiGitStatus, ApiToast};
+use okena_core::api::{ApiGitStatus, ApiToast, ApiWindow};
 use okena_core::git_poll::GitPollTrigger;
 use okena_core::ws::ClientPresentationRequest;
 use rust_embed::RustEmbed;
@@ -70,6 +70,9 @@ pub struct AppState {
     /// the git poller trusts it over that connection's subscriptions — see
     /// [`WsInbound::SetVisibleProjects`] for why it can't be derived here.
     pub remote_visible_projects: Arc<RwLock<HashMap<u64, HashSet<String>>>>,
+    /// Per-connection window list each desktop declared via
+    /// [`WsInbound::SetWindows`]; `GET /v1/state` lists these windows.
+    pub remote_windows: Arc<RwLock<HashMap<u64, Vec<ApiWindow>>>>,
     /// Optional wake-up path for the host git poller when a WS client starts
     /// viewing terminals.
     pub git_poll_trigger_tx: Option<tokio::sync::mpsc::UnboundedSender<GitPollTrigger>>,
@@ -167,6 +170,7 @@ pub fn build_router(
         presentation_tx,
         remote_subscribed_terminals,
         remote_visible_projects,
+        remote_windows: Arc::new(RwLock::new(HashMap::new())),
         git_poll_trigger_tx,
         next_connection_id,
         active_connections,

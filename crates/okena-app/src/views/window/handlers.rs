@@ -519,6 +519,7 @@ impl WindowView {
                             project_id: project_id.clone(),
                             branch: branch.clone(),
                             create_branch: *create_branch,
+                            window: None,
                         },
                         cx,
                     );

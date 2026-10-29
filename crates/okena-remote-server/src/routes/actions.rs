@@ -5,7 +5,10 @@ use axum::Json;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
-use okena_core::api::{ApiFullscreenRequest, ApiProjectVisibilityRequest, ApiTerminalFocusRequest};
+use okena_core::api::{
+    ApiFullscreenRequest, ApiProjectPlacementRequest, ApiProjectVisibilityRequest,
+    ApiTerminalFocusRequest,
+};
 use okena_core::ws::ClientPresentationRequest;
 use tokio::sync::broadcast;
 
@@ -51,6 +54,28 @@ fn presentation_request(action: &ActionRequest) -> Option<ClientPresentationRequ
     }
 }
 
+/// The window an action's newly created project must land in. Built from the
+/// daemon's reply, because the daemon assigns the project id.
+fn placement_window(action: &ActionRequest) -> Option<String> {
+    match action {
+        ActionRequest::CreateWorktree { window, .. } => window.clone(),
+        _ => None,
+    }
+}
+
+fn placement_request(
+    window: String,
+    payload: Option<&serde_json::Value>,
+) -> Option<ClientPresentationRequest> {
+    let project_id = payload?.get("project_id")?.as_str()?;
+    Some(ClientPresentationRequest::ProjectPlacement(
+        ApiProjectPlacementRequest {
+            project_id: project_id.to_string(),
+            window,
+        },
+    ))
+}
+
 enum ActionDispatchError {
     BridgeUnavailable,
     ProcessingFailed,
@@ -64,6 +89,7 @@ async fn run_action(
     action: ActionRequest,
 ) -> Result<CommandResult, ActionDispatchError> {
     let presentation = presentation_request(&action);
+    let placement = placement_window(&action);
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
     let msg = BridgeMessage {
         command: RemoteCommand::Action(action),
@@ -75,9 +101,12 @@ async fn run_action(
     let result = reply_rx
         .await
         .map_err(|_| ActionDispatchError::ProcessingFailed)?;
-    if let (CommandResult::Ok(_), Some(request)) = (&result, presentation) {
+    if let CommandResult::Ok(payload) = &result {
+        let placement = placement.and_then(|window| placement_request(window, payload.as_ref()));
         // No connected client is not an error: the request is fire-and-forget.
-        let _ = presentation_tx.send(request);
+        for request in presentation.into_iter().chain(placement) {
+            let _ = presentation_tx.send(request);
+        }
     }
     Ok(result)
 }
@@ -195,6 +224,50 @@ mod tests {
         assert_eq!(
             presentation_after(hide_main("project-1"), CommandResult::Ok(None)).await,
             presentation_request(&hide_main("project-1"))
+        );
+    }
+
+    fn create_worktree(window: Option<&str>) -> ActionRequest {
+        ActionRequest::CreateWorktree {
+            project_id: "parent".into(),
+            branch: "feature".into(),
+            create_branch: true,
+            window: window.map(str::to_string),
+        }
+    }
+
+    #[tokio::test]
+    async fn worktree_with_window_pushes_placement_of_the_created_project() {
+        let reply = CommandResult::Ok(Some(serde_json::json!({
+            "project_id": "wt-1",
+            "path": "/repo/.worktrees/feature",
+            "pending": true,
+        })));
+        assert_eq!(
+            presentation_after(create_worktree(Some("main")), reply).await,
+            Some(ClientPresentationRequest::ProjectPlacement(
+                ApiProjectPlacementRequest {
+                    project_id: "wt-1".into(),
+                    window: "main".into(),
+                }
+            ))
+        );
+    }
+
+    #[tokio::test]
+    async fn worktree_without_window_or_failed_pushes_nothing() {
+        let reply = || CommandResult::Ok(Some(serde_json::json!({"project_id": "wt-1"})));
+        assert_eq!(
+            presentation_after(create_worktree(None), reply()).await,
+            None
+        );
+        assert_eq!(
+            presentation_after(
+                create_worktree(Some("main")),
+                CommandResult::Err("project not found: parent".into())
+            )
+            .await,
+            None
         );
     }
 

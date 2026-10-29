@@ -194,6 +194,30 @@ impl WorkspaceData {
         }
     }
 
+    /// The first window (main, then extras in order) whose hidden set does not
+    /// contain `project_id`, or `None` when every window hides it.
+    pub fn first_window_showing(&self, project_id: &str) -> Option<WindowId> {
+        if !self.main_window.hidden_project_ids.contains(project_id) {
+            return Some(WindowId::Main);
+        }
+        self.extra_windows
+            .iter()
+            .find(|w| !w.hidden_project_ids.contains(project_id))
+            .map(|w| WindowId::Extra(w.id))
+    }
+
+    /// Show an already-materialized project in `window` and hide it in every
+    /// other window, through [`Self::set_hidden`] so each changed window drops
+    /// its pixel scale. The caller checks that `window` exists.
+    pub fn show_project_only_in(&mut self, project_id: &str, window: WindowId) {
+        let ids: Vec<WindowId> = std::iter::once(WindowId::Main)
+            .chain(self.extra_windows.iter().map(|w| WindowId::Extra(w.id)))
+            .collect();
+        for id in ids {
+            self.set_hidden(id, project_id, id != window);
+        }
+    }
+
     /// Hide a project in every persisted window state.
     ///
     /// Used for remote projects whose server-side `show_in_overview` flag is

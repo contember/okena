@@ -542,6 +542,12 @@ impl Okena {
             } => {
                 this.apply_fullscreen_request(project_id, terminal_id.as_deref(), *window, cx);
             }
+            RemoteManagerEvent::ProjectPlacementRequested { project_id, window } => {
+                let window = *window;
+                this.workspace.update(cx, |ws, cx| {
+                    ws.request_project_placement(window, project_id, cx);
+                });
+            }
             // Local daemon connection dead-ended — re-run discovery/ensure so
             // the GUI recovers instead of staying wedged on a dead socket.
             RemoteManagerEvent::LocalConnectionFailed => {
@@ -768,6 +774,7 @@ impl Okena {
         // the `gh` PR/CI fan-out to it. See `publish_visible_projects`.
         cx.observe(&workspace, |this, _workspace, cx| {
             this.publish_visible_projects(cx);
+            this.publish_windows(cx);
         })
         .detach();
 
@@ -819,6 +826,46 @@ impl Okena {
             manager.publish_visible_projects(&visible)
         });
         self.sync_hidden_project_scrollback(&visible, cx);
+    }
+
+    /// Declare this client's open windows to every connection, so `okena ls`
+    /// lists them and `--window` resolves to them. Windows are client-owned;
+    /// the daemon otherwise only knows its synthetic main window.
+    pub(super) fn publish_windows(&self, cx: &mut Context<Self>) {
+        let active = self.active_window_id(cx);
+        let ws = self.workspace.read(cx);
+        let open = std::iter::once(WindowId::Main).chain(
+            ws.data()
+                .extra_windows
+                .iter()
+                .map(|w| WindowId::Extra(w.id))
+                .filter(|id| self.extra_windows.contains_key(id)),
+        );
+        let windows: Vec<okena_core::api::ApiWindow> = open
+            .map(|id| okena_core::api::ApiWindow {
+                id: id.to_wire(),
+                kind: if id == WindowId::Main {
+                    "main"
+                } else {
+                    "extra"
+                }
+                .to_string(),
+                active: active == Some(id),
+                focused_project_id: None,
+                focused_terminal_id: None,
+                fullscreen: None,
+                visible_project_ids: ws
+                    .visible_projects(id, None, false)
+                    .iter()
+                    .map(|p| p.id.clone())
+                    .collect(),
+                folder_filter: None,
+                bounds: None,
+                sidebar_open: None,
+            })
+            .collect();
+        self.remote_manager
+            .update(cx, |manager, _cx| manager.publish_windows(&windows));
     }
 
     /// Free the scrollback of terminals in projects no window is showing, and

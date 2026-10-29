@@ -1507,7 +1507,12 @@ pub fn cli_project_focus(project: &str, window: Option<&str>) -> i32 {
 // ── Worktrees ────────────────────────────────────────────────────────────────
 
 /// `okena worktree add <project> <branch> [--new-branch]`
-pub fn cli_worktree_add(project: &str, branch: &str, new_branch: bool) -> i32 {
+pub fn cli_worktree_add(
+    project: &str,
+    branch: &str,
+    new_branch: bool,
+    window: Option<&str>,
+) -> i32 {
     let token = match ensure_token() {
         Ok(t) => t,
         Err(e) => {
@@ -1529,12 +1534,21 @@ pub fn cli_worktree_add(project: &str, branch: &str, new_branch: bool) -> i32 {
             return 1;
         }
     };
-    let body = serde_json::json!({
+    let mut body = serde_json::json!({
         "action": "create_worktree",
         "project_id": p.id,
         "branch": branch,
         "create_branch": new_branch,
     });
+    if let Some(w) = window {
+        match resolve::resolve_window(&state, w) {
+            Ok(win) => body["window"] = serde_json::Value::String(win),
+            Err(e) => {
+                eprintln!("{e}");
+                return 1;
+            }
+        }
+    }
     match api_action(&token, &body.to_string()) {
         Ok(resp) => {
             // Returns {project_id, path, pending} — print project_id and path to

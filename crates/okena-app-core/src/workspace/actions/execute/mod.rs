@@ -625,10 +625,12 @@ pub fn execute_action(
         ActionRequest::SetWorktreeColorOverride { project_id, color } => {
             project::set_worktree_color_override(ws, project_id, color, cx)
         }
+        // `window` is desktop placement, applied by the desktop's push handler.
         ActionRequest::CreateWorktree {
             project_id,
             branch,
             create_branch,
+            window: _,
         } => project::create_worktree(
             ws,
             window_id,
