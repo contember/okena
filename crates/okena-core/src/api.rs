@@ -82,7 +82,7 @@ pub struct ApiWindowBounds {
 
 /// One open OS window onto the shared workspace. Multi-window state is
 /// exposed so remote/CLI clients can see what the user actually sees.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ApiWindow {
     /// "main" for the main window, or the extra window's UUID string.
     pub id: String,
@@ -706,7 +706,7 @@ pub enum ApiLayoutNode {
     },
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ApiFullscreen {
     pub project_id: String,
     pub terminal_id: String,

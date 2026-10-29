@@ -1,6 +1,6 @@
 use crate::api::{
     ApiFullscreenRequest, ApiGitStatus, ApiProjectPlacementRequest, ApiProjectVisibilityRequest,
-    ApiSystemStats, ApiTerminalFocusRequest, ApiToast, ApiUsage,
+    ApiSystemStats, ApiTerminalFocusRequest, ApiToast, ApiUsage, ApiWindow,
 };
 use crate::keys::SpecialKey;
 use serde::{Deserialize, Serialize};
@@ -28,6 +28,13 @@ pub enum WsInbound {
     /// — clients subscribe to every terminal, not just the ones they render.
     SetVisibleProjects {
         project_ids: Vec<String>,
+    },
+    /// This client's windows, as a complete replacement list (unprefixed
+    /// project ids). Windows are client-owned, so `GET /v1/state` can only
+    /// list a desktop's windows — and the CLI can only resolve `--window` to
+    /// one — once the desktop declares them.
+    SetWindows {
+        windows: Vec<ApiWindow>,
     },
     SendText {
         terminal_id: String,

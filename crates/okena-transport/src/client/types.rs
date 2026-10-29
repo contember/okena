@@ -1,4 +1,4 @@
-use okena_core::api::StateResponse;
+use okena_core::api::{ApiWindow, StateResponse};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -39,6 +39,9 @@ pub enum WsClientMessage {
     /// Declare which projects this client renders, as a full replacement set.
     /// Server-side ids (unprefixed) — scopes the server's `gh` PR/CI fan-out.
     SetVisibleProjects { project_ids: Vec<String> },
+    /// Declare this client's windows, as a full replacement list. Server-side
+    /// project ids (unprefixed) — `GET /v1/state` lists them.
+    SetWindows { windows: Vec<ApiWindow> },
     /// Application-level keepalive (`{"type":"ping"}`); the server answers
     /// `pong`. Sent by the session itself to detect dead connections.
     Ping,

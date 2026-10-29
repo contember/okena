@@ -93,6 +93,8 @@ Commands that create things (`term new/split/tab`, `project add`, `project clone
   and return before the checkout exists on disk (the reply carries `pending: true`).
   Don't `cd` into the path immediately — poll `okena ls`/`okena state` until the
   project's terminal appears; if creation fails the row disappears from state.
+- **Find a window**: `okena ls` (or `ls --json` → `windows[].id`, `visible_project_ids`)
+  lists attached desktops' windows; pass a full id or a unique prefix to `--window`.
 - **`--window` is honored only by** `project add/clone/show/hide/focus`, `worktree add`
   and `term focus/fullscreen`, and must come AFTER the subcommand; others just warn.
 - **`project show/hide`, `--hidden` and `term fullscreen` also reach attached

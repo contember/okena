@@ -19,7 +19,7 @@ impl Okena {
 
     /// The main or extra window that has OS focus. `None` when another
     /// window (a detached terminal or overlay) or no Okena window is active.
-    fn active_window_id(&self, cx: &App) -> Option<WindowId> {
+    pub(super) fn active_window_id(&self, cx: &App) -> Option<WindowId> {
         let active = cx.active_window()?;
         if active == self.main_window_handle {
             return Some(WindowId::Main);
