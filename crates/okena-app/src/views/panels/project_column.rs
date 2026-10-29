@@ -8,6 +8,7 @@ use crate::views::layout::layout_container::LayoutContainer;
 use crate::views::layout::pane_drag::PaneMoveState;
 use crate::views::layout::split_pane::ActiveDrag;
 use crate::workspace::request_broker::RequestBroker;
+use crate::workspace::settings::HeaderDensity;
 use crate::workspace::state::{
     FocusedTerminalState, LayoutNode, ProjectData, ProjectLayoutMode, WindowId, Workspace,
 };
@@ -23,6 +24,12 @@ use crate::views::window::TerminalsRegistry;
 use okena_core::api::ActionRequest;
 use okena_views_services::service_panel::ServicePanel;
 use okena_workspace::requests::{OverlayRequest, ProjectOverlay, ProjectOverlayKind};
+
+/// Whether the project header uses the two-row comfortable layout. Rows are
+/// short, so they always collapse it to a single row (git info goes inline).
+fn uses_comfortable_header(density: HeaderDensity, mode: ProjectLayoutMode) -> bool {
+    density == HeaderDensity::Comfortable && mode != ProjectLayoutMode::Rows
+}
 
 fn project_header_display_name(project: &ProjectData) -> String {
     project.name.clone()
@@ -708,21 +715,14 @@ impl ProjectColumn {
         let folder_color = t.get_folder_color(effective_color);
         let app_settings = crate::settings::settings(cx);
         let density = app_settings.header_density;
-        // In the rows and grid layouts each project is short, so vertical
-        // space is precious: collapse the comfortable two-row header back to a
-        // single row (git info still shows, just inline).
-        let (is_columns, is_compact_tile) = {
+        let (layout_mode, is_compact_tile) = {
             let ws = self.workspace.read(cx);
             (
-                matches!(
-                    ws.project_layout_mode(self.window_id),
-                    ProjectLayoutMode::Columns
-                ),
+                ws.project_layout_mode(self.window_id),
                 ws.is_compact_tile(self.window_id, &self.project_id),
             )
         };
-        let is_comfortable =
-            density == crate::workspace::settings::HeaderDensity::Comfortable && is_columns;
+        let is_comfortable = uses_comfortable_header(density, layout_mode);
 
         // Reading the focus state clones a String + Vec, so stay behind the
         // opt-in (or a compact tile, whose terminal has no title bar of its
@@ -1035,10 +1035,15 @@ impl ProjectColumn {
                         .justify_between()
                         .child(
                             h_flex()
+                                // Shrink so a long compact-tile title truncates
+                                // instead of pushing the right controls out.
+                                .flex_1()
+                                .min_w_0()
                                 .gap(px(6.0))
                                 .overflow_hidden()
                                 .child(worktree_dot)
                                 .child(project_name_el)
+                                .children(terminal_title_el)
                                 .children(status_pill),
                         )
                         .child(right_controls),
@@ -1531,9 +1536,11 @@ impl Render for ProjectColumn {
 mod tests {
     use super::{
         ColumnContent, FocusedTerminalHeaderTarget, column_content, focused_terminal_header_target,
-        project_header_display_name,
+        project_header_display_name, uses_comfortable_header,
     };
+    use crate::workspace::settings::HeaderDensity;
     use crate::workspace::settings::HooksConfig;
+    use crate::workspace::state::ProjectLayoutMode;
     use crate::workspace::state::{
         FocusedTerminalState, LayoutNode, ProjectData, SplitDirection, WorktreeMetadata,
     };
@@ -1776,5 +1783,17 @@ mod tests {
         });
 
         assert_eq!(project_header_display_name(&project), "feature-login");
+    }
+
+    #[test]
+    fn comfortable_header_follows_density_except_in_rows() {
+        use HeaderDensity::{Comfortable, Compact};
+        use ProjectLayoutMode::{Columns, Grid, Rows};
+        assert!(uses_comfortable_header(Comfortable, Columns));
+        assert!(uses_comfortable_header(Comfortable, Grid));
+        assert!(!uses_comfortable_header(Comfortable, Rows));
+        for mode in [Columns, Rows, Grid] {
+            assert!(!uses_comfortable_header(Compact, mode));
+        }
     }
 }
