@@ -7,9 +7,12 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use okena_core::api::{
     ApiFullscreenRequest, ApiProjectLayoutRequest, ApiProjectPlacementRequest,
-    ApiProjectVisibilityRequest, ApiTerminalFocusRequest,
+    ApiProjectVisibilityRequest, ApiTerminalFocusRequest, ApiWindow,
 };
 use okena_core::ws::ClientPresentationRequest;
+use okena_workspace::state::WindowId;
+use std::collections::HashMap;
+use std::sync::RwLock;
 use tokio::sync::broadcast;
 
 /// The one-shot presentation request connected desktops must apply after
@@ -82,6 +85,34 @@ fn placement_request(
     ))
 }
 
+/// Why `action` cannot run: it targets an extra window no connected desktop
+/// declared, so no client would apply it. `main` always exists (the daemon
+/// serves it); a malformed id is left to the daemon to reject.
+fn undeclared_window_error(
+    action: &ActionRequest,
+    declared: &HashMap<u64, Vec<ApiWindow>>,
+) -> Option<String> {
+    let raw = action
+        .target_window()
+        .map(str::to_string)
+        .or_else(|| placement_window(action))?;
+    let target @ WindowId::Extra(_) = WindowId::from_wire(&raw)? else {
+        return None;
+    };
+    let mut windows = declared.values().flatten().peekable();
+    if windows.peek().is_none() {
+        return Some(format!(
+            "window not found: {raw} (no desktop is attached to apply it)"
+        ));
+    }
+    if windows.any(|window| WindowId::from_wire(&window.id) == Some(target)) {
+        return None;
+    }
+    Some(format!(
+        "window not found: {raw} (no attached desktop has this window)"
+    ))
+}
+
 enum ActionDispatchError {
     BridgeUnavailable,
     ProcessingFailed,
@@ -92,8 +123,16 @@ enum ActionDispatchError {
 async fn run_action(
     bridge_tx: &BridgeSender,
     presentation_tx: &broadcast::Sender<ClientPresentationRequest>,
+    declared_windows: &RwLock<HashMap<u64, Vec<ApiWindow>>>,
     action: ActionRequest,
 ) -> Result<CommandResult, ActionDispatchError> {
+    let undeclared = match declared_windows.read() {
+        Ok(declared) => undeclared_window_error(&action, &declared),
+        Err(_) => return Err(ActionDispatchError::ProcessingFailed),
+    };
+    if let Some(error) = undeclared {
+        return Ok(CommandResult::Err(error));
+    }
     let presentation = presentation_request(&action);
     let placement = placement_window(&action);
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
@@ -121,7 +160,14 @@ pub async fn post_actions(
     State(state): State<AppState>,
     Json(action): Json<ActionRequest>,
 ) -> impl IntoResponse {
-    match run_action(&state.bridge_tx, &state.presentation_tx, action).await {
+    match run_action(
+        &state.bridge_tx,
+        &state.presentation_tx,
+        &state.remote_windows,
+        action,
+    )
+    .await
+    {
         Ok(CommandResult::Ok(payload)) => {
             let body = payload.unwrap_or(serde_json::json!({"ok": true}));
             (StatusCode::OK, Json(body)).into_response()
@@ -159,22 +205,113 @@ mod tests {
         }
     }
 
+    const EXTRA: &str = "6f1c3a52-9d4e-4b8a-a0c1-2e7f5b9d3c11";
+
+    fn window(id: &str) -> ApiWindow {
+        ApiWindow {
+            id: id.into(),
+            kind: if id == "main" { "main" } else { "extra" }.into(),
+            active: false,
+            focused_project_id: None,
+            focused_terminal_id: None,
+            fullscreen: None,
+            visible_project_ids: Vec::new(),
+            folder_filter: None,
+            bounds: None,
+            sidebar_open: None,
+        }
+    }
+
+    fn hide_in(window: &str) -> ActionRequest {
+        ActionRequest::SetProjectShowInOverview {
+            project_id: "project-1".into(),
+            show: false,
+            window: Some(window.into()),
+        }
+    }
+
     /// Run `action` against a daemon stub that answers every command with
     /// `reply`, and return what connected clients would receive.
     async fn presentation_after(
         action: ActionRequest,
         reply: CommandResult,
     ) -> Option<ClientPresentationRequest> {
+        let declared = RwLock::new(HashMap::from([(1, vec![window("main"), window(EXTRA)])]));
+        presentation_with_windows(action, reply, &declared).await.1
+    }
+
+    /// Like [`presentation_after`] with the given declared desktop windows;
+    /// also returns the action's result and whether it reached the daemon.
+    async fn presentation_with_windows(
+        action: ActionRequest,
+        reply: CommandResult,
+        declared: &RwLock<HashMap<u64, Vec<ApiWindow>>>,
+    ) -> (CommandResult, Option<ClientPresentationRequest>, bool) {
         let (bridge_tx, bridge_rx) = crate::bridge::bridge_channel();
         let (presentation_tx, mut presentation_rx) = broadcast::channel(8);
         let daemon = tokio::spawn(async move {
-            let msg = bridge_rx.recv().await.expect("action reaches the daemon");
+            let Ok(msg) = bridge_rx.recv().await else {
+                return false;
+            };
             let _ = msg.reply.expect("actions expect a reply").send(reply);
+            true
         });
 
-        let _ = run_action(&bridge_tx, &presentation_tx, action).await;
-        daemon.await.expect("daemon stub finishes");
-        presentation_rx.try_recv().ok()
+        let result = match run_action(&bridge_tx, &presentation_tx, declared, action).await {
+            Ok(result) => result,
+            Err(_) => panic!("bridge stub answers"),
+        };
+        drop(bridge_tx);
+        let reached_daemon = daemon.await.expect("daemon stub finishes");
+        (result, presentation_rx.try_recv().ok(), reached_daemon)
+    }
+
+    #[tokio::test]
+    async fn show_hide_in_a_declared_extra_window_is_pushed_to_clients() {
+        assert_eq!(
+            presentation_after(hide_in(EXTRA), CommandResult::Ok(None)).await,
+            presentation_request(&hide_in(EXTRA))
+        );
+    }
+
+    #[tokio::test]
+    async fn undeclared_extra_window_is_rejected_before_the_daemon() {
+        let other_desktop = RwLock::new(HashMap::from([(1, vec![window("main")])]));
+        let no_desktop = RwLock::new(HashMap::new());
+        for (declared, reason) in [
+            (&other_desktop, "no attached desktop has this window"),
+            (&no_desktop, "no desktop is attached"),
+        ] {
+            for action in [
+                hide_in(EXTRA),
+                ActionRequest::SetFullscreen {
+                    project_id: "project-1".into(),
+                    terminal_id: Some("terminal-1".into()),
+                    window: Some(EXTRA.into()),
+                },
+                create_worktree(Some(EXTRA)),
+            ] {
+                let (result, pushed, reached_daemon) =
+                    presentation_with_windows(action, CommandResult::Ok(None), declared).await;
+                assert!(
+                    matches!(&result, CommandResult::Err(e)
+                        if e.starts_with(&format!("window not found: {EXTRA}")) && e.contains(reason)),
+                    "unexpected result: {result:?}"
+                );
+                assert!(!reached_daemon, "rejected action must not run");
+                assert_eq!(pushed, None);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn main_window_runs_without_a_desktop() {
+        let no_desktop = RwLock::new(HashMap::new());
+        let (result, pushed, reached_daemon) =
+            presentation_with_windows(hide_in("main"), CommandResult::Ok(None), &no_desktop).await;
+        assert!(matches!(result, CommandResult::Ok(None)));
+        assert!(reached_daemon);
+        assert_eq!(pushed, presentation_request(&hide_in("main")));
     }
 
     #[test]

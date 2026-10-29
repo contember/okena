@@ -4197,8 +4197,9 @@ pub async fn daemon_command_loop(
                         // Resolve the action's explicit target window (if any)
                         // BEFORE moving `action` into `execute_action`. The daemon
                         // serves only the synthetic main window. FocusTerminal and
-                        // SetProjectLayout may carry an extra UI window through
-                        // daemon-side validation.
+                        // SetProjectLayout run here for an extra UI window too; the
+                        // other per-window actions are only validated, and the
+                        // server pushes them to the desktop that owns the window.
                         let parsed_target = match action.target_window() {
                             None => Ok(None),
                             Some(s) => match WindowId::from_wire(s) {
@@ -4212,7 +4213,10 @@ pub async fn daemon_command_loop(
                                 CommandResult::Err(format!("invalid window id: {bad}"))
                             }
                             Ok(Some(WindowId::Extra(uuid))) if !presentation_only_window => {
-                                CommandResult::Err(format!("window not found: {uuid}"))
+                                validate_extra_window_action(&action, &workspace.lock())
+                                    .unwrap_or_else(|| {
+                                        CommandResult::Err(format!("window not found: {uuid}"))
+                                    })
                             }
                             Ok(_) => {
                                 // Snapshot app settings to thread into the gpui-free
@@ -4904,6 +4908,38 @@ impl TerminalBackend for DeferredKillBackend<'_> {
     fn get_batch_service_pids(&self, terminal_ids: &[&str]) -> HashMap<String, Vec<u32>> {
         self.backend.get_batch_service_pids(terminal_ids)
     }
+}
+
+/// Validate a per-window action aimed at a desktop's extra window without
+/// applying it: the window's state lives on that desktop. `None` for an action
+/// the daemon has no desktop-side counterpart for.
+fn validate_extra_window_action(action: &ActionRequest, ws: &Workspace) -> Option<CommandResult> {
+    let (project_id, terminal_id) = match action {
+        ActionRequest::SetProjectShowInOverview { project_id, .. } => (project_id, None),
+        ActionRequest::SetFullscreen {
+            project_id,
+            terminal_id,
+            ..
+        } => (project_id, terminal_id.as_deref()),
+        _ => return None,
+    };
+    let Some(project) = ws.project(project_id) else {
+        return Some(CommandResult::Err(format!(
+            "project not found: {project_id}"
+        )));
+    };
+    if let Some(terminal_id) = terminal_id
+        && project
+            .layout
+            .as_ref()
+            .and_then(|layout| layout.find_terminal_path(terminal_id))
+            .is_none()
+    {
+        return Some(CommandResult::Err(format!(
+            "terminal not found: {terminal_id}"
+        )));
+    }
+    Some(CommandResult::Ok(None))
 }
 
 /// Run a workspace-scoped action against the synthetic main window.
@@ -6482,6 +6518,87 @@ mod tests {
                 assert!(resp.windows[0].active);
 
                 // Drop the sender so `recv` errors and the loop task joins.
+                drop(bridge_tx);
+                handle.await.expect("loop task joins");
+            })
+            .await;
+    }
+
+    /// Show/hide and fullscreen aimed at a desktop's extra window are
+    /// validated and accepted (the server pushes them to that desktop) without
+    /// touching the daemon's own main window.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn extra_window_show_hide_and_fullscreen_are_validated_not_applied() {
+        let h = harness();
+        {
+            let mut data = workspace_with_worktree_child();
+            if let Some(LayoutNode::Terminal { terminal_id, .. }) = &mut data.projects[0].layout {
+                *terminal_id = Some("t1".into());
+            }
+            *h.workspace.lock() = Workspace::new(data);
+        }
+        let workspace = h.workspace.clone();
+        let extra = uuid::Uuid::new_v4().to_string();
+        let (bridge_tx, bridge_rx) = bridge_channel();
+
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async move {
+                let handle = h.spawn_loop(bridge_rx);
+                let act = |action| request(&bridge_tx, RemoteCommand::Action(action), "action");
+                let hide =
+                    |project_id: &str, window: &str| ActionRequest::SetProjectShowInOverview {
+                        project_id: project_id.into(),
+                        show: false,
+                        window: Some(window.into()),
+                    };
+                let fullscreen = |terminal_id: &str| ActionRequest::SetFullscreen {
+                    project_id: "p1".into(),
+                    terminal_id: Some(terminal_id.into()),
+                    window: Some(extra.clone()),
+                };
+
+                assert!(matches!(
+                    act(hide("p1", &extra)).await,
+                    CommandResult::Ok(None)
+                ));
+                assert!(matches!(
+                    act(fullscreen("t1")).await,
+                    CommandResult::Ok(None)
+                ));
+                assert!(
+                    workspace
+                        .lock()
+                        .data()
+                        .main_window
+                        .hidden_project_ids
+                        .is_empty(),
+                    "an extra window's hide must not hide the project in main"
+                );
+
+                assert!(matches!(
+                    act(hide("missing", &extra)).await,
+                    CommandResult::Err(e) if e == "project not found: missing"
+                ));
+                assert!(matches!(
+                    act(fullscreen("missing")).await,
+                    CommandResult::Err(e) if e == "terminal not found: missing"
+                ));
+
+                // The daemon's own main window still applies the change.
+                assert!(matches!(
+                    act(hide("p1", "main")).await,
+                    CommandResult::Ok(None)
+                ));
+                assert!(
+                    workspace
+                        .lock()
+                        .data()
+                        .main_window
+                        .hidden_project_ids
+                        .contains("p1")
+                );
+
                 drop(bridge_tx);
                 handle.await.expect("loop task joins");
             })
