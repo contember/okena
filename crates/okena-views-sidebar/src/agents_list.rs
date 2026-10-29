@@ -287,6 +287,21 @@ mod tests {
     }
 
     #[test]
+    fn agents_in_one_project_order_by_terminal_not_title() {
+        // Title order is the reverse of terminal-id order, so only the
+        // terminal tie-break yields this result.
+        let mut first = agent("zulu", AgentLifecycle::Working);
+        first.terminal_id = "t-1".to_string();
+        let mut second = agent("alpha", AgentLifecycle::Working);
+        second.terminal_id = "t-2".to_string();
+        let mut agents = vec![second, first];
+        sort_agents_by_attention(&mut agents);
+
+        let order: Vec<&str> = agents.iter().map(|a| a.terminal_id.as_str()).collect();
+        assert_eq!(order, vec!["t-1", "t-2"]);
+    }
+
+    #[test]
     fn agents_sort_is_stable_for_an_empty_or_single_list() {
         let mut empty: Vec<SidebarAgentInfo> = Vec::new();
         sort_agents_by_attention(&mut empty);
