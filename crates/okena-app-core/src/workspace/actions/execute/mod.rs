@@ -189,6 +189,9 @@ pub fn execute_action(
             terminal_id,
             window: _,
         } => terminal::set_fullscreen(ws, focus_manager, project_id, terminal_id, cx),
+        // Desktop presentation only: the daemon's synthetic window renders
+        // nothing, so success just lets the server push it to desktops.
+        ActionRequest::SetProjectLayout { .. } => ActionResult::Ok(None),
         ActionRequest::RenameTerminal {
             project_id,
             terminal_id,
@@ -625,10 +628,12 @@ pub fn execute_action(
         ActionRequest::SetWorktreeColorOverride { project_id, color } => {
             project::set_worktree_color_override(ws, project_id, color, cx)
         }
+        // `window` is desktop placement, applied by the desktop's push handler.
         ActionRequest::CreateWorktree {
             project_id,
             branch,
             create_branch,
+            window: _,
         } => project::create_worktree(
             ws,
             window_id,

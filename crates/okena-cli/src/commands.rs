@@ -1507,7 +1507,12 @@ pub fn cli_project_focus(project: &str, window: Option<&str>) -> i32 {
 // ── Worktrees ────────────────────────────────────────────────────────────────
 
 /// `okena worktree add <project> <branch> [--new-branch]`
-pub fn cli_worktree_add(project: &str, branch: &str, new_branch: bool) -> i32 {
+pub fn cli_worktree_add(
+    project: &str,
+    branch: &str,
+    new_branch: bool,
+    window: Option<&str>,
+) -> i32 {
     let token = match ensure_token() {
         Ok(t) => t,
         Err(e) => {
@@ -1529,12 +1534,21 @@ pub fn cli_worktree_add(project: &str, branch: &str, new_branch: bool) -> i32 {
             return 1;
         }
     };
-    let body = serde_json::json!({
+    let mut body = serde_json::json!({
         "action": "create_worktree",
         "project_id": p.id,
         "branch": branch,
         "create_branch": new_branch,
     });
+    if let Some(w) = window {
+        match resolve::resolve_window(&state, w) {
+            Ok(win) => body["window"] = serde_json::Value::String(win),
+            Err(e) => {
+                eprintln!("{e}");
+                return 1;
+            }
+        }
+    }
     match api_action(&token, &body.to_string()) {
         Ok(resp) => {
             // Returns {project_id, path, pending} — print project_id and path to
@@ -1808,6 +1822,41 @@ pub fn cli_term_fullscreen(terminal: &str, off: bool, window: Option<&str>) -> i
             body["window"] = serde_json::Value::String(resolve::resolve_window(state, w)?);
         }
         Ok(body)
+    })
+}
+
+// ── Windows ──────────────────────────────────────────────────────────────────
+
+/// `okena window layout <columns|rows|grid> [--min-width N] [--min-height N]`
+///
+/// The tile sizes are app settings, so they are set first; the mode is
+/// per-window presentation the daemon pushes on to the attached desktops.
+pub fn cli_window_layout(
+    mode: okena_core::types::ProjectLayoutMode,
+    min_width: Option<f32>,
+    min_height: Option<f32>,
+    window: Option<&str>,
+) -> i32 {
+    let mut patch = serde_json::Map::new();
+    if let Some(width) = min_width {
+        patch.insert("min_tile_width".into(), width.into());
+    }
+    if let Some(height) = min_height {
+        patch.insert("min_tile_height".into(), height.into());
+    }
+    if !patch.is_empty() {
+        let body = serde_json::json!({ "action": "set_settings", "patch": patch });
+        if let Err(e) = post_action_body(&body) {
+            eprintln!("{e}");
+            return 1;
+        }
+    }
+    with_state_post(|state| {
+        let window = window
+            .map(|w| resolve::resolve_window(state, w))
+            .transpose()?;
+        serde_json::to_value(okena_core::api::ActionRequest::SetProjectLayout { mode, window })
+            .map_err(|e| e.to_string())
     })
 }
 

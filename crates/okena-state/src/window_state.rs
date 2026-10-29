@@ -5,51 +5,10 @@
 //! filter, per-project column widths, sidebar folder-collapse map, and OS
 //! window bounds. Pure data — see ADR `docs/decisions/0002-window-as-viewport.md`.
 
-use okena_core::types::SplitDirection;
+pub use okena_core::types::ProjectLayoutMode;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
-
-/// How project columns are arranged in a window's grid.
-///
-/// `Columns` (default) lays projects out side by side, each with a width;
-/// `Rows` stacks them vertically, each with a height. Stored per-window so
-/// each window can flip its own orientation independently. The persisted
-/// `project_widths` map holds axis-agnostic weights, so it carries over
-/// unchanged when the orientation flips.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ProjectLayoutMode {
-    /// Projects laid out side by side (horizontal, width-resized). Default.
-    #[default]
-    Columns,
-    /// Projects stacked vertically (height-resized).
-    Rows,
-}
-
-impl ProjectLayoutMode {
-    /// Return the opposite orientation.
-    pub fn toggled(self) -> Self {
-        match self {
-            ProjectLayoutMode::Columns => ProjectLayoutMode::Rows,
-            ProjectLayoutMode::Rows => ProjectLayoutMode::Columns,
-        }
-    }
-
-    /// True when projects are stacked vertically.
-    pub fn is_rows(self) -> bool {
-        matches!(self, ProjectLayoutMode::Rows)
-    }
-
-    /// Transform the daemon's canonical split direction for this window.
-    pub fn presented_split_direction(self, direction: SplitDirection) -> SplitDirection {
-        if self.is_rows() {
-            direction.flipped()
-        } else {
-            direction
-        }
-    }
-}
 
 /// How the sidebar orders projects in a window.
 ///
@@ -302,18 +261,19 @@ mod tests {
     }
 
     #[test]
-    fn rows_present_canonical_splits_on_the_opposite_axis() {
-        assert_eq!(
-            ProjectLayoutMode::Columns.presented_split_direction(SplitDirection::Horizontal),
-            SplitDirection::Horizontal
-        );
-        assert_eq!(
-            ProjectLayoutMode::Rows.presented_split_direction(SplitDirection::Horizontal),
-            SplitDirection::Vertical
-        );
-        assert_eq!(
-            ProjectLayoutMode::Rows.presented_split_direction(SplitDirection::Vertical),
-            SplitDirection::Horizontal
-        );
+    fn grid_mode_roundtrips_and_keeps_the_rest_of_the_window() {
+        let mut widths = HashMap::new();
+        widths.insert("p1".to_string(), 0.3);
+        let original = WindowState {
+            project_layout: ProjectLayoutMode::Grid,
+            project_widths: widths,
+            ..WindowState::default()
+        };
+
+        let json = serde_json::to_value(&original).unwrap();
+        assert_eq!(json["project_layout"], "grid");
+        let reloaded: WindowState = serde_json::from_value(json).unwrap();
+        assert_eq!(reloaded.project_layout, ProjectLayoutMode::Grid);
+        assert_eq!(reloaded.project_widths, original.project_widths);
     }
 }

@@ -1,7 +1,7 @@
 ---
 id: 0002
 title: A window is a filtered viewport, not a partition of the workspace
-status: accepted
+status: accepted # cross-window-ops bullet superseded by 0008
 date: 2026-05-12
 ---
 

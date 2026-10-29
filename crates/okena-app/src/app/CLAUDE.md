@@ -11,7 +11,7 @@ The `Okena` entity coordinates desktop-only GPUI entities and synchronizes them 
 | `detached_overlays.rs` | Opens detached overlay windows. |
 | `extras.rs` | Auxiliary `Okena` methods for desktop actions. |
 | `notifications.rs` | Desktop notification integration; `jump_to_terminal` (also used for pushed terminal-focus requests). |
-| `presentation_requests.rs` | Applies daemon-pushed show/hide and fullscreen requests to the target window. |
+| `presentation_requests.rs` | Applies daemon-pushed show/hide, fullscreen and layout-mode requests to the target window. |
 
 ## Key Patterns
 

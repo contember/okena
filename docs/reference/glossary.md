@@ -38,3 +38,5 @@ Windows are not user-named; they are addressed positionally (main, then auto-num
 The underlying Workspace (projects, folders, ordering, layouts, hooks) is shared across windows. Sidebar renders in every window but reflects that window's filter state. Closing a window does not remove anything from the Workspace. Terminals, PTYs, git watchers, and settings are shared across all windows.
 
 When a project is added from a given window, it becomes visible only in that window — hidden by default in all others.
+
+**Move to window** (project context menu) shows a project in another window, or a new one, and hides it in the current one. Only the two hidden sets change; terminals keep running ([ADR-0008](../decisions/0008-move-project-between-windows.md)).

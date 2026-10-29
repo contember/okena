@@ -285,6 +285,11 @@ async fn handle_ws(
                                     let _ = tx.send(GitPollTrigger::visibility_changed());
                                 }
                             }
+                            Ok(WsInbound::SetWindows { windows }) => {
+                                if let Ok(mut map) = state.remote_windows.write() {
+                                    map.insert(connection_id, windows);
+                                }
+                            }
                             Ok(WsInbound::SendText { terminal_id, text }) => {
                                 let _ = state.bridge_tx.send(BridgeMessage {
                                     command: RemoteCommand::ActionFromConnection {
@@ -696,8 +701,11 @@ async fn handle_ws(
     if let Ok(mut map) = state.remote_subscribed_terminals.write() {
         map.remove(&connection_id);
     }
-    // Same for its declared viewport — a gone client renders nothing.
+    // Same for its declared viewport and windows — a gone client renders nothing.
     if let Ok(mut map) = state.remote_visible_projects.write() {
+        map.remove(&connection_id);
+    }
+    if let Ok(mut map) = state.remote_windows.write() {
         map.remove(&connection_id);
     }
 

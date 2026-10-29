@@ -282,6 +282,13 @@ pub enum OverlayManagerEvent {
     /// Project switcher: Toggle project overview visibility
     ToggleProjectVisibility(String),
 
+    /// Context menu: show the project in `target` (a new window when `None`)
+    /// and hide it in this one.
+    MoveProjectToWindow {
+        project_id: String,
+        target: Option<WindowId>,
+    },
+
     /// Remote connect dialog: connection paired and ready
     RemoteConnected {
         config: RemoteConnectionConfig,
@@ -1330,6 +1337,13 @@ impl OverlayManager {
                     cx.emit(OverlayManagerEvent::ToggleProjectVisibility(
                         project_id.clone(),
                     ));
+                }
+                ContextMenuEvent::MoveToWindow { project_id, target } => {
+                    this.hide_context_menu(cx);
+                    cx.emit(OverlayManagerEvent::MoveProjectToWindow {
+                        project_id: project_id.clone(),
+                        target: *target,
+                    });
                 }
             }
         })

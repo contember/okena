@@ -642,7 +642,7 @@ pub fn get_action_descriptions() -> HashMap<&'static str, ActionDescription> {
         "ToggleProjectLayout",
         ActionDescription {
             name: "Toggle Project Layout",
-            description: "Switch the project grid between columns and rows",
+            description: "Cycle the window's project layout: columns, rows, grid",
             category: "Layout",
             factory: || Box::new(ToggleProjectLayout),
         },

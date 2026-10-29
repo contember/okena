@@ -93,6 +93,11 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Desktop window presentation
+    Window {
+        #[command(subcommand)]
+        cmd: WindowCmd,
+    },
 
     // ── Projects ─────────────────────────────────────────────────────────────
     /// Project operations
@@ -271,6 +276,49 @@ pub enum ClaudeCmd {
         /// Terminal address (id, project/name, or project:index)
         terminal: String,
     },
+}
+
+#[derive(Subcommand)]
+pub enum WindowCmd {
+    /// Arrange a window's projects as columns, rows or a grid of tiles.
+    /// Applies to the --window target, else the active desktop window.
+    Layout {
+        mode: LayoutModeArg,
+        /// Minimum grid tile width in px (app setting `min_tile_width`)
+        #[arg(long, value_parser = tile_size)]
+        min_width: Option<f32>,
+        /// Minimum grid tile height in px (app setting `min_tile_height`)
+        #[arg(long, value_parser = tile_size)]
+        min_height: Option<f32>,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum LayoutModeArg {
+    Columns,
+    Rows,
+    Grid,
+}
+
+impl LayoutModeArg {
+    pub fn mode(self) -> okena_core::types::ProjectLayoutMode {
+        use okena_core::types::ProjectLayoutMode;
+        match self {
+            LayoutModeArg::Columns => ProjectLayoutMode::Columns,
+            LayoutModeArg::Rows => ProjectLayoutMode::Rows,
+            LayoutModeArg::Grid => ProjectLayoutMode::Grid,
+        }
+    }
+}
+
+/// The range the settings panel allows for a tile size.
+fn tile_size(raw: &str) -> Result<f32, String> {
+    let value: f32 = raw.parse().map_err(|_| format!("not a number: {raw}"))?;
+    if (100.0..=4000.0).contains(&value) {
+        Ok(value)
+    } else {
+        Err("must be between 100 and 4000".to_string())
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
@@ -530,7 +578,8 @@ pub enum ProjectCmd {
 
 #[derive(Subcommand)]
 pub enum WorktreeCmd {
-    /// Create a worktree from a branch
+    /// Create a worktree from a branch. Attached desktops show it in the
+    /// --window target only, else in the first window showing the parent.
     Add {
         /// Parent project (id / name / path)
         project: String,
@@ -648,6 +697,7 @@ pub fn subcommand_names() -> &'static [&'static str] {
         "usage",
         "whoami",
         "ls",
+        "window",
         "project",
         "worktree",
         "folder",
@@ -688,6 +738,45 @@ mod tests {
                 .map(|e| e.kind())
                 .expect("version exits via an error");
             assert_eq!(kind, clap::error::ErrorKind::DisplayVersion, "{form}");
+        }
+    }
+
+    #[test]
+    fn window_layout_parses_mode_sizes_and_window() {
+        let cli = Cli::try_parse_from([
+            "okena",
+            "window",
+            "layout",
+            "grid",
+            "--min-width",
+            "700",
+            "--min-height",
+            "300",
+            "--window",
+            "main",
+        ])
+        .unwrap();
+        assert_eq!(cli.window.as_deref(), Some("main"));
+        let Command::Window {
+            cmd:
+                WindowCmd::Layout {
+                    mode,
+                    min_width,
+                    min_height,
+                },
+        } = cli.command
+        else {
+            panic!("expected window layout");
+        };
+        assert_eq!(mode.mode(), okena_core::types::ProjectLayoutMode::Grid);
+        assert_eq!((min_width, min_height), (Some(700.0), Some(300.0)));
+
+        for bad in [
+            vec!["okena", "window", "layout", "diagonal"],
+            vec!["okena", "window", "layout", "grid", "--min-width", "50"],
+            vec!["okena", "window", "layout", "grid", "--min-height", "tall"],
+        ] {
+            assert!(Cli::try_parse_from(&bad).is_err(), "{bad:?}");
         }
     }
 

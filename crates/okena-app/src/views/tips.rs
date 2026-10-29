@@ -72,7 +72,7 @@ pub static TIPS: &[Tip] = &[
         "EqualizeLayout",
     ),
     key(
-        "Switch your project grid between columns and rows — handy on a portrait or vertical monitor.",
+        "Cycle your projects between columns, rows and a grid of tiles — handy on a portrait or vertical monitor.",
         "ToggleProjectLayout",
     ),
     key(

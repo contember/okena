@@ -4,6 +4,7 @@ mod pane_switcher;
 mod render;
 mod sidebar;
 mod terminal_actions;
+mod tile_grid;
 
 use crate::remote_client::manager::RemoteConnectionManager;
 use crate::services::manager::ServiceManager;
@@ -158,6 +159,8 @@ pub enum WindowViewEvent {
     RebuildLocal,
     /// Restart the UI-owned daemon and app with the rebuilt release binary.
     RestartLocalBuild,
+    /// The OS window gained or lost focus.
+    ActivationChanged,
 }
 
 pub struct WindowView {
@@ -439,6 +442,7 @@ impl WindowView {
             // Refresh key-window chrome while activity-driven presentation stays
             // live in every visible window.
             cx.notify();
+            cx.emit(WindowViewEvent::ActivationChanged);
         })
         .detach();
 

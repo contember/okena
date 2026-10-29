@@ -52,6 +52,10 @@ pub struct RemoteSyncState {
     /// the latest request per window wins. Applied once when the project
     /// materializes, never persisted.
     requested_project_visibility: HashMap<String, HashMap<WindowId, bool>>,
+    /// External placements (`okena worktree add --window`) for projects whose
+    /// daemon snapshot has not reached this client yet, keyed by prefixed
+    /// project id. Applied once on materialization, never persisted.
+    requested_project_placement: HashMap<String, WindowId>,
     /// Fullscreen pushes can arrive before their terminal's snapshot. The latest
     /// request per window waits here until that terminal materializes.
     requested_fullscreen: HashMap<WindowId, ApiFullscreen>,
@@ -252,6 +256,17 @@ impl RemoteSyncState {
         self.requested_project_visibility
             .remove(project_id)
             .unwrap_or_default()
+    }
+
+    /// Remember an external placement until `project_id` materializes.
+    pub fn queue_requested_project_placement(&mut self, project_id: &str, window_id: WindowId) {
+        self.requested_project_placement
+            .insert(project_id.to_string(), window_id);
+    }
+
+    /// Take the placement waiting for `project_id`, if any.
+    pub fn take_requested_project_placement(&mut self, project_id: &str) -> Option<WindowId> {
+        self.requested_project_placement.remove(project_id)
     }
 
     pub(crate) fn queue_requested_fullscreen(
