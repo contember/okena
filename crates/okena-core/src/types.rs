@@ -17,6 +17,55 @@ impl SplitDirection {
     }
 }
 
+/// How a window arranges its projects.
+///
+/// `Columns` (default) lays projects out side by side, each with a width;
+/// `Rows` stacks them vertically, each with a height; `Grid` flows them into
+/// equal tiles, as many per row as fit the window's width. Stored per window,
+/// so each window picks its own mode. The persisted `project_widths` weights
+/// are axis-agnostic, so they survive every switch (grid ignores them).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectLayoutMode {
+    /// Projects laid out side by side (horizontal, width-resized). Default.
+    #[default]
+    Columns,
+    /// Projects stacked vertically (height-resized).
+    Rows,
+    /// Projects flowed into a scrolling grid of equal tiles.
+    Grid,
+}
+
+impl ProjectLayoutMode {
+    /// The next mode in the toggle cycle: columns → rows → grid → columns.
+    pub fn toggled(self) -> Self {
+        match self {
+            ProjectLayoutMode::Columns => ProjectLayoutMode::Rows,
+            ProjectLayoutMode::Rows => ProjectLayoutMode::Grid,
+            ProjectLayoutMode::Grid => ProjectLayoutMode::Columns,
+        }
+    }
+
+    /// True when projects are stacked vertically.
+    pub fn is_rows(self) -> bool {
+        matches!(self, ProjectLayoutMode::Rows)
+    }
+
+    /// True when projects are flowed into tiles.
+    pub fn is_grid(self) -> bool {
+        matches!(self, ProjectLayoutMode::Grid)
+    }
+
+    /// Transform the daemon's canonical split direction for this window.
+    pub fn presented_split_direction(self, direction: SplitDirection) -> SplitDirection {
+        if self.is_rows() {
+            direction.flipped()
+        } else {
+            direction
+        }
+    }
+}
+
 /// Display mode for the diff viewer.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DiffViewMode {
@@ -173,6 +222,24 @@ impl DiffMode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_rows_present_canonical_splits_on_the_opposite_axis() {
+        use ProjectLayoutMode::*;
+        use SplitDirection::*;
+        assert_eq!(Columns.presented_split_direction(Horizontal), Horizontal);
+        assert_eq!(Rows.presented_split_direction(Horizontal), Vertical);
+        assert_eq!(Rows.presented_split_direction(Vertical), Horizontal);
+        assert_eq!(Grid.presented_split_direction(Horizontal), Horizontal);
+    }
+
+    #[test]
+    fn layout_toggle_cycles_through_every_mode() {
+        let start = ProjectLayoutMode::Columns;
+        assert_eq!(start.toggled(), ProjectLayoutMode::Rows);
+        assert_eq!(start.toggled().toggled(), ProjectLayoutMode::Grid);
+        assert_eq!(start.toggled().toggled().toggled(), start);
+    }
 
     #[test]
     fn diff_mode_serde_round_trip() {

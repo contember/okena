@@ -255,6 +255,8 @@ impl SettingsState {
         self.save_and_notify(cx);
     }
     setting_setter!(set_min_column_width, min_column_width, f32, 100.0, 2000.0);
+    setting_setter!(set_min_tile_width, min_tile_width, f32, 100.0, 4000.0);
+    setting_setter!(set_min_tile_height, min_tile_height, f32, 100.0, 4000.0);
     setting_setter!(set_idle_timeout_secs, idle_timeout_secs, u32, 0, 300);
     /// Set the default shell type for new terminals
     pub fn set_default_shell(&mut self, value: ShellType, cx: &mut Context<Self>) {

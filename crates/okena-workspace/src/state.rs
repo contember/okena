@@ -1472,7 +1472,29 @@ impl Workspace {
             .unwrap_or_default()
     }
 
-    /// Flip the targeted window's project grid between columns and rows.
+    /// Whether `project_id` renders as a compact grid tile in this window: grid
+    /// mode and exactly one terminal, standalone (not in a tab group). Its
+    /// project header then also carries the terminal's title bar.
+    pub fn is_compact_tile(&self, window_id: WindowId, project_id: &str) -> bool {
+        if !self.project_layout_mode(window_id).is_grid() {
+            return false;
+        }
+        let Some(layout) = self.project(project_id).and_then(|p| p.layout.as_ref()) else {
+            return false;
+        };
+        layout
+            .single_terminal()
+            .is_some_and(|(_, path)| !layout.is_in_tab_group(&path))
+    }
+
+    /// Cycle the targeted window's project layout (columns → rows → grid).
+    pub fn toggle_project_layout_mode(&mut self, window_id: WindowId, cx: &mut impl WorkspaceCx) {
+        let next = self.project_layout_mode(window_id).toggled();
+        self.set_project_layout_mode(window_id, next, cx);
+    }
+
+    /// Set the targeted window's project layout. Unknown windows and an
+    /// unchanged mode are no-ops.
     ///
     /// Terminal splits are transposed at render time for this window. Their
     /// canonical daemon-owned directions stay untouched, so another window can
@@ -1483,15 +1505,20 @@ impl Workspace {
     /// sizing is preserved across the flip. The pixel scale is not — it is
     /// pixels per weight unit along the *current* axis, so it is dropped and
     /// recomputed from the new axis' viewport. Persisted via `notify_data`.
-    pub fn toggle_project_layout_mode(&mut self, window_id: WindowId, cx: &mut impl WorkspaceCx) {
-        if self.data.window(window_id).is_none() {
+    pub fn set_project_layout_mode(
+        &mut self,
+        window_id: WindowId,
+        mode: ProjectLayoutMode,
+        cx: &mut impl WorkspaceCx,
+    ) {
+        let Some(w) = self.data.window_mut(window_id) else {
+            return;
+        };
+        if w.project_layout == mode {
             return;
         }
-
-        if let Some(w) = self.data.window_mut(window_id) {
-            w.project_layout = w.project_layout.toggled();
-            w.project_width_scale = None;
-        }
+        w.project_layout = mode;
+        w.project_width_scale = None;
         self.notify_data(cx);
     }
 
@@ -5411,10 +5438,10 @@ mod gpui_tests {
     }
 
     #[gpui::test]
-    fn toggle_project_layout_mode_flips_and_persists(cx: &mut gpui::TestAppContext) {
-        // Per-window orientation defaults to Columns, flips to Rows on the
-        // first toggle and back on the second. Each flip bumps data_version
-        // so the auto-save observer persists the new orientation.
+    fn toggle_project_layout_mode_cycles_and_persists(cx: &mut gpui::TestAppContext) {
+        // Per-window layout defaults to Columns and cycles Rows → Grid →
+        // Columns. Each switch bumps data_version so the auto-save observer
+        // persists the new mode.
         use crate::state::ProjectLayoutMode;
         let data = make_workspace_data(vec![make_project("p1")], vec!["p1"]);
         let workspace = cx.new(|_cx| Workspace::new(data));
@@ -5443,9 +5470,107 @@ mod gpui_tests {
         workspace.read_with(cx, |ws: &Workspace, _cx| {
             assert_eq!(
                 ws.project_layout_mode(WindowId::Main),
-                ProjectLayoutMode::Columns
+                ProjectLayoutMode::Grid
             );
             assert_eq!(ws.data_version(), 2);
+        });
+
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.toggle_project_layout_mode(WindowId::Main, cx);
+        });
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            assert_eq!(
+                ws.project_layout_mode(WindowId::Main),
+                ProjectLayoutMode::Columns
+            );
+            assert_eq!(ws.data_version(), 3);
+        });
+    }
+
+    #[gpui::test]
+    fn compact_tiles_are_single_standalone_terminals_in_grid_mode(cx: &mut gpui::TestAppContext) {
+        let terminal = |id: &str| {
+            let mut node = LayoutNode::new_terminal();
+            if let LayoutNode::Terminal { terminal_id, .. } = &mut node {
+                *terminal_id = Some(id.to_string());
+            }
+            node
+        };
+        let mut single = make_project("single");
+        single.layout = Some(terminal("t1"));
+        let mut split = make_project("split");
+        split.layout = Some(LayoutNode::Split {
+            direction: crate::state::SplitDirection::Horizontal,
+            sizes: vec![0.5, 0.5],
+            children: vec![terminal("t2"), terminal("t3")],
+        });
+        let mut tabbed = make_project("tabbed");
+        tabbed.layout = Some(LayoutNode::Tabs {
+            children: vec![terminal("t4")],
+            active_tab: 0,
+        });
+        let data = make_workspace_data(
+            vec![single, split, tabbed],
+            vec!["single", "split", "tabbed"],
+        );
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            assert!(!ws.is_compact_tile(WindowId::Main, "single"));
+        });
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.set_project_layout_mode(WindowId::Main, ProjectLayoutMode::Grid, cx);
+        });
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            assert!(ws.is_compact_tile(WindowId::Main, "single"));
+            assert!(!ws.is_compact_tile(WindowId::Main, "split"));
+            assert!(!ws.is_compact_tile(WindowId::Main, "tabbed"));
+            assert!(!ws.is_compact_tile(WindowId::Main, "missing"));
+        });
+    }
+
+    #[gpui::test]
+    fn set_project_layout_mode_grid_round_trips_without_losing_window_state(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let extra = WindowState::default();
+        let extra_id = extra.id;
+        let mut data = make_workspace_data(vec![make_project("p1")], vec!["p1"]);
+        data.extra_windows.push(extra);
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            let mut widths = HashMap::new();
+            widths.insert("p1".to_string(), 23.5);
+            ws.update_project_widths_with_scale(WindowId::Main, widths, 35.4, cx);
+            ws.set_project_layout_mode(WindowId::Main, ProjectLayoutMode::Grid, cx);
+        });
+        let version = workspace.read_with(cx, |ws: &Workspace, _cx| {
+            assert_eq!(
+                ws.project_layout_mode(WindowId::Main),
+                ProjectLayoutMode::Grid
+            );
+            assert_eq!(
+                ws.project_layout_mode(WindowId::Extra(extra_id)),
+                ProjectLayoutMode::Columns
+            );
+            ws.data_version()
+        });
+
+        // Setting the current mode again is a no-op: nothing to persist.
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.set_project_layout_mode(WindowId::Main, ProjectLayoutMode::Grid, cx);
+        });
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            assert_eq!(ws.data_version(), version);
+        });
+
+        // Back to columns: the weights grid ignored are still there.
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.set_project_layout_mode(WindowId::Main, ProjectLayoutMode::Columns, cx);
+        });
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            assert_eq!(ws.get_project_width(WindowId::Main, "p1", 1), 23.5);
         });
     }
 

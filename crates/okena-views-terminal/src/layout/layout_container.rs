@@ -29,6 +29,37 @@ pub use okena_ui::rename_state::*;
 /// Free-standing so the project header can render it without reaching into a
 /// `LayoutContainer` entity (and inheriting its `ActionDispatch` generic).
 #[allow(clippy::too_many_arguments)]
+/// Icon and colour of a terminal's title indicator. A bell wins, then the
+/// agent lifecycle (OSC 9001), a hook terminal, waiting for input, active.
+pub fn terminal_status_icon(
+    has_bell: bool,
+    agent_status: Option<&okena_core::agent_status::AgentStatus>,
+    is_hook: bool,
+    is_waiting: bool,
+    is_active: bool,
+    t: &okena_core::theme::ThemeColors,
+) -> (&'static str, u32) {
+    let icon = if has_bell {
+        "icons/bell.svg"
+    } else {
+        "icons/terminal.svg"
+    };
+    let color = if has_bell {
+        t.border_bell
+    } else if let Some(a) = agent_status {
+        a.lifecycle.theme_color(t)
+    } else if is_hook {
+        t.term_yellow
+    } else if is_waiting {
+        t.border_idle
+    } else if is_active {
+        t.success
+    } else {
+        t.text_muted
+    };
+    (icon, color)
+}
+
 pub fn terminal_actions_button(
     action: okena_ui::header_buttons::HeaderAction,
     id_suffix: &str,
@@ -342,8 +373,13 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
 
         // Reading the settings is a serde round-trip, so only ask once the
         // cheap structural checks have not already ruled the header out.
+        // A compact grid tile's project header carries this title bar.
         if !in_tab_group
             && !is_zoomed
+            && !self
+                .workspace
+                .read(cx)
+                .is_compact_tile(self.window_id, &self.project_id)
             && !crate::terminal_view_settings(cx).auto_hide_single_terminal_header
         {
             container = container.child(self.render_standalone_tab_bar(window, cx));

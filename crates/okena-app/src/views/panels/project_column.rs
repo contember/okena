@@ -8,7 +8,9 @@ use crate::views::layout::layout_container::LayoutContainer;
 use crate::views::layout::pane_drag::PaneMoveState;
 use crate::views::layout::split_pane::ActiveDrag;
 use crate::workspace::request_broker::RequestBroker;
-use crate::workspace::state::{FocusedTerminalState, LayoutNode, ProjectData, WindowId, Workspace};
+use crate::workspace::state::{
+    FocusedTerminalState, LayoutNode, ProjectData, ProjectLayoutMode, WindowId, Workspace,
+};
 use gpui::prelude::*;
 use gpui::*;
 use gpui_component::tooltip::Tooltip;
@@ -145,7 +147,6 @@ pub struct ProjectColumn {
     project_id: String,
     #[allow(dead_code)]
     backend: Arc<dyn TerminalBackend>,
-    #[allow(dead_code)]
     terminals: TerminalsRegistry,
     /// Stored layout container entity (must be created in new(), not render())
     layout_container: Option<Entity<LayoutContainer<ActionDispatcher>>>,
@@ -707,21 +708,27 @@ impl ProjectColumn {
         let folder_color = t.get_folder_color(effective_color);
         let app_settings = crate::settings::settings(cx);
         let density = app_settings.header_density;
-        // In the rows layout each project is short, so vertical space is
-        // precious: collapse the comfortable two-row header back to a single
-        // row (git info still shows, just inline) when the grid is stacked.
-        let is_rows = self
-            .workspace
-            .read(cx)
-            .project_layout_mode(self.window_id)
-            .is_rows();
+        // In the rows and grid layouts each project is short, so vertical
+        // space is precious: collapse the comfortable two-row header back to a
+        // single row (git info still shows, just inline).
+        let (is_columns, is_compact_tile) = {
+            let ws = self.workspace.read(cx);
+            (
+                matches!(
+                    ws.project_layout_mode(self.window_id),
+                    ProjectLayoutMode::Columns
+                ),
+                ws.is_compact_tile(self.window_id, &self.project_id),
+            )
+        };
         let is_comfortable =
-            density == crate::workspace::settings::HeaderDensity::Comfortable && !is_rows;
+            density == crate::workspace::settings::HeaderDensity::Comfortable && is_columns;
 
         // Reading the focus state clones a String + Vec, so stay behind the
-        // opt-in rather than paying for it on every repaint by default.
-        let focused_terminal_target = app_settings
-            .auto_hide_single_terminal_header
+        // opt-in (or a compact tile, whose terminal has no title bar of its
+        // own) rather than paying for it on every repaint by default.
+        let focused_terminal_target = (app_settings.auto_hide_single_terminal_header
+            || is_compact_tile)
             .then(|| {
                 let focus_manager = self.focus_manager.read(cx);
                 let focused = focus_manager.focused_terminal_state();
@@ -761,6 +768,13 @@ impl ProjectColumn {
         };
 
         let status_pill = self.render_status_pill(project, cx);
+
+        // A compact tile folds the terminal's title bar into this row: its
+        // status icon (bell, agent lifecycle, idle) and its name.
+        let terminal_title_el = focused_terminal_target
+            .as_ref()
+            .filter(|_| is_compact_tile)
+            .map(|target| self.render_terminal_title(project, &target.terminal_id, cx));
 
         let project_name_el = {
             let display_name = project_header_display_name(project);
@@ -1068,6 +1082,7 @@ impl ProjectColumn {
                         .overflow_hidden()
                         .child(worktree_dot)
                         .child(project_name_el)
+                        .children(terminal_title_el)
                         .children(status_pill)
                         .child(git_status_el),
                 )
@@ -1085,6 +1100,58 @@ impl ProjectColumn {
                     .bg(rgb(folder_color)),
             )
             .child(header_body)
+    }
+
+    /// The terminal's status icon and name, as its own title bar shows them.
+    fn render_terminal_title(
+        &self,
+        project: &ProjectData,
+        terminal_id: &str,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let t = theme(cx);
+        let (label, has_bell, agent_status, is_waiting) = {
+            let guard = self.terminals.lock();
+            let terminal = guard.get(terminal_id);
+            let title = terminal.and_then(|term| term.title());
+            (
+                project.terminal_display_name(terminal_id, title),
+                terminal.is_some_and(|term| term.has_bell() || term.has_notification()),
+                terminal.and_then(|term| term.agent_status()),
+                terminal.is_some_and(|term| term.is_waiting_for_input()),
+            )
+        };
+        let is_hook = project.hook_terminals.contains_key(terminal_id);
+        let (icon, color) = okena_views_terminal::layout::layout_container::terminal_status_icon(
+            has_bell,
+            agent_status.as_ref(),
+            is_hook,
+            is_waiting,
+            true,
+            &t,
+        );
+        h_flex()
+            .min_w_0()
+            .gap(px(4.0))
+            .overflow_hidden()
+            .child(
+                svg()
+                    .path(icon)
+                    .size(px(12.0))
+                    .flex_shrink_0()
+                    .text_color(rgb(color)),
+            )
+            .child(
+                div()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .text_size(ui_text_md(cx))
+                    .text_color(rgb(t.text_secondary))
+                    .child(label),
+            )
+            .into_any_element()
     }
 
     /// Render the closing state shown while a worktree is being torn down.
