@@ -194,6 +194,18 @@ impl WorkspaceData {
         }
     }
 
+    /// The first window (main, then extras in order) whose hidden set does not
+    /// contain `project_id`, or `None` when every window hides it.
+    pub fn first_window_showing(&self, project_id: &str) -> Option<WindowId> {
+        if !self.main_window.hidden_project_ids.contains(project_id) {
+            return Some(WindowId::Main);
+        }
+        self.extra_windows
+            .iter()
+            .find(|w| !w.hidden_project_ids.contains(project_id))
+            .map(|w| WindowId::Extra(w.id))
+    }
+
     /// Hide a project in every persisted window state.
     ///
     /// Used for remote projects whose server-side `show_in_overview` flag is
