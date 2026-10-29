@@ -1,7 +1,7 @@
 use crate::keys::SpecialKey;
 use crate::shell::ShellType;
 use crate::theme::FolderColor;
-use crate::types::{DiffMode, SplitDirection};
+use crate::types::{DiffMode, ProjectLayoutMode, SplitDirection};
 use serde::{Deserialize, Serialize};
 
 pub use crate::usage::{
@@ -439,6 +439,16 @@ pub struct ApiProjectPlacementRequest {
     pub window: String,
 }
 
+/// One-shot desktop presentation request emitted after an external
+/// `SetProjectLayout` action succeeds. Each desktop owns its windows' layout
+/// mode, so it applies the mode to its own window.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApiProjectLayoutRequest {
+    pub mode: ProjectLayoutMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window: Option<String>,
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ApiProject {
     pub id: String,
@@ -844,6 +854,14 @@ pub enum ActionRequest {
     SetFullscreen {
         project_id: String,
         terminal_id: Option<String>,
+        /// Target window ("main" or an extra window's UUID). None = the focused window.
+        #[serde(default)]
+        window: Option<String>,
+    },
+    /// Set a desktop window's project layout (columns, rows or grid). Pure
+    /// desktop presentation: the daemon only validates it and pushes it on.
+    SetProjectLayout {
+        mode: ProjectLayoutMode,
         /// Target window ("main" or an extra window's UUID). None = the focused window.
         #[serde(default)]
         window: Option<String>,
@@ -1459,7 +1477,8 @@ impl ActionRequest {
         match self {
             ActionRequest::FocusTerminal { window, .. }
             | ActionRequest::SetProjectShowInOverview { window, .. }
-            | ActionRequest::SetFullscreen { window, .. } => window.as_deref(),
+            | ActionRequest::SetFullscreen { window, .. }
+            | ActionRequest::SetProjectLayout { window, .. } => window.as_deref(),
             _ => None,
         }
     }
@@ -2381,6 +2400,31 @@ mod tests {
             window: None,
         };
         assert_eq!(show.target_window(), None);
+
+        let layout = ActionRequest::SetProjectLayout {
+            mode: ProjectLayoutMode::Grid,
+            window: Some("main".into()),
+        };
+        assert_eq!(layout.target_window(), Some("main"));
+    }
+
+    #[test]
+    fn set_project_layout_wire_shape() {
+        let action: ActionRequest =
+            serde_json::from_str(r#"{"action":"set_project_layout","mode":"grid"}"#).unwrap();
+        assert!(matches!(
+            action,
+            ActionRequest::SetProjectLayout {
+                mode: ProjectLayoutMode::Grid,
+                window: None
+            }
+        ));
+        assert!(
+            serde_json::from_str::<ActionRequest>(
+                r#"{"action":"set_project_layout","mode":"diagonal"}"#
+            )
+            .is_err()
+        );
     }
 
     #[test]

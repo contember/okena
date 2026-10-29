@@ -695,6 +695,9 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
             terminal_id: terminal_id.map(|id| s(&id)),
             window,
         },
+        ActionRequest::SetProjectLayout { mode, window } => {
+            ActionRequest::SetProjectLayout { mode, window }
+        }
         ActionRequest::RenameTerminal {
             project_id,
             terminal_id,

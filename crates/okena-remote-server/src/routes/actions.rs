@@ -6,8 +6,8 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use okena_core::api::{
-    ApiFullscreenRequest, ApiProjectPlacementRequest, ApiProjectVisibilityRequest,
-    ApiTerminalFocusRequest,
+    ApiFullscreenRequest, ApiProjectLayoutRequest, ApiProjectPlacementRequest,
+    ApiProjectVisibilityRequest, ApiTerminalFocusRequest,
 };
 use okena_core::ws::ClientPresentationRequest;
 use tokio::sync::broadcast;
@@ -50,6 +50,12 @@ fn presentation_request(action: &ActionRequest) -> Option<ClientPresentationRequ
                 window: window.clone(),
             },
         )),
+        ActionRequest::SetProjectLayout { mode, window } => Some(
+            ClientPresentationRequest::ProjectLayout(ApiProjectLayoutRequest {
+                mode: *mode,
+                window: window.clone(),
+            }),
+        ),
         _ => None,
     }
 }
@@ -208,6 +214,18 @@ mod tests {
                     project_id: "project-1".into(),
                     terminal_id: None,
                     window: None,
+                }
+            ))
+        );
+        assert_eq!(
+            presentation_request(&ActionRequest::SetProjectLayout {
+                mode: okena_core::types::ProjectLayoutMode::Grid,
+                window: Some("main".into()),
+            }),
+            Some(ClientPresentationRequest::ProjectLayout(
+                ApiProjectLayoutRequest {
+                    mode: okena_core::types::ProjectLayoutMode::Grid,
+                    window: Some("main".into()),
                 }
             ))
         );

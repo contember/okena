@@ -1,9 +1,10 @@
 //! External presentation requests (`okena project show|hide`, `okena term
-//! fullscreen`; `okena worktree add --window` is applied by the workspace) pushed by the daemon after the action succeeded there. The
+//! fullscreen`, `okena window layout`; `okena worktree add --window` is applied
+//! by the workspace) pushed by the daemon after the action succeeded there. The
 //! desktop owns per-window presentation, so it applies each request to its own
 //! window here; the daemon's copy only serves its synthetic main window.
 
-use crate::workspace::state::WindowId;
+use crate::workspace::state::{ProjectLayoutMode, WindowId};
 use gpui::*;
 
 use super::Okena;
@@ -75,6 +76,23 @@ impl Okena {
                 ws.request_fullscreen(fm, target, project_id, terminal_id, cx);
             });
             cx.notify();
+        });
+    }
+
+    /// Switch the target window to `mode`.
+    pub(super) fn apply_project_layout_request(
+        &mut self,
+        mode: ProjectLayoutMode,
+        requested_window: Option<WindowId>,
+        cx: &mut Context<Self>,
+    ) {
+        let target = self.presentation_target_window(requested_window, cx);
+        if self.window_view_and_handle(target).is_none() {
+            log::warn!("Ignoring project layout request for unknown window {target:?}");
+            return;
+        }
+        self.workspace.update(cx, |ws, cx| {
+            ws.set_project_layout_mode(target, mode, cx);
         });
     }
 }

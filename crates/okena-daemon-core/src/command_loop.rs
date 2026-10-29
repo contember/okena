@@ -4189,12 +4189,16 @@ pub async fn daemon_command_loop(
                     // ── Default: workspace-scoped action ─────────────────────────
                     action => {
                         let git_poll_trigger = git_poll_trigger_for_action(&action);
-                        let presentation_only_window =
-                            matches!(&action, ActionRequest::FocusTerminal { .. });
+                        let presentation_only_window = matches!(
+                            &action,
+                            ActionRequest::FocusTerminal { .. }
+                                | ActionRequest::SetProjectLayout { .. }
+                        );
                         // Resolve the action's explicit target window (if any)
                         // BEFORE moving `action` into `execute_action`. The daemon
-                        // serves only the synthetic main window. FocusTerminal may
-                        // carry an extra UI window through daemon-side validation.
+                        // serves only the synthetic main window. FocusTerminal and
+                        // SetProjectLayout may carry an extra UI window through
+                        // daemon-side validation.
                         let parsed_target = match action.target_window() {
                             None => Ok(None),
                             Some(s) => match WindowId::from_wire(s) {
