@@ -24,11 +24,6 @@ use std::sync::Arc;
 // Re-export rename state from okena-ui
 pub use okena_ui::rename_state::*;
 
-/// Trigger that opens the adaptive terminal menu for one pane.
-///
-/// Free-standing so the project header can render it without reaching into a
-/// `LayoutContainer` entity (and inheriting its `ActionDispatch` generic).
-#[allow(clippy::too_many_arguments)]
 /// Icon and colour of a terminal's title indicator. A bell wins, then the
 /// agent lifecycle (OSC 9001), a hook terminal, waiting for input, active.
 pub fn terminal_status_icon(
@@ -60,6 +55,11 @@ pub fn terminal_status_icon(
     (icon, color)
 }
 
+/// Trigger that opens the adaptive terminal menu for one pane.
+///
+/// Free-standing so the project header can render it without reaching into a
+/// `LayoutContainer` entity (and inheriting its `ActionDispatch` generic).
+#[allow(clippy::too_many_arguments)]
 pub fn terminal_actions_button(
     action: okena_ui::header_buttons::HeaderAction,
     id_suffix: &str,
