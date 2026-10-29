@@ -26,7 +26,11 @@ struct SidebarAgentInfo {
 }
 
 /// Order agent rows by attention — blocked, then done, then working, then idle
-/// — breaking ties on display name.
+/// — breaking ties on project name, then terminal id.
+///
+/// Ties never use the display name: an agent rewrites its terminal title while
+/// it works (Claude Code animates a spinner glyph at its start), so two working
+/// agents would swap places on every frame.
 ///
 /// A free function rather than an inline `sort_by`, because this ordering is
 /// the contract `docs/reference/agent-status.md` states, and `collect_agents` around it
@@ -38,7 +42,8 @@ fn sort_agents_by_attention(agents: &mut [SidebarAgentInfo]) {
             .lifecycle
             .priority()
             .cmp(&a.status.lifecycle.priority())
-            .then_with(|| a.display_name.cmp(&b.display_name))
+            .then_with(|| a.project_name.cmp(&b.project_name))
+            .then_with(|| a.terminal_id.cmp(&b.terminal_id))
     });
 }
 
@@ -63,7 +68,7 @@ impl Sidebar {
     }
 
     /// Collect every non-hook terminal across all projects that currently has an
-    /// agent status, sorted by lifecycle priority (blocked first) then name.
+    /// agent status, sorted by lifecycle priority (blocked first), then project.
     fn collect_agents(&self, cx: &mut Context<Self>) -> Vec<SidebarAgentInfo> {
         let workspace = self.workspace.read(cx);
         let terminals = self.terminals.lock();
@@ -230,17 +235,21 @@ mod tests {
     use okena_core::agent_status::{AgentLifecycle, AgentStatus};
 
     fn agent(name: &str, lifecycle: AgentLifecycle) -> SidebarAgentInfo {
+        agent_in("proj", name, lifecycle)
+    }
+
+    fn agent_in(project: &str, name: &str, lifecycle: AgentLifecycle) -> SidebarAgentInfo {
         SidebarAgentInfo {
             terminal_id: format!("t-{name}"),
             project_id: "p1".to_string(),
             display_name: name.to_string(),
-            project_name: "proj".to_string(),
+            project_name: project.to_string(),
             status: AgentStatus::new(lifecycle),
         }
     }
 
     #[test]
-    fn agents_sort_by_attention_then_name() {
+    fn agents_sort_by_attention_then_terminal() {
         // The documented contract: blocked → done → working → idle. The section
         // exists to surface what needs the user *now*, so an inverted comparator
         // would be the exact opposite of useful.
@@ -255,6 +264,41 @@ mod tests {
 
         let order: Vec<&str> = agents.iter().map(|a| a.display_name.as_str()).collect();
         assert_eq!(order, vec!["charlie", "delta", "alpha", "beta", "zeta"]);
+    }
+
+    #[test]
+    fn agents_order_ignores_title_changes() {
+        // Claude Code animates a spinner at the start of its title, so a
+        // title-based tie-break swaps two working agents on every frame.
+        let order = |a_title: &str, b_title: &str| {
+            let mut a = agent_in("alpha", a_title, AgentLifecycle::Working);
+            a.terminal_id = "t-a".to_string();
+            let mut b = agent_in("beta", b_title, AgentLifecycle::Working);
+            b.terminal_id = "t-b".to_string();
+            let mut agents = vec![b, a];
+            sort_agents_by_attention(&mut agents);
+            agents
+                .iter()
+                .map(|a| a.terminal_id.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(order("◐ task", "◑ task"), vec!["t-a", "t-b"]);
+        assert_eq!(order("◑ task", "◐ task"), vec!["t-a", "t-b"]);
+    }
+
+    #[test]
+    fn agents_in_one_project_order_by_terminal_not_title() {
+        // Title order is the reverse of terminal-id order, so only the
+        // terminal tie-break yields this result.
+        let mut first = agent("zulu", AgentLifecycle::Working);
+        first.terminal_id = "t-1".to_string();
+        let mut second = agent("alpha", AgentLifecycle::Working);
+        second.terminal_id = "t-2".to_string();
+        let mut agents = vec![second, first];
+        sort_agents_by_attention(&mut agents);
+
+        let order: Vec<&str> = agents.iter().map(|a| a.terminal_id.as_str()).collect();
+        assert_eq!(order, vec!["t-1", "t-2"]);
     }
 
     #[test]

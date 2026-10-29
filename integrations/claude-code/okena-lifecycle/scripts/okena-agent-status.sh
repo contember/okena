@@ -6,7 +6,10 @@
 # so Okena raises a desktop notification when the agent finishes or gets blocked.
 #
 # Usage:
-#   okena-agent-status <working|blocked|done|idle|clear> [message]
+#   okena-agent-status <working|blocked|done|idle|error|clear> [message]
+#
+# For `error` without a message, the message comes from the hook event on stdin:
+# its `last_assistant_message`, else its `error` code (Claude Code's StopFailure).
 #
 # Designed to be wired up as a Claude Code hook (see docs/reference/agent-status.md), but
 # it's agent-agnostic — anything that can run a command can call it.
@@ -120,6 +123,13 @@ simple_json_str() {
 session_id=$(simple_json_str session_id | grep -E '^[[:xdigit:]]{8}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{12}$')
 transcript_path=$(simple_json_str transcript_path)
 
+# A failed turn says why: StopFailure carries the API error text and its code.
+# Strings that need JSON unescaping are skipped, falling back to the code.
+if [ "$state" = error ] && [ -z "$message" ]; then
+    message=$(simple_json_str last_assistant_message)
+    [ -n "$message" ] || message=$(simple_json_str error)
+fi
+
 # Assemble the optional lbl= JSON object only when we actually have a session id
 # (the durable bit Okena persists). Values are JSON-escaped (\\ then ").
 lbl_json=""
@@ -155,7 +165,7 @@ fi
 # and later resume) or `;tid=` to retarget the status at another pane — and a
 # plain typo would be dropped by the receiver while still logging `write=ok`.
 case "$state" in
-    working | blocked | done | idle | clear) ;;
+    working | blocked | done | idle | error | clear) ;;
     *)
         log "skip=bad-state"
         exit 0
