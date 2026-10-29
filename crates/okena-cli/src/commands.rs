@@ -1825,6 +1825,41 @@ pub fn cli_term_fullscreen(terminal: &str, off: bool, window: Option<&str>) -> i
     })
 }
 
+// ── Windows ──────────────────────────────────────────────────────────────────
+
+/// `okena window layout <columns|rows|grid> [--min-width N] [--min-height N]`
+///
+/// The tile sizes are app settings, so they are set first; the mode is
+/// per-window presentation the daemon pushes on to the attached desktops.
+pub fn cli_window_layout(
+    mode: okena_core::types::ProjectLayoutMode,
+    min_width: Option<f32>,
+    min_height: Option<f32>,
+    window: Option<&str>,
+) -> i32 {
+    let mut patch = serde_json::Map::new();
+    if let Some(width) = min_width {
+        patch.insert("min_tile_width".into(), width.into());
+    }
+    if let Some(height) = min_height {
+        patch.insert("min_tile_height".into(), height.into());
+    }
+    if !patch.is_empty() {
+        let body = serde_json::json!({ "action": "set_settings", "patch": patch });
+        if let Err(e) = post_action_body(&body) {
+            eprintln!("{e}");
+            return 1;
+        }
+    }
+    with_state_post(|state| {
+        let window = window
+            .map(|w| resolve::resolve_window(state, w))
+            .transpose()?;
+        serde_json::to_value(okena_core::api::ActionRequest::SetProjectLayout { mode, window })
+            .map_err(|e| e.to_string())
+    })
+}
+
 // ── I/O (the agent loop) ─────────────────────────────────────────────────────
 
 /// `okena send <terminal> <text...>`

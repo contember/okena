@@ -11,7 +11,7 @@ use okena_transport::client::{LocalEndpoint, RemoteConnectionConfig};
 use okena_workspace::persistence::config_dir;
 use parser::{
     ClaudeCmd, ClaudeHookCmd, ClaudeRemoteCmd, Cli, Command, FolderCmd, PaletteCmd, ProjectCmd,
-    ServiceCmd, SettingsCmd, SkillCmd, TermCmd, ThemeCmd, UpdateCmd, WorktreeCmd,
+    ServiceCmd, SettingsCmd, SkillCmd, TermCmd, ThemeCmd, UpdateCmd, WindowCmd, WorktreeCmd,
 };
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -79,6 +79,7 @@ fn command_uses_window(cmd: &Command) -> bool {
             matches!(cmd, TermCmd::Focus { .. } | TermCmd::Fullscreen { .. })
         }
         Command::Worktree { cmd } => matches!(cmd, WorktreeCmd::Add { .. }),
+        Command::Window { .. } => true,
         Command::Cmd { cmd } => matches!(cmd, PaletteCmd::Run { .. }),
         _ => false,
     }
@@ -89,7 +90,7 @@ fn dispatch(cli: Cli) -> i32 {
     let window = cli.window.as_deref();
     if cli.window.is_some() && !command_uses_window(&cli.command) {
         eprintln!(
-            "Warning: --window is ignored by this command. Only `project add/clone/show/hide/focus`, `worktree add` and `term focus/fullscreen` honor it."
+            "Warning: --window is ignored by this command. Only `project add/clone/show/hide/focus`, `worktree add`, `term focus/fullscreen` and `window layout` honor it."
         );
     }
     match cli.command {
@@ -118,6 +119,13 @@ fn dispatch(cli: Cli) -> i32 {
         Command::Usage { json } => commands::cli_usage(json),
         Command::Whoami { json } => commands::cli_whoami(json),
         Command::Ls { json } => commands::cli_ls(json),
+        Command::Window { cmd } => match cmd {
+            WindowCmd::Layout {
+                mode,
+                min_width,
+                min_height,
+            } => commands::cli_window_layout(mode.mode(), min_width, min_height, window),
+        },
 
         Command::Project { cmd } => match cmd {
             ProjectCmd::Add {

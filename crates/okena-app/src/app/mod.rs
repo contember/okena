@@ -548,6 +548,9 @@ impl Okena {
                     ws.request_project_placement(window, project_id, cx);
                 });
             }
+            RemoteManagerEvent::ProjectLayoutRequested { mode, window } => {
+                this.apply_project_layout_request(*mode, *window, cx);
+            }
             // Local daemon connection dead-ended — re-run discovery/ensure so
             // the GUI recovers instead of staying wedged on a dead socket.
             RemoteManagerEvent::LocalConnectionFailed => {

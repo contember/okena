@@ -547,6 +547,16 @@ pub struct AppSettings {
     #[serde(default = "default_min_column_width")]
     pub min_column_width: f32,
 
+    /// Minimum tile width in pixels in the grid project layout (default: 600).
+    /// Decides how many tiles fit side by side.
+    #[serde(default = "default_min_tile_width")]
+    pub min_tile_width: f32,
+
+    /// Minimum tile height in pixels in the grid project layout (default: 300).
+    /// The grid scrolls vertically once its rows no longer fit.
+    #[serde(default = "default_min_tile_height")]
+    pub min_tile_height: f32,
+
     /// Whether to ignore whitespace changes in diff viewer
     #[serde(default)]
     pub diff_ignore_whitespace: bool,
@@ -707,6 +717,8 @@ impl Default for AppSettings {
             // users keep their plain-http behavior until they opt in / upgrade.
             remote_tls_enabled: true,
             min_column_width: default_min_column_width(),
+            min_tile_width: default_min_tile_width(),
+            min_tile_height: default_min_tile_height(),
             diff_ignore_whitespace: false,
             blame_visible: false,
             detached_overlays_by_default: false,
@@ -796,6 +808,14 @@ fn default_file_opener() -> String {
 
 fn default_min_column_width() -> f32 {
     400.0
+}
+
+fn default_min_tile_width() -> f32 {
+    600.0
+}
+
+fn default_min_tile_height() -> f32 {
+    300.0
 }
 
 fn default_idle_timeout_secs() -> u32 {

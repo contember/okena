@@ -3,7 +3,7 @@ use okena_terminal::TerminalsRegistry;
 use okena_terminal::backend::TerminalBackend;
 use okena_terminal::terminal::Terminal;
 use okena_workspace::settings::{AppSettings, load_settings, update_remote_connections};
-use okena_workspace::state::WindowId;
+use okena_workspace::state::{ProjectLayoutMode, WindowId};
 use okena_workspace::toast::{Toast, ToastManager};
 
 use okena_core::api::{ActionRequest, ApiSystemStats, ApiWindow, StateResponse};
@@ -249,6 +249,13 @@ pub enum RemoteManagerEvent {
     ProjectPlacementRequested {
         project_id: String,
         window: WindowId,
+    },
+
+    /// An external API client set a window's project layout mode. The desktop
+    /// applies it to its own window (`None` = its active window).
+    ProjectLayoutRequested {
+        mode: ProjectLayoutMode,
+        window: Option<WindowId>,
     },
 
     /// The implicit local-daemon loopback connection reached a terminal failed
@@ -1324,6 +1331,12 @@ fn presentation_event(
                 window: WindowId::from_wire(&request.window).ok_or(request.window)?,
             }
         }
+        ClientPresentationRequest::ProjectLayout(request) => {
+            RemoteManagerEvent::ProjectLayoutRequested {
+                mode: request.mode,
+                window: parse_window(request.window)?,
+            }
+        }
     })
 }
 
@@ -1335,12 +1348,12 @@ mod tests {
         presentation_event, run_action_queue, windows_for_connection,
     };
     use okena_core::api::{
-        ActionRequest, ApiFullscreenRequest, ApiProjectPlacementRequest,
+        ActionRequest, ApiFullscreenRequest, ApiProjectLayoutRequest, ApiProjectPlacementRequest,
         ApiProjectVisibilityRequest, ApiWindow,
     };
     use okena_core::ws::ClientPresentationRequest;
     use okena_transport::client::{ConnectionStatus, LOCAL_DAEMON_CONNECTION_ID};
-    use okena_workspace::state::WindowId;
+    use okena_workspace::state::{ProjectLayoutMode, WindowId};
     use serde_json::json;
     use std::io::{BufRead, BufReader, Read, Write};
     use std::net::{TcpListener, TcpStream};
@@ -1890,6 +1903,24 @@ mod tests {
             event,
             Ok(RemoteManagerEvent::FullscreenRequested { project_id, terminal_id: Some(terminal_id), window: None })
                 if project_id == "remote:conn:p1" && terminal_id == "remote:conn:t1"
+        ));
+    }
+
+    #[test]
+    fn presentation_event_maps_project_layout() {
+        let event = presentation_event(
+            "conn",
+            ClientPresentationRequest::ProjectLayout(ApiProjectLayoutRequest {
+                mode: ProjectLayoutMode::Grid,
+                window: Some("main".into()),
+            }),
+        );
+        assert!(matches!(
+            event,
+            Ok(RemoteManagerEvent::ProjectLayoutRequested {
+                mode: ProjectLayoutMode::Grid,
+                window: Some(WindowId::Main)
+            })
         ));
     }
 

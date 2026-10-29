@@ -1,4 +1,5 @@
 use super::grid_layout::{GridLayout, GridSpan, LANE_CAPTION_HEIGHT, LANE_GAP};
+use super::tile_grid::TileGrid;
 use crate::app_menu::AppMenuAction;
 use crate::keybindings::{
     About, AddTab, CheckForUpdates, ClearFocus, CloseWindow, CreateWorktree, EqualizeLayout,
@@ -18,6 +19,7 @@ use crate::views::layout::split_pane::{
     DragState, compute_resize, project_pixel_widths, render_project_divider, render_sidebar_divider,
 };
 use crate::workspace::requests::{OverlayRequest, ProjectOverlay, ProjectOverlayKind};
+use crate::workspace::state::ProjectLayoutMode;
 use gpui::prelude::*;
 use gpui::*;
 
@@ -94,12 +96,15 @@ impl WindowView {
 
     /// The grid's column order and spans: lanes by status while the focused
     /// family has them on, the flat grid otherwise. A single column needs no
-    /// caption either way.
+    /// caption either way, and the tile grid keeps the window's order.
     fn grid_layout(&self, visible: Vec<String>, cx: &App) -> GridLayout {
         if visible.len() <= 1 || !okena_ui::board::status_board_enabled(cx) {
             return GridLayout::flat(visible);
         }
         let workspace = self.workspace.read(cx);
+        if workspace.project_layout_mode(self.window_id).is_grid() {
+            return GridLayout::flat(visible);
+        }
         let lanes_on = self
             .focus_manager
             .read(cx)
@@ -167,27 +172,45 @@ impl WindowView {
             None => return,
         };
 
-        let is_rows = workspace.project_layout_mode(self.window_id).is_rows();
+        let mode = workspace.project_layout_mode(self.window_id);
+        // The tile grid scrolls vertically like rows.
+        let is_rows = !matches!(mode, ProjectLayoutMode::Columns);
         let settings = settings_entity(cx).read(cx).settings.clone();
-        let container_size = {
-            let b = self.projects_grid_bounds.borrow();
-            f32::from(if is_rows { b.size.height } else { b.size.width })
+        let bounds_size = self.projects_grid_bounds.borrow().size;
+        let container_size = f32::from(if is_rows {
+            bounds_size.height
+        } else {
+            bounds_size.width
+        });
+
+        let (col_lead, col_size) = if mode.is_grid() {
+            let grid = TileGrid::compute(
+                f32::from(bounds_size.width),
+                f32::from(bounds_size.height),
+                num_projects,
+                settings.min_tile_width,
+                settings.min_tile_height,
+            );
+            let tile = grid.tiles[focused_idx];
+            (tile.y, tile.height)
+        } else {
+            let raw_widths: Vec<f32> = visible_projects
+                .iter()
+                .map(|id| workspace.get_project_width(self.window_id, id, num_projects))
+                .collect();
+            let persisted_scale = workspace.get_project_width_scale(self.window_id);
+            let pixel_widths = Self::to_pixel_widths(
+                &raw_widths,
+                container_size,
+                layout.chrome(is_rows),
+                settings.min_column_width,
+                persisted_scale,
+            );
+            (
+                layout.leading_edges(&pixel_widths, is_rows)[focused_idx],
+                pixel_widths[focused_idx],
+            )
         };
-
-        let raw_widths: Vec<f32> = visible_projects
-            .iter()
-            .map(|id| workspace.get_project_width(self.window_id, id, num_projects))
-            .collect();
-        let persisted_scale = workspace.get_project_width_scale(self.window_id);
-        let pixel_widths = Self::to_pixel_widths(
-            &raw_widths,
-            container_size,
-            layout.chrome(is_rows),
-            settings.min_column_width,
-            persisted_scale,
-        );
-
-        let col_lead = layout.leading_edges(&pixel_widths, is_rows)[focused_idx];
 
         let current_offset_axis = {
             let o = self.projects_scroll_handle.offset();
@@ -196,10 +219,10 @@ impl WindowView {
 
         let new_offset = if center {
             // Center the focused project in the viewport.
-            let col_center = col_lead + pixel_widths[focused_idx] / 2.0;
+            let col_center = col_lead + col_size / 2.0;
             -(col_center - container_size / 2.0)
         } else {
-            let col_trail = col_lead + pixel_widths[focused_idx];
+            let col_trail = col_lead + col_size;
             let viewport_lead = -current_offset_axis;
             let viewport_trail = viewport_lead + container_size;
 
@@ -224,6 +247,60 @@ impl WindowView {
         }
     }
 
+    /// The grid layout's content: every project as an equal tile, positioned
+    /// by [`TileGrid`] inside a box as tall as all rows, so the surrounding
+    /// scroll container scrolls once the rows outgrow the viewport.
+    fn render_tile_grid(
+        &self,
+        visible_projects: &[String],
+        viewport: Size<Pixels>,
+        hovered_project: Option<&str>,
+        ring_color: u32,
+        cx: &App,
+    ) -> AnyElement {
+        let settings = &settings_entity(cx).read(cx).settings;
+        let grid = TileGrid::compute(
+            f32::from(viewport.width),
+            f32::from(viewport.height),
+            visible_projects.len(),
+            settings.min_tile_width,
+            settings.min_tile_height,
+        );
+        let tiles = visible_projects
+            .iter()
+            .zip(&grid.tiles)
+            .filter_map(|(project_id, tile)| {
+                let col = self.project_columns.get(project_id).cloned()?;
+                let is_hovered = hovered_project == Some(project_id.as_str());
+                Some(
+                    div()
+                        .absolute()
+                        .left(px(tile.x))
+                        .top(px(tile.y))
+                        .w(px(tile.width))
+                        .h(px(tile.height))
+                        .child(AnyView::from(col).cached(StyleRefinement::default().size_full()))
+                        .when(is_hovered, |d| {
+                            d.child(
+                                div()
+                                    .absolute()
+                                    .inset_0()
+                                    .border_2()
+                                    .border_color(rgb(ring_color))
+                                    .rounded(px(4.0)),
+                            )
+                        }),
+                )
+            });
+        div()
+            .relative()
+            .w_full()
+            .flex_shrink_0()
+            .h(px(grid.content_height))
+            .children(tiles)
+            .into_any_element()
+    }
+
     pub(super) fn render_projects_grid(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         // Restore the grid scroll position saved when project focus was entered,
         // deferred from unfocus so the overview can re-expand first. We wait until
@@ -242,7 +319,10 @@ impl WindowView {
                 .len();
             let is_zoomed = fm.focused_project_id().is_some();
 
-            let is_rows = workspace.project_layout_mode(self.window_id).is_rows();
+            let is_rows = !matches!(
+                workspace.project_layout_mode(self.window_id),
+                ProjectLayoutMode::Columns
+            );
             let max_offset = self.projects_scroll_handle.max_offset();
             let axis_overflow = if is_rows { max_offset.y } else { max_offset.x };
             if is_zoomed || num_visible <= 1 {
@@ -290,12 +370,10 @@ impl WindowView {
             }
         };
 
-        // Per-window orientation: columns (side by side) vs rows (stacked).
-        let is_rows = self
-            .workspace
-            .read(cx)
-            .project_layout_mode(self.window_id)
-            .is_rows();
+        // Per-window mode: columns (side by side), rows (stacked) or grid
+        // (tiles). The grid scrolls vertically, so it shares the rows axis.
+        let mode = self.workspace.read(cx).project_layout_mode(self.window_id);
+        let is_rows = !matches!(mode, ProjectLayoutMode::Columns);
 
         let layout = self.grid_layout(visible_projects, cx);
         let chrome = layout.chrome(is_rows);
@@ -387,42 +465,8 @@ impl WindowView {
             }
         }
 
-        // Get widths for each project
-        let settings = settings_entity(cx).read(cx).settings.clone();
-
-        let widths: Vec<f32> = if num_projects <= 1 {
-            vec![100.0; num_projects]
-        } else {
-            let workspace = self.workspace.read(cx);
-            visible_projects
-                .iter()
-                .map(|id| workspace.get_project_width(self.window_id, id, num_projects))
-                .collect()
-        };
-
         // Persistent bounds reference for resize calculation (survives across renders)
         let container_bounds = self.projects_grid_bounds.clone();
-
-        // Compute pixel sizes from weights, accounting for dividers and lanes.
-        // The relevant axis is width for columns, height for rows.
-        let container_size = {
-            let b = container_bounds.borrow();
-            f32::from(if is_rows { b.size.height } else { b.size.width })
-        };
-        let persisted_scale = (num_projects > 1)
-            .then(|| {
-                self.workspace
-                    .read(cx)
-                    .get_project_width_scale(self.window_id)
-            })
-            .flatten();
-        let pixel_widths = Self::to_pixel_widths(
-            &widths,
-            container_size,
-            chrome,
-            settings.min_column_width,
-            persisted_scale,
-        );
 
         // Project currently hovered in the Switch Project overlay (any window).
         // Its panel gets an accent ring here so a hover also reveals where the
@@ -432,117 +476,164 @@ impl WindowView {
 
         okena_core::render_probe::grid_render(num_projects);
 
-        // Build interleaved columns and dividers
         let mut elements: Vec<AnyElement> = Vec::new();
+        if mode.is_grid() {
+            elements.push(self.render_tile_grid(
+                &visible_projects,
+                container_bounds.borrow().size,
+                hovered_project.as_deref(),
+                ring_color,
+                cx,
+            ));
+        } else {
+            // Get widths for each project
+            let settings = settings_entity(cx).read(cx).settings.clone();
 
-        for GridSpan { caption, range } in spans {
-            let mut inner: Vec<AnyElement> = Vec::new();
-            let span_end = range.end;
-            for i in range {
-                let project_id = &visible_projects[i];
-                let pixel_size = pixel_widths.get(i).copied().unwrap_or(200.0);
+            let widths: Vec<f32> = if num_projects <= 1 {
+                vec![100.0; num_projects]
+            } else {
+                let workspace = self.workspace.read(cx);
+                visible_projects
+                    .iter()
+                    .map(|id| workspace.get_project_width(self.window_id, id, num_projects))
+                    .collect()
+            };
 
-                if let Some(col) = self.project_columns.get(project_id).cloned() {
-                    let is_hovered = hovered_project.as_deref() == Some(project_id.as_str());
-                    let col_element = div()
-                        // Fixed size along the grid axis, stretch on the cross axis.
-                        .when(is_rows, |d| d.h(px(pixel_size)).w_full())
-                        .when(!is_rows, |d| d.w(px(pixel_size)).h_full())
-                        .flex_shrink_0()
-                        .relative()
-                        .child(AnyView::from(col).cached(StyleRefinement::default().size_full()))
-                        // Accent ring drawn as a non-occluding overlay so it adds no
-                        // layout shift and does not intercept clicks on the panel.
-                        .when(is_hovered, |d| {
-                            d.child(
-                                div()
-                                    .absolute()
-                                    .inset_0()
-                                    .border_2()
-                                    .border_color(rgb(ring_color))
-                                    .rounded(px(4.0)),
+            // Compute pixel sizes from weights, accounting for dividers and lanes.
+            // The relevant axis is width for columns, height for rows.
+            let container_size = {
+                let b = container_bounds.borrow();
+                f32::from(if is_rows { b.size.height } else { b.size.width })
+            };
+            let persisted_scale = (num_projects > 1)
+                .then(|| {
+                    self.workspace
+                        .read(cx)
+                        .get_project_width_scale(self.window_id)
+                })
+                .flatten();
+            let pixel_widths = Self::to_pixel_widths(
+                &widths,
+                container_size,
+                chrome,
+                settings.min_column_width,
+                persisted_scale,
+            );
+
+            // Build interleaved columns and dividers
+
+            for GridSpan { caption, range } in spans {
+                let mut inner: Vec<AnyElement> = Vec::new();
+                let span_end = range.end;
+                for i in range {
+                    let project_id = &visible_projects[i];
+                    let pixel_size = pixel_widths.get(i).copied().unwrap_or(200.0);
+
+                    if let Some(col) = self.project_columns.get(project_id).cloned() {
+                        let is_hovered = hovered_project.as_deref() == Some(project_id.as_str());
+                        let col_element = div()
+                            // Fixed size along the grid axis, stretch on the cross axis.
+                            .when(is_rows, |d| d.h(px(pixel_size)).w_full())
+                            .when(!is_rows, |d| d.w(px(pixel_size)).h_full())
+                            .flex_shrink_0()
+                            .relative()
+                            .child(
+                                AnyView::from(col).cached(StyleRefinement::default().size_full()),
                             )
-                        })
-                        .into_any_element();
+                            // Accent ring drawn as a non-occluding overlay so it adds no
+                            // layout shift and does not intercept clicks on the panel.
+                            .when(is_hovered, |d| {
+                                d.child(
+                                    div()
+                                        .absolute()
+                                        .inset_0()
+                                        .border_2()
+                                        .border_color(rgb(ring_color))
+                                        .rounded(px(4.0)),
+                                )
+                            })
+                            .into_any_element();
 
-                    inner.push(col_element);
+                        inner.push(col_element);
 
-                    // Add divider after each project except the last
-                    if i + 1 < span_end {
-                        let min_col_width = settings_entity(cx).read(cx).settings.min_column_width;
-                        let divider = render_project_divider(
-                            self.window_id,
-                            self.workspace.clone(),
-                            i,
-                            visible_projects.clone(),
-                            container_bounds.clone(),
-                            chrome,
-                            &self.active_drag,
-                            min_col_width,
-                            is_rows,
-                            cx,
-                        );
-                        inner.push(divider.into_any_element());
+                        // Add divider after each project except the last
+                        if i + 1 < span_end {
+                            let min_col_width =
+                                settings_entity(cx).read(cx).settings.min_column_width;
+                            let divider = render_project_divider(
+                                self.window_id,
+                                self.workspace.clone(),
+                                i,
+                                visible_projects.clone(),
+                                container_bounds.clone(),
+                                chrome,
+                                &self.active_drag,
+                                min_col_width,
+                                is_rows,
+                                cx,
+                            );
+                            inner.push(divider.into_any_element());
+                        }
                     }
                 }
-            }
-            match caption {
-                None => elements.extend(inner),
-                Some(column) => {
-                    let lane_t = theme(cx);
-                    let accent = match column.as_ref().map(|c| c.color) {
-                        Some(okena_core::theme::FolderColor::Default) | None => None,
-                        Some(color) => Some(lane_t.get_folder_color(color)),
-                    };
-                    let label =
-                        okena_workspace::status_board::caption_label(&column).to_uppercase();
-                    let strip = div()
-                        .h(px(LANE_CAPTION_HEIGHT))
-                        .px(px(6.0))
-                        .flex()
-                        .items_center()
-                        .gap(px(8.0))
-                        .flex_shrink_0()
-                        .children(accent.map(|hex| {
-                            div()
-                                .size(px(7.0))
-                                .rounded_full()
-                                .bg(rgb(hex))
-                                .flex_shrink_0()
-                        }))
-                        .child(
-                            div()
-                                .text_size(ui_text_xs(cx))
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(rgb(accent.unwrap_or(lane_t.text_secondary)))
-                                .whitespace_nowrap()
-                                .child(label),
-                        )
-                        .child(
-                            div()
-                                .flex_1()
-                                .h(px(1.0))
-                                .bg(okena_ui::metrics::metric_track_color(&lane_t)),
-                        );
-                    elements.push(
-                        div()
+                match caption {
+                    None => elements.extend(inner),
+                    Some(column) => {
+                        let lane_t = theme(cx);
+                        let accent = match column.as_ref().map(|c| c.color) {
+                            Some(okena_core::theme::FolderColor::Default) | None => None,
+                            Some(color) => Some(lane_t.get_folder_color(color)),
+                        };
+                        let label =
+                            okena_workspace::status_board::caption_label(&column).to_uppercase();
+                        let strip = div()
+                            .h(px(LANE_CAPTION_HEIGHT))
+                            .px(px(6.0))
                             .flex()
-                            .flex_col()
+                            .items_center()
+                            .gap(px(8.0))
                             .flex_shrink_0()
-                            .when(is_rows, |d| d.w_full())
-                            .when(!is_rows, |d| d.h_full().mr(px(LANE_GAP)))
-                            .child(strip)
+                            .children(accent.map(|hex| {
+                                div()
+                                    .size(px(7.0))
+                                    .rounded_full()
+                                    .bg(rgb(hex))
+                                    .flex_shrink_0()
+                            }))
                             .child(
                                 div()
-                                    .flex()
-                                    .flex_1()
-                                    .min_h_0()
-                                    .min_w_0()
-                                    .when(is_rows, |d| d.flex_col())
-                                    .children(inner),
+                                    .text_size(ui_text_xs(cx))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(rgb(accent.unwrap_or(lane_t.text_secondary)))
+                                    .whitespace_nowrap()
+                                    .child(label),
                             )
-                            .into_any_element(),
-                    );
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .h(px(1.0))
+                                    .bg(okena_ui::metrics::metric_track_color(&lane_t)),
+                            );
+                        elements.push(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .flex_shrink_0()
+                                .when(is_rows, |d| d.w_full())
+                                .when(!is_rows, |d| d.h_full().mr(px(LANE_GAP)))
+                                .child(strip)
+                                .child(
+                                    div()
+                                        .flex()
+                                        .flex_1()
+                                        .min_h_0()
+                                        .min_w_0()
+                                        .when(is_rows, |d| d.flex_col())
+                                        .children(inner),
+                                )
+                                .into_any_element(),
+                        );
+                    }
                 }
             }
         }
@@ -608,8 +699,15 @@ impl WindowView {
                         canvas(
                             {
                                 let container_bounds = container_bounds.clone();
-                                move |bounds, _window, _cx| {
+                                let is_grid = mode.is_grid();
+                                move |bounds, window, _cx| {
+                                    let resized = container_bounds.borrow().size != bounds.size;
                                     *container_bounds.borrow_mut() = bounds;
+                                    // Tile columns derive from this size: render
+                                    // once more so a resize reflows the grid.
+                                    if resized && is_grid {
+                                        window.on_next_frame(|window, _| window.refresh());
+                                    }
                                 }
                             },
                             |_bounds, _prepaint, _window, _cx| {},
@@ -1055,9 +1153,9 @@ impl Render for WindowView {
                     ws.equalize_focused_split(&fm, cx);
                 });
             }))
-            // Toggle this window's project grid between columns and rows.
+            // Cycle this window's project layout (columns → rows → grid).
             // Per-window setting persisted on WindowState; sizing percentages
-            // carry over unchanged across the flip.
+            // carry over unchanged across every switch.
             .on_action(cx.listener(|this, _: &ToggleProjectLayout, _window, cx| {
                 let window_id = this.window_id;
                 this.workspace.update(cx, |ws, cx| {

@@ -126,6 +126,8 @@ If the file contains invalid JSON, Okena recovers as many fields as possible and
   "diff_ignore_whitespace": false,
   "idle_timeout_secs": 0,
   "min_column_width": 400,
+  "min_tile_width": 600,
+  "min_tile_height": 300,
   "hooks": {},
   "worktree": {
     "path_template": "../{repo}-wt/{branch}",

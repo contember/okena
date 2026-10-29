@@ -4,6 +4,7 @@ mod pane_switcher;
 mod render;
 mod sidebar;
 mod terminal_actions;
+mod tile_grid;
 
 use crate::remote_client::manager::RemoteConnectionManager;
 use crate::services::manager::ServiceManager;

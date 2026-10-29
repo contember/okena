@@ -516,20 +516,15 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
                             }))
                             .into_any_element()
                     } else {
-                        let icon_path = if has_bell { "icons/bell.svg" } else { "icons/terminal.svg" };
-                        let icon_color = if has_bell {
-                            rgb(t.border_bell)
-                        } else if let Some(a) = agent_status.as_ref() {
-                            rgb(a.lifecycle.theme_color(&t))
-                        } else if is_hook {
-                            rgb(t.term_yellow)
-                        } else if is_waiting {
-                            rgb(t.border_idle)
-                        } else if is_active {
-                            rgb(t.success)
-                        } else {
-                            rgb(t.text_muted)
-                        };
+                        let (icon_path, icon_color) = crate::layout::layout_container::terminal_status_icon(
+                            has_bell,
+                            agent_status.as_ref(),
+                            is_hook,
+                            is_waiting,
+                            is_active,
+                            &t,
+                        );
+                        let icon_color = rgb(icon_color);
                         h_flex()
                             .gap(px(6.0))
                             .overflow_hidden()

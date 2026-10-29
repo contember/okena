@@ -118,6 +118,16 @@ impl SettingsPanel {
                 "min-col-width", "Min Column Width", s.min_column_width,
                 "{}px", 50.0, 60.0, false,
                 |state, val, cx| state.set_min_column_width(val, cx), cx,
+            ))
+            .child(self.render_number_stepper(
+                "min-tile-width", "Min Grid Tile Width", s.min_tile_width,
+                "{}px", 50.0, 60.0, false,
+                |state, val, cx| state.set_min_tile_width(val, cx), cx,
+            ))
+            .child(self.render_number_stepper(
+                "min-tile-height", "Min Grid Tile Height", s.min_tile_height,
+                "{}px", 50.0, 60.0, false,
+                |state, val, cx| state.set_min_tile_height(val, cx), cx,
             ));
 
         div()
