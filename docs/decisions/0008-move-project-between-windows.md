@@ -43,9 +43,10 @@ because no terminal is touched.
 closed while the menu is open makes the move a no-op rather than hiding the
 project everywhere.
 
-**Not covered.** The CLI cannot move a project: the daemon serves one synthetic
-`main` window and does not know a desktop's extra windows, so `--window` could
-not address them. Adding it needs desktops to publish their windows first.
+**Not covered.** The CLI cannot move a project yet. Desktops declare their
+windows to the daemon (`WsInbound::SetWindows`, #269), so `--window` can name an
+extra window; what is missing is a move action and a desktop push that applies
+it, as `okena worktree add --window` does.
 
 ## Alternatives considered
 
