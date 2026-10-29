@@ -1035,6 +1035,10 @@ impl ProjectColumn {
                         .justify_between()
                         .child(
                             h_flex()
+                                // Shrink so a long compact-tile title truncates
+                                // instead of pushing the right controls out.
+                                .flex_1()
+                                .min_w_0()
                                 .gap(px(6.0))
                                 .overflow_hidden()
                                 .child(worktree_dot)
