@@ -11,7 +11,7 @@ use okena_workspace::state::{WindowId, Workspace};
 /// Pick the hide/show menu label given (a) whether any extra windows exist and
 /// (b) whether the project is currently hidden in the window hosting the menu.
 ///
-/// ADR `docs/decisions/0002-window-as-viewport.md` (no cross-window ops)
+/// ADR `docs/decisions/0002-window-as-viewport.md`
 /// criteria 1 + 2: single-window users keep the legacy "Hide Project" /
 /// "Show Project" labels (no learning tax — user story 30); when at least one
 /// extra window exists the per-window scope becomes explicit via
@@ -30,9 +30,37 @@ pub(crate) fn hide_project_menu_label(
     }
 }
 
+/// A window offered as a "Move to window" target: positional name (windows
+/// are not named, ADR-0002) plus the projects it shows, so it can be told apart.
+pub(crate) fn move_target_label(window_name: &str, project_names: &[&str]) -> String {
+    const SHOWN: usize = 3;
+    match project_names {
+        [] => format!("{window_name} (empty)"),
+        names if names.len() <= SHOWN => format!("{window_name}: {}", names.join(", ")),
+        names => format!(
+            "{window_name}: {} +{}",
+            names[..SHOWN].join(", "),
+            names.len() - SHOWN
+        ),
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::hide_project_menu_label;
+    use super::{hide_project_menu_label, move_target_label};
+
+    #[test]
+    fn move_target_label_lists_shown_projects() {
+        assert_eq!(move_target_label("Window 2", &[]), "Window 2 (empty)");
+        assert_eq!(
+            move_target_label("Main window", &["api", "web"]),
+            "Main window: api, web"
+        );
+        assert_eq!(
+            move_target_label("Window 3", &["a", "b", "c", "d", "e"]),
+            "Window 3: a, b, c +2"
+        );
+    }
 
     #[test]
     fn single_window_visible_reads_hide_project() {
@@ -127,6 +155,12 @@ pub enum ContextMenuEvent {
     },
     HideProject {
         project_id: String,
+    },
+    /// Show the project in `target` and hide it in this window. `None` opens
+    /// a new window for it.
+    MoveToWindow {
+        project_id: String,
+        target: Option<WindowId>,
     },
     ToggleProjectPinned {
         project_id: String,
@@ -412,6 +446,70 @@ impl Render for ContextMenu {
         };
         let status_board = okena_ui::board::status_board_enabled(cx);
         let lanes_on = ws.status_lanes(self.window_id, &self.request.project_id);
+
+        // Every other open window, positionally named, then a fresh window.
+        let other_windows = std::iter::once(WindowId::Main)
+            .chain(
+                ws.data()
+                    .extra_windows
+                    .iter()
+                    .map(|w| WindowId::Extra(w.id)),
+            )
+            .enumerate()
+            .filter(|(_, id)| *id != self.window_id)
+            .map(|(index, id)| {
+                let name = match id {
+                    WindowId::Main => "Main window".to_string(),
+                    WindowId::Extra(_) => format!("Window {}", index + 1),
+                };
+                let projects: Vec<&str> = ws
+                    .visible_projects(id, None, false)
+                    .iter()
+                    .map(|p| p.name.as_str())
+                    .collect();
+                (id, move_target_label(&name, &projects))
+            })
+            .collect::<Vec<_>>();
+        let new_window_label = if other_windows.is_empty() {
+            "Move to new window"
+        } else {
+            "New window"
+        };
+        let mut move_items: Vec<okena_ui::submenu::SubmenuItem> = other_windows
+            .into_iter()
+            .map(|(id, label)| {
+                okena_ui::submenu::SubmenuItem::new(
+                    format!("context-menu-move-to-{id:?}"),
+                    "icons/external-link.svg",
+                    label,
+                    cx.listener(move |this: &mut Self, _, _window, cx| {
+                        cx.emit(ContextMenuEvent::MoveToWindow {
+                            project_id: this.request.project_id.clone(),
+                            target: Some(id),
+                        });
+                    }),
+                )
+            })
+            .collect();
+        move_items.push(okena_ui::submenu::SubmenuItem::new(
+            "context-menu-move-to-new-window",
+            "icons/plus.svg",
+            new_window_label,
+            cx.listener(|this: &mut Self, _, _window, cx| {
+                cx.emit(ContextMenuEvent::MoveToWindow {
+                    project_id: this.request.project_id.clone(),
+                    target: None,
+                });
+            }),
+        ));
+        let move_group = okena_ui::submenu::Submenu::new(
+            "context-menu-move-to-window",
+            "icons/external-link.svg",
+            "Move to window",
+        )
+        .items(move_items)
+        .render(&mut self.submenus, &t, window, cx);
+
         let status_group = okena_ui::submenu::Submenu::new(
             "context-menu-status",
             "icons/arrow-up-down.svg",
@@ -560,6 +658,7 @@ impl Render for ContextMenu {
                                 },
                             )),
                         )
+                        .child(move_group)
                         .child(menu_separator(&t))
                         // Create Worktree option (only for git repos that are not already worktrees)
                         .when(is_git_repo && !is_worktree, |d| {
