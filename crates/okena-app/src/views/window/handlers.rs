@@ -809,6 +809,23 @@ impl WindowView {
                     });
                 });
             }
+            OverlayManagerEvent::MoveProjectToWindow { project_id, target } => {
+                let from = self.window_id;
+                let workspace = self.workspace.clone();
+                let project_id = project_id.clone();
+                let target = *target;
+                self.focus_manager.update(cx, |fm, cx| {
+                    workspace.update(cx, |ws, cx| {
+                        // Okena's extra-window observer opens the OS window.
+                        let to = target.unwrap_or_else(|| ws.spawn_extra_window(None, cx));
+                        ws.move_project_to_window(fm, from, to, &project_id, cx);
+                    });
+                });
+                // Raise the existing target window on the moved project.
+                if let Some(origin) = target {
+                    cx.emit(super::WindowViewEvent::JumpToProject { origin, project_id });
+                }
+            }
             OverlayManagerEvent::RemoteReconnect { connection_id } => {
                 if let Some(ref rm) = self.remote_manager {
                     rm.update(cx, |rm, cx| {

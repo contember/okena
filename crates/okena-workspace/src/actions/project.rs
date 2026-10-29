@@ -362,6 +362,32 @@ impl Workspace {
         }
     }
 
+    /// Move a project from window `from` to window `to`: visible in `to`,
+    /// hidden in `from`, every other window untouched. Only per-window hidden
+    /// sets change, so the project's terminals and layout stay as they are.
+    /// `focus_manager` is `from`'s. A no-op for an unknown project, an unknown
+    /// target window, or `from == to`, so the project never disappears from
+    /// every window because its target was just closed.
+    pub fn move_project_to_window(
+        &mut self,
+        focus_manager: &mut FocusManager,
+        from: WindowId,
+        to: WindowId,
+        project_id: &str,
+        cx: &mut impl WorkspaceCx,
+    ) {
+        if from == to || self.project(project_id).is_none() || self.data.window(to).is_none() {
+            return;
+        }
+        self.data.set_hidden(to, project_id, false);
+        self.notify_data(cx);
+        // A zoomed project renders even while hidden, so leave the zoom first.
+        if focus_manager.focused_project_id().map(String::as_str) == Some(project_id) {
+            self.set_focused_project(focus_manager, None, cx);
+        }
+        self.set_project_overview_visibility(focus_manager, from, project_id, false, cx);
+    }
+
     /// Apply an external show/hide request (`okena project show|hide`) to one
     /// window. A project whose daemon snapshot has not reached this client yet
     /// is remembered and applied once it materializes.
@@ -2210,6 +2236,92 @@ mod gpui_tests {
                 assert!(!ws.is_project_hidden(extra_id, "p1"));
             });
         }
+    }
+
+    #[gpui::test]
+    fn move_project_to_window_shows_in_target_and_hides_in_source_only(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let mut data = make_workspace_data();
+        data.projects = vec![make_project("p1")];
+        data.project_order = vec!["p1".to_string()];
+        let mut target = okena_state::WindowState::default();
+        target.hidden_project_ids.insert("p1".to_string());
+        let target_id = WindowId::Extra(target.id);
+        let bystander = okena_state::WindowState::default();
+        let bystander_id = WindowId::Extra(bystander.id);
+        data.extra_windows = vec![target, bystander];
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.move_project_to_window(
+                &mut FocusManager::new(),
+                WindowId::Main,
+                target_id,
+                "p1",
+                cx,
+            );
+        });
+
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            assert!(ws.is_project_hidden(WindowId::Main, "p1"));
+            assert!(!ws.is_project_hidden(target_id, "p1"));
+            assert!(!ws.is_project_hidden(bystander_id, "p1"));
+            // Only presentation moved; the project and its layout are intact.
+            assert!(ws.project("p1").is_some_and(|p| p.layout.is_some()));
+        });
+    }
+
+    #[gpui::test]
+    fn move_project_to_unknown_window_keeps_it_in_source(cx: &mut gpui::TestAppContext) {
+        let mut data = make_workspace_data();
+        data.projects = vec![make_project("p1")];
+        data.project_order = vec!["p1".to_string()];
+        let workspace = cx.new(|_cx| Workspace::new(data));
+        let closed = WindowId::Extra(uuid::Uuid::new_v4());
+
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.move_project_to_window(&mut FocusManager::new(), WindowId::Main, closed, "p1", cx);
+            ws.move_project_to_window(
+                &mut FocusManager::new(),
+                WindowId::Main,
+                WindowId::Main,
+                "p1",
+                cx,
+            );
+        });
+
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            assert!(!ws.is_project_hidden(WindowId::Main, "p1"));
+        });
+    }
+
+    #[gpui::test]
+    fn move_project_to_window_leaves_source_zoom(cx: &mut gpui::TestAppContext) {
+        let mut data = make_workspace_data();
+        data.projects = vec![make_project("p1"), make_project("p2")];
+        data.project_order = vec!["p1".to_string(), "p2".to_string()];
+        let target = okena_state::WindowState::default();
+        let target_id = WindowId::Extra(target.id);
+        data.extra_windows = vec![target];
+        let workspace = cx.new(|_cx| Workspace::new(data));
+        let mut fm = FocusManager::new();
+        fm.set_focused_project_id(Some("p1".to_string()));
+
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.move_project_to_window(&mut fm, WindowId::Main, target_id, "p1", cx);
+        });
+
+        // A zoomed project renders despite the hidden set; the zoom must go.
+        assert_eq!(fm.focused_project_id(), None);
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            let visible: Vec<&str> = ws
+                .visible_projects(WindowId::Main, fm.focused_project_id(), false)
+                .iter()
+                .map(|p| p.id.as_str())
+                .collect();
+            assert_eq!(visible, vec!["p2"]);
+        });
     }
 
     #[gpui::test]

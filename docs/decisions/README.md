@@ -20,3 +20,4 @@ a commit message suffices.
 - 0005 — [Keep AI routing policies in the proxy, keyed by a project segment in the URL](0005-ai-routing-policies-in-the-proxy.md) — accepted (2026-10-08)
 - 0006 — [Connect claude panes to remote clients through a Bun preload, hooks and an MCP channel](0006-claude-remote-via-bun-preload.md) — accepted (2026-10-16)
 - 0007 — [Serve AI proxy management on a private socket, not the inference port](0007-ai-proxy-management-on-a-private-socket.md) — accepted (2026-10-21)
+- 0008 — [Let a project be moved to another window](0008-move-project-between-windows.md) — accepted (2026-10-29)
