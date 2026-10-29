@@ -36,8 +36,8 @@ shown verbatim.
   free-form status text.
 - **Sidebar → AGENTS** — a flat, cross-project list of every pane currently
   reporting a status, sorted by attention (blocked → error → done → working →
-  idle), then by project. The title is not a sort key, so rows don't swap places
-  while agents retitle their panes.
+  idle), then by project, then by terminal. The title is not a sort key, so
+  rows don't swap places while agents retitle their panes.
   Each row shows the lifecycle dot, the terminal name, its project, and the
   free-form text. Click a row to jump straight to that pane. The section hides
   itself when no agent is active.
@@ -144,7 +144,7 @@ ESC ] 9001 ; st=<state> [ ; tid=<terminal-id> ] [ ; msg=<base64> ] [ ; lbl=<base
 
 - `ESC` is `\033` (0x1B); `ST` is the string terminator `ESC \` (`\033\\`). A
   `BEL` (`\007`) terminator is also accepted.
-- `st=` — `working` | `blocked` | `done` | `idle`, or `clear` to remove any
+- `st=` — `working` | `blocked` | `done` | `idle` | `error`, or `clear` to remove any
   status. An unknown/missing `st` leaves the current status untouched.
 - `tid=` — the pane the status is *for*, from `$OKENA_TERMINAL_ID`. A pane drops
   a sequence addressed to a different id (see "Choosing the output device").
@@ -345,7 +345,7 @@ The plugin maps Claude Code's lifecycle hooks to agent states:
 | `PostToolUse` | `working` | A tool finished — work continues. |
 | `Notification` (`permission_prompt`, `elicitation_dialog`, `elicitation_url_dialog`) | `blocked` | Claude needs permission or input. |
 | `Stop` | `done` | The agent finished its turn. |
-| `StopFailure` | `done` | An API error (rate limit, auth, overload) ended the turn instead. |
+| `StopFailure` | `error` | An API error (rate limit, auth, overload) ended the turn instead. The status text is the error message Claude Code shows, else the error code. |
 | `SessionStart` | `clear` | A new/resumed session — reset any stale status. |
 | `SessionEnd` | `clear` | The agent exited — drop it from the Agents list. |
 
@@ -429,7 +429,7 @@ you get the indicator, but no persistence and no resume, with no error.
       { "hooks": [ { "type": "command", "command": "OKENA_AGENT=claude-code okena-agent-status done" } ] }
     ],
     "StopFailure": [
-      { "hooks": [ { "type": "command", "command": "OKENA_AGENT=claude-code okena-agent-status done" } ] }
+      { "hooks": [ { "type": "command", "command": "OKENA_AGENT=claude-code okena-agent-status error" } ] }
     ],
     "SessionStart": [
       { "hooks": [ { "type": "command", "command": "OKENA_AGENT=claude-code okena-agent-status clear" } ] }

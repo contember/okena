@@ -1412,6 +1412,11 @@ mod tests {
 
     #[cfg(unix)]
     fn agent_hook_output(event: &serde_json::Value) -> Vec<u8> {
+        agent_hook_output_for("working", event)
+    }
+
+    #[cfg(unix)]
+    fn agent_hook_output_for(state: &str, event: &serde_json::Value) -> Vec<u8> {
         use std::io::Write;
         use std::process::{Command, Stdio};
 
@@ -1421,7 +1426,7 @@ mod tests {
                 env!("CARGO_MANIFEST_DIR"),
                 "/../../integrations/claude-code/okena-lifecycle/scripts/okena-agent-status.sh"
             ))
-            .arg("working")
+            .arg(state)
             .env("OKENA_AGENT", "claude-code")
             .env("OKENA_TERMINAL_ID", "agent-terminal")
             .env("OKENA_TTY", &output)
@@ -1509,6 +1514,40 @@ mod tests {
         let restored: WorkspaceData =
             serde_json::from_str(&serde_json::to_string(&data).unwrap()).unwrap();
         assert_eq!(restored.agent_session_history.sessions(), &[first, second]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hook_reports_a_failed_turn_as_error_with_its_reason() {
+        use okena_core::agent_status::AgentLifecycle;
+
+        let reactor = test_reactor(
+            Workspace::new(WorkspaceData::empty()),
+            AppSettings::default(),
+        );
+        // Claude Code's StopFailure payload: the message it shows, else the code
+        // when the message needs JSON unescaping.
+        for (event, expected) in [
+            (
+                serde_json::json!({"hook_event_name": "StopFailure", "error": "rate_limit", "last_assistant_message": "API Error: Rate limit reached"}),
+                "API Error: Rate limit reached",
+            ),
+            (
+                serde_json::json!({"hook_event_name": "StopFailure", "error": "server_error", "last_assistant_message": "API Error: \"overloaded\""}),
+                "server_error",
+            ),
+        ] {
+            let terminal = Terminal::new(
+                "agent-terminal".into(),
+                terminal_size(),
+                reactor.backend.transport(),
+                "/tmp".into(),
+            );
+            terminal.process_output(&agent_hook_output_for("error", &event));
+            let status = terminal.agent_status().expect("status");
+            assert_eq!(status.lifecycle, AgentLifecycle::Error, "{event}");
+            assert_eq!(status.custom.as_deref(), Some(expected), "{event}");
+        }
     }
 
     #[cfg(unix)]

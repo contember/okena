@@ -66,7 +66,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "OKENA_AGENT=claude-code \"${CLAUDE_PLUGIN_ROOT}\"/scripts/okena-agent-status.sh done"
+            "command": "OKENA_AGENT=claude-code \"${CLAUDE_PLUGIN_ROOT}\"/scripts/okena-agent-status.sh error"
           }
         ]
       }
