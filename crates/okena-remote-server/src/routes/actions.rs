@@ -126,6 +126,7 @@ async fn run_action(
     declared_windows: &RwLock<HashMap<u64, Vec<ApiWindow>>>,
     action: ActionRequest,
 ) -> Result<CommandResult, ActionDispatchError> {
+    // Best-effort: the window can close or its desktop detach while the action runs.
     let undeclared = match declared_windows.read() {
         Ok(declared) => undeclared_window_error(&action, &declared),
         Err(_) => return Err(ActionDispatchError::ProcessingFailed),
@@ -301,6 +302,62 @@ mod tests {
                 assert!(!reached_daemon, "rejected action must not run");
                 assert_eq!(pushed, None);
             }
+        }
+    }
+
+    #[tokio::test]
+    async fn extra_window_declared_by_another_connection_is_pushed() {
+        let declared = RwLock::new(HashMap::from([
+            (1, vec![window("main")]),
+            (2, vec![window("main"), window(EXTRA)]),
+        ]));
+        let (result, pushed, reached_daemon) =
+            presentation_with_windows(hide_in(EXTRA), CommandResult::Ok(None), &declared).await;
+        assert!(matches!(result, CommandResult::Ok(None)));
+        assert!(reached_daemon);
+        assert_eq!(pushed, presentation_request(&hide_in(EXTRA)));
+    }
+
+    #[tokio::test]
+    async fn focus_and_layout_in_an_undeclared_extra_window_are_rejected() {
+        let declared = RwLock::new(HashMap::from([(1, vec![window("main")])]));
+        for action in [
+            ActionRequest::FocusTerminal {
+                project_id: "project-1".into(),
+                terminal_id: "terminal-1".into(),
+                window: Some(EXTRA.into()),
+            },
+            ActionRequest::SetProjectLayout {
+                mode: okena_core::types::ProjectLayoutMode::Grid,
+                window: Some(EXTRA.into()),
+            },
+        ] {
+            let (result, pushed, reached_daemon) =
+                presentation_with_windows(action, CommandResult::Ok(None), &declared).await;
+            assert!(
+                matches!(&result, CommandResult::Err(e)
+                    if e.starts_with(&format!("window not found: {EXTRA}"))),
+                "unexpected result: {result:?}"
+            );
+            assert!(!reached_daemon, "rejected action must not run");
+            assert_eq!(pushed, None);
+        }
+    }
+
+    #[tokio::test]
+    async fn malformed_window_id_is_left_to_the_daemon() {
+        let no_desktop = RwLock::new(HashMap::new());
+        for action in [
+            hide_in("not-a-window"),
+            create_worktree(Some("not-a-window")),
+        ] {
+            let daemon_error = CommandResult::Err("invalid window id: not-a-window".into());
+            let (result, pushed, reached_daemon) =
+                presentation_with_windows(action, daemon_error, &no_desktop).await;
+            assert!(reached_daemon, "the gate must not swallow a malformed id");
+            assert!(matches!(&result, CommandResult::Err(e)
+                if e == "invalid window id: not-a-window"));
+            assert_eq!(pushed, None);
         }
     }
 

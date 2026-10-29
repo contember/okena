@@ -6532,8 +6532,10 @@ mod tests {
         let h = harness();
         {
             let mut data = workspace_with_worktree_child();
-            if let Some(LayoutNode::Terminal { terminal_id, .. }) = &mut data.projects[0].layout {
-                *terminal_id = Some("t1".into());
+            for (project, id) in data.projects.iter_mut().zip(["t1", "t2"]) {
+                if let Some(LayoutNode::Terminal { terminal_id, .. }) = &mut project.layout {
+                    *terminal_id = Some(id.into());
+                }
             }
             *h.workspace.lock() = Workspace::new(data);
         }
@@ -6552,9 +6554,9 @@ mod tests {
                         show: false,
                         window: Some(window.into()),
                     };
-                let fullscreen = |terminal_id: &str| ActionRequest::SetFullscreen {
+                let fullscreen = |terminal_id: Option<&str>| ActionRequest::SetFullscreen {
                     project_id: "p1".into(),
-                    terminal_id: Some(terminal_id.into()),
+                    terminal_id: terminal_id.map(str::to_string),
                     window: Some(extra.clone()),
                 };
 
@@ -6563,7 +6565,12 @@ mod tests {
                     CommandResult::Ok(None)
                 ));
                 assert!(matches!(
-                    act(fullscreen("t1")).await,
+                    act(fullscreen(Some("t1"))).await,
+                    CommandResult::Ok(None)
+                ));
+                // Leaving fullscreen names no terminal.
+                assert!(matches!(
+                    act(fullscreen(None)).await,
                     CommandResult::Ok(None)
                 ));
                 assert!(
@@ -6581,8 +6588,13 @@ mod tests {
                     CommandResult::Err(e) if e == "project not found: missing"
                 ));
                 assert!(matches!(
-                    act(fullscreen("missing")).await,
+                    act(fullscreen(Some("missing"))).await,
                     CommandResult::Err(e) if e == "terminal not found: missing"
+                ));
+                // `t2` exists, but in another project's layout.
+                assert!(matches!(
+                    act(fullscreen(Some("t2"))).await,
+                    CommandResult::Err(e) if e == "terminal not found: t2"
                 ));
 
                 // The daemon's own main window still applies the change.
