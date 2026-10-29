@@ -1,5 +1,5 @@
 //! External presentation requests (`okena project show|hide`, `okena term
-//! fullscreen`) pushed by the daemon after the action succeeded there. The
+//! fullscreen`; `okena worktree add --window` is applied by the workspace) pushed by the daemon after the action succeeded there. The
 //! desktop owns per-window presentation, so it applies each request to its own
 //! window here; the daemon's copy only serves its synthetic main window.
 

@@ -523,7 +523,9 @@ pub fn apply_remote_snapshot(
 /// in this window, hidden everywhere else") is applied. A worktree another
 /// client created (`okena worktree add`, web, mobile) under an already-synced
 /// `parent_project_id` gets the same rule for the first window showing that
-/// parent, else main. Otherwise the project is left visible in every window.
+/// parent, else main — unless it asked for a window of this desktop
+/// (`okena worktree add --window`). Otherwise the project is left visible in
+/// every window.
 /// External show/hide requests that arrived before the project did
 /// (`okena project add --hidden`) are applied last.
 ///
@@ -547,8 +549,12 @@ fn apply_initial_remote_project_visibility(
     path: &str,
     parent_project_id: Option<&str>,
 ) {
+    let requested_placement = remote_sync
+        .take_requested_project_placement(prefixed_id)
+        .filter(|window| data.window(*window).is_some());
     let spawning_window = remote_sync
         .take_project_visibility(connection_id, name, path)
+        .or(requested_placement)
         .or_else(|| {
             parent_project_id
                 .map(|parent| data.first_window_showing(parent).unwrap_or(WindowId::Main))
@@ -1754,6 +1760,40 @@ mod tests {
 
         assert!(!hidden_in(&data, WindowId::Main, "remote:c1:w"));
         assert!(hidden_in(&data, extra_id, "remote:c1:w"));
+    }
+
+    #[test]
+    fn requested_placement_overrides_the_parent_window() {
+        // `okena worktree add --window <extra>`: the push can outrun the sync.
+        let mut data = empty_data();
+        let extra = okena_state::WindowState::default();
+        let extra_id = WindowId::Extra(extra.id);
+        data.extra_windows = vec![extra];
+        let mut rs = RemoteSyncState::new();
+        let parent_only = RemoteSnapshot {
+            config: config("c1"),
+            state: Some(state_with(
+                vec![api_project("p", None)],
+                vec!["p".into()],
+                vec![],
+            )),
+        };
+        apply_remote_snapshot(&mut data, &mut rs, &[parent_only], WindowId::Main);
+        rs.queue_requested_project_placement("remote:c1:w", extra_id);
+
+        let with_worktree = RemoteSnapshot {
+            config: config("c1"),
+            state: Some(state_with(
+                vec![api_project("p", None), worktree_of("w", "p")],
+                vec!["p".into()],
+                vec![],
+            )),
+        };
+        apply_remote_snapshot(&mut data, &mut rs, &[with_worktree], WindowId::Main);
+
+        assert!(hidden_in(&data, WindowId::Main, "remote:c1:w"));
+        assert!(!hidden_in(&data, extra_id, "remote:c1:w"));
+        assert_eq!(rs.take_requested_project_placement("remote:c1:w"), None);
     }
 
     #[test]

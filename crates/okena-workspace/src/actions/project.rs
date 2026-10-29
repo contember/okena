@@ -381,6 +381,28 @@ impl Workspace {
         }
     }
 
+    /// Apply an external placement (`okena worktree add --window`): show the
+    /// project in `window_id` only. A project not synced yet is placed once it
+    /// materializes. A window this desktop does not have is ignored, leaving
+    /// the default rule in force.
+    pub fn request_project_placement(
+        &mut self,
+        window_id: WindowId,
+        project_id: &str,
+        cx: &mut impl WorkspaceCx,
+    ) {
+        if self.data.window(window_id).is_none() {
+            return;
+        }
+        if self.project(project_id).is_some() {
+            self.data.show_project_only_in(project_id, window_id);
+            self.notify_data(cx);
+        } else {
+            self.remote_sync
+                .queue_requested_project_placement(project_id, window_id);
+        }
+    }
+
     /// Add a new project
     /// If `with_terminal` is false, creates a bookmark project without a terminal layout.
     ///
@@ -2229,6 +2251,44 @@ mod gpui_tests {
                 ws.remote_sync
                     .take_requested_project_visibility("p1")
                     .is_empty()
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn request_project_placement_shows_only_in_the_target_window(cx: &mut gpui::TestAppContext) {
+        let mut data = make_workspace_data();
+        data.projects = vec![make_project("p1")];
+        data.project_order = vec!["p1".to_string()];
+        let extra = okena_state::WindowState::default();
+        let extra_id = WindowId::Extra(extra.id);
+        data.extra_windows = vec![extra];
+        // Materialized under the default rule, hidden in the requested window.
+        data.toggle_hidden(extra_id, "p1");
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.request_project_placement(extra_id, "p1", cx);
+            ws.request_project_placement(extra_id, "not-synced-yet", cx);
+            ws.request_project_placement(
+                WindowId::Extra(uuid::Uuid::new_v4()),
+                "other-desktop",
+                cx,
+            );
+        });
+        workspace.update(cx, |ws: &mut Workspace, _cx| {
+            assert!(!ws.is_project_hidden(extra_id, "p1"));
+            assert!(ws.is_project_hidden(WindowId::Main, "p1"));
+            assert_eq!(
+                ws.remote_sync
+                    .take_requested_project_placement("not-synced-yet"),
+                Some(extra_id)
+            );
+            // A window this desktop does not have is not queued.
+            assert_eq!(
+                ws.remote_sync
+                    .take_requested_project_placement("other-desktop"),
+                None
             );
         });
     }

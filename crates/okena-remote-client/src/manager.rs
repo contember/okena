@@ -243,6 +243,14 @@ pub enum RemoteManagerEvent {
         window: Option<WindowId>,
     },
 
+    /// An external API client created a project (`okena worktree add --window`)
+    /// for one window: the desktop shows it there and hides it elsewhere. The
+    /// project id is already prefixed for this manager connection.
+    ProjectPlacementRequested {
+        project_id: String,
+        window: WindowId,
+    },
+
     /// The implicit local-daemon loopback connection reached a terminal failed
     /// state (its own connect/reconnect retries are exhausted against a dead
     /// endpoint). The manager stays generic — it only reports; the app decides
@@ -1285,6 +1293,12 @@ fn presentation_event(
                 .map(|terminal_id| make_prefixed_id(connection_id, &terminal_id)),
             window: parse_window(request.window)?,
         },
+        ClientPresentationRequest::ProjectPlacement(request) => {
+            RemoteManagerEvent::ProjectPlacementRequested {
+                project_id: make_prefixed_id(connection_id, &request.project_id),
+                window: WindowId::from_wire(&request.window).ok_or(request.window)?,
+            }
+        }
     })
 }
 
@@ -1295,7 +1309,10 @@ mod tests {
         coalesce_settings_actions, is_local_connection_terminal_failure, merge_settings_patches,
         presentation_event, run_action_queue,
     };
-    use okena_core::api::{ActionRequest, ApiFullscreenRequest, ApiProjectVisibilityRequest};
+    use okena_core::api::{
+        ActionRequest, ApiFullscreenRequest, ApiProjectPlacementRequest,
+        ApiProjectVisibilityRequest,
+    };
     use okena_core::ws::ClientPresentationRequest;
     use okena_transport::client::{ConnectionStatus, LOCAL_DAEMON_CONNECTION_ID};
     use okena_workspace::state::WindowId;
@@ -1859,6 +1876,32 @@ mod tests {
                 project_id: "p1".into(),
                 show: true,
                 window: Some("second".into()),
+            }),
+        );
+        assert!(matches!(event, Err(window) if window == "second"));
+    }
+
+    #[test]
+    fn presentation_event_maps_project_placement() {
+        let extra = uuid::Uuid::new_v4();
+        let event = presentation_event(
+            "conn",
+            ClientPresentationRequest::ProjectPlacement(ApiProjectPlacementRequest {
+                project_id: "p1".into(),
+                window: extra.to_string(),
+            }),
+        );
+        assert!(matches!(
+            event,
+            Ok(RemoteManagerEvent::ProjectPlacementRequested { project_id, window: WindowId::Extra(id) })
+                if project_id == "remote:conn:p1" && id == extra
+        ));
+
+        let event = presentation_event(
+            "conn",
+            ClientPresentationRequest::ProjectPlacement(ApiProjectPlacementRequest {
+                project_id: "p1".into(),
+                window: "second".into(),
             }),
         );
         assert!(matches!(event, Err(window) if window == "second"));

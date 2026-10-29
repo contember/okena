@@ -430,6 +430,15 @@ pub struct ApiFullscreenRequest {
     pub window: Option<String>,
 }
 
+/// One-shot desktop presentation request emitted after an external
+/// `CreateWorktree` with an explicit `window` succeeds: the new project shows
+/// in that window only and is hidden in every other one.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApiProjectPlacementRequest {
+    pub project_id: String,
+    pub window: String,
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ApiProject {
     pub id: String,
@@ -1064,6 +1073,10 @@ pub enum ActionRequest {
         branch: String,
         #[serde(default)]
         create_branch: bool,
+        /// Desktop window the new worktree lands in ("main" or an extra
+        /// window's UUID). None = the first window showing the parent.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        window: Option<String>,
     },
     /// Track an already-on-disk git worktree (discovered by a client-side git
     /// scan) as a project under `parent_project_id`. The daemon creates the

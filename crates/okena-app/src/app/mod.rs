@@ -542,6 +542,12 @@ impl Okena {
             } => {
                 this.apply_fullscreen_request(project_id, terminal_id.as_deref(), *window, cx);
             }
+            RemoteManagerEvent::ProjectPlacementRequested { project_id, window } => {
+                let window = *window;
+                this.workspace.update(cx, |ws, cx| {
+                    ws.request_project_placement(window, project_id, cx);
+                });
+            }
             // Local daemon connection dead-ended — re-run discovery/ensure so
             // the GUI recovers instead of staying wedged on a dead socket.
             RemoteManagerEvent::LocalConnectionFailed => {

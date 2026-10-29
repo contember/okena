@@ -206,6 +206,18 @@ impl WorkspaceData {
             .map(|w| WindowId::Extra(w.id))
     }
 
+    /// Show an already-materialized project in `window` and hide it in every
+    /// other window, through [`Self::set_hidden`] so each changed window drops
+    /// its pixel scale. The caller checks that `window` exists.
+    pub fn show_project_only_in(&mut self, project_id: &str, window: WindowId) {
+        let ids: Vec<WindowId> = std::iter::once(WindowId::Main)
+            .chain(self.extra_windows.iter().map(|w| WindowId::Extra(w.id)))
+            .collect();
+        for id in ids {
+            self.set_hidden(id, project_id, id != window);
+        }
+    }
+
     /// Hide a project in every persisted window state.
     ///
     /// Used for remote projects whose server-side `show_in_overview` flag is
