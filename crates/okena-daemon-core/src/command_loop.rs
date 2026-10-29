@@ -8751,6 +8751,7 @@ mod tests {
         data.projects[0].worktree_info = Some(okena_state::WorktreeMetadata {
             parent_project_id: "parent".to_string(),
             color_override: None,
+            custom_name: false,
             main_repo_path: String::new(),
             worktree_path: "/tmp/okena-checkout".to_string(),
             branch_name: "topic".to_string(),
@@ -8972,6 +8973,7 @@ mod tests {
             Some(WorktreeMetadata {
                 parent_project_id: "p1".to_string(),
                 color_override: None,
+                custom_name: false,
                 main_repo_path: "/tmp".to_string(),
                 worktree_path: "/tmp/worktrees/wt1".to_string(),
                 branch_name: String::new(),

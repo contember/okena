@@ -356,7 +356,15 @@ impl Render for ContextMenu {
         // Get project info
         let ws = self.workspace.read(cx);
         let project = ws.project(&self.request.project_id);
-        let project_name = project.map(|p| p.name.clone()).unwrap_or_default();
+        // Seed the rename with the label the sidebar shows (a worktree's live
+        // branch), not the stored name it may be hiding.
+        let branch = ws
+            .remote_snapshot(&self.request.project_id)
+            .and_then(|s| s.git_status.as_ref())
+            .and_then(|g| g.branch.as_deref());
+        let project_name = project
+            .map(|p| crate::sidebar::SidebarProjectInfo::display_name(p, branch))
+            .unwrap_or_default();
         let project_path = project.map(|p| p.path.clone()).unwrap_or_default();
         let is_worktree = project.map(|p| p.worktree_info.is_some()).unwrap_or(false);
         let is_pinned = project.map(|p| p.pinned).unwrap_or(false);

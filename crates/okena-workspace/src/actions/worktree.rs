@@ -723,6 +723,7 @@ impl Workspace {
             worktree_info: Some(crate::state::WorktreeMetadata {
                 parent_project_id: parent_project_id.to_string(),
                 color_override: None,
+                custom_name: false,
                 main_repo_path: repo_path.to_string_lossy().into_owned(),
                 worktree_path: worktree_path.to_string(),
                 branch_name: branch.to_string(),
@@ -919,6 +920,7 @@ impl Workspace {
             worktree_info: Some(crate::state::WorktreeMetadata {
                 parent_project_id: parent_id.to_string(),
                 color_override: None,
+                custom_name: false,
                 main_repo_path: found.main_repo_path,
                 worktree_path: found.worktree_path,
                 branch_name: found.branch,

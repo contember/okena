@@ -708,7 +708,8 @@ impl Workspace {
         }
     }
 
-    /// Rename a project
+    /// Rename a project. A renamed worktree keeps its name instead of
+    /// following its git branch.
     pub fn rename_project(
         &mut self,
         project_id: &str,
@@ -717,6 +718,9 @@ impl Workspace {
     ) {
         self.with_project(project_id, cx, |project| {
             project.name = new_name;
+            if let Some(wt) = project.worktree_info.as_mut() {
+                wt.custom_name = true;
+            }
             true
         });
     }
@@ -939,6 +943,9 @@ impl Workspace {
             .find(|project| project.id == plan.project_id)
         {
             project.name = plan.new_name.clone();
+            if let Some(metadata) = &mut project.worktree_info {
+                metadata.custom_name = true;
+            }
             if let Some(moved_root) = result.moved_worktree_root {
                 project.path = moved_root.clone();
                 if let Some(metadata) = &mut project.worktree_info {
@@ -1572,6 +1579,7 @@ mod worktree_rename_tests {
         worktree_project.worktree_info = Some(okena_state::WorktreeMetadata {
             parent_project_id: "main".to_string(),
             color_override: None,
+            custom_name: false,
             main_repo_path: main_repo.to_string_lossy().into_owned(),
             worktree_path: recorded_root.to_string(),
             branch_name: "feature".to_string(),
@@ -2970,11 +2978,36 @@ mod gpui_tests {
         });
     }
 
+    #[gpui::test]
+    fn rename_project_marks_worktree_custom_name(cx: &mut gpui::TestAppContext) {
+        // A worktree is listed under its live branch until the user renames
+        // it; the rename has to record that so the sidebar stops overriding it.
+        let mut data = make_workspace_data();
+        data.projects = vec![make_project("main"), make_worktree_project("wt", "main")];
+        data.project_order = vec!["main".to_string()];
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.rename_project("wt", "repairs".to_string(), cx);
+            ws.rename_project("main", "Main".to_string(), cx);
+        });
+
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            let wt = ws.project("wt").unwrap();
+            assert_eq!(wt.name, "repairs");
+            assert!(wt.worktree_info.as_ref().unwrap().custom_name);
+            let main = ws.project("main").unwrap();
+            assert_eq!(main.name, "Main");
+            assert!(main.worktree_info.is_none());
+        });
+    }
+
     fn make_worktree_project(id: &str, parent_id: &str) -> ProjectData {
         let mut p = make_project(id);
         p.worktree_info = Some(crate::state::WorktreeMetadata {
             parent_project_id: parent_id.to_string(),
             color_override: None,
+            custom_name: false,
             main_repo_path: "/tmp/repo".to_string(),
             worktree_path: format!("/tmp/worktrees/{}", id),
             branch_name: String::new(),
@@ -3949,6 +3982,9 @@ mod gpui_tests {
                 Path::new(&moved.worktree_info.as_ref().unwrap().worktree_path),
                 renamed
             );
+            // The new directory name is the worktree's name now, not its branch.
+            assert_eq!(moved.name, "renamed-worktree");
+            assert!(moved.worktree_info.as_ref().unwrap().custom_name);
             assert_eq!(
                 Path::new(&ws.project("descendant").unwrap().path),
                 renamed.join("packages/child")

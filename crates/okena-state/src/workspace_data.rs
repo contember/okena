@@ -92,6 +92,10 @@ pub struct WorktreeMetadata {
     /// Optional color override for this worktree (when None, inherits parent's color)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color_override: Option<FolderColor>,
+    /// Whether the user renamed this worktree. A worktree is shown under its
+    /// live git branch until renamed; after that the stored name wins.
+    #[serde(default)]
+    pub custom_name: bool,
     /// Deprecated: resolved dynamically from parent project path.
     #[serde(default, skip_serializing)]
     #[allow(dead_code)]
@@ -518,6 +522,7 @@ mod tests {
         let metadata = WorktreeMetadata {
             parent_project_id: "p1".to_string(),
             color_override: None,
+            custom_name: false,
             main_repo_path: "/repo".to_string(),
             worktree_path: "/worktrees/feature".to_string(),
             branch_name: "feature".to_string(),

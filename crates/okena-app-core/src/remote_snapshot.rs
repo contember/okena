@@ -80,6 +80,7 @@ pub fn build_api_project(
         worktree_info: p.worktree_info.as_ref().map(|wt| ApiWorktreeMetadata {
             parent_project_id: wt.parent_project_id.clone(),
             color_override: wt.color_override,
+            custom_name: wt.custom_name,
         }),
         worktree_ids: p.worktree_ids.clone(),
         pinned: p.pinned,

@@ -919,6 +919,7 @@ mod hook_action_tests {
         data.projects[0].worktree_info = Some(crate::workspace::state::WorktreeMetadata {
             parent_project_id: "parent".to_string(),
             color_override: None,
+            custom_name: false,
             main_repo_path: "/tmp/main".to_string(),
             worktree_path: "/tmp/test".to_string(),
             branch_name: "topic".to_string(),

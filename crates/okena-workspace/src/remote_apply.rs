@@ -219,6 +219,7 @@ pub fn apply_remote_snapshot(
                                     conn_id, wt.parent_project_id
                                 ),
                                 color_override: wt.color_override,
+                                custom_name: wt.custom_name,
                                 main_repo_path: String::new(),
                                 worktree_path: String::new(),
                                 branch_name: String::new(),
@@ -265,6 +266,7 @@ pub fn apply_remote_snapshot(
                                     conn_id, wt.parent_project_id
                                 ),
                                 color_override: wt.color_override,
+                                custom_name: wt.custom_name,
                                 main_repo_path: String::new(),
                                 worktree_path: String::new(),
                                 branch_name: String::new(),
@@ -1679,6 +1681,7 @@ mod tests {
         project.worktree_info = Some(okena_core::api::ApiWorktreeMetadata {
             parent_project_id: parent.to_string(),
             color_override: None,
+            custom_name: false,
         });
         project
     }
@@ -1688,6 +1691,38 @@ mod tests {
             .unwrap()
             .hidden_project_ids
             .contains(project_id)
+    }
+
+    #[test]
+    fn mirrors_worktree_custom_name_on_insert_and_update() {
+        let mut data = empty_data();
+        let mut rs = RemoteSyncState::new();
+        let parent = api_project("main", None);
+        let snap = |custom_name: bool| {
+            let mut wt = worktree_of("wt", "main");
+            wt.worktree_info.as_mut().unwrap().custom_name = custom_name;
+            RemoteSnapshot {
+                config: config("c1"),
+                state: Some(state_with(
+                    vec![parent.clone(), wt],
+                    vec!["main".into()],
+                    vec![],
+                )),
+            }
+        };
+        let custom_name = |data: &WorkspaceData| {
+            data.projects
+                .iter()
+                .find(|p| p.id == "remote:c1:wt")
+                .and_then(|p| p.worktree_info.as_ref())
+                .map(|wt| wt.custom_name)
+        };
+
+        apply_remote_snapshot(&mut data, &mut rs, &[snap(true)], WindowId::Main);
+        assert_eq!(custom_name(&data), Some(true));
+
+        apply_remote_snapshot(&mut data, &mut rs, &[snap(false)], WindowId::Main);
+        assert_eq!(custom_name(&data), Some(false));
     }
 
     #[test]

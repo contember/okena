@@ -3687,6 +3687,7 @@ mod workspace_tests {
         w1.worktree_info = Some(WorktreeMetadata {
             parent_project_id: "p1".to_string(),
             color_override: None,
+            custom_name: false,
             main_repo_path: "/tmp/repo".to_string(),
             worktree_path: "/tmp/wt1".to_string(),
             branch_name: "branch-w1".to_string(),
@@ -3695,6 +3696,7 @@ mod workspace_tests {
         w2.worktree_info = Some(WorktreeMetadata {
             parent_project_id: "p1".to_string(),
             color_override: None,
+            custom_name: false,
             main_repo_path: "/tmp/repo".to_string(),
             worktree_path: "/tmp/wt2".to_string(),
             branch_name: "branch-w2".to_string(),
@@ -3741,6 +3743,7 @@ mod workspace_tests {
         w1.worktree_info = Some(WorktreeMetadata {
             parent_project_id: "p1".to_string(),
             color_override: None,
+            custom_name: false,
             main_repo_path: "/tmp/repo".to_string(),
             worktree_path: "/tmp/wt1".to_string(),
             branch_name: "branch-w1".to_string(),
@@ -3749,6 +3752,7 @@ mod workspace_tests {
         w2.worktree_info = Some(WorktreeMetadata {
             parent_project_id: "p1".to_string(),
             color_override: None,
+            custom_name: false,
             main_repo_path: "/tmp/repo".to_string(),
             worktree_path: "/tmp/wt2".to_string(),
             branch_name: "branch-w2".to_string(),
@@ -3780,6 +3784,7 @@ mod workspace_tests {
         w1.worktree_info = Some(WorktreeMetadata {
             parent_project_id: "p1".to_string(),
             color_override: None,
+            custom_name: false,
             main_repo_path: "/tmp/repo".to_string(),
             worktree_path: "/tmp/wt1".to_string(),
             branch_name: "branch-w1".to_string(),
@@ -3811,6 +3816,7 @@ mod workspace_tests {
         w1.worktree_info = Some(WorktreeMetadata {
             parent_project_id: "p1".to_string(),
             color_override: None,
+            custom_name: false,
             main_repo_path: "/tmp/repo".to_string(),
             worktree_path: "/tmp/wt1".to_string(),
             branch_name: "branch-w1".to_string(),
@@ -3854,6 +3860,7 @@ mod workspace_tests {
         w1.worktree_info = Some(WorktreeMetadata {
             parent_project_id: "p2".to_string(),
             color_override: None,
+            custom_name: false,
             main_repo_path: "/tmp/repo".to_string(),
             worktree_path: "/tmp/wt1".to_string(),
             branch_name: "branch-w1".to_string(),
@@ -3895,6 +3902,7 @@ mod workspace_tests {
         w1.worktree_info = Some(WorktreeMetadata {
             parent_project_id: "p1".to_string(),
             color_override: None,
+            custom_name: false,
             main_repo_path: "/tmp/repo".to_string(),
             worktree_path: "/tmp/wt1".to_string(),
             branch_name: "branch-w1".to_string(),
@@ -3935,6 +3943,7 @@ mod workspace_tests {
         w1.worktree_info = Some(WorktreeMetadata {
             parent_project_id: "p1".to_string(),
             color_override: None,
+            custom_name: false,
             main_repo_path: "/tmp/repo".to_string(),
             worktree_path: "/tmp/wt1".to_string(),
             branch_name: "branch-w1".to_string(),
@@ -3975,6 +3984,7 @@ mod workspace_tests {
         w1.worktree_info = Some(WorktreeMetadata {
             parent_project_id: "p1".to_string(),
             color_override: None,
+            custom_name: false,
             main_repo_path: "/tmp/repo".to_string(),
             worktree_path: "/tmp/wt1".to_string(),
             branch_name: "branch-w1".to_string(),
@@ -4025,6 +4035,7 @@ mod workspace_tests {
         wt1.worktree_info = Some(WorktreeMetadata {
             parent_project_id: "parent".to_string(),
             color_override: None,
+            custom_name: false,
             main_repo_path: "/tmp/repo".to_string(),
             worktree_path: "/tmp/wt1".to_string(),
             branch_name: String::new(),
@@ -4033,6 +4044,7 @@ mod workspace_tests {
         wt2.worktree_info = Some(WorktreeMetadata {
             parent_project_id: "parent".to_string(),
             color_override: None,
+            custom_name: false,
             main_repo_path: "/tmp/repo".to_string(),
             worktree_path: "/tmp/wt2".to_string(),
             branch_name: String::new(),
@@ -4055,6 +4067,7 @@ mod workspace_tests {
         wt1.worktree_info = Some(WorktreeMetadata {
             parent_project_id: "parent".to_string(),
             color_override: None,
+            custom_name: false,
             main_repo_path: "/tmp/repo".to_string(),
             worktree_path: "/tmp/wt1".to_string(),
             branch_name: String::new(),
@@ -4084,6 +4097,7 @@ mod workspace_tests {
         wt1.worktree_info = Some(WorktreeMetadata {
             parent_project_id: "parent".to_string(),
             color_override: None,
+            custom_name: false,
             main_repo_path: "/tmp/repo".to_string(),
             worktree_path: "/tmp/wt1".to_string(),
             branch_name: String::new(),
@@ -4092,6 +4106,7 @@ mod workspace_tests {
         wt2.worktree_info = Some(WorktreeMetadata {
             parent_project_id: "parent".to_string(),
             color_override: None,
+            custom_name: false,
             main_repo_path: "/tmp/repo".to_string(),
             worktree_path: "/tmp/wt2".to_string(),
             branch_name: String::new(),
@@ -4120,6 +4135,7 @@ mod workspace_tests {
         wt1.worktree_info = Some(WorktreeMetadata {
             parent_project_id: "parent".to_string(),
             color_override: None,
+            custom_name: false,
             main_repo_path: "/tmp/repo".to_string(),
             worktree_path: "/tmp/wt1".to_string(),
             branch_name: String::new(),
@@ -4128,6 +4144,7 @@ mod workspace_tests {
         wt2.worktree_info = Some(WorktreeMetadata {
             parent_project_id: "parent".to_string(),
             color_override: None,
+            custom_name: false,
             main_repo_path: "/tmp/repo".to_string(),
             worktree_path: "/tmp/wt2".to_string(),
             branch_name: String::new(),
@@ -4154,6 +4171,7 @@ mod workspace_tests {
         wt1.worktree_info = Some(WorktreeMetadata {
             parent_project_id: "parent".to_string(),
             color_override: None,
+            custom_name: false,
             main_repo_path: "/tmp/repo".to_string(),
             worktree_path: "/tmp/wt1".to_string(),
             branch_name: String::new(),
@@ -4162,6 +4180,7 @@ mod workspace_tests {
         wt2.worktree_info = Some(WorktreeMetadata {
             parent_project_id: "parent".to_string(),
             color_override: None,
+            custom_name: false,
             main_repo_path: "/tmp/repo".to_string(),
             worktree_path: "/tmp/wt2".to_string(),
             branch_name: String::new(),

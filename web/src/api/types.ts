@@ -173,6 +173,7 @@ export interface ApiServiceInfo {
 export interface ApiWorktreeMetadata {
   parent_project_id: string;
   color_override?: FolderColor | null;
+  custom_name?: boolean;
 }
 
 export type ApiHookTerminalStatus =

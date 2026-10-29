@@ -85,6 +85,7 @@ fn make_worktree(id: &str, parent: &str, color_override: Option<FolderColor>) ->
     wt.worktree_info = Some(okena_workspace::state::WorktreeMetadata {
         parent_project_id: parent.to_string(),
         color_override,
+        custom_name: false,
         main_repo_path: String::new(),
         worktree_path: String::new(),
         branch_name: String::new(),
@@ -129,4 +130,34 @@ fn from_project_resolves_worktree_colour_through_override_then_parent() {
     );
     assert_eq!(plain_info.folder_color, FolderColor::Blue);
     assert_eq!(red_info.folder_color, FolderColor::Red);
+}
+
+#[test]
+fn display_name_follows_branch_until_worktree_is_renamed() {
+    let mut wt = make_worktree("wt", "main", None);
+    wt.name = "neumie/zlaty-pernik".to_string();
+    assert_eq!(
+        SidebarProjectInfo::display_name(&wt, Some("neumie/fix-login")),
+        "neumie/fix-login",
+        "an un-renamed worktree tracks its live branch"
+    );
+    assert_eq!(
+        SidebarProjectInfo::display_name(&wt, None),
+        "neumie/zlaty-pernik",
+        "before the first git poll the stored name stands in"
+    );
+
+    wt.name = "repairs".to_string();
+    wt.worktree_info.as_mut().unwrap().custom_name = true;
+    assert_eq!(
+        SidebarProjectInfo::display_name(&wt, Some("neumie/fix-login")),
+        "repairs",
+        "a renamed worktree keeps the user's name"
+    );
+}
+
+#[test]
+fn display_name_ignores_branch_for_plain_projects() {
+    let p = make_project("p");
+    assert_eq!(SidebarProjectInfo::display_name(&p, Some("main")), "Project p");
 }
