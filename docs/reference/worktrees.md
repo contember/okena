@@ -42,7 +42,11 @@ removes the row again and shows a toast.
 - `--wait` returns once the checkout exists and its terminals run, and prints
   the project id, path and first terminal id. A failed checkout exits 1 with
   Git's reason. The `create_worktree` action takes it as `wait: true` and then
-  replies with `pending: false`, `terminal_id` and `terminal_ids`.
+  replies with `pending: false`, `terminal_id` and `terminal_ids` (the layout's
+  terminals). An `on_worktree_create` hook may still be running in its own
+  terminal, which `terminal_ids` leaves out. With `--window`, the worktree moves
+  to that window only after the reply, and stays in the parent's window if the
+  caller disconnects first.
 - `--layout single` starts the worktree with one terminal; the default
   (`parent`) clones the parent project's layout with fresh terminals.
 - `--name <label>` names the worktree's first terminal (`terminal_name`).

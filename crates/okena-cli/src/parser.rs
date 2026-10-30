@@ -637,7 +637,7 @@ pub enum WorktreeCmd {
         #[arg(long, value_enum)]
         layout: Option<WorktreeLayoutArg>,
         /// Name the worktree's first terminal
-        #[arg(long)]
+        #[arg(long, value_parser = clap::builder::NonEmptyStringValueParser::new())]
         name: Option<String>,
     },
     /// Remove a worktree project
@@ -906,6 +906,9 @@ mod tests {
         assert!(
             Cli::try_parse_from(["okena", "worktree", "add", "p", "feat", "--layout", "grid"])
                 .is_err()
+        );
+        assert!(
+            Cli::try_parse_from(["okena", "worktree", "add", "p", "feat", "--name", ""]).is_err()
         );
         assert!(Cli::try_parse_from(["okena", "skill", "show"]).is_ok());
         assert!(Cli::try_parse_from(["okena", "skill", "install", "--project"]).is_ok());

@@ -104,7 +104,7 @@ Commands that create things (`term new/split/tab`, `project add`, `project clone
   and return before the checkout exists on disk (the reply carries `pending: true`).
   Use `worktree add --wait`: it returns once the checkout and its terminal exist,
   prints the terminal id as a third line, and exits 1 with the reason if creation
-  fails. Without it, poll `okena ls` until the terminal appears; a failed creation
+  fails. An `on_worktree_create` hook may still be running then. Without it, poll `okena ls` until the terminal appears; a failed creation
   just removes the row.
 - **Find a window**: `okena ls` (or `ls --json` → `windows[].id`, `visible_project_ids`)
   lists attached desktops' windows; pass a full id or a unique prefix to `--window`.

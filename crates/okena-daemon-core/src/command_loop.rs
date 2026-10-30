@@ -4564,7 +4564,12 @@ fn created_worktree_reply(
             "worktree created at {path}, but its terminals did not start: {error}"
         ));
     }
-    let terminal_ids = ws.all_terminal_ids_for_project(project_id);
+    // Layout terminals only: hook terminals (`on_worktree_create`) run their own command.
+    let terminal_ids = ws
+        .project(project_id)
+        .and_then(|project| project.layout.as_ref())
+        .map(|layout| layout.collect_terminal_ids())
+        .unwrap_or_default();
     CommandResult::Ok(Some(serde_json::json!({
         "project_id": project_id,
         "path": path,
@@ -5188,6 +5193,8 @@ mod tests {
         service_tick: watch::Sender<u64>,
         settings: Arc<Mutex<AppSettings>>,
         daemon_config: DaemonConfig,
+        hook_runner: Option<okena_hooks::HookRunner>,
+        hook_monitor: Option<okena_hooks::HookMonitor>,
     }
 
     impl Harness {
@@ -5197,8 +5204,8 @@ mod tests {
                 self.backend,
                 self.workspace,
                 self.workspace_tick,
-                None,
-                None,
+                self.hook_runner,
+                self.hook_monitor,
                 self.terminals,
                 self.state_version,
                 self.git_status_tx,
@@ -5241,6 +5248,8 @@ mod tests {
             service_tick,
             settings,
             daemon_config,
+            hook_runner: None,
+            hook_monitor: None,
         }
     }
 
@@ -10622,6 +10631,92 @@ mod tests {
         }
     }
 
+    /// Project `p1` at `repo` whose layout splits two terminals, optionally
+    /// with an `on_worktree_create` hook.
+    fn split_parent_workspace(repo: &TempRepo, on_create: Option<&str>) -> WorkspaceData {
+        use okena_state::LayoutNode;
+
+        let mut parent = plain_project("p1", repo.0.to_str().expect("utf-8 path"));
+        let terminal = || LayoutNode::Terminal {
+            terminal_id: None,
+            pending_agent_resume: None,
+            minimized: false,
+            detached: false,
+            shell_type: ShellType::Default,
+            zoom_level: 1.0,
+        };
+        parent.layout = Some(LayoutNode::Split {
+            direction: okena_core::types::SplitDirection::Vertical,
+            sizes: vec![50.0, 50.0],
+            children: vec![terminal(), terminal()],
+        });
+        parent.hooks.worktree.on_create = on_create.map(str::to_string);
+        let mut data = empty_workspace_data();
+        data.projects.push(parent);
+        data.project_order.push("p1".to_string());
+        data
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn waited_create_worktree_lists_the_cloned_layout_without_hook_terminals() {
+        use okena_hooks::{HookMonitor, HookRunner};
+        use okena_terminal::backend::LocalBackend;
+        use okena_terminal::pty_manager::PtyManager;
+        use okena_terminal::session_backend::SessionBackend;
+
+        let repo = TempRepo::new();
+        let mut h = harness();
+        let (pty_manager, _pty_events) = PtyManager::new(SessionBackend::None);
+        h.backend = Arc::new(LocalBackend::new(Arc::new(pty_manager)));
+        h.hook_runner = Some(HookRunner::new(h.backend.clone(), h.terminals.clone()));
+        h.hook_monitor = Some(HookMonitor::new());
+        *h.workspace.lock() = Workspace::new(split_parent_workspace(&repo, Some("true")));
+        let workspace = h.workspace.clone();
+        let (bridge_tx, bridge_rx) = bridge_channel();
+
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async move {
+                let handle = h.spawn_loop(bridge_rx);
+                let create = RemoteCommand::Action(ActionRequest::CreateWorktree {
+                    project_id: "p1".to_string(),
+                    branch: "feature".to_string(),
+                    create_branch: true,
+                    window: None,
+                    layout: None,
+                    terminal_name: None,
+                    wait: true,
+                });
+
+                let created = request(&bridge_tx, create, "create").await;
+                let CommandResult::Ok(Some(reply)) = created else {
+                    panic!("expected a ready worktree, got {created:?}");
+                };
+                {
+                    let ws = workspace.lock();
+                    let project_id = reply["project_id"].as_str().expect("project id");
+                    let project = ws.project(project_id).expect("worktree project");
+                    assert_eq!(
+                        project.hook_terminals.len(),
+                        1,
+                        "the hook got its own terminal"
+                    );
+                    let layout_ids = project
+                        .layout
+                        .as_ref()
+                        .expect("cloned layout")
+                        .collect_terminal_ids();
+                    assert_eq!(layout_ids.len(), 2);
+                    assert_eq!(reply["terminal_ids"], serde_json::json!(layout_ids));
+                    assert_eq!(reply["terminal_id"], serde_json::json!(layout_ids[0]));
+                }
+
+                drop(bridge_tx);
+                handle.await.expect("loop task joins");
+            })
+            .await;
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn waited_create_worktree_replies_with_its_single_named_terminal() {
         use okena_state::LayoutNode;
@@ -10633,26 +10728,7 @@ mod tests {
         let mut h = harness();
         let (pty_manager, _pty_events) = PtyManager::new(SessionBackend::None);
         h.backend = Arc::new(LocalBackend::new(Arc::new(pty_manager)));
-        {
-            let mut parent = plain_project("p1", repo.0.to_str().expect("utf-8 path"));
-            let terminal = || LayoutNode::Terminal {
-                terminal_id: None,
-                pending_agent_resume: None,
-                minimized: false,
-                detached: false,
-                shell_type: ShellType::Default,
-                zoom_level: 1.0,
-            };
-            parent.layout = Some(LayoutNode::Split {
-                direction: okena_core::types::SplitDirection::Vertical,
-                sizes: vec![50.0, 50.0],
-                children: vec![terminal(), terminal()],
-            });
-            let mut data = empty_workspace_data();
-            data.projects.push(parent);
-            data.project_order.push("p1".to_string());
-            *h.workspace.lock() = Workspace::new(data);
-        }
+        *h.workspace.lock() = Workspace::new(split_parent_workspace(&repo, None));
         let workspace = h.workspace.clone();
         let (bridge_tx, bridge_rx) = bridge_channel();
 
