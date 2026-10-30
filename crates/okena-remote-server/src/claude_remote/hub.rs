@@ -150,19 +150,6 @@ impl TerminalState {
         }
     }
 
-    /// The session `claude` runs in this pane: the hooks' unless it ended, else
-    /// the one the daemon recorded when no hook has reported.
-    fn current_session_id<'a>(&'a self, info: &'a ClaudeTerminalInfo) -> Option<&'a str> {
-        match self.session_id.as_deref() {
-            Some(_) if self.session_ended => None,
-            Some(session_id) => Some(session_id),
-            None => info
-                .session
-                .as_ref()
-                .map(|session| session.session_id.as_str()),
-        }
-    }
-
     /// A connected `claude`: hooks reported, or the channel server is polling.
     fn has_session(&self, now: Instant) -> bool {
         self.hooks_attached || self.channel.is_attached(now)
@@ -546,7 +533,7 @@ impl ClaudeRemoteHub {
             let terminal = terminals.get(terminal_id);
             ApiClaudeSession {
                 terminal_id: terminal_id.to_string(),
-                session_id: terminal.and_then(|terminal| terminal.session_id.clone()),
+                session_id: live_session_id(terminal, &info).map(str::to_string),
                 has_transcript: false,
                 hooks_attached: terminal.is_some_and(|terminal| terminal.hooks_attached),
                 channel_attached: terminal
@@ -573,9 +560,6 @@ impl ClaudeRemoteHub {
         let source = self
             .hooked_transcript_source(terminal_id)
             .unwrap_or_else(|| TranscriptSource::from_terminal_info(&info));
-        if session.session_id.is_none() {
-            session.session_id = source.session_id;
-        }
         session.has_transcript = match &source.path {
             Some(path) => {
                 has_transcript_extension(Path::new(&path))
@@ -767,7 +751,7 @@ impl ClaudeRemoteHub {
             let mut terminals = self.terminals.lock();
             let terminal = terminals.entry(terminal_id.to_string()).or_default();
             if let Some(expected) = expect_session_id {
-                let current = terminal.current_session_id(&info);
+                let current = live_session_id(Some(terminal), &info);
                 if current != Some(expected) {
                     return Err(ClaudeRemoteError::SessionMismatch {
                         expected: expected.to_string(),
@@ -1014,6 +998,25 @@ impl TranscriptSource {
                 .and_then(|session| session.transcript_path.clone())
                 .filter(|path| is_valid_transcript_path(path)),
         }
+    }
+}
+
+/// The session `claude` runs in a pane: the hooks' unless it ended, else the
+/// one the daemon recorded, when no hook has reported (as after a daemon
+/// restart).
+fn live_session_id<'a>(
+    terminal: Option<&'a TerminalState>,
+    info: &'a ClaudeTerminalInfo,
+) -> Option<&'a str> {
+    match terminal {
+        Some(terminal) if terminal.session_id.is_some() => terminal
+            .session_id
+            .as_deref()
+            .filter(|_| !terminal.session_ended),
+        _ => info
+            .session
+            .as_ref()
+            .map(|session| session.session_id.as_str()),
     }
 }
 
@@ -1638,6 +1641,66 @@ mod tests {
             delivery,
             Err(ClaudeRemoteError::SessionMismatch { current: None, .. })
         ));
+    }
+
+    #[tokio::test]
+    async fn an_ended_session_is_not_the_panes_until_resumed() {
+        let (hub, _version, _pty) = hub_with_daemon(claude_in_pane());
+        hub.hook_event(hook("t1", event("SessionStart")))
+            .expect("valid event");
+        hub.hook_event(hook("t1", event("SessionEnd")))
+            .expect("valid event");
+        let session = hub.session("t1", false).await.expect("session");
+        assert_eq!(session.session_id, None);
+
+        let mut resume = event("SessionStart");
+        resume["source"] = json!("resume");
+        hub.hook_event(hook("t1", resume)).expect("valid event");
+        let session = hub.session("t1", false).await.expect("session");
+        assert_eq!(session.session_id.as_deref(), Some("s1"));
+        let delivery = hub.send_prompt("t1", "go".into(), Some("s1")).await;
+        assert_eq!(delivery.expect("delivered"), ApiClaudePromptDelivery::Pty);
+    }
+
+    #[tokio::test]
+    async fn before_any_hook_the_daemon_recorded_session_is_the_panes() {
+        const RECORDED: &str = "00000000-0000-4000-8000-000000000001";
+        let (hub, _version, _pty) = hub_with_daemon(ClaudeTerminalInfo {
+            session: Some(okena_core::agent_session::AgentSession {
+                agent: "claude".to_string(),
+                session_id: RECORDED.to_string(),
+                transcript_path: None,
+            }),
+            ..claude_running()
+        });
+
+        let delivery = hub.send_prompt("t1", "go".into(), Some("s1")).await;
+        assert!(matches!(
+            delivery,
+            Err(ClaudeRemoteError::SessionMismatch { current, .. })
+                if current.as_deref() == Some(RECORDED)
+        ));
+        let delivery = hub.send_prompt("t1", "go".into(), Some(RECORDED)).await;
+        assert_eq!(delivery.expect("delivered"), ApiClaudePromptDelivery::Pty);
+    }
+
+    #[tokio::test]
+    async fn a_mismatch_pushes_nothing_to_the_channel() {
+        let (hub, _version, _pty) = hub_with_daemon(claude_in_pane());
+        hub.hook_event(hook("t1", event("SessionStart")))
+            .expect("valid event");
+        let poll = tokio::spawn({
+            let hub = Arc::clone(&hub);
+            async move { hub.poll_channel_for("t1", Duration::from_millis(50)).await }
+        });
+        wait_for_channel(&hub, "t1").await;
+
+        let delivery = hub.send_prompt("t1", "go".into(), Some("s2")).await;
+        assert!(matches!(
+            delivery,
+            Err(ClaudeRemoteError::SessionMismatch { .. })
+        ));
+        assert!(poll.await.expect("poll finished").is_empty());
     }
 
     #[tokio::test]

@@ -59,6 +59,8 @@ For terminals running `claude` with Claude Remote on (Settings → Terminal).
   (`user|assistant|tool_use|tool_result`, newlines escaped as `\n`), last line
   `cursor<TAB><c>`. Pass `<c>` back to get only newer entries; a `reset` line
   means drop what you had. `okena claude subagents <term>` lists `--agent` ids.
+- `okena claude find <session-id> [--json]` — the terminal that runs that
+  session (exit 1 when none does; known once a hook reported it).
 - `okena claude prompt <term> [--session <id>] <text…>` — prints `channel`, `pty`
   or `queued`; exits 1 with the daemon's reason when it cannot be delivered.
   `--session` (before the text) refuses unless the pane still runs that session

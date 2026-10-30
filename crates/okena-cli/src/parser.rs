@@ -248,6 +248,14 @@ pub enum ClaudeCmd {
         #[arg(long)]
         json: bool,
     },
+    /// Print the terminal that runs a Claude session
+    Find {
+        /// Claude session id (`session_id` from `claude show`/`start`)
+        session: String,
+        /// Output the session like `claude show --json`
+        #[arg(long)]
+        json: bool,
+    },
     /// List the session's subagents (ids for `claude log --agent`)
     Subagents {
         /// Terminal address (id, project/name, or project:index)
@@ -945,6 +953,7 @@ mod tests {
         );
         assert!(Cli::try_parse_from(["okena", "claude", "answer", "p:0", "d1", "maybe"]).is_err());
         assert!(Cli::try_parse_from(["okena", "claude", "prompt", "p:0"]).is_err());
+        assert!(Cli::try_parse_from(["okena", "claude", "find", "s1", "--json"]).is_ok());
         let prompt = |args: &[&str]| match Cli::try_parse_from(args).map(|cli| cli.command) {
             Ok(Command::Claude {
                 cmd: ClaudeCmd::Prompt { session, text, .. },

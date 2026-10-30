@@ -66,6 +66,25 @@ pub fn cli_show(terminal: &str, json_mode: bool) -> i32 {
     })())
 }
 
+/// `okena claude find <session> [--json]`
+pub fn cli_find(session_id: &str, json_mode: bool) -> i32 {
+    exit_code((|| {
+        let (token, state) = connect()?;
+        let body = api_get(
+            &format!("/v1/claude/sessions/{}", encode(session_id)),
+            &token,
+        )?;
+        let session: ApiClaudeSession =
+            serde_json::from_str(&body).map_err(|e| format!("Invalid session: {e}"))?;
+        if json_mode {
+            print_json(&LabeledSession::new(&state, session).to_json()?)
+        } else {
+            println!("{}", session.terminal_id);
+            Ok(())
+        }
+    })())
+}
+
 /// `okena claude subagents <term> [--json]`
 pub fn cli_subagents(terminal: &str, json_mode: bool) -> i32 {
     exit_code((|| {
