@@ -383,7 +383,7 @@ enum Record {
 struct SystemRecord {
     #[serde(default)]
     subtype: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "rfc3339_timestamp")]
     timestamp: Option<String>,
 }
 
@@ -401,6 +401,19 @@ impl SystemRecord {
 /// Starts the user message Claude records when an interrupt ends a turn.
 const INTERRUPT_MARKER: &str = "[Request interrupted by user";
 
+/// A line's `timestamp` when it is an RFC 3339 string. Any other value drops
+/// only the timestamp, never the record.
+fn rfc3339_timestamp<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<String>, D::Error> {
+    Ok(match serde_json::Value::deserialize(deserializer)? {
+        serde_json::Value::String(timestamp) if timestamp_ms(&timestamp).is_some() => {
+            Some(timestamp)
+        }
+        _ => None,
+    })
+}
+
 fn timestamp_ms(timestamp: &str) -> Option<u64> {
     let timestamp = chrono::DateTime::parse_from_rfc3339(timestamp).ok()?;
     u64::try_from(timestamp.timestamp_millis()).ok()
@@ -411,7 +424,7 @@ fn timestamp_ms(timestamp: &str) -> Option<u64> {
 #[derive(Deserialize)]
 struct AttachmentRecord {
     uuid: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "rfc3339_timestamp")]
     timestamp: Option<String>,
     attachment: Attachment,
 }
@@ -465,7 +478,7 @@ struct UserRecord {
     is_compact_summary: Option<bool>,
     #[serde(default)]
     origin: Option<RecordOrigin>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "rfc3339_timestamp")]
     timestamp: Option<String>,
     message: Message<UserBlock>,
 }
@@ -494,7 +507,7 @@ struct RecordOrigin {
 #[derive(Deserialize)]
 struct AssistantRecord {
     uuid: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "rfc3339_timestamp")]
     timestamp: Option<String>,
     message: Message<AssistantBlock>,
 }
@@ -964,6 +977,23 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn a_malformed_timestamp_drops_only_the_timestamp() {
+        for timestamp in [json!(1_761_818_400), json!("yesterday")] {
+            let reply = line(json!({
+                "type": "assistant",
+                "uuid": "a1",
+                "timestamp": timestamp,
+                "message": {"role": "assistant", "content": [{"type": "text", "text": "hi"}]}
+            }));
+            assert_eq!(
+                parse_lines(&reply),
+                vec![assistant("a1", "hi")],
+                "{timestamp}"
+            );
+        }
     }
 
     #[test]

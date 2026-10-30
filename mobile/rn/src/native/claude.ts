@@ -451,7 +451,5 @@ export function summarizeClaudeDialog(dialog: ApiClaudeDialog): string {
       .find((line) => line.length > 0);
     return heading ? `Plan: ${heading}` : 'Plan ready to approve';
   }
-  return oneLine(
-    `${dialog.tool_name}: ${previewClaudeToolInput(dialog.tool_input)}`,
-  );
+  return oneLine(`${dialog.tool_name}: ${previewClaudeToolInput(dialog.tool_input)}`);
 }

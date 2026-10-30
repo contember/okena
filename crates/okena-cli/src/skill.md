@@ -58,7 +58,8 @@ For terminals running `claude` with Claude Remote on (Settings → Terminal).
 - `okena claude log <term> [--cursor <c>] [--agent <id>]` — one line per entry
   (`user|assistant|tool_use|tool_result`, newlines escaped as `\n`), last line
   `cursor<TAB><c>`. Pass `<c>` back to get only newer entries; a `reset` line
-  means drop what you had. `--json` adds each entry's `timestamp`.
+  means drop what you had. `--json` prints the page instead: `entries[]` (each
+  with `timestamp`), `reset`, and `next_cursor` to pass back as `--cursor`.
   `okena claude subagents <term>` lists `--agent` ids.
 - `okena claude find <session-id> [--json]` — the terminal that runs that
   session (exit 1 when none does; known once a hook reported it).

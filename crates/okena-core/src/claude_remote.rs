@@ -266,8 +266,8 @@ pub enum ApiClaudePromptOrigin {
 pub enum ApiClaudeEntry {
     User {
         uuid: String,
-        /// When Claude recorded the entry (RFC 3339, UTC): its transcript
-        /// line's `timestamp`.
+        /// When Claude recorded the entry: its transcript line's RFC 3339
+        /// `timestamp`.
         #[serde(default)]
         timestamp: Option<String>,
         text: String,
@@ -275,16 +275,16 @@ pub enum ApiClaudeEntry {
     },
     Assistant {
         uuid: String,
-        /// When Claude recorded the entry (RFC 3339, UTC): its transcript
-        /// line's `timestamp`.
+        /// When Claude recorded the entry: its transcript line's RFC 3339
+        /// `timestamp`.
         #[serde(default)]
         timestamp: Option<String>,
         text: String,
     },
     ToolUse {
         uuid: String,
-        /// When Claude recorded the entry (RFC 3339, UTC): its transcript
-        /// line's `timestamp`.
+        /// When Claude recorded the entry: its transcript line's RFC 3339
+        /// `timestamp`.
         #[serde(default)]
         timestamp: Option<String>,
         tool_use_id: String,
@@ -294,8 +294,8 @@ pub enum ApiClaudeEntry {
     },
     ToolResult {
         uuid: String,
-        /// When Claude recorded the entry (RFC 3339, UTC): its transcript
-        /// line's `timestamp`.
+        /// When Claude recorded the entry: its transcript line's RFC 3339
+        /// `timestamp`.
         #[serde(default)]
         timestamp: Option<String>,
         tool_use_id: String,
