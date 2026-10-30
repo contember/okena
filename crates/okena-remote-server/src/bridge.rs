@@ -41,10 +41,12 @@ pub enum RemoteCommand {
     /// Agent session + lifecycle of a pane, answered with a serialized
     /// [`okena_core::claude_remote::ClaudeTerminalInfo`]. `probe_foreground`
     /// also fills `foreground_command`, which forks tmux or scans /proc: only
-    /// for typing into the pane, never on a polled read.
+    /// for typing into the pane, never on a polled read. `read_screen` fills
+    /// `startup_dialog` from the pane's visible text.
     ClaudeTerminalInfo {
         terminal_id: String,
         probe_foreground: bool,
+        read_screen: bool,
     },
 }
 

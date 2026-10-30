@@ -240,6 +240,21 @@ fn dispatch(cli: Cli) -> i32 {
         },
         Command::Claude { cmd } => match cmd {
             ClaudeCmd::Ls { json } => claude::cli_ls(json),
+            ClaudeCmd::Start {
+                terminal,
+                prompt_file,
+                trust,
+                wait,
+                timeout,
+                json,
+            } => claude::cli_start(
+                &terminal,
+                prompt_file.as_deref(),
+                trust,
+                wait,
+                timeout,
+                json,
+            ),
             ClaudeCmd::Show { terminal, json } => claude::cli_show(&terminal, json),
             ClaudeCmd::Subagents { terminal, json } => claude::cli_subagents(&terminal, json),
             ClaudeCmd::Log {

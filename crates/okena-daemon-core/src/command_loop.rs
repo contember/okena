@@ -61,7 +61,7 @@ use okena_app_core::workspace::actions::execute::{
     spawn_uninitialized_terminals,
 };
 use okena_core::api::{ActionRequest, ApiGitStatus, ApiServiceInfo, ApiWindow, CommandResult};
-use okena_core::claude_remote::ClaudeTerminalInfo;
+use okena_core::claude_remote::{ApiClaudeStartupDialog, ClaudeTerminalInfo};
 use okena_core::git_poll::{GitPollTrigger, git_poll_trigger_for_action};
 use okena_remote_server::bridge::{BridgeMessage, BridgeReceiver, RemoteCommand};
 use okena_remote_server::claude_remote::ClaudeRemoteHub;
@@ -4469,6 +4469,7 @@ pub async fn daemon_command_loop(
             RemoteCommand::ClaudeTerminalInfo {
                 terminal_id,
                 probe_foreground,
+                read_screen,
             } => {
                 let terminal = terminals.lock().get(&terminal_id).cloned();
                 match terminal {
@@ -4477,6 +4478,9 @@ pub async fn daemon_command_loop(
                             session: terminal.agent_session(),
                             lifecycle: terminal.agent_status().map(|status| status.lifecycle),
                             foreground_command: None,
+                            startup_dialog: read_screen
+                                .then(|| ApiClaudeStartupDialog::detect(&terminal.visible_text()))
+                                .flatten(),
                         };
                         if !probe_foreground {
                             serialize_terminal_info(info)
@@ -6631,6 +6635,9 @@ mod tests {
             None,
             Default::default(),
         )));
+        terminal.process_output(
+            b"WARNING: Loading development channels\r\n\xe2\x9d\xaf 1. I am using this for local development\r\n",
+        );
         h.terminals
             .lock()
             .insert("claude-pane".to_string(), terminal);
@@ -6646,6 +6653,7 @@ mod tests {
                     RemoteCommand::ClaudeTerminalInfo {
                         terminal_id: "claude-pane".to_string(),
                         probe_foreground: false,
+                        read_screen: true,
                     },
                     "ClaudeTerminalInfo",
                 )
@@ -6662,6 +6670,7 @@ mod tests {
                         session: None,
                         lifecycle: Some(okena_core::agent_status::AgentLifecycle::Working),
                         foreground_command: None,
+                        startup_dialog: Some(ApiClaudeStartupDialog::Channels),
                     }
                 );
 
@@ -6670,6 +6679,7 @@ mod tests {
                     RemoteCommand::ClaudeTerminalInfo {
                         terminal_id: "missing".to_string(),
                         probe_foreground: true,
+                        read_screen: false,
                     },
                     "ClaudeTerminalInfo unknown",
                 )
@@ -6791,6 +6801,7 @@ mod tests {
                         RemoteCommand::ClaudeTerminalInfo {
                             terminal_id: "claude-pane".to_string(),
                             probe_foreground,
+                            read_screen: false,
                         },
                         "ClaudeTerminalInfo",
                     )

@@ -32,10 +32,11 @@ channel attached; `claude_sessions` in `GET /v1/state`) or has an open dialog
   drawer's **Chat** pill opens a terminal straight in the chat. A project with
   an open dialog is listed under Needs attention.
 - **Desktop**: settings only; dialogs are answered in the terminal.
-- **CLI**: `okena claude ls | show | subagents | log | prompt | answer |
+- **CLI**: `okena claude start | ls | show | subagents | log | prompt | answer |
   interrupt` uses the same endpoints, for people and for agents driving other
   sessions. `log` prints a cursor (`<session_id>:<offset>`) to pass back with
-  `--cursor` for only the newer entries. See `okena skill show`.
+  `--cursor` for only the newer entries. `start` runs `claude` in a pane, see
+  [Starting a session](#starting-a-session). See `okena skill show`.
 
 ## How a session is connected
 
@@ -54,13 +55,36 @@ channel attached; `claude_sessions` in `GET /v1/state`) or has an open dialog
 The preload's location, environment and the cases it leaves alone are in
 [`integrations/claude-code/okena-remote/README.md`](../../integrations/claude-code/okena-remote/README.md).
 
+## Starting a session
+
+Before it connects, `claude` may wait on a start-up dialog: the folder-trust
+question, then the development-channels warning that Okena's own
+`--dangerously-load-development-channels` causes. While neither the hooks nor
+the channel are attached, the session's `startup_dialog` reads the pane's
+screen and names it: `trust`, `channels` or `null`.
+
+`okena claude start <term>` types `claude` into the pane (it must be at a shell
+prompt) and polls the session. It accepts the channels warning; the trust
+dialog only with `--trust`, else it exits 1 and leaves the dialog open; run
+again with `--trust`, it resumes from the open dialog instead of typing. Keys
+move the selection to the confirming option and press Enter, so the dialog's
+default option does not matter. Once the channel is attached (with
+`claude_remote_channel` off: once the hooks are), it sends `--prompt-file` as
+the first prompt and prints `terminal`, `session_id` and `delivery` (`-` or
+`null` without a prompt). `--wait` then blocks until the transcript shows the
+prompt and a reply after it and Claude is idle with nothing queued (`state
+idle`), or a dialog opens (`state dialog`); the hooks run async, so an idle
+pane alone does not prove the turn ran. It exits 1 when Claude Remote is off, when `claude` already
+runs connected in the pane, or when it does not connect within `--timeout`
+(60 s).
+
 ## Client endpoints
 
 All take the bearer token. Errors have a plain-text body.
 
 | Endpoint | Purpose |
 |---|---|
-| `GET /v1/claude/terminals/{id}` | Session: `session_id`, `hooks_attached`, `busy`, open `dialogs`, `running_subagents`, `pr_links` |
+| `GET /v1/claude/terminals/{id}` | Session: `session_id`, `hooks_attached`, `busy`, open `dialogs`, `running_subagents`, `pr_links`, `startup_dialog` |
 | `GET /v1/claude/terminals/{id}/transcript?cursor=&session_id=&agent_id=` | Transcript page, see [Transcript](#transcript) |
 | `GET /v1/claude/terminals/{id}/subagents` | The session's subagents, see [Subagents](#subagents) |
 | `POST /v1/claude/terminals/{id}/prompt` | `{ "text" }` → `{ "delivery" }`, see [Prompts](#prompts) |

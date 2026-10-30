@@ -40,6 +40,53 @@ pub struct ClaudeTerminalInfo {
     /// Linux). `None` when the shell is at its prompt or the probe failed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub foreground_command: Option<String>,
+    /// The start-up dialog on the pane's screen, when the screen was read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub startup_dialog: Option<ApiClaudeStartupDialog>,
+}
+
+/// A dialog Claude Code shows at start, before the session connects.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApiClaudeStartupDialog {
+    /// "Do you trust this folder": only the user may vouch for a folder.
+    Trust,
+    /// The development-channels warning `--dangerously-load-development-channels`
+    /// causes, which Okena's preload adds for its own channel server.
+    Channels,
+}
+
+impl ApiClaudeStartupDialog {
+    /// The dialog Claude shows on `screen` (a pane's visible text), if any.
+    pub fn detect(screen: &str) -> Option<Self> {
+        [Self::Trust, Self::Channels].into_iter().find(|dialog| {
+            screen.contains(dialog.marker()) && screen.contains(dialog.confirm_label())
+        })
+    }
+
+    /// The option that accepts the dialog.
+    pub fn confirm_label(self) -> &'static str {
+        match self {
+            Self::Trust => "Yes, I trust this folder",
+            Self::Channels => "I am using this for local development",
+        }
+    }
+
+    /// Whether the confirming option is the selected one (`❯` before it).
+    pub fn confirm_selected(self, screen: &str) -> bool {
+        screen.lines().any(|line| {
+            line.trim_start()
+                .strip_prefix('❯')
+                .is_some_and(|rest| rest.contains(self.confirm_label()))
+        })
+    }
+
+    fn marker(self) -> &'static str {
+        match self {
+            Self::Trust => "Accessing workspace:",
+            Self::Channels => "WARNING: Loading development channels",
+        }
+    }
 }
 
 /// What a remote client sees of the Claude session in one pane.
@@ -71,6 +118,10 @@ pub struct ApiClaudeSession {
     /// Pull requests the session created or touched, newest first.
     #[serde(default)]
     pub pr_links: Vec<ApiClaudePrLink>,
+    /// The start-up dialog `claude` waits on before it connects; `null` once
+    /// it connected or when none is shown.
+    #[serde(default)]
+    pub startup_dialog: Option<ApiClaudeStartupDialog>,
 }
 
 /// A pull request Claude Code recorded in the session transcript (a `pr-link`
@@ -243,5 +294,64 @@ mod tests {
         }))
         .expect("session");
         assert_eq!(session.pr_links, Vec::new());
+    }
+
+    const TRUST_SCREEN: &str = "\
+ Accessing workspace:
+
+ /var/tmp/project
+
+ Quick safety check: Is this a project you created or one you trust?
+
+ ❯ No, exit
+   Yes, I trust this folder
+
+ Enter to confirm · Esc to cancel";
+
+    const CHANNELS_SCREEN: &str = "\
+  WARNING: Loading development channels
+
+  Channels: server:okena-remote
+
+  ❯ 1. I am using this for local development
+    2. Exit";
+
+    #[test]
+    fn startup_dialogs_are_detected_with_their_selection() {
+        let trust = ApiClaudeStartupDialog::detect(TRUST_SCREEN);
+        assert_eq!(trust, Some(ApiClaudeStartupDialog::Trust));
+        assert!(!ApiClaudeStartupDialog::Trust.confirm_selected(TRUST_SCREEN));
+        let moved = TRUST_SCREEN
+            .replace("❯ No, exit", "  No, exit")
+            .replace("  Yes, I trust", "❯ Yes, I trust");
+        assert!(ApiClaudeStartupDialog::Trust.confirm_selected(&moved));
+
+        let channels = ApiClaudeStartupDialog::detect(CHANNELS_SCREEN);
+        assert_eq!(channels, Some(ApiClaudeStartupDialog::Channels));
+        assert!(ApiClaudeStartupDialog::Channels.confirm_selected(CHANNELS_SCREEN));
+    }
+
+    #[test]
+    fn a_transcript_quoting_a_dialog_is_not_one() {
+        assert_eq!(
+            ApiClaudeStartupDialog::detect("> says \"Yes, I trust this folder\" in the docs"),
+            None
+        );
+        assert_eq!(ApiClaudeStartupDialog::detect("$ ls\nsrc"), None);
+    }
+
+    #[test]
+    fn session_serializes_a_missing_startup_dialog_as_null() {
+        let session: ApiClaudeSession = serde_json::from_value(json!({
+            "terminal_id": "t1",
+            "has_transcript": false,
+            "hooks_attached": false,
+            "channel_attached": false,
+            "queued_prompts": 0,
+            "dialogs": [],
+        }))
+        .expect("session");
+        let value = serde_json::to_value(&session).expect("encodes");
+        assert_eq!(value["startup_dialog"], serde_json::Value::Null);
     }
 }
