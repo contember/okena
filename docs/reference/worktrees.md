@@ -156,6 +156,12 @@ If any step fails, the operation stops and displays an error. Failed rebases are
 
 Worktree removal uses a fast path: it deletes the directory directly and runs `git worktree prune`, which is significantly faster than `git worktree remove` (which performs expensive status checks).
 
+Before deleting the checkout, Okena kills the worktree's terminals and waits up
+to 5 s for their processes to exit. If it cannot confirm that, the worktree is
+kept and the error says its processes "could not be verified as stopped": the
+close dialog shows it as a toast, and `okena worktree rm` exits 75. Retry after
+a few seconds.
+
 ## Monorepo Support
 
 Okena handles monorepos where the project directory is a subdirectory of the git repository root. When creating a worktree from a monorepo project:

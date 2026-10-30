@@ -5,6 +5,7 @@ use crate::session_backend::SessionBackend;
 use crate::shell_config::ShellType;
 use crate::terminal::TerminalTransport;
 use anyhow::Result;
+use okena_core::api::TEARDOWN_UNVERIFIED;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -22,10 +23,13 @@ pub enum TeardownIncomplete {
 impl std::fmt::Display for TeardownIncomplete {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::TimedOut => write!(f, "queued terminal teardown did not finish in time"),
+            Self::TimedOut => write!(
+                f,
+                "queued terminal teardown did not finish in time; its processes {TEARDOWN_UNVERIFIED}"
+            ),
             Self::Unreleased(terminal_ids) => write!(
                 f,
-                "processes of terminal(s) {} could not be verified as stopped",
+                "processes of terminal(s) {} {TEARDOWN_UNVERIFIED}",
                 terminal_ids.join(", ")
             ),
         }
@@ -322,5 +326,23 @@ impl TerminalBackend for LocalBackend {
 
     fn get_batch_service_pids(&self, terminal_ids: &[&str]) -> HashMap<String, Vec<u32>> {
         self.pty_manager.get_batch_service_pids(terminal_ids)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_incomplete_teardown_names_the_retryable_marker() {
+        for incomplete in [
+            TeardownIncomplete::TimedOut,
+            TeardownIncomplete::Unreleased(vec!["t1".to_string()]),
+        ] {
+            assert!(
+                incomplete.to_string().contains(TEARDOWN_UNVERIFIED),
+                "{incomplete}"
+            );
+        }
     }
 }

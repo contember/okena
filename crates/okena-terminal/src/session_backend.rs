@@ -839,55 +839,115 @@ pub(crate) fn terminate_pty_process_session(
     }
 
     let context = format!("terminal {terminal_id}");
-    let mut members = Vec::new();
-    let mut seen = std::collections::HashSet::new();
-    let mut stable_snapshots = 0;
-    for _ in 0..8 {
-        let Some(snapshot) = tracked_process_session_members(session_id) else {
-            signal_tracked_processes(&members, libc::SIGCONT, &context);
-            log::error!("Could not inspect PTY session {session_id} for terminal {terminal_id}");
-            return false;
-        };
-        let newly_seen = snapshot
-            .into_iter()
-            .filter(|process| seen.insert(*process))
-            .collect::<Vec<_>>();
-        if newly_seen.is_empty() {
-            stable_snapshots += 1;
-            if stable_snapshots == 2 {
-                break;
-            }
-        } else {
-            stable_snapshots = 0;
-            signal_tracked_processes(&newly_seen, libc::SIGSTOP, &context);
-            members.extend(newly_seen);
-        }
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
-
-    if stable_snapshots < 2 {
+    let Some((members, quiesced)) =
+        freeze_process_tree(&context, || tracked_process_session_members(session_id))
+    else {
+        log::error!("Could not inspect PTY session {session_id} for terminal {terminal_id}");
+        return false;
+    };
+    if !quiesced {
         signal_tracked_processes(&members, libc::SIGCONT, &context);
         log::error!("PTY session {session_id} for terminal {terminal_id} did not quiesce");
         return false;
     }
 
     signal_tracked_processes(&members, libc::SIGKILL, &context);
-    std::thread::sleep(std::time::Duration::from_millis(50));
-
-    let Some(snapshot) = tracked_process_session_members(session_id) else {
-        signal_tracked_processes(&members, libc::SIGCONT, &context);
-        log::error!("Could not verify PTY session {session_id} for terminal {terminal_id}");
-        return false;
-    };
-    let survivors = snapshot.len();
-    if survivors > 0 {
-        signal_tracked_processes(&snapshot, libc::SIGCONT, &context);
-        log::error!(
-            "PTY session {session_id} for terminal {terminal_id} retained {survivors} process(es)"
-        );
-        return false;
+    match await_killed_exit(&context, || tracked_process_session_members(session_id)) {
+        Some(survivors) if survivors.is_empty() => true,
+        Some(survivors) => {
+            signal_tracked_processes(&survivors, libc::SIGCONT, &context);
+            log::error!(
+                "PTY session {session_id} for terminal {terminal_id} retained {} process(es)",
+                survivors.len()
+            );
+            false
+        }
+        None => {
+            signal_tracked_processes(&members, libc::SIGCONT, &context);
+            log::error!("Could not verify PTY session {session_id} for terminal {terminal_id}");
+            false
+        }
     }
-    true
+}
+
+/// How long a process tree may keep spawning before its teardown gives up
+/// stopping it.
+#[cfg(unix)]
+const TEARDOWN_QUIESCE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// How long SIGKILLed processes may take to exit before the teardown counts as
+/// unverified. A large tree (an agent with its tools) needs far longer than one
+/// short sleep.
+#[cfg(unix)]
+const TEARDOWN_EXIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// 10 ms, doubling up to 200 ms.
+#[cfg(unix)]
+fn teardown_poll_delay(attempt: u32) -> std::time::Duration {
+    std::time::Duration::from_millis(10u64 << attempt.min(5))
+        .min(std::time::Duration::from_millis(200))
+}
+
+/// SIGSTOPs every process `snapshot` reports, in its order, until two polls in
+/// a row find none new or `TEARDOWN_QUIESCE_TIMEOUT` passes. Returns the stopped
+/// processes and whether the tree quiesced; `None` (after resuming them) when
+/// a snapshot fails.
+#[cfg(unix)]
+fn freeze_process_tree(
+    context: &str,
+    mut snapshot: impl FnMut() -> Option<Vec<TrackedProcess>>,
+) -> Option<(Vec<TrackedProcess>, bool)> {
+    let mut stopped = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let mut stable_snapshots = 0;
+    let deadline = std::time::Instant::now() + TEARDOWN_QUIESCE_TIMEOUT;
+    for attempt in 0u32.. {
+        let Some(processes) = snapshot() else {
+            signal_tracked_processes(&stopped, libc::SIGCONT, context);
+            return None;
+        };
+        let newly_seen = processes
+            .into_iter()
+            .filter(|process| seen.insert(*process))
+            .collect::<Vec<_>>();
+        if newly_seen.is_empty() {
+            stable_snapshots += 1;
+            if stable_snapshots == 2 {
+                return Some((stopped, true));
+            }
+        } else {
+            stable_snapshots = 0;
+            signal_tracked_processes(&newly_seen, libc::SIGSTOP, context);
+            stopped.extend(newly_seen);
+        }
+        if std::time::Instant::now() >= deadline {
+            break;
+        }
+        std::thread::sleep(teardown_poll_delay(attempt));
+    }
+    Some((stopped, false))
+}
+
+/// Polls `survivors` with backoff until it reports none or
+/// `TEARDOWN_EXIT_TIMEOUT` passes, and returns its last report. `None` when a
+/// poll fails.
+#[cfg(unix)]
+fn await_killed_exit(
+    context: &str,
+    mut survivors: impl FnMut() -> Option<Vec<TrackedProcess>>,
+) -> Option<Vec<TrackedProcess>> {
+    let deadline = std::time::Instant::now() + TEARDOWN_EXIT_TIMEOUT;
+    let mut attempt = 0;
+    loop {
+        std::thread::sleep(teardown_poll_delay(attempt));
+        attempt += 1;
+        let alive = survivors()?;
+        if alive.is_empty() || std::time::Instant::now() >= deadline {
+            return Some(alive);
+        }
+        // Kills whatever joined after the freeze; a repeat SIGKILL is a no-op.
+        signal_tracked_processes(&alive, libc::SIGKILL, context);
+    }
 }
 
 #[cfg(unix)]
@@ -960,32 +1020,16 @@ fn terminate_dtach_process_tree(socket_path: &std::path::PathBuf, session_name: 
     // group. Iteratively freeze descendants parent-first until two snapshots are
     // stable. Once every anchored process is SIGSTOPed, none can fork during the
     // destructive pass and the socket remains a durable retry handle on failure.
-    let mut descendants = Vec::new();
-    let mut seen = std::collections::HashSet::new();
-    let mut stable_snapshots = 0;
-    for _ in 0..8 {
-        let snapshot = tracked_descendants(&holders);
-        let mut newly_seen: Vec<TrackedProcess> = snapshot
-            .into_iter()
-            .filter(|process| seen.insert(*process))
-            .collect();
-        if newly_seen.is_empty() {
-            stable_snapshots += 1;
-            if stable_snapshots == 2 {
-                break;
-            }
-        } else {
-            stable_snapshots = 0;
-            // `tracked_descendants` is child-first; reverse it so spawning
-            // parents are stopped before their children.
-            newly_seen.reverse();
-            signal_tracked_processes(&newly_seen, libc::SIGSTOP, session_name);
-            descendants.extend(newly_seen);
-        }
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
+    let (descendants, quiesced) = freeze_process_tree(session_name, || {
+        // `tracked_descendants` is child-first; reverse it so spawning parents
+        // are stopped before their children.
+        let mut snapshot = tracked_descendants(&holders);
+        snapshot.reverse();
+        Some(snapshot)
+    })
+    .unwrap_or_default();
 
-    if stable_snapshots < 2 {
+    if !quiesced {
         signal_tracked_processes(&descendants, libc::SIGCONT, session_name);
         signal_tracked_processes(&stopped_holders, libc::SIGCONT, session_name);
         log::error!(
@@ -996,11 +1040,17 @@ fn terminate_dtach_process_tree(socket_path: &std::path::PathBuf, session_name: 
     }
 
     signal_tracked_processes(&descendants, libc::SIGKILL, session_name);
-    std::thread::sleep(std::time::Duration::from_millis(50));
-    let surviving_descendants = descendants
-        .iter()
-        .filter(|process| same_process_is_alive(**process))
-        .count();
+    let surviving_descendants = await_killed_exit(session_name, || {
+        Some(
+            descendants
+                .iter()
+                .copied()
+                .filter(|process| same_process_is_alive(*process))
+                .collect(),
+        )
+    })
+    // A failed poll proves nothing: keep the socket as the retry handle.
+    .map_or(descendants.len().max(1), |survivors| survivors.len());
     if surviving_descendants > 0 {
         signal_tracked_processes(&descendants, libc::SIGCONT, session_name);
         signal_tracked_processes(&stopped_holders, libc::SIGCONT, session_name);
@@ -2153,6 +2203,108 @@ fn is_screen_available() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn teardown_polls_back_off_to_200ms() {
+        let delays = [0, 1, 4, 5, 40].map(|attempt| teardown_poll_delay(attempt).as_millis());
+        assert_eq!(delays, [10, 20, 160, 200, 200]);
+    }
+
+    /// A PID no process has, so the re-SIGKILL between polls signals nothing.
+    #[cfg(unix)]
+    const GONE: TrackedProcess = TrackedProcess {
+        pid: i32::MAX,
+        start_marker: None,
+    };
+
+    #[cfg(unix)]
+    #[test]
+    fn a_killed_tree_that_exits_slowly_is_verified() {
+        let mut polls = 0;
+        let survivors = await_killed_exit("test", || {
+            polls += 1;
+            Some(if polls < 6 { vec![GONE] } else { Vec::new() })
+        });
+        assert_eq!(survivors, Some(Vec::new()));
+        assert_eq!(polls, 6);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_killed_tree_that_never_exits_fails_after_the_exit_timeout() {
+        let started = std::time::Instant::now();
+        let survivors = await_killed_exit("test", || Some(vec![GONE]));
+        let elapsed = started.elapsed();
+        assert_eq!(survivors, Some(vec![GONE]));
+        assert!(
+            elapsed >= TEARDOWN_EXIT_TIMEOUT,
+            "gave up after {elapsed:?}"
+        );
+        assert!(elapsed < TEARDOWN_EXIT_TIMEOUT + std::time::Duration::from_secs(1));
+    }
+
+    /// A distinct process no one has, like [`GONE`].
+    #[cfg(unix)]
+    fn gone(n: u128) -> TrackedProcess {
+        TrackedProcess {
+            pid: i32::MAX,
+            start_marker: Some(n),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_tree_that_stops_growing_is_frozen() {
+        let mut polls = 0;
+        let frozen = freeze_process_tree("test", || {
+            polls += 1;
+            Some(if polls == 1 {
+                vec![gone(1)]
+            } else {
+                vec![gone(1), gone(2)]
+            })
+        });
+        assert_eq!(frozen, Some((vec![gone(1), gone(2)], true)));
+        assert_eq!(polls, 4, "two polls in a row found nothing new");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_tree_that_keeps_growing_is_not_frozen() {
+        let started = std::time::Instant::now();
+        let mut polls = 0;
+        let frozen = freeze_process_tree("test", || {
+            polls += 1;
+            Some(vec![gone(polls)])
+        });
+        let elapsed = started.elapsed();
+        let (stopped, quiesced) = frozen.expect("snapshots succeeded");
+        assert!(!quiesced);
+        assert_eq!(stopped.len(), usize::try_from(polls).expect("small count"));
+        assert!(
+            elapsed >= TEARDOWN_QUIESCE_TIMEOUT,
+            "gave up after {elapsed:?}"
+        );
+        assert!(elapsed < TEARDOWN_QUIESCE_TIMEOUT + std::time::Duration::from_secs(1));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_snapshot_is_not_frozen() {
+        let mut polls = 0;
+        let frozen = freeze_process_tree("test", || {
+            polls += 1;
+            (polls == 1).then(|| vec![gone(1)])
+        });
+        assert_eq!(frozen, None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_survivor_poll_is_unverified() {
+        assert_eq!(await_killed_exit("test", || None), None);
+    }
 
     fn command_output(success: bool) -> std::process::Output {
         #[cfg(windows)]
