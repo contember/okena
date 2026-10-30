@@ -548,6 +548,7 @@ mod tests {
             worktree_info: Some(WorktreeMetadata {
                 parent_project_id: parent_id.to_string(),
                 color_override: None,
+                custom_name: false,
                 main_repo_path: String::new(),
                 worktree_path: path.to_string(),
                 branch_name: String::new(),

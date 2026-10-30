@@ -695,6 +695,7 @@ mod jump_gpui_tests {
         child.worktree_info = Some(WorktreeMetadata {
             parent_project_id: "p1".to_string(),
             color_override: None,
+            custom_name: false,
             main_repo_path: "/tmp/test".to_string(),
             worktree_path: "/tmp/w1".to_string(),
             branch_name: String::new(),

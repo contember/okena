@@ -13,6 +13,8 @@ pub struct RenameState<Id> {
     pub target: Id,
     /// The input entity for editing the name
     pub input: Entity<SimpleInputState>,
+    /// The name the input was seeded with
+    initial: String,
     /// Holds the blur subscription alive so the on_blur handler fires
     _blur_subscription: Option<Subscription>,
 }
@@ -54,19 +56,22 @@ where
     RenameState {
         target,
         input,
+        initial: current_name.to_string(),
         _blur_subscription: Some(subscription),
     }
 }
 
 /// Finish a rename operation and get the result.
 ///
-/// Returns `Some((target, new_name))` if the rename was active and the name is not empty.
-/// Returns `None` if the state was `None` or the input was empty.
+/// Returns `Some((target, new_name))` if the rename was active and the name is
+/// not empty. Returns `None` if the state was `None`, the input was empty, or
+/// the name was left unchanged — a stray double-click then blur must not count
+/// as a rename (it would pin a worktree's name over its live branch).
 pub fn finish_rename<Id>(state: &mut Option<RenameState<Id>>, cx: &App) -> Option<(Id, String)> {
     let rename_state = state.take()?;
     let new_name = rename_state.value(cx);
 
-    if new_name.is_empty() {
+    if new_name.is_empty() || new_name == rename_state.initial {
         None
     } else {
         Some((rename_state.target, new_name))

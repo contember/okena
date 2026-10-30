@@ -956,6 +956,16 @@ pub struct SidebarProjectInfo {
 }
 
 impl SidebarProjectInfo {
+    /// The label a project is listed under. A worktree follows its live git
+    /// branch (falling back to the stored name until the first git poll lands)
+    /// unless the user renamed it; every other project shows its stored name.
+    pub(crate) fn display_name(project: &ProjectData, branch: Option<&str>) -> String {
+        match (&project.worktree_info, branch) {
+            (Some(wt), Some(branch)) if !wt.custom_name => branch.to_string(),
+            _ => project.name.clone(),
+        }
+    }
+
     /// Build a sidebar projection of a project.
     ///
     /// `show_in_overview` on the projection is derived from
@@ -969,19 +979,14 @@ impl SidebarProjectInfo {
         window_id: WindowId,
     ) -> Self {
         let layout = project.layout.as_ref();
-        // For worktree projects, show the git branch instead of the stored name.
         // The branch comes from the daemon's git poll over the wire
         // (`remote_snapshot().git_status.branch`) — a local `get_git_status` would
         // return None in client mode since the daemon owns the working tree.
-        let name = if project.worktree_info.is_some() {
-            workspace
-                .remote_snapshot(&project.id)
-                .and_then(|s| s.git_status.as_ref())
-                .and_then(|g| g.branch.clone())
-                .unwrap_or_else(|| project.name.clone())
-        } else {
-            project.name.clone()
-        };
+        let branch = workspace
+            .remote_snapshot(&project.id)
+            .and_then(|s| s.git_status.as_ref())
+            .and_then(|g| g.branch.as_deref());
+        let name = Self::display_name(project, branch);
         Self {
             id: project.id.clone(),
             name,

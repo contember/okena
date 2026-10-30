@@ -1777,6 +1777,7 @@ mod tests {
         project.worktree_info = Some(WorktreeMetadata {
             parent_project_id: "parent".to_string(),
             color_override: None,
+            custom_name: false,
             main_repo_path: "/tmp/repo".to_string(),
             worktree_path: "/tmp/repo-worktree".to_string(),
             branch_name: "feature/login".to_string(),

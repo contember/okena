@@ -1860,6 +1860,7 @@ mod tests {
         WorktreeMetadata {
             parent_project_id: parent_id.to_string(),
             color_override: None,
+            custom_name: false,
             main_repo_path: repo.to_string_lossy().into_owned(),
             worktree_path: String::new(),
             branch_name: "some-branch".to_string(),
@@ -2818,6 +2819,7 @@ mod tests {
         p.worktree_info = Some(crate::state::WorktreeMetadata {
             parent_project_id: parent_id.to_string(),
             color_override: None,
+            custom_name: false,
             main_repo_path: "/tmp/repo".to_string(),
             worktree_path: format!("/tmp/worktrees/{}", id),
             branch_name: String::new(),
@@ -2834,6 +2836,7 @@ mod tests {
         wt_project.worktree_info = Some(WorktreeMetadata {
             parent_project_id: "p1".to_string(),
             color_override: None,
+            custom_name: false,
             main_repo_path: "/tmp/test".to_string(),
             worktree_path: String::new(),
             branch_name: "some-branch".to_string(),
@@ -2860,6 +2863,7 @@ mod tests {
         wt_project.worktree_info = Some(WorktreeMetadata {
             parent_project_id: "p1".to_string(),
             color_override: None,
+            custom_name: false,
             main_repo_path: "/tmp/test".to_string(),
             worktree_path: String::new(),
             branch_name: "some-branch".to_string(),
@@ -2890,6 +2894,7 @@ mod tests {
         wt_project.worktree_info = Some(WorktreeMetadata {
             parent_project_id: "p1".to_string(),
             color_override: None,
+            custom_name: false,
             main_repo_path: "/tmp/test".to_string(),
             worktree_path: String::new(),
             branch_name: "some-branch".to_string(),
@@ -2923,6 +2928,7 @@ mod tests {
         wt_project.worktree_info = Some(WorktreeMetadata {
             parent_project_id: "p1".to_string(),
             color_override: None,
+            custom_name: false,
             main_repo_path: "/tmp/test".to_string(),
             worktree_path: checkout.to_string_lossy().into_owned(),
             branch_name: "some-branch".to_string(),
@@ -3052,6 +3058,7 @@ mod tests {
         wt.worktree_info = Some(WorktreeMetadata {
             parent_project_id: "p1".to_string(),
             color_override: None,
+            custom_name: false,
             main_repo_path: "/tmp/test".to_string(),
             worktree_path: String::new(),
             branch_name: "some-branch".to_string(),
@@ -3209,6 +3216,7 @@ mod tests {
         wt.worktree_info = Some(WorktreeMetadata {
             parent_project_id: "p1".to_string(),
             color_override: None,
+            custom_name: false,
             main_repo_path: "/tmp/test".to_string(),
             worktree_path: String::new(),
             branch_name: "some-branch".to_string(),
@@ -3237,6 +3245,7 @@ mod tests {
         wt.worktree_info = Some(WorktreeMetadata {
             parent_project_id: "p1".to_string(),
             color_override: None,
+            custom_name: false,
             main_repo_path: "/tmp/test".to_string(),
             worktree_path: String::new(),
             branch_name: "b".to_string(),
@@ -3315,6 +3324,7 @@ mod tests {
         worktree.worktree_info = Some(WorktreeMetadata {
             parent_project_id: "p1".to_string(),
             color_override: None,
+            custom_name: false,
             main_repo_path: "C:\\repo".to_string(),
             worktree_path: worktree.path.clone(),
             branch_name: "feature".to_string(),
@@ -3373,6 +3383,7 @@ mod tests {
         worktree.worktree_info = Some(WorktreeMetadata {
             parent_project_id: "p1".to_string(),
             color_override: None,
+            custom_name: false,
             main_repo_path: "C:\\repo".to_string(),
             worktree_path: worktree.path.clone(),
             branch_name: "feature".to_string(),

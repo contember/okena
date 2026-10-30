@@ -658,6 +658,10 @@ pub struct ApiWorktreeMetadata {
     pub parent_project_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color_override: Option<FolderColor>,
+    /// Whether the user renamed this worktree (clients then show the stored
+    /// name instead of the live branch). serde-defaulted for older peers.
+    #[serde(default)]
+    pub custom_name: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

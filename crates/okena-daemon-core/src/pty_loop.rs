@@ -1206,6 +1206,7 @@ mod tests {
             worktree_info: Some(WorktreeMetadata {
                 parent_project_id: "parent".into(),
                 color_override: None,
+                custom_name: false,
                 main_repo_path: main_repo.to_string_lossy().into_owned(),
                 worktree_path: worktree.to_string_lossy().into_owned(),
                 branch_name: "feature".into(),
