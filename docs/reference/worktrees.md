@@ -154,6 +154,11 @@ The close workflow runs these steps in order:
 
 If any step fails, the operation stops and displays an error. Failed rebases are automatically aborted. Failed stashes are popped to restore the working state.
 
+Before removing the checkout, Okena kills the worktree's terminals and waits up
+to 5 s for their processes to exit. If it cannot confirm that, the worktree is
+kept and the error says its processes "could not be verified as stopped";
+`okena worktree rm` (and `project rm`) then exits 75. Retry after a few seconds.
+
 Worktree removal uses a fast path: it deletes the directory directly and runs `git worktree prune`, which is significantly faster than `git worktree remove` (which performs expensive status checks).
 
 ## Monorepo Support

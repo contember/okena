@@ -274,7 +274,7 @@ pub fn cli_action(json: &str) -> i32 {
         }
         Err(e) => {
             eprintln!("{e}");
-            1
+            action_error_exit_code(&e)
         }
     }
 }
@@ -727,8 +727,19 @@ fn post_action(token: &str, body: &serde_json::Value) -> i32 {
         }
         Err(e) => {
             eprintln!("{e}");
-            1
+            action_error_exit_code(&e)
         }
+    }
+}
+
+/// 1, or `EXIT_RETRYABLE` when the daemon could not confirm a terminal's
+/// processes stopped (`TEARDOWN_UNVERIFIED`): a retry a few seconds later
+/// usually succeeds.
+fn action_error_exit_code(error: &str) -> i32 {
+    if error.contains(okena_core::api::TEARDOWN_UNVERIFIED) {
+        okena_core::api::EXIT_RETRYABLE
+    } else {
+        1
     }
 }
 
@@ -743,7 +754,7 @@ fn post_action_print_ids(token: &str, body: &serde_json::Value, id_fields: &[&st
         }
         Err(e) => {
             eprintln!("{e}");
-            1
+            action_error_exit_code(&e)
         }
     }
 }
@@ -2620,6 +2631,20 @@ pub fn cli_read(terminal: &str, json_mode: bool) -> i32 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn an_unverified_teardown_exits_retryable() {
+        let unverified = format!(
+            "Server returned 400 Bad Request: terminal teardown did not release the worktree: \
+             processes of terminal(s) t1 {}; checkout preserved",
+            okena_core::api::TEARDOWN_UNVERIFIED
+        );
+        assert_eq!(super::action_error_exit_code(&unverified), 75);
+        assert_eq!(
+            super::action_error_exit_code("Server returned 400 Bad Request: project not found"),
+            1
+        );
+    }
+
     #[test]
     fn usage_lines_one_per_window_or_status() {
         use okena_core::api::{

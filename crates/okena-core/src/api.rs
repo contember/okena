@@ -1477,6 +1477,14 @@ pub enum ActionRequest {
     },
 }
 
+/// Part of every error for a terminal teardown that could not confirm its
+/// processes stopped. The tree usually exits a little later, so the request is
+/// worth retrying; the CLI exits with [`EXIT_RETRYABLE`] on it.
+pub const TEARDOWN_UNVERIFIED: &str = "could not be verified as stopped";
+
+/// CLI exit code for a failure worth retrying (`EX_TEMPFAIL`).
+pub const EXIT_RETRYABLE: i32 = 75;
+
 /// Result of processing a remote command on the GPUI thread.
 ///
 /// Lives in `okena-core` (rather than the server crate) so the binary's
