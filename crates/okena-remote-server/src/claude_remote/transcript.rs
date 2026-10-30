@@ -350,6 +350,30 @@ enum Record {
     Assistant(AssistantRecord),
     #[serde(rename = "pr-link")]
     PrLink(PrLinkRecord),
+    Attachment(AttachmentRecord),
+    #[serde(other)]
+    Other,
+}
+
+/// A prompt sent while Claude was busy is recorded only as a `queued_command`
+/// attachment, never as a user record.
+#[derive(Deserialize)]
+struct AttachmentRecord {
+    uuid: String,
+    attachment: Attachment,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum Attachment {
+    #[serde(rename_all = "camelCase")]
+    QueuedCommand {
+        prompt: Content<UserBlock>,
+        #[serde(default)]
+        command_mode: Option<String>,
+        #[serde(default)]
+        origin: Option<RecordOrigin>,
+    },
     #[serde(other)]
     Other,
 }
@@ -469,7 +493,43 @@ fn record_entries(record: Record) -> Vec<ApiClaudeEntry> {
     match record {
         Record::User(user) => user_entries(user),
         Record::Assistant(assistant) => assistant_entries(assistant),
+        Record::Attachment(attachment) => attachment_entries(attachment),
         Record::PrLink(_) | Record::Other => Vec::new(),
+    }
+}
+
+/// Queued prompts from the user (terminal) or a channel; task notifications
+/// and peer messages queue the same way and stay hidden, as their user records do.
+fn attachment_entries(record: AttachmentRecord) -> Vec<ApiClaudeEntry> {
+    let Attachment::QueuedCommand {
+        prompt,
+        command_mode,
+        origin,
+    } = record.attachment
+    else {
+        return Vec::new();
+    };
+    if command_mode.as_deref() != Some("prompt") {
+        return Vec::new();
+    }
+    let text = content_text(&prompt);
+    match origin.map(|origin| origin.kind).as_deref() {
+        Some("channel") => vec![ApiClaudeEntry::User {
+            uuid: record.uuid,
+            text: strip_channel_wrapper(&text).to_string(),
+            origin: ApiClaudePromptOrigin::Channel,
+        }],
+        // Older Claude Code versions write typed prompts without an origin.
+        Some("human") | None => terminal_prompt_text(&text)
+            .filter(|text| !text.trim().is_empty())
+            .map(|text| ApiClaudeEntry::User {
+                uuid: record.uuid,
+                text,
+                origin: ApiClaudePromptOrigin::Terminal,
+            })
+            .into_iter()
+            .collect(),
+        _ => Vec::new(),
     }
 }
 
@@ -751,6 +811,103 @@ mod tests {
         assert_eq!(
             parse_lines(&text),
             vec![user("u1", "run the tests", ApiClaudePromptOrigin::Channel)]
+        );
+    }
+
+    #[test]
+    fn queued_prompts_are_user_entries() {
+        // Shapes as Claude Code writes them when a prompt arrives mid-turn.
+        let channel = line(json!({
+            "type": "attachment",
+            "uuid": "a1",
+            "attachment": {
+                "type": "queued_command",
+                "prompt": "<channel source=\"okena-remote\">\nship it\n</channel>",
+                "commandMode": "prompt",
+                "origin": {"kind": "channel", "server": "okena-remote"},
+                "isMeta": true
+            }
+        }));
+        let typed = line(json!({
+            "type": "attachment",
+            "uuid": "a2",
+            "attachment": {
+                "type": "queued_command",
+                "prompt": [{"type": "text", "text": "and the docs"}, {"type": "image"}],
+                "commandMode": "prompt",
+                "origin": {"kind": "human"}
+            }
+        }));
+        // Older Claude Code versions omit the origin of typed prompts.
+        let legacy = line(json!({
+            "type": "attachment",
+            "uuid": "a3",
+            "attachment": {
+                "type": "queued_command",
+                "prompt": "<command-name>/review</command-name>\n<command-args>42</command-args>",
+                "commandMode": "prompt"
+            }
+        }));
+        let legacy_plain = line(json!({
+            "type": "attachment",
+            "uuid": "a4",
+            "attachment": {
+                "type": "queued_command",
+                "prompt": "fix it",
+                "commandMode": "prompt"
+            }
+        }));
+        assert_eq!(
+            parse_lines(&(channel + &typed + &legacy + &legacy_plain)),
+            vec![
+                user("a1", "ship it", ApiClaudePromptOrigin::Channel),
+                user("a2", "and the docs", ApiClaudePromptOrigin::Terminal),
+                user("a3", "/review 42", ApiClaudePromptOrigin::Terminal),
+                user("a4", "fix it", ApiClaudePromptOrigin::Terminal),
+            ]
+        );
+    }
+
+    #[test]
+    fn other_queued_commands_are_skipped() {
+        let task = line(json!({
+            "type": "attachment",
+            "uuid": "a1",
+            "attachment": {
+                "type": "queued_command",
+                "prompt": "<task-notification>\n</task-notification>",
+                "commandMode": "task-notification",
+                "origin": {"kind": "task-notification"}
+            }
+        }));
+        let peer = line(json!({
+            "type": "attachment",
+            "uuid": "a2",
+            "attachment": {
+                "type": "queued_command",
+                "prompt": "<cross-session-message from=\"x\">hi</cross-session-message>",
+                "commandMode": "prompt",
+                "origin": {"kind": "peer"}
+            }
+        }));
+        let continuation = line(json!({
+            "type": "attachment",
+            "uuid": "a3",
+            "attachment": {
+                "type": "queued_command",
+                "prompt": "Goal set: finish",
+                "commandMode": "prompt",
+                "origin": {"kind": "auto-continuation"}
+            }
+        }));
+        let other = line(json!({
+            "type": "attachment",
+            "uuid": "a4",
+            "attachment": {"type": "edited_text_file", "filename": "/x"}
+        }));
+        assert_eq!(
+            parse_lines(&(task + &peer + &continuation + &other)),
+            Vec::new()
         );
     }
 
