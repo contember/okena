@@ -9,6 +9,7 @@ use super::{ActionResult, find_first_terminal_id, spawn_uninitialized_terminals}
 use crate::workspace::focus::FocusManager;
 use crate::workspace::persistence::AppSettings;
 use crate::workspace::state::{HookTerminalStatus, WindowId, Workspace};
+use okena_core::api::WorktreeLayout;
 use okena_core::theme::FolderColor;
 use okena_terminal::TerminalsRegistry;
 use okena_terminal::backend::{TerminalBackend, TerminalLaunchPlan};
@@ -484,6 +485,8 @@ pub(super) fn create_worktree(
     project_id: String,
     branch: String,
     create_branch: bool,
+    layout: Option<WorktreeLayout>,
+    terminal_name: Option<String>,
     backend: &dyn TerminalBackend,
     terminals: &TerminalsRegistry,
     settings: &AppSettings,
@@ -512,6 +515,9 @@ pub(super) fn create_worktree(
         cx,
     ) {
         Ok(new_project_id) => {
+            if layout == Some(WorktreeLayout::Single) {
+                ws.use_single_terminal_layout(&new_project_id);
+            }
             let result = spawn_uninitialized_terminals(
                 ws,
                 &new_project_id,
@@ -521,6 +527,9 @@ pub(super) fn create_worktree(
                 None,
                 cx,
             );
+            if let Some(name) = terminal_name {
+                ws.name_first_terminal(&new_project_id, name, cx);
+            }
             let terminal_id = ws
                 .project(&new_project_id)
                 .and_then(|p| p.layout.as_ref())

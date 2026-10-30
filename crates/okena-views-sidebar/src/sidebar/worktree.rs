@@ -95,6 +95,9 @@ impl Sidebar {
                         branch,
                         create_branch: true,
                         window: None,
+                        layout: None,
+                        terminal_name: None,
+                        wait: false,
                     },
                     cx,
                 );

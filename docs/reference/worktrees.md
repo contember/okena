@@ -33,6 +33,20 @@ Right-click a project in the sidebar and select **Create Worktree**, or use the 
 
 Check **Use custom path** to override where the worktree is created on disk. The field is pre-filled with the auto-generated path based on your path template.
 
+### From the CLI
+
+`okena worktree add <project> <branch> [--new-branch]` returns as soon as the
+row exists (`pending: true`) and checks out in the background; a failed checkout
+removes the row again and shows a toast.
+
+- `--wait` returns once the checkout exists and its terminals run, and prints
+  the project id, path and first terminal id. A failed checkout exits 1 with
+  Git's reason. The `create_worktree` action takes it as `wait: true` and then
+  replies with `pending: false`, `terminal_id` and `terminal_ids`.
+- `--layout single` starts the worktree with one terminal; the default
+  (`parent`) clones the parent project's layout with fresh terminals.
+- `--name <label>` names the worktree's first terminal (`terminal_name`).
+
 ## Worktrees Created Outside Okena
 
 The daemon keeps the sidebar in step with what Git knows about. Two background

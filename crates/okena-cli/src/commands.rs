@@ -1506,12 +1506,20 @@ pub fn cli_project_focus(project: &str, window: Option<&str>) -> i32 {
 
 // ── Worktrees ────────────────────────────────────────────────────────────────
 
-/// `okena worktree add <project> <branch> [--new-branch]`
+/// `worktree add` flags beyond the branch and window.
+pub struct WorktreeAddOptions {
+    pub wait: bool,
+    pub layout: Option<okena_core::api::WorktreeLayout>,
+    pub terminal_name: Option<String>,
+}
+
+/// `okena worktree add <project> <branch> [--new-branch] [--wait] [--layout l] [--name n]`
 pub fn cli_worktree_add(
     project: &str,
     branch: &str,
     new_branch: bool,
     window: Option<&str>,
+    options: WorktreeAddOptions,
 ) -> i32 {
     let token = match ensure_token() {
         Ok(t) => t,
@@ -1539,6 +1547,9 @@ pub fn cli_worktree_add(
         "project_id": p.id,
         "branch": branch,
         "create_branch": new_branch,
+        "layout": options.layout,
+        "terminal_name": options.terminal_name,
+        "wait": options.wait,
     });
     if let Some(w) = window {
         match resolve::resolve_window(&state, w) {
@@ -1557,7 +1568,8 @@ pub fn cli_worktree_add(
             // exist on disk yet — warn on stderr so a script does not `cd` into it
             // immediately. On a later background failure the row is removed from
             // state (observable via `okena ls` / `okena state`) plus a toast.
-            print_response_ids(&resp, &["project_id", "path"]);
+            // `--wait` gets the ready worktree with its first terminal instead.
+            print_response_ids(&resp, &["project_id", "path", "terminal_id"]);
             let pending = serde_json::from_str::<serde_json::Value>(&resp)
                 .ok()
                 .and_then(|v| v.get("pending").and_then(|p| p.as_bool()))

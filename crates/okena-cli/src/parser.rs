@@ -318,6 +318,23 @@ pub enum WindowCmd {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum WorktreeLayoutArg {
+    /// One terminal
+    Single,
+    /// The parent project's layout
+    Parent,
+}
+
+impl From<WorktreeLayoutArg> for okena_core::api::WorktreeLayout {
+    fn from(arg: WorktreeLayoutArg) -> Self {
+        match arg {
+            WorktreeLayoutArg::Single => Self::Single,
+            WorktreeLayoutArg::Parent => Self::Parent,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
 pub enum LayoutModeArg {
     Columns,
     Rows,
@@ -612,6 +629,16 @@ pub enum WorktreeCmd {
         /// Create the branch if it doesn't exist
         #[arg(long)]
         new_branch: bool,
+        /// Block until the checkout and its terminals exist; print the first
+        /// terminal id too, exit 1 with the reason if creation fails
+        #[arg(long)]
+        wait: bool,
+        /// Terminals to start with: one (`single`) or the parent's layout
+        #[arg(long, value_enum)]
+        layout: Option<WorktreeLayoutArg>,
+        /// Name the worktree's first terminal
+        #[arg(long)]
+        name: Option<String>,
     },
     /// Remove a worktree project
     Rm {
@@ -868,6 +895,17 @@ mod tests {
         assert!(
             Cli::try_parse_from(["okena", "run", "--wait", "--timeout", "60", "t1", "make"])
                 .is_ok()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "okena", "worktree", "add", "p", "feat", "--wait", "--layout", "single", "--name",
+                "agent"
+            ])
+            .is_ok()
+        );
+        assert!(
+            Cli::try_parse_from(["okena", "worktree", "add", "p", "feat", "--layout", "grid"])
+                .is_err()
         );
         assert!(Cli::try_parse_from(["okena", "skill", "show"]).is_ok());
         assert!(Cli::try_parse_from(["okena", "skill", "install", "--project"]).is_ok());

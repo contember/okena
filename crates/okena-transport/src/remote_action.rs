@@ -54,7 +54,9 @@ fn client_kind_for(action: &ActionRequest) -> ActionClientKind {
         ActionRequest::SearchContent { .. } | ActionRequest::SearchPathContent { .. } => {
             ActionClientKind::Search
         }
-        ActionRequest::RemoveWorktreeProject { .. }
+        // A waited create replies after `git fetch` + checkout + hooks.
+        ActionRequest::CreateWorktree { wait: true, .. }
+        | ActionRequest::RemoveWorktreeProject { .. }
         | ActionRequest::ForceRemoveWorktreeProject { .. }
         | ActionRequest::RenameProjectDirectory { .. } => ActionClientKind::LongMutation,
         _ => ActionClientKind::Fast,
@@ -687,6 +689,24 @@ mod tests {
             assert_eq!(timeout_for(&action), LONG_MUTATION_TIMEOUT_SECS);
         }
         assert_eq!(LONG_MUTATION_TIMEOUT_SECS, 660);
+    }
+
+    #[test]
+    fn only_a_waited_worktree_create_waits_long() {
+        let create = |wait| ActionRequest::CreateWorktree {
+            project_id: "p1".into(),
+            branch: "feature".into(),
+            create_branch: true,
+            window: None,
+            layout: None,
+            terminal_name: None,
+            wait,
+        };
+        assert_eq!(
+            client_kind_for(&create(true)),
+            ActionClientKind::LongMutation
+        );
+        assert_eq!(client_kind_for(&create(false)), ActionClientKind::Fast);
     }
 
     #[test]

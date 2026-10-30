@@ -629,17 +629,23 @@ pub fn execute_action(
             project::set_worktree_color_override(ws, project_id, color, cx)
         }
         // `window` is desktop placement, applied by the desktop's push handler.
+        // This path creates synchronously, so `wait` changes nothing.
         ActionRequest::CreateWorktree {
             project_id,
             branch,
             create_branch,
             window: _,
+            layout,
+            terminal_name,
+            wait: _,
         } => project::create_worktree(
             ws,
             window_id,
             project_id,
             branch,
             create_branch,
+            layout,
+            terminal_name,
             backend,
             terminals,
             settings,
