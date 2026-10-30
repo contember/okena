@@ -1955,7 +1955,7 @@ pub fn cli_run(terminal: &str, command: &[String], wait: bool, timeout_secs: u64
 }
 
 /// Post a `read_content` action and return the terminal's visible content.
-fn fetch_terminal_content(token: &str, terminal_id: &str) -> Result<String, String> {
+pub(crate) fn fetch_terminal_content(token: &str, terminal_id: &str) -> Result<String, String> {
     let body = serde_json::json!({ "action": "read_content", "terminal_id": terminal_id });
     let resp = api_action(token, &body.to_string())?;
     let v: serde_json::Value =

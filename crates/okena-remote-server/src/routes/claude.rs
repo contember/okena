@@ -84,11 +84,23 @@ pub async fn get_channel_poll(
     Json(ClaudeChannelPollResponse { prompts })
 }
 
+#[derive(Deserialize)]
+pub struct SessionQuery {
+    /// Report `foreground_command` of a pane without a connected `claude`.
+    #[serde(default)]
+    probe_foreground: bool,
+}
+
 pub async fn get_session(
     State(state): State<AppState>,
     Path(terminal_id): Path<String>,
+    Query(query): Query<SessionQuery>,
 ) -> Result<impl IntoResponse, ClaudeRemoteError> {
-    state.claude_hub.session(&terminal_id).await.map(Json)
+    state
+        .claude_hub
+        .session(&terminal_id, query.probe_foreground)
+        .await
+        .map(Json)
 }
 
 #[derive(Deserialize)]

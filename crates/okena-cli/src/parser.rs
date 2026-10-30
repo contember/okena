@@ -216,6 +216,30 @@ pub enum ClaudeCmd {
         #[arg(long)]
         json: bool,
     },
+    /// Run `claude` in a terminal at a shell prompt, wait until it connects
+    /// and send the first prompt; prints terminal, session_id and delivery
+    Start {
+        /// Terminal address (id, project/name, or project:index)
+        terminal: String,
+        /// File with the first prompt
+        #[arg(long)]
+        prompt_file: Option<std::path::PathBuf>,
+        /// Accept the "trust this folder" dialog (else fail while it is shown)
+        #[arg(long)]
+        trust: bool,
+        /// Also wait until the first prompt's turn ends or a dialog opens
+        #[arg(long, requires = "prompt_file")]
+        wait: bool,
+        /// Seconds to wait for `claude` to connect
+        #[arg(long, default_value_t = 60)]
+        timeout: u64,
+        /// Seconds `--wait` waits for the turn; exit 1 with `state timeout` after
+        #[arg(long, default_value_t = 3600, requires = "wait")]
+        wait_timeout: u64,
+        /// Output JSON instead of tab-separated text
+        #[arg(long)]
+        json: bool,
+    },
     /// Show a session's status and open dialogs
     Show {
         /// Terminal address (id, project/name, or project:index)
@@ -876,6 +900,21 @@ mod tests {
         );
         assert!(Cli::try_parse_from(["okena", "claude", "answer", "p:0", "d1", "maybe"]).is_err());
         assert!(Cli::try_parse_from(["okena", "claude", "prompt", "p:0"]).is_err());
+        assert!(
+            Cli::try_parse_from([
+                "okena",
+                "claude",
+                "start",
+                "p:0",
+                "--prompt-file",
+                "task.md",
+                "--trust",
+                "--wait"
+            ])
+            .is_ok()
+        );
+        // `--wait` waits for the first prompt's turn, so it needs a prompt.
+        assert!(Cli::try_parse_from(["okena", "claude", "start", "p:0", "--wait"]).is_err());
         assert!(Cli::try_parse_from(["okena", "claude-remote", "hook", "permission"]).is_ok());
         assert!(Cli::try_parse_from(["okena", "claude-remote", "hook", "event"]).is_ok());
         assert!(Cli::try_parse_from(["okena", "claude-remote", "channel"]).is_ok());

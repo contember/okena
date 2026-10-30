@@ -4,15 +4,23 @@
 
 use crate::commands::{fetch_state, with_state_post};
 use crate::parser::ClaudeDecisionArg;
-use crate::{api_get, api_post_json, ensure_token, resolve};
+use crate::{api_action, api_get, api_post_json, ensure_token, resolve};
 use okena_core::api::StateResponse;
 use okena_core::claude_remote::{
     ApiClaudeDecision, ApiClaudeEntry, ApiClaudePromptDelivery, ApiClaudePromptOrigin,
-    ApiClaudePromptRequest, ApiClaudePromptResponse, ApiClaudeSession, ApiClaudeSubagentList,
-    ApiClaudeTranscriptPage,
+    ApiClaudePromptRequest, ApiClaudePromptResponse, ApiClaudeSession, ApiClaudeStartupDialog,
+    ApiClaudeSubagentList, ApiClaudeTranscriptPage,
 };
 use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use std::collections::BTreeMap;
+use std::path::Path;
+use std::time::{Duration, Instant};
+
+/// How often `claude start` re-reads the session while it waits.
+const START_POLL_INTERVAL: Duration = Duration::from_millis(250);
+/// After a key press, the dialog needs a moment to redraw before the screen
+/// says anything new; pressing again earlier could answer the next dialog.
+const KEY_SETTLE: Duration = Duration::from_millis(700);
 
 /// `okena claude ls [--json]`
 pub fn cli_ls(json_mode: bool) -> i32 {
@@ -118,18 +126,85 @@ pub fn cli_prompt(terminal: &str, text: &[String]) -> i32 {
     exit_code((|| {
         let (token, state) = connect()?;
         let (_project_id, terminal_id) = resolve::resolve_terminal(&state, terminal)?;
-        let request = ApiClaudePromptRequest {
-            text: text.join(" "),
-        };
-        let body = api_post_json(
-            &terminal_path(&terminal_id, "/prompt"),
-            &token,
-            &to_json(&request)?,
-        )?;
-        let response: ApiClaudePromptResponse =
-            serde_json::from_str(&body).map_err(|e| format!("Invalid prompt response: {e}"))?;
-        println!("{}", delivery_label(response.delivery));
+        let delivery = send_prompt(&token, &terminal_id, text.join(" "))?;
+        println!("{}", delivery_label(delivery));
         Ok(())
+    })())
+}
+
+/// `okena claude start <term> [--prompt-file f] [--trust] [--wait] [--timeout s] [--json]`:
+/// run `claude` in the pane, accept the start-up dialogs, wait until it
+/// connects and send the first prompt.
+pub fn cli_start(
+    terminal: &str,
+    prompt_file: Option<&Path>,
+    trust: bool,
+    wait: Option<Duration>,
+    timeout_secs: u64,
+    json_mode: bool,
+) -> i32 {
+    exit_code((|| {
+        let prompt = prompt_file
+            .map(|path| {
+                std::fs::read_to_string(path)
+                    .map_err(|e| format!("Cannot read {}: {e}", path.display()))
+            })
+            .transpose()?;
+        let (token, state) = connect()?;
+        let (_project_id, terminal_id) = resolve::resolve_terminal(&state, terminal)?;
+        let wait_for_channel = remote_settings(&token)?;
+        let body = api_get(
+            &terminal_path(&terminal_id, "?probe_foreground=true"),
+            &token,
+        )?;
+        let session: ApiClaudeSession =
+            serde_json::from_str(&body).map_err(|e| format!("Invalid session: {e}"))?;
+        if launch(&session).map_err(|e| format!("{terminal_id}: {e}"))? == Launch::Type {
+            let run = serde_json::json!({
+                "action": "run_command",
+                "terminal_id": terminal_id,
+                "command": "claude",
+            });
+            api_action(&token, &run.to_string())?;
+        }
+        let session = wait_until_connected(
+            &token,
+            &terminal_id,
+            wait_for_channel,
+            trust,
+            Duration::from_secs(timeout_secs),
+        )?;
+
+        let mut started = StartResult {
+            terminal_id: terminal_id.clone(),
+            session_id: session.session_id,
+            delivery: None,
+            state: None,
+        };
+        if let Some(prompt) = prompt {
+            let before = fetch_page(&token, &terminal_id, None).ok();
+            started.delivery = Some(send_prompt(&token, &terminal_id, prompt)?);
+            if let Some(wait) = wait {
+                started.state = Some(wait_for_turn(&token, &terminal_id, before, wait)?);
+            }
+        }
+        if started.session_id.is_none() {
+            started.session_id = fetch_session(&token, &terminal_id)?.session_id;
+        }
+        if json_mode {
+            print_json(&started.to_json())?;
+        } else {
+            for line in started.lines() {
+                println!("{line}");
+            }
+        }
+        match started.state {
+            Some(TurnState::Disconnected) => Err(format!("claude in {terminal_id} disconnected")),
+            Some(TurnState::TimedOut) => {
+                Err(format!("the turn in {terminal_id} did not end in time"))
+            }
+            _ => Ok(()),
+        }
     })())
 }
 
@@ -185,6 +260,249 @@ fn connect() -> Result<(String, StateResponse), String> {
 fn fetch_session(token: &str, terminal_id: &str) -> Result<ApiClaudeSession, String> {
     let body = api_get(&terminal_path(terminal_id, ""), token)?;
     serde_json::from_str(&body).map_err(|e| format!("Invalid session: {e}"))
+}
+
+fn send_prompt(
+    token: &str,
+    terminal_id: &str,
+    text: String,
+) -> Result<ApiClaudePromptDelivery, String> {
+    let request = ApiClaudePromptRequest { text };
+    let body = api_post_json(
+        &terminal_path(terminal_id, "/prompt"),
+        token,
+        &to_json(&request)?,
+    )?;
+    let response: ApiClaudePromptResponse =
+        serde_json::from_str(&body).map_err(|e| format!("Invalid prompt response: {e}"))?;
+    Ok(response.delivery)
+}
+
+fn fetch_page(
+    token: &str,
+    terminal_id: &str,
+    cursor: Option<&LogCursor>,
+) -> Result<ApiClaudeTranscriptPage, String> {
+    let body = api_get(
+        &terminal_path(terminal_id, &transcript_query(cursor, None)),
+        token,
+    )?;
+    serde_json::from_str(&body).map_err(|e| format!("Invalid transcript page: {e}"))
+}
+
+/// The settings `claude start` depends on.
+#[derive(serde::Deserialize)]
+struct RemoteSettings {
+    claude_remote: bool,
+    claude_remote_channel: bool,
+}
+
+/// Whether panes connect `claude` through the channel (else hooks only).
+/// Fails when Claude remote is off: `claude` would never connect.
+fn remote_settings(token: &str) -> Result<bool, String> {
+    let body = api_action(
+        token,
+        &serde_json::json!({"action": "get_settings"}).to_string(),
+    )?;
+    let settings: RemoteSettings =
+        serde_json::from_str(&body).map_err(|e| format!("Invalid settings: {e}"))?;
+    if !settings.claude_remote {
+        return Err(
+            "Claude Remote is off; turn it on (okena settings set claude_remote true) and open a new terminal"
+                .into(),
+        );
+    }
+    Ok(settings.claude_remote_channel)
+}
+
+/// Whether `claude start` types `claude` or resumes one waiting on a
+/// start-up dialog (typing into the dialog would answer it).
+#[derive(Debug, PartialEq)]
+enum Launch {
+    Type,
+    Resume,
+}
+
+fn launch(session: &ApiClaudeSession) -> Result<Launch, String> {
+    if session.hooks_attached || session.channel_attached {
+        return Err("a connected claude already runs here".into());
+    }
+    if session.startup_dialog.is_some() {
+        return Ok(Launch::Resume);
+    }
+    match &session.foreground_command {
+        Some(command) => Err(format!(
+            "`{command}` runs in the foreground; claude start needs a shell prompt"
+        )),
+        None => Ok(Launch::Type),
+    }
+}
+
+/// What one poll of the starting session asks for.
+#[derive(Debug, PartialEq)]
+enum StartStep {
+    Connected,
+    Wait,
+    Answer(ApiClaudeStartupDialog),
+    /// The trust dialog is open and `--trust` was not given.
+    NeedsTrust,
+}
+
+fn start_step(session: &ApiClaudeSession, wait_for_channel: bool, trust: bool) -> StartStep {
+    let connected = if wait_for_channel {
+        session.channel_attached
+    } else {
+        session.hooks_attached
+    };
+    match session.startup_dialog {
+        _ if connected => StartStep::Connected,
+        None => StartStep::Wait,
+        Some(ApiClaudeStartupDialog::Trust) if !trust => StartStep::NeedsTrust,
+        Some(dialog) => StartStep::Answer(dialog),
+    }
+}
+
+/// Poll the session until `claude` connects, answering the start-up dialogs on
+/// the way: the channel warning always, the folder trust only with `trust`.
+fn wait_until_connected(
+    token: &str,
+    terminal_id: &str,
+    wait_for_channel: bool,
+    trust: bool,
+    timeout: Duration,
+) -> Result<ApiClaudeSession, String> {
+    let deadline = Instant::now() + timeout;
+    let mut last_key: Option<Instant> = None;
+    loop {
+        if Instant::now() > deadline {
+            return Err(format!(
+                "claude did not connect within {}s; check the terminal (okena read {terminal_id})",
+                timeout.as_secs()
+            ));
+        }
+        std::thread::sleep(START_POLL_INTERVAL);
+        let session = fetch_session(token, terminal_id)?;
+        let dialog = match start_step(&session, wait_for_channel, trust) {
+            StartStep::Connected => return Ok(session),
+            StartStep::Wait => continue,
+            StartStep::NeedsTrust => {
+                return Err(format!(
+                    "claude asks whether to trust this folder; pass --trust to accept it, or answer it in the terminal ({terminal_id})"
+                ));
+            }
+            StartStep::Answer(dialog) => dialog,
+        };
+        if last_key.is_some_and(|at| at.elapsed() < KEY_SETTLE) {
+            continue;
+        }
+        let screen = crate::commands::fetch_terminal_content(token, terminal_id)?;
+        let Some(key) = startup_dialog_key(dialog, &screen) else {
+            continue;
+        };
+        let body = serde_json::json!({
+            "action": "send_special_key",
+            "terminal_id": terminal_id,
+            "key": key,
+        });
+        api_action(token, &body.to_string())?;
+        last_key = Some(Instant::now());
+    }
+}
+
+/// The key that moves `dialog` towards accepting: Enter on the confirming
+/// option, else an arrow towards it. `None` when `screen` (read after the
+/// session) no longer shows that dialog, so a key would hit the next one.
+fn startup_dialog_key(dialog: ApiClaudeStartupDialog, screen: &str) -> Option<&'static str> {
+    if ApiClaudeStartupDialog::detect(screen) != Some(dialog) {
+        return None;
+    }
+    if dialog.confirm_selected(screen) {
+        return Some("Enter");
+    }
+    let lines: Vec<&str> = screen.lines().collect();
+    let selected = lines
+        .iter()
+        .position(|line| line.trim_start().starts_with('❯'));
+    let confirm = lines
+        .iter()
+        .position(|line| line.contains(dialog.confirm_label()));
+    match (selected, confirm) {
+        (Some(selected), Some(confirm)) if confirm < selected => Some("ArrowUp"),
+        _ => Some("ArrowDown"),
+    }
+}
+
+/// Wait until the turn the first prompt started ends, a dialog needs an
+/// answer, `claude` disconnects or `timeout` passes. `before` is the transcript
+/// as it was before the prompt.
+fn wait_for_turn(
+    token: &str,
+    terminal_id: &str,
+    before: Option<ApiClaudeTranscriptPage>,
+    timeout: Duration,
+) -> Result<TurnState, String> {
+    let deadline = Instant::now() + timeout;
+    let mut cursor = before.map(|page| LogCursor {
+        session_id: page.session_id,
+        offset: page.cursor,
+    });
+    let mut progress = TurnProgress::default();
+    loop {
+        if Instant::now() > deadline {
+            return Ok(TurnState::TimedOut);
+        }
+        std::thread::sleep(START_POLL_INTERVAL);
+        if !progress.reply_seen
+            && let Ok(page) = fetch_page(token, terminal_id, cursor.as_ref())
+        {
+            progress.read(&page.entries);
+            cursor = Some(LogCursor {
+                session_id: page.session_id,
+                offset: page.cursor,
+            });
+        }
+        let session = fetch_session(token, terminal_id)?;
+        if let Some(state) = progress.observe(&session) {
+            return Ok(state);
+        }
+    }
+}
+
+/// How far the prompt's turn has come. The hooks that mark the pane busy run
+/// async, so the transcript can show the prompt while the pane still reads
+/// idle: the turn has ended once it was seen busy, or a reply follows the
+/// prompt, and the pane is idle again.
+#[derive(Default)]
+struct TurnProgress {
+    prompt_seen: bool,
+    reply_seen: bool,
+    busy_seen: bool,
+}
+
+impl TurnProgress {
+    fn read(&mut self, entries: &[ApiClaudeEntry]) {
+        for entry in entries {
+            match entry {
+                ApiClaudeEntry::User { .. } => self.prompt_seen = true,
+                ApiClaudeEntry::Assistant { .. } if self.prompt_seen => self.reply_seen = true,
+                _ => {}
+            }
+        }
+    }
+
+    /// Where the turn stands after a session read; `None` while it runs.
+    fn observe(&mut self, session: &ApiClaudeSession) -> Option<TurnState> {
+        if !session.hooks_attached && !session.channel_attached {
+            return Some(TurnState::Disconnected);
+        }
+        if !session.dialogs.is_empty() {
+            return Some(TurnState::Dialog);
+        }
+        self.busy_seen |= session.busy == Some(true);
+        let ran = self.reply_seen || self.busy_seen;
+        (ran && session.busy == Some(false) && session.queued_prompts == 0)
+            .then_some(TurnState::Idle)
+    }
 }
 
 fn terminal_path(terminal_id: &str, rest: &str) -> String {
@@ -295,6 +613,71 @@ fn delivery_label(delivery: ApiClaudePromptDelivery) -> &'static str {
     }
 }
 
+/// Where `claude start --wait` stopped waiting.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum TurnState {
+    Idle,
+    /// A dialog waits for an answer (`claude show`, `claude answer`).
+    Dialog,
+    /// `claude` left the pane during the turn.
+    Disconnected,
+    /// `--wait-timeout` passed first.
+    TimedOut,
+}
+
+impl TurnState {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Idle => "idle",
+            Self::Dialog => "dialog",
+            Self::Disconnected => "disconnected",
+            Self::TimedOut => "timeout",
+        }
+    }
+}
+
+/// What `claude start` reports.
+struct StartResult {
+    terminal_id: String,
+    session_id: Option<String>,
+    delivery: Option<ApiClaudePromptDelivery>,
+    state: Option<TurnState>,
+}
+
+impl StartResult {
+    fn lines(&self) -> Vec<String> {
+        let mut lines = vec![
+            format!("terminal\t{}", self.terminal_id),
+            format!("session_id\t{}", self.session_id.as_deref().unwrap_or("-")),
+            format!("delivery\t{}", self.delivery.map_or("-", delivery_label)),
+        ];
+        if let Some(state) = self.state {
+            lines.push(format!("state\t{}", state.label()));
+        }
+        lines
+    }
+
+    fn to_json(&self) -> serde_json::Value {
+        let mut value = serde_json::json!({
+            "terminal": self.terminal_id,
+            "session_id": self.session_id,
+            "delivery": self.delivery.map(delivery_label),
+        });
+        if let (Some(state), Some(object)) = (self.state, value.as_object_mut()) {
+            object.insert("state".into(), state.label().into());
+        }
+        value
+    }
+}
+
+fn startup_dialog_label(dialog: Option<ApiClaudeStartupDialog>) -> &'static str {
+    match dialog {
+        Some(ApiClaudeStartupDialog::Trust) => "trust",
+        Some(ApiClaudeStartupDialog::Channels) => "channels",
+        None => "-",
+    }
+}
+
 /// `terminal_id  project  name  session_id  busy|idle|-  dialogs  queued  subagents`
 fn ls_row(labeled: &LabeledSession) -> String {
     let s = &labeled.session;
@@ -328,6 +711,7 @@ fn show_lines(labeled: &LabeledSession) -> Vec<String> {
         format!("channel\t{}", yes_no(s.channel_attached)),
         format!("transcript\t{}", yes_no(s.has_transcript)),
         format!("queued\t{}", s.queued_prompts),
+        format!("startup_dialog\t{}", startup_dialog_label(s.startup_dialog)),
     ];
     for subagent in &s.running_subagents {
         lines.push(format!(
@@ -496,6 +880,8 @@ mod tests {
                 agent_type: "Explore".into(),
             }],
             pr_links: vec![],
+            startup_dialog: None,
+            foreground_command: None,
         }
     }
 
@@ -590,6 +976,164 @@ mod tests {
             lines.last().map(String::as_str),
             Some(r#"dialog	d-1	Bash	{"command":"ls"}"#)
         );
+    }
+
+    #[test]
+    fn show_names_the_startup_dialog() {
+        let state = state_with_terminal("t1", "claude");
+        let mut waiting = session("t1");
+        waiting.startup_dialog = Some(ApiClaudeStartupDialog::Trust);
+        let lines = show_lines(&LabeledSession::new(&state, waiting));
+        assert!(lines.contains(&"startup_dialog\ttrust".to_string()));
+        let lines = show_lines(&LabeledSession::new(&state, session("t1")));
+        assert!(lines.contains(&"startup_dialog\t-".to_string()));
+    }
+
+    const TRUST_SCREEN: &str = " Accessing workspace:\n ❯ No, exit\n   Yes, I trust this folder";
+    const CHANNELS_ON_EXIT: &str = "  WARNING: Loading development channels\n    1. I am using this for local development\n  ❯ 2. Exit";
+
+    #[test]
+    fn startup_dialog_key_moves_to_the_confirming_option_first() {
+        use ApiClaudeStartupDialog::{Channels, Trust};
+        assert_eq!(startup_dialog_key(Trust, TRUST_SCREEN), Some("ArrowDown"));
+        let selected = TRUST_SCREEN
+            .replace("❯ No", "  No")
+            .replace("  Yes", "❯ Yes");
+        assert_eq!(startup_dialog_key(Trust, &selected), Some("Enter"));
+        assert_eq!(
+            startup_dialog_key(Channels, CHANNELS_ON_EXIT),
+            Some("ArrowUp")
+        );
+    }
+
+    #[test]
+    fn startup_dialog_key_skips_a_screen_showing_another_dialog() {
+        use ApiClaudeStartupDialog::{Channels, Trust};
+        assert_eq!(startup_dialog_key(Trust, CHANNELS_ON_EXIT), None);
+        assert_eq!(startup_dialog_key(Channels, "$ "), None);
+    }
+
+    fn unconnected(foreground: Option<&str>) -> ApiClaudeSession {
+        let mut session = session("t1");
+        session.hooks_attached = false;
+        session.foreground_command = foreground.map(str::to_string);
+        session
+    }
+
+    #[test]
+    fn launch_needs_a_shell_prompt_or_a_waiting_dialog() {
+        assert_eq!(launch(&unconnected(None)), Ok(Launch::Type));
+
+        let mut waiting = unconnected(Some("claude"));
+        waiting.startup_dialog = Some(ApiClaudeStartupDialog::Trust);
+        assert_eq!(launch(&waiting), Ok(Launch::Resume));
+
+        assert!(launch(&unconnected(Some("vim"))).is_err());
+        // Claude that runs without Okena's hooks would take `claude` as a prompt.
+        assert!(launch(&unconnected(Some("claude"))).is_err());
+        assert!(launch(&session("t1")).is_err());
+    }
+
+    #[test]
+    fn start_steps_follow_the_dialogs_and_the_connection() {
+        use ApiClaudeStartupDialog::{Channels, Trust};
+        let mut session = unconnected(Some("claude"));
+        assert_eq!(start_step(&session, true, false), StartStep::Wait);
+
+        session.startup_dialog = Some(Trust);
+        assert_eq!(start_step(&session, true, false), StartStep::NeedsTrust);
+        assert_eq!(start_step(&session, true, true), StartStep::Answer(Trust));
+
+        session.startup_dialog = Some(Channels);
+        assert_eq!(
+            start_step(&session, true, false),
+            StartStep::Answer(Channels)
+        );
+
+        session.startup_dialog = None;
+        session.hooks_attached = true;
+        assert_eq!(start_step(&session, true, false), StartStep::Wait);
+        assert_eq!(start_step(&session, false, false), StartStep::Connected);
+        session.channel_attached = true;
+        assert_eq!(start_step(&session, true, false), StartStep::Connected);
+    }
+
+    fn turn_session(busy: Option<bool>) -> ApiClaudeSession {
+        let mut session = session("t1");
+        session.dialogs.clear();
+        session.queued_prompts = 0;
+        session.busy = busy;
+        session
+    }
+
+    #[test]
+    fn a_turn_ends_once_it_ran_and_the_pane_is_idle() {
+        let user = ApiClaudeEntry::User {
+            uuid: "u".into(),
+            text: "go".into(),
+            origin: ApiClaudePromptOrigin::Channel,
+        };
+        let assistant = ApiClaudeEntry::Assistant {
+            uuid: "a".into(),
+            text: "done".into(),
+        };
+        let idle = turn_session(Some(false));
+
+        // The prompt is in the transcript, the hooks have not marked it busy yet.
+        let mut progress = TurnProgress::default();
+        progress.read(std::slice::from_ref(&assistant));
+        progress.read(std::slice::from_ref(&user));
+        assert_eq!(progress.observe(&idle), None);
+        progress.read(&[assistant]);
+        assert_eq!(progress.observe(&idle), Some(TurnState::Idle));
+
+        // A turn without a reply ends once it was seen busy.
+        let mut progress = TurnProgress::default();
+        assert_eq!(progress.observe(&turn_session(Some(true))), None);
+        assert_eq!(progress.observe(&idle), Some(TurnState::Idle));
+    }
+
+    #[test]
+    fn a_turn_stops_waiting_for_a_dialog_or_a_lost_claude() {
+        let mut progress = TurnProgress::default();
+        assert_eq!(progress.observe(&session("t1")), Some(TurnState::Dialog));
+        let mut gone = turn_session(None);
+        gone.hooks_attached = false;
+        assert_eq!(progress.observe(&gone), Some(TurnState::Disconnected));
+    }
+
+    #[test]
+    fn start_result_prints_every_field() {
+        let mut started = StartResult {
+            terminal_id: "t1".into(),
+            session_id: Some("s1".into()),
+            delivery: Some(ApiClaudePromptDelivery::Channel),
+            state: Some(TurnState::Dialog),
+        };
+        assert_eq!(
+            started.lines(),
+            [
+                "terminal\tt1",
+                "session_id\ts1",
+                "delivery\tchannel",
+                "state\tdialog"
+            ]
+        );
+        assert_eq!(
+            started.to_json(),
+            serde_json::json!({
+                "terminal": "t1",
+                "session_id": "s1",
+                "delivery": "channel",
+                "state": "dialog",
+            })
+        );
+
+        started.delivery = None;
+        started.state = None;
+        assert_eq!(started.lines()[2], "delivery\t-");
+        assert_eq!(started.to_json()["delivery"], serde_json::Value::Null);
+        assert!(started.to_json().get("state").is_none());
     }
 
     #[test]
