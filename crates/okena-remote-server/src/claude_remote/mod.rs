@@ -23,6 +23,13 @@ pub(crate) enum ClaudeRemoteError {
     /// agent-status OSC show it.
     NoClaudeSession,
     QueueFull,
+    /// The prompt named a session the pane no longer runs.
+    SessionMismatch {
+        expected: String,
+        current: Option<String>,
+    },
+    /// No pane runs a session with this id.
+    SessionNotFound,
     TerminalNotFound(String),
     DialogNotFound,
     NoTranscript,

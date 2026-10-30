@@ -191,6 +191,10 @@ pub fn build_router(
             axum::routing::get(claude::get_session),
         )
         .route(
+            "/v1/claude/sessions/{session_id}",
+            axum::routing::get(claude::get_session_by_id),
+        )
+        .route(
             "/v1/claude/terminals/{terminal_id}/transcript",
             axum::routing::get(claude::get_transcript),
         )

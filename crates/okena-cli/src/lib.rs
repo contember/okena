@@ -270,6 +270,7 @@ fn dispatch(cli: Cli) -> i32 {
                 json,
             ),
             ClaudeCmd::Show { terminal, json } => claude::cli_show(&terminal, json),
+            ClaudeCmd::Find { session, json } => claude::cli_find(&session, json),
             ClaudeCmd::Subagents { terminal, json } => claude::cli_subagents(&terminal, json),
             ClaudeCmd::Log {
                 terminal,
@@ -277,7 +278,11 @@ fn dispatch(cli: Cli) -> i32 {
                 agent,
                 json,
             } => claude::cli_log(&terminal, cursor.as_deref(), agent.as_deref(), json),
-            ClaudeCmd::Prompt { terminal, text } => claude::cli_prompt(&terminal, &text),
+            ClaudeCmd::Prompt {
+                terminal,
+                session,
+                text,
+            } => claude::cli_prompt(&terminal, session.as_deref(), &text),
             ClaudeCmd::Answer {
                 terminal,
                 dialog,

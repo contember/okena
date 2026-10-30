@@ -66,6 +66,25 @@ pub fn cli_show(terminal: &str, json_mode: bool) -> i32 {
     })())
 }
 
+/// `okena claude find <session> [--json]`
+pub fn cli_find(session_id: &str, json_mode: bool) -> i32 {
+    exit_code((|| {
+        let (token, state) = connect()?;
+        let body = api_get(
+            &format!("/v1/claude/sessions/{}", encode(session_id)),
+            &token,
+        )?;
+        let session: ApiClaudeSession =
+            serde_json::from_str(&body).map_err(|e| format!("Invalid session: {e}"))?;
+        if json_mode {
+            print_json(&LabeledSession::new(&state, session).to_json()?)
+        } else {
+            println!("{}", session.terminal_id);
+            Ok(())
+        }
+    })())
+}
+
 /// `okena claude subagents <term> [--json]`
 pub fn cli_subagents(terminal: &str, json_mode: bool) -> i32 {
     exit_code((|| {
@@ -122,11 +141,11 @@ pub fn cli_log(terminal: &str, cursor: Option<&str>, agent: Option<&str>, json_m
 }
 
 /// `okena claude prompt <term> <text…>`
-pub fn cli_prompt(terminal: &str, text: &[String]) -> i32 {
+pub fn cli_prompt(terminal: &str, session: Option<&str>, text: &[String]) -> i32 {
     exit_code((|| {
         let (token, state) = connect()?;
         let (_project_id, terminal_id) = resolve::resolve_terminal(&state, terminal)?;
-        let delivery = send_prompt(&token, &terminal_id, text.join(" "))?;
+        let delivery = send_prompt(&token, &terminal_id, text.join(" "), session)?;
         println!("{}", delivery_label(delivery));
         Ok(())
     })())
@@ -183,7 +202,12 @@ pub fn cli_start(
         };
         if let Some(prompt) = prompt {
             let before = fetch_page(&token, &terminal_id, None).ok();
-            started.delivery = Some(send_prompt(&token, &terminal_id, prompt)?);
+            started.delivery = Some(send_prompt(
+                &token,
+                &terminal_id,
+                prompt,
+                started.session_id.as_deref(),
+            )?);
             if let Some(wait) = wait {
                 started.state = Some(wait_for_turn(&token, &terminal_id, before, wait)?);
             }
@@ -266,8 +290,12 @@ fn send_prompt(
     token: &str,
     terminal_id: &str,
     text: String,
+    expect_session_id: Option<&str>,
 ) -> Result<ApiClaudePromptDelivery, String> {
-    let request = ApiClaudePromptRequest { text };
+    let request = ApiClaudePromptRequest {
+        text,
+        expect_session_id: expect_session_id.map(str::to_string),
+    };
     let body = api_post_json(
         &terminal_path(terminal_id, "/prompt"),
         token,

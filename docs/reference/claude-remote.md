@@ -32,8 +32,8 @@ channel attached; `claude_sessions` in `GET /v1/state`) or has an open dialog
   drawer's **Chat** pill opens a terminal straight in the chat. A project with
   an open dialog is listed under Needs attention.
 - **Desktop**: settings only; dialogs are answered in the terminal.
-- **CLI**: `okena claude start | ls | show | subagents | log | prompt | answer |
-  interrupt` uses the same endpoints, for people and for agents driving other
+- **CLI**: `okena claude start | ls | show | find | subagents | log | prompt |
+  answer | interrupt` uses the same endpoints, for people and for agents driving other
   sessions. `log` prints a cursor (`<session_id>:<offset>`) to pass back with
   `--cursor` for only the newer entries. `start` runs `claude` in a pane, see
   [Starting a session](#starting-a-session). See `okena skill show`.
@@ -95,14 +95,28 @@ All take the bearer token. Errors have a plain-text body.
 | Endpoint | Purpose |
 |---|---|
 | `GET /v1/claude/terminals/{id}?probe_foreground=` | Session: `session_id`, `hooks_attached`, `busy`, open `dialogs`, `running_subagents`, `pr_links`, `startup_dialog`, `foreground_command` |
+| `GET /v1/claude/sessions/{session_id}` | The session of the pane that runs it, same shape as above (`terminal_id` names the pane); `404` when no pane does |
 | `GET /v1/claude/terminals/{id}/transcript?cursor=&session_id=&agent_id=` | Transcript page, see [Transcript](#transcript) |
 | `GET /v1/claude/terminals/{id}/subagents` | The session's subagents, see [Subagents](#subagents) |
-| `POST /v1/claude/terminals/{id}/prompt` | `{ "text" }` → `{ "delivery" }`, see [Prompts](#prompts) |
+| `POST /v1/claude/terminals/{id}/prompt` | `{ "text", "expect_session_id"? }` → `{ "delivery" }`, see [Prompts](#prompts) |
 | `POST /v1/claude/terminals/{id}/dialogs/{dialog_id}` | `{ "decision": "allow" \| "deny" \| "answer", "always"?, "message"?, "answers"? }`; `404` once the dialog is answered or gone |
 
 Dialog ids are opaque strings, unique across daemon restarts. String values
 over 16 KiB in a dialog's `tool_input` are cut for clients; the answer to
 Claude uses the full input.
+
+## Sessions by id
+
+A session's `session_id` is the session `claude` runs in the pane now: the
+hooks' session until its `SessionEnd`, after which it is `null` until a new one
+(or `--resume`) starts. Before any hook has reported, as after a daemon restart,
+it is the session the daemon recorded from the pane; that record is not cleared
+when `claude` exits, so it is a weaker signal.
+
+`GET /v1/claude/sessions/{session_id}` (`okena claude find`) finds the pane
+whose hooks report that session and no `SessionEnd` (of two such panes, the
+lowest terminal id). A session is known once a hook reported it, so after a
+daemon restart only after its next hook event.
 
 ## Prompts
 
@@ -116,7 +130,11 @@ Claude uses the full input.
 
 `400` means an empty prompt or one over 64 KiB. `409` means the prompt cannot
 be delivered: no `claude` runs in the pane, Claude is busy and no `Stop` hook
-will arrive (no hooks attached), or 32 prompts are already queued. A prompt is
+will arrive (no hooks attached), 32 prompts are already queued, or
+`expect_session_id` names another session than the pane's `session_id` (see
+[Sessions by id](#sessions-by-id)). `okena claude prompt --session <id>` sends
+it. The check covers a session that changed before the prompt arrived, not one
+that changes while it is being typed into the pane. A prompt is
 typed into the pane only while its foreground process is `claude`; queued
 prompts are dropped if `claude` is gone when the turn ends. Claude skips
 slash-command parsing and attachments for channel prompts, so a prompt starting

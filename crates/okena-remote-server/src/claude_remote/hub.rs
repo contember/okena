@@ -533,7 +533,7 @@ impl ClaudeRemoteHub {
             let terminal = terminals.get(terminal_id);
             ApiClaudeSession {
                 terminal_id: terminal_id.to_string(),
-                session_id: terminal.and_then(|terminal| terminal.session_id.clone()),
+                session_id: live_session_id(terminal, &info).map(str::to_string),
                 has_transcript: false,
                 hooks_attached: terminal.is_some_and(|terminal| terminal.hooks_attached),
                 channel_attached: terminal
@@ -560,9 +560,6 @@ impl ClaudeRemoteHub {
         let source = self
             .hooked_transcript_source(terminal_id)
             .unwrap_or_else(|| TranscriptSource::from_terminal_info(&info));
-        if session.session_id.is_none() {
-            session.session_id = source.session_id;
-        }
         session.has_transcript = match &source.path {
             Some(path) => {
                 has_transcript_extension(Path::new(&path))
@@ -624,6 +621,31 @@ impl ClaudeRemoteHub {
             hub.refresh_pr_links(&terminal_id, PathBuf::from(path))
                 .await;
         }));
+    }
+
+    /// The session of the pane whose hooks report `session_id` and no
+    /// `SessionEnd`. Of several such panes (`claude --resume` in two), the
+    /// lowest terminal id.
+    pub(crate) async fn session_by_id(
+        &self,
+        session_id: &str,
+    ) -> Result<ApiClaudeSession, ClaudeRemoteError> {
+        let terminal_id = self
+            .terminals
+            .lock()
+            .iter()
+            .filter(|(_, terminal)| {
+                !terminal.session_ended && terminal.session_id.as_deref() == Some(session_id)
+            })
+            .map(|(terminal_id, _)| terminal_id.clone())
+            .min()
+            .ok_or(ClaudeRemoteError::SessionNotFound)?;
+        let session = self.session(&terminal_id, false).await?;
+        // A new session may have started in the pane meanwhile.
+        if session.session_id.as_deref() != Some(session_id) {
+            return Err(ClaudeRemoteError::SessionNotFound);
+        }
+        Ok(session)
     }
 
     /// Transcript entries after `cursor`, or a first page.
@@ -714,6 +736,7 @@ impl ClaudeRemoteHub {
         self: &Arc<Self>,
         terminal_id: &str,
         text: String,
+        expect_session_id: Option<&str>,
     ) -> Result<ApiClaudePromptDelivery, ClaudeRemoteError> {
         if text.trim().is_empty() {
             return Err(ClaudeRemoteError::EmptyPrompt);
@@ -727,6 +750,15 @@ impl ClaudeRemoteHub {
         {
             let mut terminals = self.terminals.lock();
             let terminal = terminals.entry(terminal_id.to_string()).or_default();
+            if let Some(expected) = expect_session_id {
+                let current = live_session_id(Some(terminal), &info);
+                if current != Some(expected) {
+                    return Err(ClaudeRemoteError::SessionMismatch {
+                        expected: expected.to_string(),
+                        current: current.map(str::to_string),
+                    });
+                }
+            }
             let now = Instant::now();
             if terminal.channel.is_attached(now) && !is_slash_command(&text) {
                 if terminal.channel.queued() >= MAX_QUEUED_PROMPTS {
@@ -966,6 +998,25 @@ impl TranscriptSource {
                 .and_then(|session| session.transcript_path.clone())
                 .filter(|path| is_valid_transcript_path(path)),
         }
+    }
+}
+
+/// The session `claude` runs in a pane: the hooks' unless it ended, else the
+/// one the daemon recorded, when no hook has reported (as after a daemon
+/// restart).
+fn live_session_id<'a>(
+    terminal: Option<&'a TerminalState>,
+    info: &'a ClaudeTerminalInfo,
+) -> Option<&'a str> {
+    match terminal {
+        Some(terminal) if terminal.session_id.is_some() => terminal
+            .session_id
+            .as_deref()
+            .filter(|_| !terminal.session_ended),
+        _ => info
+            .session
+            .as_ref()
+            .map(|session| session.session_id.as_str()),
     }
 }
 
@@ -1431,7 +1482,7 @@ mod tests {
         });
         wait_for_channel(&hub, "t1").await;
 
-        let delivery = hub.send_prompt("t1", "hello".into()).await;
+        let delivery = hub.send_prompt("t1", "hello".into(), None).await;
 
         assert_eq!(
             delivery.expect("delivered"),
@@ -1455,7 +1506,7 @@ mod tests {
         });
         wait_for_channel(&hub, "t1").await;
 
-        let delivery = hub.send_prompt("t1", "/compact".into()).await;
+        let delivery = hub.send_prompt("t1", "/compact".into(), None).await;
 
         assert_eq!(delivery.expect("delivered"), ApiClaudePromptDelivery::Pty);
         assert_eq!(pty.recv().await.as_deref(), Some("paste t1 /compact"));
@@ -1469,7 +1520,7 @@ mod tests {
         let prompts = hub.poll_channel_for("t1", Duration::from_millis(10)).await;
         assert!(prompts.is_empty());
 
-        let delivery = hub.send_prompt("t1", "later".into()).await;
+        let delivery = hub.send_prompt("t1", "later".into(), None).await;
         assert_eq!(
             delivery.expect("delivered"),
             ApiClaudePromptDelivery::Channel
@@ -1483,13 +1534,13 @@ mod tests {
         hub.hook_event(hook("t1", event("SessionStart")))
             .expect("valid event");
 
-        let first = hub.send_prompt("t1", "first".into()).await;
+        let first = hub.send_prompt("t1", "first".into(), None).await;
         assert_eq!(first.expect("delivered"), ApiClaudePromptDelivery::Pty);
         assert_eq!(pty.recv().await.as_deref(), Some("paste t1 first"));
         assert_eq!(pty.recv().await.as_deref(), Some("enter t1"));
 
-        let second = hub.send_prompt("t1", "second".into()).await;
-        let third = hub.send_prompt("t1", "third".into()).await;
+        let second = hub.send_prompt("t1", "second".into(), None).await;
+        let third = hub.send_prompt("t1", "third".into(), None).await;
         assert_eq!(second.expect("accepted"), ApiClaudePromptDelivery::Queued);
         assert_eq!(third.expect("accepted"), ApiClaudePromptDelivery::Queued);
         assert_eq!(
@@ -1526,7 +1577,7 @@ mod tests {
             lifecycle: Some(AgentLifecycle::Done),
             ..claude_in_pane()
         });
-        let delivery = idle_hub.send_prompt("t1", "go".into()).await;
+        let delivery = idle_hub.send_prompt("t1", "go".into(), None).await;
         assert_eq!(delivery.expect("delivered"), ApiClaudePromptDelivery::Pty);
         assert_eq!(pty.recv().await.as_deref(), Some("paste t1 go"));
 
@@ -1534,7 +1585,7 @@ mod tests {
             lifecycle: Some(AgentLifecycle::Working),
             ..claude_in_pane()
         });
-        let delivery = busy_hub.send_prompt("t1", "go".into()).await;
+        let delivery = busy_hub.send_prompt("t1", "go".into(), None).await;
         assert!(matches!(delivery, Err(ClaudeRemoteError::Busy)));
         assert!(pty.try_recv().is_err());
     }
@@ -1550,14 +1601,134 @@ mod tests {
         hub.hook_event(hook("t1", event("SessionEnd")))
             .expect("valid event");
 
-        let delivery = hub.send_prompt("t1", "go".into()).await;
+        let delivery = hub.send_prompt("t1", "go".into(), None).await;
         assert!(matches!(delivery, Err(ClaudeRemoteError::Busy)));
+    }
+
+    #[tokio::test]
+    async fn a_prompt_for_another_session_is_refused() {
+        let (hub, _version, mut pty) = hub_with_daemon(claude_in_pane());
+        hub.hook_event(hook("t1", event("SessionStart")))
+            .expect("valid event");
+
+        let delivery = hub.send_prompt("t1", "go".into(), Some("s1")).await;
+        assert_eq!(delivery.expect("delivered"), ApiClaudePromptDelivery::Pty);
+        assert_eq!(pty.recv().await.as_deref(), Some("paste t1 go"));
+        assert_eq!(pty.recv().await.as_deref(), Some("enter t1"));
+
+        let mut next = event("SessionStart");
+        next["session_id"] = json!("s2");
+        hub.hook_event(hook("t1", next)).expect("valid event");
+        let delivery = hub.send_prompt("t1", "go".into(), Some("s1")).await;
+        assert!(matches!(
+            delivery,
+            Err(ClaudeRemoteError::SessionMismatch { expected, current })
+                if expected == "s1" && current.as_deref() == Some("s2")
+        ));
+        assert!(pty.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn a_prompt_for_an_ended_session_is_refused() {
+        let (hub, _version, _pty) = hub_with_daemon(claude_in_pane());
+        hub.hook_event(hook("t1", event("SessionStart")))
+            .expect("valid event");
+        hub.hook_event(hook("t1", event("SessionEnd")))
+            .expect("valid event");
+
+        let delivery = hub.send_prompt("t1", "go".into(), Some("s1")).await;
+        assert!(matches!(
+            delivery,
+            Err(ClaudeRemoteError::SessionMismatch { current: None, .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn an_ended_session_is_not_the_panes_until_resumed() {
+        let (hub, _version, _pty) = hub_with_daemon(claude_in_pane());
+        hub.hook_event(hook("t1", event("SessionStart")))
+            .expect("valid event");
+        hub.hook_event(hook("t1", event("SessionEnd")))
+            .expect("valid event");
+        let session = hub.session("t1", false).await.expect("session");
+        assert_eq!(session.session_id, None);
+
+        let mut resume = event("SessionStart");
+        resume["source"] = json!("resume");
+        hub.hook_event(hook("t1", resume)).expect("valid event");
+        let session = hub.session("t1", false).await.expect("session");
+        assert_eq!(session.session_id.as_deref(), Some("s1"));
+        let delivery = hub.send_prompt("t1", "go".into(), Some("s1")).await;
+        assert_eq!(delivery.expect("delivered"), ApiClaudePromptDelivery::Pty);
+    }
+
+    #[tokio::test]
+    async fn before_any_hook_the_daemon_recorded_session_is_the_panes() {
+        const RECORDED: &str = "00000000-0000-4000-8000-000000000001";
+        let (hub, _version, _pty) = hub_with_daemon(ClaudeTerminalInfo {
+            session: Some(okena_core::agent_session::AgentSession {
+                agent: "claude".to_string(),
+                session_id: RECORDED.to_string(),
+                transcript_path: None,
+            }),
+            ..claude_running()
+        });
+
+        let delivery = hub.send_prompt("t1", "go".into(), Some("s1")).await;
+        assert!(matches!(
+            delivery,
+            Err(ClaudeRemoteError::SessionMismatch { current, .. })
+                if current.as_deref() == Some(RECORDED)
+        ));
+        let delivery = hub.send_prompt("t1", "go".into(), Some(RECORDED)).await;
+        assert_eq!(delivery.expect("delivered"), ApiClaudePromptDelivery::Pty);
+    }
+
+    #[tokio::test]
+    async fn a_mismatch_pushes_nothing_to_the_channel() {
+        let (hub, _version, _pty) = hub_with_daemon(claude_in_pane());
+        hub.hook_event(hook("t1", event("SessionStart")))
+            .expect("valid event");
+        let poll = tokio::spawn({
+            let hub = Arc::clone(&hub);
+            async move { hub.poll_channel_for("t1", Duration::from_millis(50)).await }
+        });
+        wait_for_channel(&hub, "t1").await;
+
+        let delivery = hub.send_prompt("t1", "go".into(), Some("s2")).await;
+        assert!(matches!(
+            delivery,
+            Err(ClaudeRemoteError::SessionMismatch { .. })
+        ));
+        assert!(poll.await.expect("poll finished").is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_live_session_is_found_by_its_id() {
+        let (hub, _version, _pty) = hub_with_daemon(claude_in_pane());
+        hub.hook_event(hook("t1", event("SessionStart")))
+            .expect("valid event");
+
+        let session = hub.session_by_id("s1").await.expect("session");
+        assert_eq!(session.terminal_id, "t1");
+        assert_eq!(session.session_id.as_deref(), Some("s1"));
+        assert!(matches!(
+            hub.session_by_id("s2").await,
+            Err(ClaudeRemoteError::SessionNotFound)
+        ));
+
+        hub.hook_event(hook("t1", event("SessionEnd")))
+            .expect("valid event");
+        assert!(matches!(
+            hub.session_by_id("s1").await,
+            Err(ClaudeRemoteError::SessionNotFound)
+        ));
     }
 
     #[tokio::test]
     async fn blank_prompt_is_rejected() {
         let (hub, _version, _pty) = hub_with_daemon(claude_in_pane());
-        let delivery = hub.send_prompt("t1", " \n".into()).await;
+        let delivery = hub.send_prompt("t1", " \n".into(), None).await;
         assert!(matches!(delivery, Err(ClaudeRemoteError::EmptyPrompt)));
     }
 
@@ -1824,7 +1995,7 @@ mod tests {
         let (hub, _version, _pty) = hub_with_daemon(claude_in_pane());
         hub.hook_event(hook("t1", event("UserPromptSubmit")))
             .expect("valid event");
-        let delivery = hub.send_prompt("t1", "later".into()).await;
+        let delivery = hub.send_prompt("t1", "later".into(), None).await;
         assert_eq!(delivery.expect("accepted"), ApiClaudePromptDelivery::Queued);
         let (_, _waiting) =
             open_dialog(&hub, "t1", permission("Bash", json!({"command": "ls"}))).await;
@@ -1914,7 +2085,7 @@ mod tests {
     #[tokio::test]
     async fn a_pane_without_claude_is_never_typed_into() {
         let (hub, _version, mut pty) = hub_with_daemon(ClaudeTerminalInfo::default());
-        let delivery = hub.send_prompt("t1", "rm -rf ~".into()).await;
+        let delivery = hub.send_prompt("t1", "rm -rf ~".into(), None).await;
         assert!(matches!(delivery, Err(ClaudeRemoteError::NoClaudeSession)));
         assert!(pty.try_recv().is_err());
     }
@@ -1924,7 +2095,7 @@ mod tests {
         let (hub, _version, mut pty) = hub_with_daemon(claude_in_pane());
         hub.hook_event(hook("t1", event("SessionStart")))
             .expect("valid event");
-        let first = hub.send_prompt("t1", "/clear".into()).await;
+        let first = hub.send_prompt("t1", "/clear".into(), None).await;
         assert_eq!(first.expect("delivered"), ApiClaudePromptDelivery::Pty);
         assert_eq!(
             hub.session("t1", false).await.expect("session").busy,
@@ -1947,7 +2118,7 @@ mod tests {
             hub.session("t1", false).await.expect("session").busy,
             Some(false)
         );
-        let second = hub.send_prompt("t1", "hello".into()).await;
+        let second = hub.send_prompt("t1", "hello".into(), None).await;
         assert_eq!(second.expect("delivered"), ApiClaudePromptDelivery::Pty);
         let typed: Vec<String> = std::iter::from_fn(|| pty.try_recv().ok()).collect();
         assert!(typed.contains(&"paste t1 hello".to_string()), "{typed:?}");
@@ -1959,7 +2130,7 @@ mod tests {
         hub.hook_event(hook("broken", event("SessionStart")))
             .expect("valid event");
 
-        let delivery = hub.send_prompt("broken", "hello".into()).await;
+        let delivery = hub.send_prompt("broken", "hello".into(), None).await;
 
         assert!(matches!(delivery, Err(ClaudeRemoteError::Daemon(_))));
         assert_eq!(
@@ -1989,7 +2160,7 @@ mod tests {
             .expect("valid event");
         let request = tokio::spawn({
             let hub = Arc::clone(&hub);
-            async move { hub.send_prompt("t1", "hello".into()).await }
+            async move { hub.send_prompt("t1", "hello".into(), None).await }
         });
         assert_eq!(pty.recv().await.as_deref(), Some("paste t1 hello"));
 
@@ -2005,14 +2176,14 @@ mod tests {
             let (hub, _version, _pty) = hub_with_daemon(claude_running());
             hub.hook_event(hook("t1", event("UserPromptSubmit")))
                 .expect("valid event");
-            let queued = hub.send_prompt("t1", "pty".into()).await;
+            let queued = hub.send_prompt("t1", "pty".into(), None).await;
             assert_eq!(queued.expect("accepted"), ApiClaudePromptDelivery::Queued);
             assert!(
                 hub.poll_channel_for("t1", Duration::from_millis(1))
                     .await
                     .is_empty()
             );
-            let channel = hub.send_prompt("t1", "channel".into()).await;
+            let channel = hub.send_prompt("t1", "channel".into(), None).await;
             assert_eq!(channel.expect("accepted"), ApiClaudePromptDelivery::Channel);
             assert_eq!(queued_prompts(&hub, "t1"), (1, 1), "{name}");
 
@@ -2029,10 +2200,10 @@ mod tests {
         hub.hook_event(hook("t1", event("UserPromptSubmit")))
             .expect("valid event");
         for n in 0..MAX_QUEUED_PROMPTS {
-            let delivery = hub.send_prompt("t1", format!("prompt {n}")).await;
+            let delivery = hub.send_prompt("t1", format!("prompt {n}"), None).await;
             assert_eq!(delivery.expect("accepted"), ApiClaudePromptDelivery::Queued);
         }
-        let overflow = hub.send_prompt("t1", "one too many".into()).await;
+        let overflow = hub.send_prompt("t1", "one too many".into(), None).await;
         assert!(matches!(overflow, Err(ClaudeRemoteError::QueueFull)));
 
         assert!(
@@ -2041,17 +2212,17 @@ mod tests {
                 .is_empty()
         );
         for n in 0..MAX_QUEUED_PROMPTS {
-            let delivery = hub.send_prompt("t2", format!("prompt {n}")).await;
+            let delivery = hub.send_prompt("t2", format!("prompt {n}"), None).await;
             assert_eq!(
                 delivery.expect("accepted"),
                 ApiClaudePromptDelivery::Channel
             );
         }
-        let overflow = hub.send_prompt("t2", "one too many".into()).await;
+        let overflow = hub.send_prompt("t2", "one too many".into(), None).await;
         assert!(matches!(overflow, Err(ClaudeRemoteError::QueueFull)));
 
         let too_long = hub
-            .send_prompt("t1", "x".repeat(MAX_PROMPT_BYTES + 1))
+            .send_prompt("t1", "x".repeat(MAX_PROMPT_BYTES + 1), None)
             .await;
         assert!(matches!(too_long, Err(ClaudeRemoteError::PromptTooLong)));
     }
@@ -2064,7 +2235,7 @@ mod tests {
             Err(ClaudeRemoteError::TerminalNotFound(_))
         ));
         assert!(matches!(
-            hub.send_prompt("gone", "hi".into()).await,
+            hub.send_prompt("gone", "hi".into(), None).await,
             Err(ClaudeRemoteError::TerminalNotFound(_))
         ));
     }
@@ -2101,12 +2272,12 @@ mod tests {
         let (hub, _version, mut pty) = hub_with_daemon(shell_in_pane());
         hub.hook_event(hook("t1", event("SessionStart")))
             .expect("valid event");
-        let idle = hub.send_prompt("t1", "rm -rf ~".into()).await;
+        let idle = hub.send_prompt("t1", "rm -rf ~".into(), None).await;
         assert!(matches!(idle, Err(ClaudeRemoteError::NoClaudeSession)));
 
         hub.hook_event(hook("t1", event("UserPromptSubmit")))
             .expect("valid event");
-        let busy = hub.send_prompt("t1", "rm -rf ~".into()).await;
+        let busy = hub.send_prompt("t1", "rm -rf ~".into(), None).await;
         assert!(matches!(busy, Err(ClaudeRemoteError::NoClaudeSession)));
 
         assert!(pty.try_recv().is_err());
@@ -2119,7 +2290,7 @@ mod tests {
         hub.hook_event(hook("t1", event("UserPromptSubmit")))
             .expect("valid event");
         for text in ["first", "second"] {
-            let delivery = hub.send_prompt("t1", text.into()).await;
+            let delivery = hub.send_prompt("t1", text.into(), None).await;
             assert_eq!(delivery.expect("accepted"), ApiClaudePromptDelivery::Queued);
         }
         *daemon.info.lock() = shell_in_pane();
@@ -2295,7 +2466,7 @@ mod tests {
         hub.transcript("t1", None, None, None).await.expect("page");
         assert_eq!(daemon.probes.load(Ordering::Relaxed), 0);
 
-        let delivery = hub.send_prompt("t1", "hi".into()).await;
+        let delivery = hub.send_prompt("t1", "hi".into(), None).await;
         assert_eq!(delivery.expect("delivered"), ApiClaudePromptDelivery::Pty);
         assert_eq!(pty.recv().await.as_deref(), Some("paste t1 hi"));
         assert_eq!(daemon.probes.load(Ordering::Relaxed), 1);
