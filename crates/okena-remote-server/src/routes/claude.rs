@@ -36,6 +36,19 @@ impl IntoResponse for ClaudeRemoteError {
                 "No Claude session detected in this pane".to_string(),
             ),
             Self::QueueFull => (StatusCode::CONFLICT, "too many queued prompts".to_string()),
+            Self::SessionMismatch { expected, current } => (
+                StatusCode::CONFLICT,
+                match current {
+                    Some(current) => {
+                        format!("the pane runs Claude session {current}, not {expected}")
+                    }
+                    None => format!("the pane runs no Claude session, not {expected}"),
+                },
+            ),
+            Self::SessionNotFound => (
+                StatusCode::NOT_FOUND,
+                "no pane runs this Claude session".to_string(),
+            ),
             Self::TerminalNotFound(message) => (StatusCode::NOT_FOUND, message),
             Self::DialogNotFound => (
                 StatusCode::NOT_FOUND,
@@ -103,6 +116,13 @@ pub async fn get_session(
         .map(Json)
 }
 
+pub async fn get_session_by_id(
+    State(state): State<AppState>,
+    Path(session_id): Path<String>,
+) -> Result<impl IntoResponse, ClaudeRemoteError> {
+    state.claude_hub.session_by_id(&session_id).await.map(Json)
+}
+
 #[derive(Deserialize)]
 pub struct TranscriptQuery {
     #[serde(default)]
@@ -140,7 +160,11 @@ pub async fn post_prompt(
 ) -> Result<Json<ApiClaudePromptResponse>, ClaudeRemoteError> {
     let delivery = state
         .claude_hub
-        .send_prompt(&terminal_id, request.text)
+        .send_prompt(
+            &terminal_id,
+            request.text,
+            request.expect_session_id.as_deref(),
+        )
         .await?;
     Ok(Json(ApiClaudePromptResponse { delivery }))
 }
@@ -297,6 +321,7 @@ mod tests {
         let mut router = router();
         let calls = [
             ("GET", "/v1/claude/terminals/t1"),
+            ("GET", "/v1/claude/sessions/s1"),
             ("GET", "/v1/claude/terminals/t1/transcript?cursor=0"),
             ("GET", "/v1/claude/terminals/t1/subagents"),
             ("POST", "/v1/claude/terminals/t1/prompt"),
@@ -309,6 +334,33 @@ mod tests {
                 "{method} {uri}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn a_session_mismatch_conflicts_and_an_unknown_session_is_not_found() {
+        let mut router = router_with_plain_shell();
+        assert_eq!(
+            status(
+                &mut router,
+                "POST",
+                "/v1/claude/terminals/t1/prompt",
+                PeerInfo::Local,
+                r#"{"text":"go","expect_session_id":"s1"}"#
+            )
+            .await,
+            StatusCode::CONFLICT
+        );
+        assert_eq!(
+            status(
+                &mut router,
+                "GET",
+                "/v1/claude/sessions/s1",
+                PeerInfo::Local,
+                ""
+            )
+            .await,
+            StatusCode::NOT_FOUND
+        );
     }
 
     #[tokio::test]

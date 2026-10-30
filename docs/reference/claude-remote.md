@@ -95,14 +95,22 @@ All take the bearer token. Errors have a plain-text body.
 | Endpoint | Purpose |
 |---|---|
 | `GET /v1/claude/terminals/{id}?probe_foreground=` | Session: `session_id`, `hooks_attached`, `busy`, open `dialogs`, `running_subagents`, `pr_links`, `startup_dialog`, `foreground_command` |
+| `GET /v1/claude/sessions/{session_id}` | The session of the pane that runs it, same shape as above (`terminal_id` names the pane); `404` when no pane does |
 | `GET /v1/claude/terminals/{id}/transcript?cursor=&session_id=&agent_id=` | Transcript page, see [Transcript](#transcript) |
 | `GET /v1/claude/terminals/{id}/subagents` | The session's subagents, see [Subagents](#subagents) |
-| `POST /v1/claude/terminals/{id}/prompt` | `{ "text" }` → `{ "delivery" }`, see [Prompts](#prompts) |
+| `POST /v1/claude/terminals/{id}/prompt` | `{ "text", "expect_session_id"? }` → `{ "delivery" }`, see [Prompts](#prompts) |
 | `POST /v1/claude/terminals/{id}/dialogs/{dialog_id}` | `{ "decision": "allow" \| "deny" \| "answer", "always"?, "message"?, "answers"? }`; `404` once the dialog is answered or gone |
 
 Dialog ids are opaque strings, unique across daemon restarts. String values
 over 16 KiB in a dialog's `tool_input` are cut for clients; the answer to
 Claude uses the full input.
+
+## Sessions by id
+
+`GET /v1/claude/sessions/{session_id}` finds the pane whose hooks report that
+session and no `SessionEnd` (of two such panes, the lowest terminal id). A
+session is known once a hook reported it, so after a daemon restart only after
+its next hook event.
 
 ## Prompts
 
@@ -116,7 +124,10 @@ Claude uses the full input.
 
 `400` means an empty prompt or one over 64 KiB. `409` means the prompt cannot
 be delivered: no `claude` runs in the pane, Claude is busy and no `Stop` hook
-will arrive (no hooks attached), or 32 prompts are already queued. A prompt is
+will arrive (no hooks attached), 32 prompts are already queued, or
+`expect_session_id` names another session than the pane's (the hooks' session
+unless it reported `SessionEnd`; before any hook, the one the daemon recorded).
+`okena claude prompt --session <id>` sends it. A prompt is
 typed into the pane only while its foreground process is `claude`; queued
 prompts are dropped if `claude` is gone when the turn ends. Claude skips
 slash-command parsing and attachments for channel prompts, so a prompt starting

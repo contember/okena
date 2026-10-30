@@ -211,6 +211,9 @@ pub enum ApiClaudeDecision {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ApiClaudePromptRequest {
     pub text: String,
+    /// Refuse (`409`) unless the pane runs this Claude session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expect_session_id: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

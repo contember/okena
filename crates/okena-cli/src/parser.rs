@@ -274,6 +274,10 @@ pub enum ClaudeCmd {
     Prompt {
         /// Terminal address (id, project/name, or project:index)
         terminal: String,
+        /// Refuse unless the pane still runs this Claude session (`session_id`
+        /// from `claude show`/`start`); goes before the text
+        #[arg(long)]
+        session: Option<String>,
         /// Prompt text (joined with spaces)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true, required = true)]
         text: Vec<String>,
@@ -941,6 +945,33 @@ mod tests {
         );
         assert!(Cli::try_parse_from(["okena", "claude", "answer", "p:0", "d1", "maybe"]).is_err());
         assert!(Cli::try_parse_from(["okena", "claude", "prompt", "p:0"]).is_err());
+        let prompt = |args: &[&str]| match Cli::try_parse_from(args).map(|cli| cli.command) {
+            Ok(Command::Claude {
+                cmd: ClaudeCmd::Prompt { session, text, .. },
+            }) => (session, text),
+            _ => panic!("expected claude prompt"),
+        };
+        assert_eq!(
+            prompt(&[
+                "okena",
+                "claude",
+                "prompt",
+                "p:0",
+                "--session",
+                "s1",
+                "fix",
+                "it"
+            ]),
+            (
+                Some("s1".to_string()),
+                vec!["fix".to_string(), "it".to_string()]
+            )
+        );
+        // After the text starts, `--session` is prompt text.
+        assert_eq!(
+            prompt(&["okena", "claude", "prompt", "p:0", "fix", "--session", "s1"]).0,
+            None
+        );
         assert!(
             Cli::try_parse_from([
                 "okena",

@@ -132,7 +132,10 @@ pub(crate) async fn send_prompt(
         &config,
         &token,
         &terminal_route(terminal_id, &["prompt"]),
-        &ApiClaudePromptRequest { text },
+        &ApiClaudePromptRequest {
+            text,
+            expect_session_id: None,
+        },
     )
     .await
     .map_err(|error| request_error(error, None))?;
