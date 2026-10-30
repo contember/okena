@@ -328,3 +328,21 @@ impl TerminalBackend for LocalBackend {
         self.pty_manager.get_batch_service_pids(terminal_ids)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_incomplete_teardown_names_the_retryable_marker() {
+        for incomplete in [
+            TeardownIncomplete::TimedOut,
+            TeardownIncomplete::Unreleased(vec!["t1".to_string()]),
+        ] {
+            assert!(
+                incomplete.to_string().contains(TEARDOWN_UNVERIFIED),
+                "{incomplete}"
+            );
+        }
+    }
+}

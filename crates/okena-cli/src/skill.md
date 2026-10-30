@@ -100,9 +100,9 @@ Commands that create things (`term new/split/tab`, `project add`, `project clone
 - **`run --wait` assumes a POSIX-ish shell** (bash/zsh/sh) and a non-interactive
   command (it appends a completion marker). Don't use it for vim/REPLs.
 - **A bare `run` reports no completion or exit code** — only `run --wait` does.
-- **Exit 75 = retry**: `worktree rm`/`project rm` (and `action`) exit 75 when a
-  terminal's processes could not be verified as stopped. The checkout is kept;
-  retry after a few seconds.
+- **Exit 75 = retry**: `worktree rm` (and `action`) exits 75 when a terminal's
+  processes could not be verified as stopped. The checkout is kept; retry after
+  a few seconds.
 - **`worktree add` and `project clone` are optimistic**: they print the id + path
   and return before the checkout exists on disk (the reply carries `pending: true`).
   Use `worktree add --wait`: it returns once the checkout and its terminal exist,

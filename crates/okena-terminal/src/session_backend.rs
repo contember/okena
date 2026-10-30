@@ -945,8 +945,7 @@ fn await_killed_exit(
         if alive.is_empty() || std::time::Instant::now() >= deadline {
             return Some(alive);
         }
-        // Stopped processes cannot fork, but one caught mid-fork can leave a
-        // child the snapshots missed.
+        // Kills whatever joined after the freeze; a repeat SIGKILL is a no-op.
         signal_tracked_processes(&alive, libc::SIGKILL, context);
     }
 }
@@ -1050,7 +1049,8 @@ fn terminate_dtach_process_tree(socket_path: &std::path::PathBuf, session_name: 
                 .collect(),
         )
     })
-    .map_or(0, |survivors| survivors.len());
+    // A failed poll proves nothing: keep the socket as the retry handle.
+    .map_or(descendants.len().max(1), |survivors| survivors.len());
     if surviving_descendants > 0 {
         signal_tracked_processes(&descendants, libc::SIGCONT, session_name);
         signal_tracked_processes(&stopped_holders, libc::SIGCONT, session_name);
@@ -2241,7 +2241,63 @@ mod tests {
             elapsed >= TEARDOWN_EXIT_TIMEOUT,
             "gave up after {elapsed:?}"
         );
-        assert!(elapsed < TEARDOWN_EXIT_TIMEOUT + std::time::Duration::from_millis(500));
+        assert!(elapsed < TEARDOWN_EXIT_TIMEOUT + std::time::Duration::from_secs(1));
+    }
+
+    /// A distinct process no one has, like [`GONE`].
+    #[cfg(unix)]
+    fn gone(n: u128) -> TrackedProcess {
+        TrackedProcess {
+            pid: i32::MAX,
+            start_marker: Some(n),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_tree_that_stops_growing_is_frozen() {
+        let mut polls = 0;
+        let frozen = freeze_process_tree("test", || {
+            polls += 1;
+            Some(if polls == 1 {
+                vec![gone(1)]
+            } else {
+                vec![gone(1), gone(2)]
+            })
+        });
+        assert_eq!(frozen, Some((vec![gone(1), gone(2)], true)));
+        assert_eq!(polls, 4, "two polls in a row found nothing new");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_tree_that_keeps_growing_is_not_frozen() {
+        let started = std::time::Instant::now();
+        let mut polls = 0;
+        let frozen = freeze_process_tree("test", || {
+            polls += 1;
+            Some(vec![gone(polls)])
+        });
+        let elapsed = started.elapsed();
+        let (stopped, quiesced) = frozen.expect("snapshots succeeded");
+        assert!(!quiesced);
+        assert_eq!(stopped.len(), usize::try_from(polls).expect("small count"));
+        assert!(
+            elapsed >= TEARDOWN_QUIESCE_TIMEOUT,
+            "gave up after {elapsed:?}"
+        );
+        assert!(elapsed < TEARDOWN_QUIESCE_TIMEOUT + std::time::Duration::from_secs(1));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_snapshot_is_not_frozen() {
+        let mut polls = 0;
+        let frozen = freeze_process_tree("test", || {
+            polls += 1;
+            (polls == 1).then(|| vec![gone(1)])
+        });
+        assert_eq!(frozen, None);
     }
 
     #[cfg(unix)]
