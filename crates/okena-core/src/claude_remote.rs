@@ -40,6 +40,10 @@ pub struct ClaudeTerminalInfo {
     /// Linux). `None` when the shell is at its prompt or the probe failed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub foreground_command: Option<String>,
+    /// The probe saw the pane's shell itself running no process: whatever ran
+    /// there has exited. `false` when unsure (failed or unsupported probe).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub shell_idle: bool,
     /// The start-up dialog on the pane's screen, when the screen was read.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub startup_dialog: Option<ApiClaudeStartupDialog>,

@@ -112,17 +112,22 @@ Hooks keep `busy`: `UserPromptSubmit` and the tool hooks set it, `Stop` (or
 `queued` prompt. An interrupt (Escape, also answering a permission dialog with
 "No") fires neither, so the daemon also reads the end of each turn from the
 transcript: Claude writes a `turn_duration` record, or a `[Request interrupted
-by user…]` message when interrupted while generating. A recorded end newer than
-the turn's `UserPromptSubmit` ends it like `Stop`. The transcript is read on
-session reads, so this lands on the next one.
+by user…]` message when interrupted while generating. A recorded end at or
+after the time the turn's first hook (`UserPromptSubmit`, or a tool hook for a
+turn Claude started itself) reached the daemon ends it like `Stop`. The
+transcript is read on session reads, so this lands on the next one. A `Stop`
+that arrives after the transcript already ended the turn types nothing more.
 
 A `claude` that is killed or crashes sends no `SessionEnd`. While its hooks are
 attached and no channel polls, a session read probes the pane's foreground at
-most every 5 s; with nothing running there, the session counts as gone: hooks
-detached, `session_id` and `busy` `null`, dialogs cancelled, queued prompts
-dropped, and the pane leaves `claude_sessions`. A prompt that finds no
-foreground process does the same. A later hook of that session attaches it
-again. With the channel on, this starts once the dead channel stops polling
+most every 5 s. When the probe finds the pane's shell running no process at
+all, the session counts as gone: hooks detached, `session_id` and `busy`
+`null`, dialogs cancelled, queued prompts dropped, and the pane leaves
+`claude_sessions` and `GET /v1/claude/sessions/{session_id}`. A prompt whose
+probe finds the same does the same. A probe that fails, an OS without process
+probing, or a shell replaced by `exec claude` never counts as gone, and neither
+does a hook arriving while the probe runs. A later hook of that session
+attaches it again. With the channel on, this starts once the dead channel stops polling
 (within its 25 s poll timeout).
 
 A permission dialog whose hook stops waiting (Claude answered or dismissed it
@@ -227,7 +232,7 @@ subagent's transcript; an id that is not ASCII letters, digits, `-` or `_` is a
   dialog that was waiting is answerable only in the terminal. Without the
   channel, an idle `claude` is not listed as connected until its next step.
 - A `claude` that dies without a `SessionEnd` hook stays listed as connected
-  until a session read finds the pane's foreground empty (see
+  until a session read finds the pane's shell running nothing (see
   [Turns and liveness](#turns-and-liveness)). Until its channel stops polling,
   a prompt is still accepted for the channel and lost.
 - A prompt is typed into the pane only when the pane's foreground process is
@@ -237,7 +242,9 @@ subagent's transcript; an id that is not ASCII letters, digits, `-` or `_` is a
   from another session than the current one before its `SessionStart`, are
   ignored.
 - An interrupt ends `busy` only once a session read finds its end in the
-  transcript.
+  transcript. One that lands before the turn's first hook reached the daemon
+  (hooks run async) is older than the turn and does not end it; the next
+  `Stop` does.
 - Clients poll (1 s); there are no push notifications.
 - `running_subagents` lives in daemon memory like the rest; after a restart it
   fills again only with subagents started afterwards.

@@ -42,6 +42,54 @@ pub fn has_child_processes(_pid: u32) -> bool {
     false
 }
 
+/// Whether `pid` is known to run no child process. Unlike
+/// `!has_child_processes`, false when the check fails or is unsupported.
+#[cfg(target_os = "linux")]
+pub fn has_no_child_processes(pid: u32) -> bool {
+    let Ok(entries) = std::fs::read_dir(format!("/proc/{pid}/task")) else {
+        return false;
+    };
+    let mut checked = false;
+    for entry in entries {
+        let Ok(entry) = entry else {
+            return false;
+        };
+        match std::fs::read_to_string(entry.path().join("children")) {
+            Ok(children) if children.trim().is_empty() => checked = true,
+            _ => return false,
+        }
+    }
+    checked
+}
+
+#[cfg(target_os = "macos")]
+pub fn has_no_child_processes(pid: u32) -> bool {
+    crate::macos_proc::process_name(pid).is_some()
+        && crate::macos_proc::checked_child_pids(pid).is_some_and(|children| children.is_empty())
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub fn has_no_child_processes(_pid: u32) -> bool {
+    false
+}
+
+/// Name of the process `pid` (`comm` on Linux), `None` when unknown.
+#[cfg(target_os = "linux")]
+pub fn process_name(pid: u32) -> Option<String> {
+    let comm = std::fs::read_to_string(format!("/proc/{pid}/comm")).ok()?;
+    Some(comm.trim().to_string()).filter(|name| !name.is_empty())
+}
+
+#[cfg(target_os = "macos")]
+pub fn process_name(pid: u32) -> Option<String> {
+    crate::macos_proc::process_name(pid)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub fn process_name(_pid: u32) -> Option<String> {
+    None
+}
+
 /// Best-effort name of the foreground command running under `pid` (the shell):
 /// the first child process's name (e.g. "make", "vim", "cargo"). On Linux reads
 /// `/proc/<child>/comm`; on macOS uses `libproc`; returns `None` elsewhere or
@@ -81,4 +129,28 @@ pub fn foreground_command(pid: u32) -> Option<String> {
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub fn foreground_command(_pid: u32) -> Option<String> {
     None
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn no_child_processes_is_known_only_for_a_live_childless_process() {
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn sleep");
+        assert!(has_no_child_processes(child.id()));
+        assert!(!has_no_child_processes(std::process::id()));
+        assert_eq!(process_name(child.id()).as_deref(), Some("sleep"));
+
+        child.kill().expect("kill sleep");
+        child.wait().expect("reap sleep");
+        assert!(
+            !has_no_child_processes(child.id()),
+            "a missing pid is unknown"
+        );
+        assert_eq!(process_name(child.id()), None);
+    }
 }

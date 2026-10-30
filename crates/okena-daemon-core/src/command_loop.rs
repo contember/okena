@@ -4520,6 +4520,7 @@ pub async fn daemon_command_loop(
                             session: terminal.agent_session(),
                             lifecycle: terminal.agent_status().map(|status| status.lifecycle),
                             foreground_command: None,
+                            shell_idle: false,
                             startup_dialog: read_screen
                                 .then(|| ApiClaudeStartupDialog::detect(&terminal.visible_text()))
                                 .flatten(),
@@ -4530,10 +4531,11 @@ pub async fn daemon_command_loop(
                             let backend = backend.clone();
                             // The foreground probe forks tmux or scans /proc.
                             spawn_blocking_command_with(reply, &runtime, move || {
+                                let shell_pid = backend.get_foreground_shell_pid(&terminal_id);
                                 serialize_terminal_info(ClaudeTerminalInfo {
-                                    foreground_command: backend
-                                        .get_foreground_shell_pid(&terminal_id)
+                                    foreground_command: shell_pid
                                         .and_then(okena_terminal::terminal::foreground_command),
+                                    shell_idle: shell_pid.is_some_and(shell_is_idle),
                                     ..info
                                 })
                             });
@@ -4549,6 +4551,13 @@ pub async fn daemon_command_loop(
             let _ = reply.send(result);
         }
     }
+}
+
+/// The pane's shell is known to run nothing. A shell replaced by
+/// `exec claude` is `claude` itself, which may run no child either.
+fn shell_is_idle(shell_pid: u32) -> bool {
+    okena_terminal::terminal::process_name(shell_pid).is_some_and(|name| name != "claude")
+        && okena_terminal::terminal::has_no_child_processes(shell_pid)
 }
 
 /// The `wait` reply of `CreateWorktree`: the ready worktree and its terminals,
@@ -6746,6 +6755,7 @@ mod tests {
                         session: None,
                         lifecycle: Some(okena_core::agent_status::AgentLifecycle::Working),
                         foreground_command: None,
+                        shell_idle: false,
                         startup_dialog: Some(ApiClaudeStartupDialog::Channels),
                     }
                 );
