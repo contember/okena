@@ -266,15 +266,27 @@ pub enum ApiClaudePromptOrigin {
 pub enum ApiClaudeEntry {
     User {
         uuid: String,
+        /// When Claude recorded the entry (RFC 3339, UTC): its transcript
+        /// line's `timestamp`.
+        #[serde(default)]
+        timestamp: Option<String>,
         text: String,
         origin: ApiClaudePromptOrigin,
     },
     Assistant {
         uuid: String,
+        /// When Claude recorded the entry (RFC 3339, UTC): its transcript
+        /// line's `timestamp`.
+        #[serde(default)]
+        timestamp: Option<String>,
         text: String,
     },
     ToolUse {
         uuid: String,
+        /// When Claude recorded the entry (RFC 3339, UTC): its transcript
+        /// line's `timestamp`.
+        #[serde(default)]
+        timestamp: Option<String>,
         tool_use_id: String,
         name: String,
         /// One line describing the call (command, file path, pattern, ...).
@@ -282,6 +294,10 @@ pub enum ApiClaudeEntry {
     },
     ToolResult {
         uuid: String,
+        /// When Claude recorded the entry (RFC 3339, UTC): its transcript
+        /// line's `timestamp`.
+        #[serde(default)]
+        timestamp: Option<String>,
         tool_use_id: String,
         /// Result text, truncated.
         text: String,

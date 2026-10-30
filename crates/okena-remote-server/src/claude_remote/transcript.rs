@@ -411,6 +411,8 @@ fn timestamp_ms(timestamp: &str) -> Option<u64> {
 #[derive(Deserialize)]
 struct AttachmentRecord {
     uuid: String,
+    #[serde(default)]
+    timestamp: Option<String>,
     attachment: Attachment,
 }
 
@@ -492,6 +494,8 @@ struct RecordOrigin {
 #[derive(Deserialize)]
 struct AssistantRecord {
     uuid: String,
+    #[serde(default)]
+    timestamp: Option<String>,
     message: Message<AssistantBlock>,
 }
 
@@ -585,6 +589,7 @@ fn attachment_entries(record: AttachmentRecord) -> Vec<ApiClaudeEntry> {
     match origin.map(|origin| origin.kind).as_deref() {
         Some("channel") => vec![ApiClaudeEntry::User {
             uuid: record.uuid,
+            timestamp: record.timestamp,
             text: strip_channel_wrapper(&text).to_string(),
             origin: ApiClaudePromptOrigin::Channel,
         }],
@@ -593,6 +598,7 @@ fn attachment_entries(record: AttachmentRecord) -> Vec<ApiClaudeEntry> {
             .filter(|text| !text.trim().is_empty())
             .map(|text| ApiClaudeEntry::User {
                 uuid: record.uuid,
+                timestamp: record.timestamp,
                 text,
                 origin: ApiClaudePromptOrigin::Terminal,
             })
@@ -609,7 +615,7 @@ fn user_entries(record: UserRecord) -> Vec<ApiClaudeEntry> {
         is_compact_summary,
         origin,
         message,
-        timestamp: _,
+        timestamp,
     } = record;
 
     if is_compact_summary == Some(true) {
@@ -620,6 +626,7 @@ fn user_entries(record: UserRecord) -> Vec<ApiClaudeEntry> {
         let text = strip_channel_wrapper(&content_text(&message.content)).to_string();
         return vec![ApiClaudeEntry::User {
             uuid,
+            timestamp,
             text,
             origin: ApiClaudePromptOrigin::Channel,
         }];
@@ -636,16 +643,21 @@ fn user_entries(record: UserRecord) -> Vec<ApiClaudeEntry> {
         Content::Text(content) => terminal_prompt_text(&content)
             .map(|text| ApiClaudeEntry::User {
                 uuid,
+                timestamp,
                 text,
                 origin: ApiClaudePromptOrigin::Terminal,
             })
             .into_iter()
             .collect(),
-        Content::Blocks(blocks) => user_block_entries(uuid, blocks),
+        Content::Blocks(blocks) => user_block_entries(uuid, timestamp, blocks),
     }
 }
 
-fn user_block_entries(uuid: String, blocks: Vec<UserBlock>) -> Vec<ApiClaudeEntry> {
+fn user_block_entries(
+    uuid: String,
+    timestamp: Option<String>,
+    blocks: Vec<UserBlock>,
+) -> Vec<ApiClaudeEntry> {
     let mut texts = Vec::new();
     let mut results = Vec::new();
     for block in blocks {
@@ -657,6 +669,7 @@ fn user_block_entries(uuid: String, blocks: Vec<UserBlock>) -> Vec<ApiClaudeEntr
                 is_error,
             } => results.push(ApiClaudeEntry::ToolResult {
                 uuid: uuid.clone(),
+                timestamp: timestamp.clone(),
                 tool_use_id,
                 text: truncate_chars(&tool_result_text(content), TOOL_RESULT_MAX_CHARS),
                 is_error: is_error.unwrap_or(false),
@@ -669,6 +682,7 @@ fn user_block_entries(uuid: String, blocks: Vec<UserBlock>) -> Vec<ApiClaudeEntr
     if !texts.is_empty() {
         entries.push(ApiClaudeEntry::User {
             uuid,
+            timestamp,
             text: texts.join("\n"),
             origin: ApiClaudePromptOrigin::Terminal,
         });
@@ -678,7 +692,11 @@ fn user_block_entries(uuid: String, blocks: Vec<UserBlock>) -> Vec<ApiClaudeEntr
 }
 
 fn assistant_entries(record: AssistantRecord) -> Vec<ApiClaudeEntry> {
-    let AssistantRecord { uuid, message } = record;
+    let AssistantRecord {
+        uuid,
+        timestamp,
+        message,
+    } = record;
     let blocks = match message.content {
         Content::Text(text) => vec![AssistantBlock::Text { text }],
         Content::Blocks(blocks) => blocks,
@@ -689,11 +707,13 @@ fn assistant_entries(record: AssistantRecord) -> Vec<ApiClaudeEntry> {
             AssistantBlock::Text { text } if !text.trim().is_empty() => {
                 Some(ApiClaudeEntry::Assistant {
                     uuid: uuid.clone(),
+                    timestamp: timestamp.clone(),
                     text,
                 })
             }
             AssistantBlock::ToolUse { id, name, input } => Some(ApiClaudeEntry::ToolUse {
                 uuid: uuid.clone(),
+                timestamp: timestamp.clone(),
                 tool_use_id: id,
                 summary: tool_summary(&name, &input),
                 name,
@@ -849,6 +869,7 @@ mod tests {
     fn user(uuid: &str, text: &str, origin: ApiClaudePromptOrigin) -> ApiClaudeEntry {
         ApiClaudeEntry::User {
             uuid: uuid.into(),
+            timestamp: None,
             text: text.into(),
             origin,
         }
@@ -857,6 +878,7 @@ mod tests {
     fn assistant(uuid: &str, text: &str) -> ApiClaudeEntry {
         ApiClaudeEntry::Assistant {
             uuid: uuid.into(),
+            timestamp: None,
             text: text.into(),
         }
     }
@@ -866,6 +888,81 @@ mod tests {
         assert_eq!(
             parse_lines(&user_text("u1", "fix the build")),
             vec![user("u1", "fix the build", ApiClaudePromptOrigin::Terminal)]
+        );
+    }
+
+    #[test]
+    fn entries_carry_their_line_timestamp() {
+        let prompt = line(json!({
+            "type": "user",
+            "uuid": "u1",
+            "timestamp": "2026-10-30T10:00:00.000Z",
+            "message": {"role": "user", "content": "go"}
+        }));
+        let queued = line(json!({
+            "type": "attachment",
+            "uuid": "q1",
+            "timestamp": "2026-10-30T10:00:01.000Z",
+            "attachment": {
+                "type": "queued_command",
+                "prompt": "<channel source=\"okena-remote\">\nnext\n</channel>",
+                "commandMode": "prompt",
+                "origin": {"kind": "channel", "server": "okena-remote"}
+            }
+        }));
+        let reply = line(json!({
+            "type": "assistant",
+            "uuid": "a1",
+            "timestamp": "2026-10-30T10:00:02.000Z",
+            "message": {"role": "assistant", "content": [
+                {"type": "text", "text": "Listing."},
+                {"type": "tool_use", "id": "toolu_1", "name": "Bash", "input": {"command": "ls"}}
+            ]}
+        }));
+        let result = line(json!({
+            "type": "user",
+            "uuid": "u2",
+            "timestamp": "2026-10-30T10:00:03.000Z",
+            "message": {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "toolu_1", "content": "ok"}
+            ]}
+        }));
+        let at = |second: u8| Some(format!("2026-10-30T10:00:0{second}.000Z"));
+        assert_eq!(
+            parse_lines(&(prompt + &queued + &reply + &result)),
+            vec![
+                ApiClaudeEntry::User {
+                    uuid: "u1".into(),
+                    timestamp: at(0),
+                    text: "go".into(),
+                    origin: ApiClaudePromptOrigin::Terminal,
+                },
+                ApiClaudeEntry::User {
+                    uuid: "q1".into(),
+                    timestamp: at(1),
+                    text: "next".into(),
+                    origin: ApiClaudePromptOrigin::Channel,
+                },
+                ApiClaudeEntry::Assistant {
+                    uuid: "a1".into(),
+                    timestamp: at(2),
+                    text: "Listing.".into(),
+                },
+                ApiClaudeEntry::ToolUse {
+                    uuid: "a1".into(),
+                    timestamp: at(2),
+                    tool_use_id: "toolu_1".into(),
+                    name: "Bash".into(),
+                    summary: "ls".into(),
+                },
+                ApiClaudeEntry::ToolResult {
+                    uuid: "u2".into(),
+                    timestamp: at(3),
+                    tool_use_id: "toolu_1".into(),
+                    text: "ok".into(),
+                    is_error: false,
+                },
+            ]
         );
     }
 
@@ -1031,6 +1128,7 @@ mod tests {
                 user("u1", "typed by hand", ApiClaudePromptOrigin::Terminal),
                 ApiClaudeEntry::ToolResult {
                     uuid: "u4".into(),
+                    timestamp: None,
                     tool_use_id: "toolu_1".into(),
                     text: "ok".into(),
                     is_error: false,
@@ -1090,18 +1188,21 @@ mod tests {
             vec![
                 ApiClaudeEntry::ToolResult {
                     uuid: "u1".into(),
+                    timestamp: None,
                     tool_use_id: "toolu_1".into(),
                     text: "ok".into(),
                     is_error: false,
                 },
                 ApiClaudeEntry::ToolResult {
                     uuid: "u1".into(),
+                    timestamp: None,
                     tool_use_id: "toolu_2".into(),
                     text: "line one\n[image]\nline two".into(),
                     is_error: true,
                 },
                 ApiClaudeEntry::ToolResult {
                     uuid: "u1".into(),
+                    timestamp: None,
                     tool_use_id: "toolu_3".into(),
                     text: String::new(),
                     is_error: false,
@@ -1162,6 +1263,7 @@ mod tests {
                 assistant("a1", "Running the tests."),
                 ApiClaudeEntry::ToolUse {
                     uuid: "a1".into(),
+                    timestamp: None,
                     tool_use_id: "toolu_1".into(),
                     name: "Bash".into(),
                     summary: "cargo test --workspace".into(),
