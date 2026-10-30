@@ -519,11 +519,16 @@ fn attachment_entries(record: AttachmentRecord) -> Vec<ApiClaudeEntry> {
             text: strip_channel_wrapper(&text).to_string(),
             origin: ApiClaudePromptOrigin::Channel,
         }],
-        Some("human") if !text.trim().is_empty() => vec![ApiClaudeEntry::User {
-            uuid: record.uuid,
-            text,
-            origin: ApiClaudePromptOrigin::Terminal,
-        }],
+        // Older Claude Code versions write typed prompts without an origin.
+        Some("human") | None => terminal_prompt_text(&text)
+            .filter(|text| !text.trim().is_empty())
+            .map(|text| ApiClaudeEntry::User {
+                uuid: record.uuid,
+                text,
+                origin: ApiClaudePromptOrigin::Terminal,
+            })
+            .into_iter()
+            .collect(),
         _ => Vec::new(),
     }
 }
@@ -833,11 +838,22 @@ mod tests {
                 "origin": {"kind": "human"}
             }
         }));
+        // Older Claude Code versions omit the origin of typed prompts.
+        let legacy = line(json!({
+            "type": "attachment",
+            "uuid": "a3",
+            "attachment": {
+                "type": "queued_command",
+                "prompt": "<command-name>/review</command-name>\n<command-args>42</command-args>",
+                "commandMode": "prompt"
+            }
+        }));
         assert_eq!(
-            parse_lines(&(channel + &typed)),
+            parse_lines(&(channel + &typed + &legacy)),
             vec![
                 user("a1", "ship it", ApiClaudePromptOrigin::Channel),
                 user("a2", "and the docs", ApiClaudePromptOrigin::Terminal),
+                user("a3", "/review 42", ApiClaudePromptOrigin::Terminal),
             ]
         );
     }
@@ -864,12 +880,25 @@ mod tests {
                 "origin": {"kind": "peer"}
             }
         }));
-        let other = line(json!({
+        let continuation = line(json!({
             "type": "attachment",
             "uuid": "a3",
+            "attachment": {
+                "type": "queued_command",
+                "prompt": "Goal set: finish",
+                "commandMode": "prompt",
+                "origin": {"kind": "auto-continuation"}
+            }
+        }));
+        let other = line(json!({
+            "type": "attachment",
+            "uuid": "a4",
             "attachment": {"type": "edited_text_file", "filename": "/x"}
         }));
-        assert_eq!(parse_lines(&(task + &peer + &other)), Vec::new());
+        assert_eq!(
+            parse_lines(&(task + &peer + &continuation + &other)),
+            Vec::new()
+        );
     }
 
     #[test]
