@@ -142,7 +142,13 @@ describe('parseClaudeSession', () => {
 
 describe('parseClaudeTranscriptPage', () => {
   const ENTRIES = [
-    { kind: 'user', uuid: 'u1', text: 'hi', origin: 'channel' },
+    {
+      kind: 'user',
+      uuid: 'u1',
+      timestamp: '2026-10-30T10:00:00.000Z',
+      text: 'hi',
+      origin: 'channel',
+    },
     { kind: 'assistant', uuid: 'a1', text: 'hello' },
     {
       kind: 'tool_use',
@@ -168,6 +174,19 @@ describe('parseClaudeTranscriptPage', () => {
       reset: true,
     };
     expect(parseClaudeTranscriptPage(JSON.stringify(page))).toEqual(page);
+  });
+
+  it('reads a null timestamp as absent and rejects a non-string one', () => {
+    const page = (timestamp: unknown) =>
+      JSON.stringify({
+        entries: [{ kind: 'assistant', uuid: 'a1', text: 'x', timestamp }],
+        cursor: 1,
+        reset: false,
+      });
+    expect(parseClaudeTranscriptPage(page(null)).entries[0].timestamp).toBe(
+      undefined,
+    );
+    expect(() => parseClaudeTranscriptPage(page(5))).toThrow();
   });
 
   it('skips entry kinds it does not know', () => {

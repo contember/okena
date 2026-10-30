@@ -79,23 +79,23 @@ export interface ApiClaudePromptResponse {
 
 export type ApiClaudePromptOrigin = 'terminal' | 'channel';
 
-export type ApiClaudeEntry =
-  | { kind: 'user'; uuid: string; text: string; origin: ApiClaudePromptOrigin }
-  | { kind: 'assistant'; uuid: string; text: string }
+/** `timestamp`: when Claude recorded the entry (RFC 3339, UTC). */
+export type ApiClaudeEntry = { uuid: string; timestamp?: string } & (
+  | { kind: 'user'; text: string; origin: ApiClaudePromptOrigin }
+  | { kind: 'assistant'; text: string }
   | {
       kind: 'tool_use';
-      uuid: string;
       tool_use_id: string;
       name: string;
       summary: string;
     }
   | {
       kind: 'tool_result';
-      uuid: string;
       tool_use_id: string;
       text: string;
       is_error: boolean;
-    };
+    }
+);
 
 export interface ApiClaudeTranscriptPage {
   session_id?: string;
@@ -294,20 +294,28 @@ export function parseClaudeSubagentList(json: string): ApiClaudeSubagentList {
 function parseEntry(value: unknown, path: string): ApiClaudeEntry | null {
   const entry = record(value, path);
   const uuid = str(entry.uuid, `${path}.uuid`);
+  const timestamp = optionalStr(entry.timestamp, `${path}.timestamp`);
   switch (entry.kind) {
     case 'user':
       return {
         kind: 'user',
         uuid,
+        timestamp,
         text: str(entry.text, `${path}.text`),
         origin: oneOf(entry.origin, ORIGINS, `${path}.origin`),
       };
     case 'assistant':
-      return { kind: 'assistant', uuid, text: str(entry.text, `${path}.text`) };
+      return {
+        kind: 'assistant',
+        uuid,
+        timestamp,
+        text: str(entry.text, `${path}.text`),
+      };
     case 'tool_use':
       return {
         kind: 'tool_use',
         uuid,
+        timestamp,
         tool_use_id: str(entry.tool_use_id, `${path}.tool_use_id`),
         name: str(entry.name, `${path}.name`),
         summary: str(entry.summary, `${path}.summary`),
@@ -316,6 +324,7 @@ function parseEntry(value: unknown, path: string): ApiClaudeEntry | null {
       return {
         kind: 'tool_result',
         uuid,
+        timestamp,
         tool_use_id: str(entry.tool_use_id, `${path}.tool_use_id`),
         text: str(entry.text, `${path}.text`),
         is_error: bool(entry.is_error, `${path}.is_error`),

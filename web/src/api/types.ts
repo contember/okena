@@ -464,11 +464,13 @@ export interface ApiClaudeTranscriptPage {
 export type ApiClaudePromptOrigin = "terminal" | "channel";
 
 // serde(tag = "kind", rename_all = "snake_case")
-export type ApiClaudeEntry =
-  | { kind: "user"; uuid: string; text: string; origin: ApiClaudePromptOrigin }
-  | { kind: "assistant"; uuid: string; text: string }
-  | { kind: "tool_use"; uuid: string; tool_use_id: string; name: string; summary: string }
-  | { kind: "tool_result"; uuid: string; tool_use_id: string; text: string; is_error: boolean };
+/** `timestamp`: when Claude recorded the entry (RFC 3339, UTC). */
+export type ApiClaudeEntry = { uuid: string; timestamp?: string | null } & (
+  | { kind: "user"; text: string; origin: ApiClaudePromptOrigin }
+  | { kind: "assistant"; text: string }
+  | { kind: "tool_use"; tool_use_id: string; name: string; summary: string }
+  | { kind: "tool_result"; tool_use_id: string; text: string; is_error: boolean }
+);
 
 export interface PairRequest {
   code: string;

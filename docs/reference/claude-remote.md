@@ -190,7 +190,9 @@ file; otherwise the plan is in the transcript.
 
 `GET /v1/claude/terminals/{id}/transcript?cursor=&session_id=` reads the
 session JSONL from `transcript_path` incrementally. Entries are `user`,
-`assistant`, `tool_use` and `tool_result`. User entries carry `origin`
+`assistant`, `tool_use` and `tool_result`. Each carries `timestamp`, when
+Claude recorded it (RFC 3339 as Claude wrote it on its JSONL line; `null` when
+the line has none or it does not parse); the entries of one line share it. User entries carry `origin`
 (`channel` for remote prompts). `reset: true` means the client must drop what
 it has (new session or rewritten file).
 

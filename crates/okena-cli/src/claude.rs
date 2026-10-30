@@ -1098,11 +1098,13 @@ mod tests {
     fn a_turn_ends_once_it_ran_and_the_pane_is_idle() {
         let user = ApiClaudeEntry::User {
             uuid: "u".into(),
+            timestamp: None,
             text: "go".into(),
             origin: ApiClaudePromptOrigin::Channel,
         };
         let assistant = ApiClaudeEntry::Assistant {
             uuid: "a".into(),
+            timestamp: None,
             text: "done".into(),
         };
         let idle = turn_session(Some(false));
@@ -1171,17 +1173,20 @@ mod tests {
             entries: vec![
                 ApiClaudeEntry::User {
                     uuid: "u".into(),
+                    timestamp: None,
                     text: "fix\tit\nnow".into(),
                     origin: ApiClaudePromptOrigin::Channel,
                 },
                 ApiClaudeEntry::ToolUse {
                     uuid: "u".into(),
+                    timestamp: None,
                     tool_use_id: "tu1".into(),
                     name: "Bash".into(),
                     summary: "cargo test".into(),
                 },
                 ApiClaudeEntry::ToolResult {
                     uuid: "u".into(),
+                    timestamp: None,
                     tool_use_id: "tu1".into(),
                     text: r"C:\dir".into(),
                     is_error: true,
