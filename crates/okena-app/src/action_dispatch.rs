@@ -917,11 +917,17 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
             branch,
             create_branch,
             window,
+            layout,
+            terminal_name,
+            wait,
         } => ActionRequest::CreateWorktree {
             project_id: s(&project_id),
             branch,
             create_branch,
             window,
+            layout,
+            terminal_name,
+            wait,
         },
         ActionRequest::AddDiscoveredWorktree {
             parent_project_id,

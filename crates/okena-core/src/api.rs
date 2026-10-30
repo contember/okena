@@ -449,6 +449,17 @@ pub struct ApiProjectLayoutRequest {
     pub window: Option<String>,
 }
 
+/// The terminals a new worktree starts with.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorktreeLayout {
+    /// The parent project's layout structure, one fresh terminal per slot.
+    #[default]
+    Parent,
+    /// One terminal.
+    Single,
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ApiProject {
     pub id: String,
@@ -1099,6 +1110,17 @@ pub enum ActionRequest {
         /// window's UUID). None = the first window showing the parent.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         window: Option<String>,
+        /// Terminals of the new worktree; None = clone the parent's layout.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        layout: Option<WorktreeLayout>,
+        /// Name of the worktree's first terminal.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        terminal_name: Option<String>,
+        /// Reply once the checkout exists and its terminals run (with their
+        /// ids), or with the error that rolled the worktree back, instead of
+        /// optimistically with `pending: true`.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        wait: bool,
     },
     /// Track an already-on-disk git worktree (discovered by a client-side git
     /// scan) as a project under `parent_project_id`. The daemon creates the
@@ -1548,6 +1570,46 @@ impl ApiLayoutNode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn create_worktree_without_the_new_fields_keeps_the_old_wire_form() {
+        let old: ActionRequest = serde_json::from_value(serde_json::json!({
+            "action": "create_worktree",
+            "project_id": "p1",
+            "branch": "feature",
+        }))
+        .expect("old request parses");
+        let ActionRequest::CreateWorktree {
+            layout,
+            terminal_name,
+            wait,
+            ..
+        } = &old
+        else {
+            panic!("expected CreateWorktree");
+        };
+        assert_eq!((layout, terminal_name, wait), (&None, &None, &false));
+        let value = serde_json::to_value(&old).expect("encodes");
+        assert!(value.get("wait").is_none() && value.get("layout").is_none());
+
+        let new: ActionRequest = serde_json::from_value(serde_json::json!({
+            "action": "create_worktree",
+            "project_id": "p1",
+            "branch": "feature",
+            "layout": "single",
+            "terminal_name": "agent",
+            "wait": true,
+        }))
+        .expect("new request parses");
+        assert!(matches!(
+            new,
+            ActionRequest::CreateWorktree {
+                layout: Some(WorktreeLayout::Single),
+                wait: true,
+                ..
+            }
+        ));
+    }
 
     #[test]
     fn set_project_status_action_tolerates_a_missing_status() {

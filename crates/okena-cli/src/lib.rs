@@ -165,7 +165,20 @@ fn dispatch(cli: Cli) -> i32 {
                 project,
                 branch,
                 new_branch,
-            } => commands::cli_worktree_add(&project, &branch, new_branch, window),
+                wait,
+                layout,
+                name,
+            } => commands::cli_worktree_add(
+                &project,
+                &branch,
+                new_branch,
+                window,
+                commands::WorktreeAddOptions {
+                    wait,
+                    layout: layout.map(Into::into),
+                    terminal_name: name,
+                },
+            ),
             WorktreeCmd::Rm { worktree, force } => commands::cli_worktree_rm(&worktree, force),
         },
 

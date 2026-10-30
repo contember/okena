@@ -60,7 +60,9 @@ use okena_app_core::workspace::actions::execute::{
     publish_prepared_terminal_launches, reserve_uninitialized_terminal_launches,
     spawn_uninitialized_terminals,
 };
-use okena_core::api::{ActionRequest, ApiGitStatus, ApiServiceInfo, ApiWindow, CommandResult};
+use okena_core::api::{
+    ActionRequest, ApiGitStatus, ApiServiceInfo, ApiWindow, CommandResult, WorktreeLayout,
+};
 use okena_core::claude_remote::{ApiClaudeStartupDialog, ClaudeTerminalInfo};
 use okena_core::git_poll::{GitPollTrigger, git_poll_trigger_for_action};
 use okena_remote_server::bridge::{BridgeMessage, BridgeReceiver, RemoteCommand};
@@ -2884,7 +2886,7 @@ pub async fn daemon_command_loop(
     let content_search_permits = Arc::new(Semaphore::new(MAX_CONCURRENT_CONTENT_SEARCHES));
 
     loop {
-        let BridgeMessage { command, reply } = match bridge_rx.recv().await {
+        let BridgeMessage { command, mut reply } = match bridge_rx.recv().await {
             Ok(m) => m,
             Err(_) => break,
         };
@@ -3615,6 +3617,9 @@ pub async fn daemon_command_loop(
                         branch,
                         create_branch,
                         window: _,
+                        layout,
+                        terminal_name,
+                        wait,
                     } => {
                         // Phase 0: resolve paths. Read settings first, then the
                         // workspace (settings-before-workspace lock order), and drop
@@ -3689,6 +3694,10 @@ pub async fn daemon_command_loop(
                                         let branch = branch.clone();
                                         let worktree_path = worktree_path.clone();
                                         let new_id_task = new_id.clone();
+                                        let wt_project_path_task = wt_project_path.clone();
+                                        // `wait`: the task answers once the worktree is
+                                        // ready or rolled back.
+                                        let waiter = if wait { reply.take() } else { None };
                                         tokio::task::spawn_local(async move {
                                             let git = {
                                                 let git_root = git_root.clone();
@@ -3742,6 +3751,12 @@ pub async fn daemon_command_loop(
                                                         })
                                                         .await;
                                                 }
+                                                if let Some(waiter) = waiter {
+                                                    let _ = waiter.send(CommandResult::Err(
+                                                        "the workspace was replaced while the worktree was being created"
+                                                            .to_string(),
+                                                    ));
+                                                }
                                                 return;
                                             }
                                             match git {
@@ -3753,7 +3768,13 @@ pub async fn daemon_command_loop(
                                                             &hook_monitor,
                                                         );
                                                         let mut ws = workspace.lock();
-                                                        // Seeds the layout from the parent, then fires on_worktree_create.
+                                                        if layout == Some(WorktreeLayout::Single) {
+                                                            ws.use_single_terminal_layout(
+                                                                &new_id_task,
+                                                            );
+                                                        }
+                                                        // Seeds the layout from the parent unless set
+                                                        // above, then fires on_worktree_create.
                                                         ws.fire_worktree_hooks(
                                                             &new_id_task,
                                                             &app_settings.hooks,
@@ -3764,7 +3785,7 @@ pub async fn daemon_command_loop(
                                                         // not-yet-checked-out worktree). The checkout is done here, so the
                                                         // dir exists and the PTYs must actually spawn.
                                                         ws.finish_creating_project(&new_id_task);
-                                                        let _ = spawn_uninitialized_terminals(
+                                                        let spawned = spawn_uninitialized_terminals(
                                                             &mut ws,
                                                             &new_id_task,
                                                             &*backend,
@@ -3773,7 +3794,24 @@ pub async fn daemon_command_loop(
                                                             None,
                                                             &mut cx,
                                                         );
+                                                        if let Some(name) = terminal_name {
+                                                            ws.name_first_terminal(
+                                                                &new_id_task,
+                                                                name,
+                                                                &mut cx,
+                                                            );
+                                                        }
                                                         ws.notify_data(&mut cx);
+                                                        if let Some(waiter) = waiter {
+                                                            let _ = waiter.send(
+                                                                created_worktree_reply(
+                                                                    &ws,
+                                                                    &new_id_task,
+                                                                    &wt_project_path_task,
+                                                                    spawned,
+                                                                ),
+                                                            );
+                                                        }
                                                     }
                                                 }
                                                 result => {
@@ -3811,6 +3849,10 @@ pub async fn daemon_command_loop(
                                                     log::error!(
                                                         "worktree-create: {branch} failed: {msg}"
                                                     );
+                                                    if let Some(waiter) = waiter {
+                                                        let _ = waiter
+                                                            .send(CommandResult::Err(msg.clone()));
+                                                    }
                                                     if let Some(hm) = &hook_monitor {
                                                         hm.push_toast(okena_state::Toast::error(
                                                             msg,
@@ -4509,6 +4551,34 @@ pub async fn daemon_command_loop(
     }
 }
 
+/// The `wait` reply of `CreateWorktree`: the ready worktree and its terminals,
+/// first terminal first, or why they did not start.
+fn created_worktree_reply(
+    ws: &Workspace,
+    project_id: &str,
+    path: &str,
+    spawned: okena_app_core::workspace::actions::execute::ActionResult,
+) -> CommandResult {
+    if let okena_app_core::workspace::actions::execute::ActionResult::Err(error) = spawned {
+        return CommandResult::Err(format!(
+            "worktree created at {path}, but its terminals did not start: {error}"
+        ));
+    }
+    // Layout terminals only: hook terminals (`on_worktree_create`) run their own command.
+    let terminal_ids = ws
+        .project(project_id)
+        .and_then(|project| project.layout.as_ref())
+        .map(|layout| layout.collect_terminal_ids())
+        .unwrap_or_default();
+    CommandResult::Ok(Some(serde_json::json!({
+        "project_id": project_id,
+        "path": path,
+        "pending": false,
+        "terminal_id": terminal_ids.first(),
+        "terminal_ids": terminal_ids,
+    })))
+}
+
 fn serialize_terminal_info(info: ClaudeTerminalInfo) -> CommandResult {
     match serde_json::to_value(info) {
         Ok(v) => CommandResult::Ok(Some(v)),
@@ -5094,7 +5164,9 @@ fn finalize_soft_close_now(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{StubBackend, StubTransport, default_settings, empty_workspace_data};
+    use crate::test_support::{
+        StubBackend, StubTransport, default_settings, empty_workspace_data, plain_project,
+    };
     use okena_core::api::StateResponse;
     use okena_terminal::session_backend::SessionBackend;
     use std::collections::HashSet;
@@ -5121,6 +5193,8 @@ mod tests {
         service_tick: watch::Sender<u64>,
         settings: Arc<Mutex<AppSettings>>,
         daemon_config: DaemonConfig,
+        hook_runner: Option<okena_hooks::HookRunner>,
+        hook_monitor: Option<okena_hooks::HookMonitor>,
     }
 
     impl Harness {
@@ -5130,8 +5204,8 @@ mod tests {
                 self.backend,
                 self.workspace,
                 self.workspace_tick,
-                None,
-                None,
+                self.hook_runner,
+                self.hook_monitor,
                 self.terminals,
                 self.state_version,
                 self.git_status_tx,
@@ -5174,6 +5248,8 @@ mod tests {
             service_tick,
             settings,
             daemon_config,
+            hook_runner: None,
+            hook_monitor: None,
         }
     }
 
@@ -10517,6 +10593,195 @@ mod tests {
         assert_eq!(*receiver.borrow(), 8);
     }
 
+    /// A temp git repo with one commit, removed (with its worktrees) on drop.
+    struct TempRepo(std::path::PathBuf);
+
+    impl TempRepo {
+        fn new() -> Self {
+            let repo = std::env::temp_dir().join(format!(
+                "okena-wt-wait-{}-{}",
+                std::process::id(),
+                uuid::Uuid::new_v4()
+            ));
+            std::fs::create_dir_all(&repo).expect("mk repo dir");
+            for args in [
+                &["init", "-q", "-b", "main"][..],
+                &["config", "user.email", "wait@okena.test"],
+                &["config", "user.name", "Wait"],
+                &["commit", "-q", "--allow-empty", "-m", "seed"],
+            ] {
+                let out = std::process::Command::new("git")
+                    .args(args)
+                    .current_dir(&repo)
+                    .output()
+                    .expect("run git");
+                assert!(out.status.success(), "git {args:?} failed");
+            }
+            Self(repo)
+        }
+    }
+
+    impl Drop for TempRepo {
+        fn drop(&mut self) {
+            std::fs::remove_dir_all(&self.0).ok();
+            if let Some(parent) = self.0.parent() {
+                let name = self.0.file_name().unwrap_or_default().to_string_lossy();
+                std::fs::remove_dir_all(parent.join(format!("{name}-wt"))).ok();
+            }
+        }
+    }
+
+    /// Project `p1` at `repo` whose layout splits two terminals, optionally
+    /// with an `on_worktree_create` hook.
+    fn split_parent_workspace(repo: &TempRepo, on_create: Option<&str>) -> WorkspaceData {
+        use okena_state::LayoutNode;
+
+        let mut parent = plain_project("p1", repo.0.to_str().expect("utf-8 path"));
+        let terminal = || LayoutNode::Terminal {
+            terminal_id: None,
+            pending_agent_resume: None,
+            minimized: false,
+            detached: false,
+            shell_type: ShellType::Default,
+            zoom_level: 1.0,
+        };
+        parent.layout = Some(LayoutNode::Split {
+            direction: okena_core::types::SplitDirection::Vertical,
+            sizes: vec![50.0, 50.0],
+            children: vec![terminal(), terminal()],
+        });
+        parent.hooks.worktree.on_create = on_create.map(str::to_string);
+        let mut data = empty_workspace_data();
+        data.projects.push(parent);
+        data.project_order.push("p1".to_string());
+        data
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn waited_create_worktree_lists_the_cloned_layout_without_hook_terminals() {
+        use okena_hooks::{HookMonitor, HookRunner};
+        use okena_terminal::backend::LocalBackend;
+        use okena_terminal::pty_manager::PtyManager;
+        use okena_terminal::session_backend::SessionBackend;
+
+        let repo = TempRepo::new();
+        let mut h = harness();
+        let (pty_manager, _pty_events) = PtyManager::new(SessionBackend::None);
+        h.backend = Arc::new(LocalBackend::new(Arc::new(pty_manager)));
+        h.hook_runner = Some(HookRunner::new(h.backend.clone(), h.terminals.clone()));
+        h.hook_monitor = Some(HookMonitor::new());
+        *h.workspace.lock() = Workspace::new(split_parent_workspace(&repo, Some("true")));
+        let workspace = h.workspace.clone();
+        let (bridge_tx, bridge_rx) = bridge_channel();
+
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async move {
+                let handle = h.spawn_loop(bridge_rx);
+                let create = RemoteCommand::Action(ActionRequest::CreateWorktree {
+                    project_id: "p1".to_string(),
+                    branch: "feature".to_string(),
+                    create_branch: true,
+                    window: None,
+                    layout: None,
+                    terminal_name: None,
+                    wait: true,
+                });
+
+                let created = request(&bridge_tx, create, "create").await;
+                let CommandResult::Ok(Some(reply)) = created else {
+                    panic!("expected a ready worktree, got {created:?}");
+                };
+                {
+                    let ws = workspace.lock();
+                    let project_id = reply["project_id"].as_str().expect("project id");
+                    let project = ws.project(project_id).expect("worktree project");
+                    assert_eq!(
+                        project.hook_terminals.len(),
+                        1,
+                        "the hook got its own terminal"
+                    );
+                    let layout_ids = project
+                        .layout
+                        .as_ref()
+                        .expect("cloned layout")
+                        .collect_terminal_ids();
+                    assert_eq!(layout_ids.len(), 2);
+                    assert_eq!(reply["terminal_ids"], serde_json::json!(layout_ids));
+                    assert_eq!(reply["terminal_id"], serde_json::json!(layout_ids[0]));
+                }
+
+                drop(bridge_tx);
+                handle.await.expect("loop task joins");
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn waited_create_worktree_replies_with_its_single_named_terminal() {
+        use okena_state::LayoutNode;
+        use okena_terminal::backend::LocalBackend;
+        use okena_terminal::pty_manager::PtyManager;
+        use okena_terminal::session_backend::SessionBackend;
+
+        let repo = TempRepo::new();
+        let mut h = harness();
+        let (pty_manager, _pty_events) = PtyManager::new(SessionBackend::None);
+        h.backend = Arc::new(LocalBackend::new(Arc::new(pty_manager)));
+        *h.workspace.lock() = Workspace::new(split_parent_workspace(&repo, None));
+        let workspace = h.workspace.clone();
+        let (bridge_tx, bridge_rx) = bridge_channel();
+
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async move {
+                let handle = h.spawn_loop(bridge_rx);
+                let create = |branch: &str, create_branch: bool| {
+                    RemoteCommand::Action(ActionRequest::CreateWorktree {
+                        project_id: "p1".to_string(),
+                        branch: branch.to_string(),
+                        create_branch,
+                        window: None,
+                        layout: Some(WorktreeLayout::Single),
+                        terminal_name: Some("agent".to_string()),
+                        wait: true,
+                    })
+                };
+
+                let created = request(&bridge_tx, create("feature", true), "create").await;
+                let CommandResult::Ok(Some(reply)) = created else {
+                    panic!("expected a ready worktree, got {created:?}");
+                };
+                assert_eq!(reply["pending"], false);
+                let terminal_id = reply["terminal_id"].as_str().expect("terminal id");
+                assert_eq!(reply["terminal_ids"], serde_json::json!([terminal_id]));
+                {
+                    let ws = workspace.lock();
+                    let project_id = reply["project_id"].as_str().expect("project id");
+                    let project = ws.project(project_id).expect("worktree project");
+                    assert!(matches!(project.layout, Some(LayoutNode::Terminal { .. })));
+                    assert_eq!(
+                        project.terminal_names.get(terminal_id).map(String::as_str),
+                        Some("agent")
+                    );
+                    assert!(!project.is_creating);
+                }
+
+                // An unknown branch without --new-branch fails the checkout: the
+                // waiting caller gets git's reason and the row is rolled back.
+                let failed = request(&bridge_tx, create("missing", false), "fail").await;
+                assert!(
+                    matches!(&failed, CommandResult::Err(message) if !message.is_empty()),
+                    "expected the checkout error, got {failed:?}"
+                );
+                assert_eq!(workspace.lock().data().projects.len(), 2);
+
+                drop(bridge_tx);
+                handle.await.expect("loop task joins");
+            })
+            .await;
+    }
+
     // ── PROOF: does the DAEMON side of quick-create-worktree work? ────────────
     //
     // Drives the REAL CreateWorktree action end-to-end through `execute_action`
@@ -10657,6 +10922,9 @@ mod tests {
                 branch: "neumie/tezky-medovnik".to_string(),
                 create_branch: true,
                 window: None,
+                layout: None,
+                terminal_name: None,
+                wait: false,
             },
             &mut workspace,
             WindowId::Main,

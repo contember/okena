@@ -520,6 +520,9 @@ impl WindowView {
                             branch: branch.clone(),
                             create_branch: *create_branch,
                             window: None,
+                            layout: None,
+                            terminal_name: None,
+                            wait: false,
                         },
                         cx,
                     );

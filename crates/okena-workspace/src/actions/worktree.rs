@@ -793,6 +793,33 @@ impl Workspace {
         Ok(id)
     }
 
+    /// Start a worktree whose terminals have not spawned yet with one terminal
+    /// instead of its parent's layout.
+    pub fn use_single_terminal_layout(&mut self, project_id: &str) {
+        if let Some(project) = self.data.projects.iter_mut().find(|p| p.id == project_id) {
+            project.layout = Some(crate::state::LayoutNode::new_terminal());
+        }
+    }
+
+    /// Name the first terminal of a project's layout (depth-first), once its
+    /// terminals have ids. Returns that terminal's id.
+    pub fn name_first_terminal(
+        &mut self,
+        project_id: &str,
+        name: String,
+        cx: &mut impl WorkspaceCx,
+    ) -> Option<String> {
+        let terminal_id = self
+            .project(project_id)?
+            .layout
+            .as_ref()?
+            .collect_terminal_ids()
+            .into_iter()
+            .next()?;
+        self.rename_terminal(project_id, &terminal_id, name, cx);
+        Some(terminal_id)
+    }
+
     /// Finalize a deferred worktree: set the layout from the parent and fire hooks.
     /// Called once the worktree directory exists on disk.
     pub fn fire_worktree_hooks(

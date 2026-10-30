@@ -445,6 +445,9 @@ mod tests {
             branch: "feature".into(),
             create_branch: true,
             window: window.map(str::to_string),
+            layout: None,
+            terminal_name: None,
+            wait: false,
         }
     }
 
