@@ -233,6 +233,9 @@ pub enum ClaudeCmd {
         /// Seconds to wait for `claude` to connect
         #[arg(long, default_value_t = 60)]
         timeout: u64,
+        /// Seconds `--wait` waits for the turn; exit 1 with `state timeout` after
+        #[arg(long, default_value_t = 3600, requires = "wait")]
+        wait_timeout: u64,
         /// Output JSON instead of tab-separated text
         #[arg(long)]
         json: bool,

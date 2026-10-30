@@ -60,23 +60,33 @@ The preload's location, environment and the cases it leaves alone are in
 Before it connects, `claude` may wait on a start-up dialog: the folder-trust
 question, then the development-channels warning that Okena's own
 `--dangerously-load-development-channels` causes. While neither the hooks nor
-the channel are attached, the session's `startup_dialog` reads the pane's
-screen and names it: `trust`, `channels` or `null`.
+the channel are attached, a session read reads the pane's screen:
+`startup_dialog` names the dialog (`trust`, `channels` or `null`) only while
+`claude` is the foreground process, so a dialog left on screen by a `claude`
+that exited does not count (a dialog on screen costs a foreground probe).
+`?probe_foreground=true` also reports that process as `foreground_command`
+(absent at a shell prompt).
 
-`okena claude start <term>` types `claude` into the pane (it must be at a shell
-prompt) and polls the session. It accepts the channels warning; the trust
-dialog only with `--trust`, else it exits 1 and leaves the dialog open; run
-again with `--trust`, it resumes from the open dialog instead of typing. Keys
-move the selection to the confirming option and press Enter, so the dialog's
-default option does not matter. Once the channel is attached (with
-`claude_remote_channel` off: once the hooks are), it sends `--prompt-file` as
-the first prompt and prints `terminal`, `session_id` and `delivery` (`-` or
-`null` without a prompt). `--wait` then blocks until the transcript shows the
-prompt and a reply after it and Claude is idle with nothing queued (`state
-idle`), or a dialog opens (`state dialog`); the hooks run async, so an idle
-pane alone does not prove the turn ran. It exits 1 when Claude Remote is off, when `claude` already
-runs connected in the pane, or when it does not connect within `--timeout`
-(60 s).
+`okena claude start <term>` needs a shell prompt in the pane: it refuses a pane
+whose foreground is another program (or a `claude` started without Okena's
+hooks) and one with a connected `claude`. It types `claude`, or resumes one
+already waiting on a start-up dialog, and polls the session. It accepts the
+channels warning; the trust dialog only with `--trust`, else it exits 1 and
+leaves the dialog open, and a second run with `--trust` resumes from it. A key
+is sent only when a fresh read of the screen still shows the dialog the session
+named: an arrow towards the confirming option, or Enter on it, at most one key
+per 700 ms. Once the channel is attached (with `claude_remote_channel` off:
+once the hooks are), it sends `--prompt-file` as the first prompt and prints
+`terminal`, `session_id` and `delivery` (`-` or `null` without a prompt). It
+exits 1 when Claude Remote is off or `claude` does not connect within
+`--timeout` (60 s).
+
+`--wait` then blocks until the turn ends and prints `state`: `idle` once the
+turn ran (the pane was seen busy, or the transcript shows a reply after the
+prompt; the hooks run async, so an idle pane alone proves nothing) and the pane
+is idle with nothing queued; `dialog` when a dialog waits for an answer;
+`disconnected` (exit 1) when `claude` left; `timeout` (exit 1) after
+`--wait-timeout` (3600 s).
 
 ## Client endpoints
 
@@ -84,7 +94,7 @@ All take the bearer token. Errors have a plain-text body.
 
 | Endpoint | Purpose |
 |---|---|
-| `GET /v1/claude/terminals/{id}` | Session: `session_id`, `hooks_attached`, `busy`, open `dialogs`, `running_subagents`, `pr_links`, `startup_dialog` |
+| `GET /v1/claude/terminals/{id}?probe_foreground=` | Session: `session_id`, `hooks_attached`, `busy`, open `dialogs`, `running_subagents`, `pr_links`, `startup_dialog`, `foreground_command` |
 | `GET /v1/claude/terminals/{id}/transcript?cursor=&session_id=&agent_id=` | Transcript page, see [Transcript](#transcript) |
 | `GET /v1/claude/terminals/{id}/subagents` | The session's subagents, see [Subagents](#subagents) |
 | `POST /v1/claude/terminals/{id}/prompt` | `{ "text" }` → `{ "delivery" }`, see [Prompts](#prompts) |

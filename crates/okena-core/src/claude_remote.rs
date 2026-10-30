@@ -122,6 +122,11 @@ pub struct ApiClaudeSession {
     /// it connected or when none is shown.
     #[serde(default)]
     pub startup_dialog: Option<ApiClaudeStartupDialog>,
+    /// The pane's foreground process (`claude`, `vim`, ...), probed only on
+    /// request (`?probe_foreground=true`) while `claude` is not connected.
+    /// Absent at a shell prompt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub foreground_command: Option<String>,
 }
 
 /// A pull request Claude Code recorded in the session transcript (a `pr-link`

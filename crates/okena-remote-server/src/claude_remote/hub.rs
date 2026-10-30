@@ -503,9 +503,12 @@ impl ClaudeRemoteHub {
     }
 
     /// What a remote client shows for the Claude session in a pane.
+    /// `probe_foreground` also reports the foreground process of a pane whose
+    /// `claude` is not connected; the probe is too costly for polled reads.
     pub(crate) async fn session(
         &self,
         terminal_id: &str,
+        probe_foreground: bool,
     ) -> Result<ApiClaudeSession, ClaudeRemoteError> {
         // A start-up dialog shows only before `claude` connects.
         let connected = self
@@ -513,9 +516,18 @@ impl ClaudeRemoteHub {
             .lock()
             .get(terminal_id)
             .is_some_and(|terminal| terminal.has_session(Instant::now()));
-        let info = self
-            .terminal_info_with(terminal_id, false, !connected)
+        let probe = probe_foreground && !connected;
+        let mut info = self
+            .terminal_info_with(terminal_id, probe, !connected)
             .await?;
+        // A dialog left on screen by a `claude` that exited is not live, so a
+        // dialog on screen is worth the probe.
+        if info.startup_dialog.is_some() && !probe {
+            info = self.terminal_info_with(terminal_id, true, true).await?;
+        }
+        if !runs_claude(&info) {
+            info.startup_dialog = None;
+        }
         let mut session = {
             let terminals = self.terminals.lock();
             let terminal = terminals.get(terminal_id);
@@ -541,6 +553,7 @@ impl ClaudeRemoteHub {
                     .map_or_else(Vec::new, |terminal| terminal.running_subagents.clone()),
                 pr_links: Vec::new(),
                 startup_dialog: info.startup_dialog,
+                foreground_command: info.foreground_command.clone().filter(|_| probe),
             }
         };
 
@@ -1352,7 +1365,7 @@ mod tests {
         let (_, _waiting) =
             open_dialog(&hub, "t1", permission("Bash", json!({"command": "ls"}))).await;
 
-        let session = hub.session("t1").await.expect("session");
+        let session = hub.session("t1", false).await.expect("session");
         assert_eq!(session.session_id.as_deref(), Some("s1"));
         assert!(session.hooks_attached);
         assert_eq!(session.busy, Some(true));
@@ -1367,7 +1380,7 @@ mod tests {
             startup_dialog: Some(ApiClaudeStartupDialog::Channels),
             ..claude_in_pane()
         });
-        let session = hub.session("t1").await.expect("session");
+        let session = hub.session("t1", false).await.expect("session");
         assert_eq!(
             session.startup_dialog,
             Some(ApiClaudeStartupDialog::Channels)
@@ -1378,8 +1391,21 @@ mod tests {
             json!({"hook_event_name": "SessionStart", "session_id": "s1"}),
         ))
         .expect("hook accepted");
-        let session = hub.session("t1").await.expect("session");
+        let session = hub.session("t1", false).await.expect("session");
         assert_eq!(session.startup_dialog, None);
+    }
+
+    #[tokio::test]
+    async fn a_dialog_left_on_screen_after_claude_exited_is_not_live() {
+        let (hub, _version, _pty) = hub_with_daemon(ClaudeTerminalInfo {
+            startup_dialog: Some(ApiClaudeStartupDialog::Trust),
+            ..shell_in_pane()
+        });
+        let session = hub.session("t1", false).await.expect("session");
+        assert_eq!(session.startup_dialog, None);
+        assert_eq!(session.foreground_command, None);
+        let session = hub.session("t1", true).await.expect("session");
+        assert_eq!(session.foreground_command.as_deref(), Some("bash"));
     }
 
     async fn wait_for_channel(hub: &ClaudeRemoteHub, terminal_id: &str) {
@@ -1466,7 +1492,13 @@ mod tests {
         let third = hub.send_prompt("t1", "third".into()).await;
         assert_eq!(second.expect("accepted"), ApiClaudePromptDelivery::Queued);
         assert_eq!(third.expect("accepted"), ApiClaudePromptDelivery::Queued);
-        assert_eq!(hub.session("t1").await.expect("session").queued_prompts, 2);
+        assert_eq!(
+            hub.session("t1", false)
+                .await
+                .expect("session")
+                .queued_prompts,
+            2
+        );
 
         hub.hook_event(hook("t1", event("UserPromptSubmit")))
             .expect("valid event");
@@ -1474,7 +1506,13 @@ mod tests {
             .expect("valid event");
         assert_eq!(pty.recv().await.as_deref(), Some("paste t1 second"));
         assert_eq!(pty.recv().await.as_deref(), Some("enter t1"));
-        assert_eq!(hub.session("t1").await.expect("session").queued_prompts, 1);
+        assert_eq!(
+            hub.session("t1", false)
+                .await
+                .expect("session")
+                .queued_prompts,
+            1
+        );
 
         hub.hook_event(hook("t1", event("Stop")))
             .expect("valid event");
@@ -1566,7 +1604,12 @@ mod tests {
         assert!(other_session.reset);
         assert_eq!(other_session.entries.len(), 1);
 
-        assert!(hub.session("t1").await.expect("session").has_transcript);
+        assert!(
+            hub.session("t1", false)
+                .await
+                .expect("session")
+                .has_transcript
+        );
     }
 
     #[tokio::test]
@@ -1596,7 +1639,7 @@ mod tests {
         start["transcript_path"] = json!(path.to_string_lossy());
         hub.hook_event(hook("t1", start)).expect("valid event");
 
-        let session = hub.session("t1").await.expect("session");
+        let session = hub.session("t1", false).await.expect("session");
         assert_eq!(
             serde_json::to_value(&session.pr_links).expect("json"),
             json!([{
@@ -1671,7 +1714,10 @@ mod tests {
             .expect("valid event");
 
         assert_eq!(
-            hub.session("t1").await.expect("session").running_subagents,
+            hub.session("t1", false)
+                .await
+                .expect("session")
+                .running_subagents,
             vec![ApiClaudeRunningSubagent {
                 agent_id: "a1".into(),
                 agent_type: "Explore".into(),
@@ -1713,7 +1759,7 @@ mod tests {
         hub.hook_event(hook("t1", subagent_stop))
             .expect("valid event");
         assert!(
-            hub.session("t1")
+            hub.session("t1", false)
                 .await
                 .expect("session")
                 .running_subagents
@@ -1724,7 +1770,7 @@ mod tests {
         late_start["agent_id"] = json!("a1");
         hub.hook_event(hook("t1", late_start)).expect("valid event");
         assert!(
-            hub.session("t1")
+            hub.session("t1", false)
                 .await
                 .expect("session")
                 .running_subagents
@@ -1788,7 +1834,10 @@ mod tests {
         hub.hook_event(hook("t1", compact)).expect("valid event");
 
         assert_eq!(hub.dialog_counts(), HashMap::from([("t1".to_string(), 1)]));
-        assert_eq!(hub.session("t1").await.expect("session").busy, Some(true));
+        assert_eq!(
+            hub.session("t1", false).await.expect("session").busy,
+            Some(true)
+        );
         assert_eq!(queued_prompts(&hub, "t1"), (1, 0));
     }
 
@@ -1877,7 +1926,10 @@ mod tests {
             .expect("valid event");
         let first = hub.send_prompt("t1", "/clear".into()).await;
         assert_eq!(first.expect("delivered"), ApiClaudePromptDelivery::Pty);
-        assert_eq!(hub.session("t1").await.expect("session").busy, Some(true));
+        assert_eq!(
+            hub.session("t1", false).await.expect("session").busy,
+            Some(true)
+        );
 
         let expired = Instant::now()
             .checked_sub(TYPED_PROMPT_GRACE + Duration::from_secs(1))
@@ -1891,7 +1943,10 @@ mod tests {
             typed.at = expired;
         }
 
-        assert_eq!(hub.session("t1").await.expect("session").busy, Some(false));
+        assert_eq!(
+            hub.session("t1", false).await.expect("session").busy,
+            Some(false)
+        );
         let second = hub.send_prompt("t1", "hello".into()).await;
         assert_eq!(second.expect("delivered"), ApiClaudePromptDelivery::Pty);
         let typed: Vec<String> = std::iter::from_fn(|| pty.try_recv().ok()).collect();
@@ -1908,7 +1963,7 @@ mod tests {
 
         assert!(matches!(delivery, Err(ClaudeRemoteError::Daemon(_))));
         assert_eq!(
-            hub.session("broken").await.expect("session").busy,
+            hub.session("broken", false).await.expect("session").busy,
             Some(false)
         );
 
@@ -1922,7 +1977,7 @@ mod tests {
         });
         hub.clear_typed_prompt("broken", 6);
         assert_eq!(
-            hub.session("broken").await.expect("session").busy,
+            hub.session("broken", false).await.expect("session").busy,
             Some(true)
         );
     }
@@ -2005,7 +2060,7 @@ mod tests {
     async fn unknown_terminal_is_not_found() {
         let (hub, _version, _pty) = hub_with_daemon(claude_in_pane());
         assert!(matches!(
-            hub.session("gone").await,
+            hub.session("gone", false).await,
             Err(ClaudeRemoteError::TerminalNotFound(_))
         ));
         assert!(matches!(
@@ -2032,7 +2087,12 @@ mod tests {
                 hub.transcript("t1", None, None, None).await,
                 Err(ClaudeRemoteError::NoTranscript)
             ));
-            assert!(!hub.session("t1").await.expect("session").has_transcript);
+            assert!(
+                !hub.session("t1", false)
+                    .await
+                    .expect("session")
+                    .has_transcript
+            );
         }
     }
 
@@ -2074,7 +2134,10 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(1)).await;
         }
         assert_eq!(queued_prompts(&hub, "t1"), (0, 0));
-        assert_eq!(hub.session("t1").await.expect("session").busy, Some(false));
+        assert_eq!(
+            hub.session("t1", false).await.expect("session").busy,
+            Some(false)
+        );
         tokio::time::sleep(ENTER_DELAY * 2).await;
         assert!(pty.try_recv().is_err());
     }
@@ -2090,7 +2153,7 @@ mod tests {
         for name in ["PostToolUse", "Stop", "SessionStart"] {
             hub.hook_event(hook("t1", event(name)))
                 .expect("valid event");
-            let session = hub.session("t1").await.expect("session");
+            let session = hub.session("t1", false).await.expect("session");
             assert!(!session.hooks_attached, "{name}");
             assert!(hub.session_terminals().is_empty(), "{name}");
         }
@@ -2098,7 +2161,12 @@ mod tests {
         let mut resume = event("SessionStart");
         resume["source"] = json!("resume");
         hub.hook_event(hook("t1", resume)).expect("valid event");
-        assert!(hub.session("t1").await.expect("session").hooks_attached);
+        assert!(
+            hub.session("t1", false)
+                .await
+                .expect("session")
+                .hooks_attached
+        );
     }
 
     #[tokio::test]
@@ -2123,7 +2191,7 @@ mod tests {
             .expect("valid event");
 
         assert_eq!(hub.dialog_counts(), HashMap::from([("t1".to_string(), 1)]));
-        let session = hub.session("t1").await.expect("session");
+        let session = hub.session("t1", false).await.expect("session");
         assert_eq!(session.session_id.as_deref(), Some("s2"));
         assert!(session.hooks_attached);
         let transcript_path = hub
@@ -2142,7 +2210,7 @@ mod tests {
         let (hub, _version, _pty) = hub_with_daemon(claude_in_pane());
         hub.hook_event(hook("t1", event("PreToolUse")))
             .expect("valid event");
-        let session = hub.session("t1").await.expect("session");
+        let session = hub.session("t1", false).await.expect("session");
         assert_eq!(session.session_id.as_deref(), Some("s1"));
         assert!(session.hooks_attached);
         assert_eq!(session.busy, Some(true));
@@ -2185,7 +2253,7 @@ mod tests {
         let input = json!({"file_path": "/a", "edits": [{"new_string": content}]});
         let (dialog_id, waiting) = open_dialog(&hub, "t1", permission("Edit", input.clone())).await;
 
-        let session = hub.session("t1").await.expect("session");
+        let session = hub.session("t1", false).await.expect("session");
         let shown = &session.dialogs[0].tool_input;
         assert_eq!(shown["file_path"], json!("/a"));
         let cut = shown["edits"][0]["new_string"]
@@ -2223,7 +2291,7 @@ mod tests {
             ..claude_running()
         });
 
-        hub.session("t1").await.expect("session");
+        hub.session("t1", false).await.expect("session");
         hub.transcript("t1", None, None, None).await.expect("page");
         assert_eq!(daemon.probes.load(Ordering::Relaxed), 0);
 

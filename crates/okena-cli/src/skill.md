@@ -45,12 +45,13 @@ okena key okena:0 ctrl-c               # interrupt
 
 For terminals running `claude` with Claude Remote on (Settings → Terminal).
 
-- `okena claude start <term> [--prompt-file f] [--trust] [--wait] [--json]` — run
-  `claude` in a terminal at a shell prompt, accept the development-channels
+- `okena claude start <term> [--prompt-file f] [--trust] [--wait] [--timeout s] [--wait-timeout s] [--json]`
+  — run `claude` in a terminal at a shell prompt, accept the development-channels
   warning Okena causes, wait until it connects, send the first prompt. Prints
   `terminal`, `session_id`, `delivery`. The folder-trust dialog is accepted only
-  with `--trust` (else exit 1). `--wait` blocks until that turn ends (`state idle`)
-  or a dialog opens (`state dialog`). Don't type into the dialogs yourself.
+  with `--trust` (else exit 1; rerun with `--trust` to resume). `--wait` blocks
+  until that turn ends: `state idle|dialog`, or `disconnected|timeout` with exit 1.
+  Don't type into the start-up dialogs yourself.
 - `okena claude ls` — `term<TAB>project<TAB>name<TAB>session<TAB>busy|idle|-<TAB>dialogs<TAB>queued<TAB>subagents`.
 - `okena claude show <term>` — status lines (`startup_dialog trust|channels|-`:
   a start-up dialog `claude` waits on) plus `dialog<TAB>id<TAB>tool<TAB>tool_input-json` per open dialog.
