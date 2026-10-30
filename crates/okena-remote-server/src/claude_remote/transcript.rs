@@ -80,21 +80,24 @@ fn open_transcript(path: &Path) -> io::Result<(File, u64)> {
     Ok((file, len))
 }
 
-/// The pull requests one transcript records, kept up to date by reading only
-/// what was appended since the previous read.
+/// The pull requests one transcript records and when its last turn ended,
+/// kept up to date by reading only what was appended since the previous read.
 #[derive(Debug, Default)]
-pub(super) struct PrLinkScan {
+pub(super) struct TranscriptScan {
     path: Option<PathBuf>,
     /// Byte offset just past the last complete line read.
     offset: u64,
     /// By URL.
     links: HashMap<String, ApiClaudePrLink>,
+    /// The newest `turn_duration` record, in ms since the epoch.
+    turn_ended_ms: Option<u64>,
 }
 
-/// The `pr-link` records of a byte range of a transcript.
+/// The `pr-link` and `turn_duration` records of a byte range of a transcript.
 #[derive(Debug)]
-pub(super) struct PrLinkRead {
+pub(super) struct TranscriptScanRead {
     links: Vec<ApiClaudePrLink>,
+    turn_ended_ms: Option<u64>,
     /// Byte offset just past the last complete line read.
     end: u64,
     /// The file was shorter than the requested start, so it was read from the
@@ -102,7 +105,7 @@ pub(super) struct PrLinkRead {
     restarted: bool,
 }
 
-impl PrLinkScan {
+impl TranscriptScan {
     /// Where the next read of `path` starts.
     pub(super) fn resume_from(&self, path: &Path) -> u64 {
         if self.path.as_deref() == Some(path) {
@@ -115,7 +118,7 @@ impl PrLinkScan {
     /// Merge a read that started at `from`. A read that no longer continues
     /// this scan (another one landed first) is dropped. Returns whether the
     /// links changed.
-    pub(super) fn apply(&mut self, path: &Path, from: u64, read: PrLinkRead) -> bool {
+    pub(super) fn apply(&mut self, path: &Path, from: u64, read: TranscriptScanRead) -> bool {
         if from != self.resume_from(path) {
             return false;
         }
@@ -123,13 +126,23 @@ impl PrLinkScan {
         if self.path.as_deref() != Some(path) || read.restarted {
             changed = !self.links.is_empty();
             self.links.clear();
+            self.turn_ended_ms = None;
             self.path = Some(path.to_path_buf());
         }
         self.offset = read.end;
+        self.turn_ended_ms = self.turn_ended_ms.max(read.turn_ended_ms);
         for link in read.links {
             changed |= self.insert(link);
         }
         changed
+    }
+
+    /// When the last turn recorded in `path` ended, if the scan follows it.
+    /// Claude records the end of every turn, also an interrupted one, which
+    /// fires no `Stop` hook.
+    pub(super) fn turn_ended_ms(&self, path: &Path) -> Option<u64> {
+        self.turn_ended_ms
+            .filter(|_| self.path.as_deref() == Some(path))
     }
 
     /// Newest first; empty unless the scan follows `path`.
@@ -174,9 +187,9 @@ impl PrLinkScan {
     }
 }
 
-/// Read the `pr-link` records in the complete lines from `from` on, or from
-/// the start when the file is now shorter than `from`.
-pub(super) fn read_pr_links(path: &Path, from: u64) -> io::Result<PrLinkRead> {
+/// Read the `pr-link` and `turn_duration` records in the complete lines from
+/// `from` on, or from the start when the file is now shorter than `from`.
+pub(super) fn scan_transcript(path: &Path, from: u64) -> io::Result<TranscriptScanRead> {
     let (mut file, len) = open_transcript(path)?;
     let restarted = len < from;
     let start = if restarted { 0 } else { from };
@@ -184,6 +197,7 @@ pub(super) fn read_pr_links(path: &Path, from: u64) -> io::Result<PrLinkRead> {
     let mut reader = BufReader::new(file.take(len - start));
 
     let mut links = Vec::new();
+    let mut turn_ended_ms = None;
     let mut end = start;
     let mut line = Vec::new();
     loop {
@@ -198,17 +212,26 @@ pub(super) fn read_pr_links(path: &Path, from: u64) -> io::Result<PrLinkRead> {
         let Ok(text) = std::str::from_utf8(&line) else {
             continue;
         };
-        if !text.contains(r#""pr-link""#) {
+        if !text.contains(r#""pr-link""#)
+            && !text.contains(r#""turn_duration""#)
+            && !text.contains(INTERRUPT_MARKER)
+        {
             continue;
         }
-        if let Ok(Record::PrLink(record)) = serde_json::from_str::<Record>(text)
-            && let Some(link) = record.into_link()
-        {
-            links.push(link);
+        match serde_json::from_str::<Record>(text) {
+            Ok(Record::PrLink(record)) => links.extend(record.into_link()),
+            Ok(Record::System(record)) => {
+                turn_ended_ms = turn_ended_ms.max(record.turn_ended_ms());
+            }
+            Ok(Record::User(record)) => {
+                turn_ended_ms = turn_ended_ms.max(record.interrupted_at_ms());
+            }
+            _ => {}
         }
     }
-    Ok(PrLinkRead {
+    Ok(TranscriptScanRead {
         links,
+        turn_ended_ms,
         end,
         restarted,
     })
@@ -351,8 +374,36 @@ enum Record {
     #[serde(rename = "pr-link")]
     PrLink(PrLinkRecord),
     Attachment(AttachmentRecord),
+    System(SystemRecord),
     #[serde(other)]
     Other,
+}
+
+#[derive(Deserialize)]
+struct SystemRecord {
+    #[serde(default)]
+    subtype: Option<String>,
+    #[serde(default)]
+    timestamp: Option<String>,
+}
+
+impl SystemRecord {
+    /// When the turn ended, for the `turn_duration` record Claude writes at the
+    /// end of a turn, unless it was interrupted while generating.
+    fn turn_ended_ms(&self) -> Option<u64> {
+        if self.subtype.as_deref() != Some("turn_duration") {
+            return None;
+        }
+        timestamp_ms(self.timestamp.as_deref()?)
+    }
+}
+
+/// Starts the user message Claude records when an interrupt ends a turn.
+const INTERRUPT_MARKER: &str = "[Request interrupted by user";
+
+fn timestamp_ms(timestamp: &str) -> Option<u64> {
+    let timestamp = chrono::DateTime::parse_from_rfc3339(timestamp).ok()?;
+    u64::try_from(timestamp.timestamp_millis()).ok()
 }
 
 /// A prompt sent while Claude was busy is recorded only as a `queued_command`
@@ -412,7 +463,25 @@ struct UserRecord {
     is_compact_summary: Option<bool>,
     #[serde(default)]
     origin: Option<RecordOrigin>,
+    #[serde(default)]
+    timestamp: Option<String>,
     message: Message<UserBlock>,
+}
+
+impl UserRecord {
+    /// When an interrupt ended the turn, if this is the message recording it.
+    fn interrupted_at_ms(&self) -> Option<u64> {
+        let interrupted = match &self.message.content {
+            Content::Text(text) => text.starts_with(INTERRUPT_MARKER),
+            Content::Blocks(blocks) => blocks.iter().any(|block| {
+                matches!(block, UserBlock::Text { text } if text.starts_with(INTERRUPT_MARKER))
+            }),
+        };
+        if !interrupted {
+            return None;
+        }
+        timestamp_ms(self.timestamp.as_deref()?)
+    }
 }
 
 #[derive(Deserialize)]
@@ -494,7 +563,7 @@ fn record_entries(record: Record) -> Vec<ApiClaudeEntry> {
         Record::User(user) => user_entries(user),
         Record::Assistant(assistant) => assistant_entries(assistant),
         Record::Attachment(attachment) => attachment_entries(attachment),
-        Record::PrLink(_) | Record::Other => Vec::new(),
+        Record::PrLink(_) | Record::System(_) | Record::Other => Vec::new(),
     }
 }
 
@@ -540,6 +609,7 @@ fn user_entries(record: UserRecord) -> Vec<ApiClaudeEntry> {
         is_compact_summary,
         origin,
         message,
+        timestamp: _,
     } = record;
 
     if is_compact_summary == Some(true) {
@@ -1246,10 +1316,56 @@ mod tests {
         }
     }
 
-    fn scan(scan: &mut PrLinkScan, path: &Path) -> bool {
+    fn scan(scan: &mut TranscriptScan, path: &Path) -> bool {
         let from = scan.resume_from(path);
-        let read = read_pr_links(path, from).expect("read");
+        let read = scan_transcript(path, from).expect("read");
         scan.apply(path, from, read)
+    }
+
+    #[test]
+    fn the_scan_keeps_the_latest_turn_end_including_interrupts() {
+        let mut file = tempfile::Builder::new()
+            .suffix(".jsonl")
+            .tempfile()
+            .expect("temp file");
+        let system = |subtype: &str, timestamp: &str| {
+            line(json!({"type": "system", "subtype": subtype, "timestamp": timestamp}))
+        };
+        let interrupt = |text: serde_json::Value, timestamp: &str| {
+            line(json!({
+                "type": "user",
+                "uuid": "u1",
+                "timestamp": timestamp,
+                "message": {"role": "user", "content": text},
+            }))
+        };
+        let text = system("turn_duration", "2026-01-01T10:00:00.000Z")
+            + &system("stop_hook_summary", "2026-01-01T12:00:00.000Z")
+            + &interrupt(
+                json!("tell me about [Request interrupted by user"),
+                "2026-01-01T12:00:00.000Z",
+            );
+        file.write_all(text.as_bytes()).expect("write");
+
+        let mut scan_state = TranscriptScan::default();
+        scan(&mut scan_state, file.path());
+        assert_eq!(
+            scan_state.turn_ended_ms(file.path()),
+            timestamp_ms("2026-01-01T10:00:00.000Z")
+        );
+
+        // Interrupted while generating: no `turn_duration`, only the marker.
+        let text = interrupt(
+            json!([{"type": "text", "text": "[Request interrupted by user]"}]),
+            "2026-01-01T11:00:00.000Z",
+        );
+        file.write_all(text.as_bytes()).expect("write");
+        scan(&mut scan_state, file.path());
+        assert_eq!(
+            scan_state.turn_ended_ms(file.path()),
+            timestamp_ms("2026-01-01T11:00:00.000Z")
+        );
+        assert_eq!(scan_state.turn_ended_ms(Path::new("/other.jsonl")), None);
     }
 
     #[test]
@@ -1276,7 +1392,7 @@ mod tests {
             + "not json\n";
         file.write_all(text.as_bytes()).expect("write");
 
-        let mut links = PrLinkScan::default();
+        let mut links = TranscriptScan::default();
         assert!(scan(&mut links, file.path()));
         assert_eq!(
             links.links(file.path()),
@@ -1304,7 +1420,7 @@ mod tests {
         let (head, tail) = partial.split_at(20);
         file.write_all(head.as_bytes()).expect("write");
 
-        let mut links = PrLinkScan::default();
+        let mut links = TranscriptScan::default();
         assert!(scan(&mut links, file.path()));
         assert_eq!(links.resume_from(file.path()), first.len() as u64);
         assert_eq!(links.links(file.path()).len(), 1);
@@ -1325,7 +1441,7 @@ mod tests {
                 + &pr_link_line(2, "2026-01-01T11:00:00.000Z"),
         )
         .expect("write");
-        let mut links = PrLinkScan::default();
+        let mut links = TranscriptScan::default();
         assert!(scan(&mut links, &path));
 
         std::fs::write(&path, pr_link_line(3, "2026-01-01T12:00:00.000Z")).expect("rewrite");
@@ -1350,8 +1466,8 @@ mod tests {
             .expect("temp file");
         file.write_all(pr_link_line(1, "2026-01-01T10:00:00.000Z").as_bytes())
             .expect("write");
-        let mut links = PrLinkScan::default();
-        let stale = read_pr_links(file.path(), 0).expect("read");
+        let mut links = TranscriptScan::default();
+        let stale = scan_transcript(file.path(), 0).expect("read");
         assert!(scan(&mut links, file.path()));
         assert!(!links.apply(file.path(), 0, stale));
         assert_eq!(links.links(file.path()).len(), 1);
@@ -1359,7 +1475,7 @@ mod tests {
 
     #[test]
     fn pr_links_are_capped_dropping_the_least_recently_seen() {
-        let mut links = PrLinkScan::default();
+        let mut links = TranscriptScan::default();
         for number in 1..=(MAX_PR_LINKS as u64 + 1) {
             links.insert(pr_link(number, &format!("2026-01-01T10:00:{number:02}Z")));
         }
