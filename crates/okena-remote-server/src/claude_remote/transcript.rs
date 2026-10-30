@@ -848,12 +848,22 @@ mod tests {
                 "commandMode": "prompt"
             }
         }));
+        let legacy_plain = line(json!({
+            "type": "attachment",
+            "uuid": "a4",
+            "attachment": {
+                "type": "queued_command",
+                "prompt": "fix it",
+                "commandMode": "prompt"
+            }
+        }));
         assert_eq!(
-            parse_lines(&(channel + &typed + &legacy)),
+            parse_lines(&(channel + &typed + &legacy + &legacy_plain)),
             vec![
                 user("a1", "ship it", ApiClaudePromptOrigin::Channel),
                 user("a2", "and the docs", ApiClaudePromptOrigin::Terminal),
                 user("a3", "/review 42", ApiClaudePromptOrigin::Terminal),
+                user("a4", "fix it", ApiClaudePromptOrigin::Terminal),
             ]
         );
     }
