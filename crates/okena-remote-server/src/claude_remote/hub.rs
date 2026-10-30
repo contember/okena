@@ -20,7 +20,7 @@ use super::channel::{ChannelState, PollStart};
 use super::decision::{cancelled_output, decided_output};
 use super::hook_input::{HookEvent, HookInput, is_valid_agent_id};
 use super::transcript::{
-    PrLinkScan, has_transcript_extension, list_subagents, read_pr_links, read_transcript,
+    TranscriptScan, has_transcript_extension, list_subagents, read_transcript, scan_transcript,
     subagent_transcript_path,
 };
 use crate::bridge::{BridgeMessage, BridgeSender, CommandResult, RemoteCommand};
@@ -35,6 +35,9 @@ const ENTER_DELAY: Duration = Duration::from_millis(150);
 /// `UserPromptSubmit` confirms it. A slash command, a swallowed paste or a
 /// killed `claude` never confirms, and must not keep the pane busy for good.
 const TYPED_PROMPT_GRACE: Duration = Duration::from_secs(5);
+/// How often a session read may probe whether a hooked `claude` without a
+/// polling channel still runs.
+const LIVENESS_PROBE_INTERVAL: Duration = Duration::from_secs(5);
 /// Per terminal, for the PTY queue and the channel queue each.
 const MAX_QUEUED_PROMPTS: usize = 32;
 const MAX_PROMPT_BYTES: usize = 64 * 1024;
@@ -72,6 +75,17 @@ struct TerminalState {
     hooks_attached: bool,
     /// From hooks only.
     busy: Option<bool>,
+    /// When the running turn's `UserPromptSubmit` arrived, ms since the epoch.
+    turn_started_ms: Option<u64>,
+    /// The transcript ended the last turn, whose own `Stop` may still arrive.
+    turn_ended_by_transcript: bool,
+    /// The pane's shell ran nothing at the last liveness probe: the hooks'
+    /// `claude` exited without `SessionEnd`. Its next hook clears it.
+    gone: bool,
+    liveness_probed_at: Option<Instant>,
+    /// Counts accepted hooks, so a probe answered after a newer hook does not
+    /// mark that hook's `claude` gone.
+    hooks_seen: u64,
     /// A prompt Okena typed that Claude has not confirmed yet.
     typed_prompt: Option<TypedPrompt>,
     pty_queue: VecDeque<String>,
@@ -82,7 +96,7 @@ struct TerminalState {
     /// stop before its start.
     stopped_subagents: VecDeque<String>,
     /// Pull requests of the transcript last read for this pane.
-    pr_links: PrLinkScan,
+    scan: TranscriptScan,
 }
 
 struct TypedPrompt {
@@ -143,6 +157,8 @@ impl TerminalState {
     /// transcript path.
     fn record_hook(&mut self, input: &HookInput) {
         self.hooks_attached = true;
+        self.gone = false;
+        self.hooks_seen += 1;
         if input.event == HookEvent::SessionStart || self.session_id != input.session_id {
             self.session_id = input.session_id.clone();
             self.transcript_path = input.transcript_path.clone();
@@ -152,7 +168,76 @@ impl TerminalState {
 
     /// A connected `claude`: hooks reported, or the channel server is polling.
     fn has_session(&self, now: Instant) -> bool {
-        self.hooks_attached || self.channel.is_attached(now)
+        self.hooks_live() || self.channel.is_attached(now)
+    }
+
+    fn hooks_live(&self) -> bool {
+        self.hooks_attached && !self.gone
+    }
+
+    /// Hooks report nothing while `claude` idles, and a polling channel
+    /// already proves it runs.
+    fn needs_liveness_probe(&self, now: Instant) -> bool {
+        self.hooks_live()
+            && !self.channel.is_attached(now)
+            && self
+                .liveness_probed_at
+                .is_none_or(|at| now.saturating_duration_since(at) >= LIVENESS_PROBE_INTERVAL)
+    }
+
+    /// The hooks' `claude` exited without `SessionEnd` (killed, crashed): its
+    /// state is void. Returns the dialogs to cancel.
+    fn mark_gone(&mut self) -> Vec<OpenDialog> {
+        self.gone = true;
+        self.busy = None;
+        self.turn_started_ms = None;
+        self.turn_ended_by_transcript = false;
+        self.running_subagents.clear();
+        self.drop_undelivered_prompts();
+        self.take_all_dialogs()
+    }
+
+    fn mark_busy(&mut self) {
+        // Set on a turn's first event only when its `UserPromptSubmit` was
+        // missed, as after a daemon restart.
+        if self.turn_started_ms.is_none() {
+            self.turn_started_ms = Some(now_ms());
+        }
+        self.busy = Some(true);
+        self.turn_ended_by_transcript = false;
+    }
+
+    /// The turn is over: idle, its dialogs are answered, and the next queued
+    /// prompt is due. Returns the dialogs to cancel and the prompt to type.
+    fn end_turn(&mut self, generation: u64) -> (Vec<OpenDialog>, Option<(String, u64)>) {
+        self.busy = Some(false);
+        self.turn_started_ms = None;
+        // A `Stop` arriving after the transcript already ended its turn must
+        // not type a second queued prompt.
+        let ended_already = std::mem::take(&mut self.turn_ended_by_transcript);
+        let prompt = (!ended_already)
+            .then(|| self.pty_queue.pop_front())
+            .flatten()
+            .map(|prompt| {
+                self.typed_prompt = Some(TypedPrompt {
+                    generation,
+                    at: Instant::now(),
+                });
+                (prompt, generation)
+            });
+        (self.take_all_dialogs(), prompt)
+    }
+
+    /// Claude recorded the end of the running turn, which an interrupt does
+    /// without a `Stop` hook.
+    fn turn_recorded_over(&self, path: &Path) -> bool {
+        self.busy == Some(true)
+            && self.transcript_path.as_deref() == path.to_str()
+            && self
+                .scan
+                .turn_ended_ms(path)
+                .zip(self.turn_started_ms)
+                .is_some_and(|(ended, started)| ended >= started)
     }
 
     fn typed_prompt_pending(&self, now: Instant) -> bool {
@@ -165,6 +250,9 @@ impl TerminalState {
     fn busy(&self, now: Instant, lifecycle: Option<AgentLifecycle>) -> Option<bool> {
         if self.typed_prompt_pending(now) {
             return Some(true);
+        }
+        if self.gone {
+            return None;
         }
         self.busy.or(lifecycle.map(lifecycle_is_busy))
     }
@@ -312,7 +400,7 @@ impl ClaudeRemoteHub {
             .filter(|(_, terminal)| terminal.has_session(now))
             .filter_map(|(terminal_id, terminal)| {
                 let path = terminal.transcript_path.as_deref()?;
-                let links = terminal.pr_links.links(Path::new(path));
+                let links = terminal.scan.links(Path::new(path));
                 (!links.is_empty()).then(|| (terminal_id.clone(), links))
             })
             .collect()
@@ -346,7 +434,7 @@ impl ClaudeRemoteHub {
             // session's own `SessionStart` has not arrived yet.
             if terminal.accepts(&input) {
                 terminal.record_hook(&input);
-                terminal.busy = Some(true);
+                terminal.mark_busy();
             }
             terminal.dialogs.push(OpenDialog {
                 id: dialog_id.clone(),
@@ -394,33 +482,27 @@ impl ClaudeRemoteHub {
                 HookEvent::SessionStart if input.source.as_deref() == Some("compact") => {}
                 HookEvent::SessionStart => {
                     terminal.busy = Some(false);
+                    terminal.turn_started_ms = None;
+                    terminal.turn_ended_by_transcript = false;
                     terminal.running_subagents.clear();
                     terminal.drop_undelivered_prompts();
                     cancelled = terminal.take_all_dialogs();
                 }
                 HookEvent::UserPromptSubmit => {
+                    terminal.turn_started_ms = Some(now_ms());
                     terminal.busy = Some(true);
+                    terminal.turn_ended_by_transcript = false;
                     terminal.typed_prompt = None;
                     cancelled = terminal.take_all_dialogs();
                 }
-                HookEvent::PreToolUse | HookEvent::PermissionRequest => {
-                    terminal.busy = Some(true);
-                }
+                HookEvent::PreToolUse | HookEvent::PermissionRequest => terminal.mark_busy(),
                 HookEvent::PostToolUse | HookEvent::PostToolUseFailure => {
-                    terminal.busy = Some(true);
+                    terminal.mark_busy();
                     cancelled.extend(terminal.take_matching_dialog(&input));
                 }
-                HookEvent::Stop => {
-                    terminal.busy = Some(false);
-                    cancelled = terminal.take_all_dialogs();
-                    prompt_to_type = terminal.pty_queue.pop_front().map(|prompt| {
-                        let generation = self.next_id();
-                        terminal.typed_prompt = Some(TypedPrompt {
-                            generation,
-                            at: Instant::now(),
-                        });
-                        (prompt, generation)
-                    });
+                // An API error ends the turn with `StopFailure` instead.
+                HookEvent::Stop | HookEvent::StopFailure => {
+                    (cancelled, prompt_to_type) = terminal.end_turn(self.next_id());
                 }
                 HookEvent::SessionEnd => {
                     terminal.busy = None;
@@ -443,6 +525,7 @@ impl ClaudeRemoteHub {
                     | HookEvent::PostToolUse
                     | HookEvent::PostToolUseFailure
                     | HookEvent::Stop
+                    | HookEvent::StopFailure
             );
             transcript_to_scan = terminal
                 .transcript_path
@@ -455,7 +538,7 @@ impl ClaudeRemoteHub {
             self.bump_state_version();
         }
         if let Some(path) = transcript_to_scan {
-            self.spawn_pr_link_refresh(request.terminal_id.clone(), path);
+            self.spawn_transcript_scan(request.terminal_id.clone(), path);
         }
         if let Some((prompt, generation)) = prompt_to_type {
             self.spawn_queued_typing(request.terminal_id, prompt, generation);
@@ -506,17 +589,31 @@ impl ClaudeRemoteHub {
     /// `probe_foreground` also reports the foreground process of a pane whose
     /// `claude` is not connected; the probe is too costly for polled reads.
     pub(crate) async fn session(
-        &self,
+        self: &Arc<Self>,
         terminal_id: &str,
         probe_foreground: bool,
     ) -> Result<ApiClaudeSession, ClaudeRemoteError> {
+        let now = Instant::now();
+        let (connected, check_liveness, hooks_seen) = {
+            let mut terminals = self.terminals.lock();
+            match terminals.get_mut(terminal_id) {
+                Some(terminal) => {
+                    let check_liveness = terminal.needs_liveness_probe(now);
+                    if check_liveness {
+                        terminal.liveness_probed_at = Some(now);
+                    }
+                    (
+                        terminal.has_session(now),
+                        check_liveness,
+                        terminal.hooks_seen,
+                    )
+                }
+                None => (false, false, 0),
+            }
+        };
         // A start-up dialog shows only before `claude` connects.
-        let connected = self
-            .terminals
-            .lock()
-            .get(terminal_id)
-            .is_some_and(|terminal| terminal.has_session(Instant::now()));
-        let probe = probe_foreground && !connected;
+        let report_foreground = probe_foreground && !connected;
+        let probe = report_foreground || check_liveness;
         let mut info = self
             .terminal_info_with(terminal_id, probe, !connected)
             .await?;
@@ -528,39 +625,14 @@ impl ClaudeRemoteHub {
         if !runs_claude(&info) {
             info.startup_dialog = None;
         }
-        let mut session = {
-            let terminals = self.terminals.lock();
-            let terminal = terminals.get(terminal_id);
-            ApiClaudeSession {
-                terminal_id: terminal_id.to_string(),
-                session_id: live_session_id(terminal, &info).map(str::to_string),
-                has_transcript: false,
-                hooks_attached: terminal.is_some_and(|terminal| terminal.hooks_attached),
-                channel_attached: terminal
-                    .is_some_and(|terminal| terminal.channel.is_attached(Instant::now())),
-                busy: match terminal {
-                    Some(terminal) => terminal.busy(Instant::now(), info.lifecycle),
-                    None => info.lifecycle.map(lifecycle_is_busy),
-                },
-                queued_prompts: terminal.map_or(0, |terminal| {
-                    let queued = terminal.pty_queue.len() + terminal.channel.queued();
-                    u32::try_from(queued).unwrap_or(u32::MAX)
-                }),
-                dialogs: terminal.map_or_else(Vec::new, |terminal| {
-                    terminal.dialogs.iter().map(OpenDialog::to_api).collect()
-                }),
-                running_subagents: terminal
-                    .map_or_else(Vec::new, |terminal| terminal.running_subagents.clone()),
-                pr_links: Vec::new(),
-                startup_dialog: info.startup_dialog,
-                foreground_command: info.foreground_command.clone().filter(|_| probe),
-            }
-        };
+        if check_liveness && info.shell_idle {
+            self.note_claude_gone(terminal_id, hooks_seen);
+        }
 
         let source = self
             .hooked_transcript_source(terminal_id)
             .unwrap_or_else(|| TranscriptSource::from_terminal_info(&info));
-        session.has_transcript = match &source.path {
+        let has_transcript = match &source.path {
             Some(path) => {
                 has_transcript_extension(Path::new(&path))
                     && tokio::fs::metadata(&path)
@@ -569,56 +641,115 @@ impl ClaudeRemoteHub {
             }
             None => false,
         };
-        if session.has_transcript
-            && let Some(path) = &source.path
-        {
-            session.pr_links = self
-                .refresh_pr_links(terminal_id, PathBuf::from(path))
-                .await;
-        }
-        Ok(session)
+        let pr_links = match &source.path {
+            Some(path) if has_transcript => {
+                self.refresh_transcript_scan(terminal_id, PathBuf::from(path))
+                    .await
+            }
+            _ => Vec::new(),
+        };
+
+        let terminals = self.terminals.lock();
+        let terminal = terminals.get(terminal_id);
+        let now = Instant::now();
+        Ok(ApiClaudeSession {
+            terminal_id: terminal_id.to_string(),
+            session_id: live_session_id(terminal, &info).map(str::to_string),
+            has_transcript,
+            hooks_attached: terminal.is_some_and(TerminalState::hooks_live),
+            channel_attached: terminal.is_some_and(|terminal| terminal.channel.is_attached(now)),
+            busy: match terminal {
+                Some(terminal) => terminal.busy(now, info.lifecycle),
+                None => info.lifecycle.map(lifecycle_is_busy),
+            },
+            queued_prompts: terminal.map_or(0, |terminal| {
+                let queued = terminal.pty_queue.len() + terminal.channel.queued();
+                u32::try_from(queued).unwrap_or(u32::MAX)
+            }),
+            dialogs: terminal.map_or_else(Vec::new, |terminal| {
+                terminal.dialogs.iter().map(OpenDialog::to_api).collect()
+            }),
+            running_subagents: terminal
+                .map_or_else(Vec::new, |terminal| terminal.running_subagents.clone()),
+            pr_links,
+            startup_dialog: info.startup_dialog,
+            foreground_command: info.foreground_command.filter(|_| report_foreground),
+        })
     }
 
-    /// Read the `pr-link` records appended to the pane's transcript since the
-    /// last read and return its pull requests. A failed read keeps the known
-    /// ones.
-    async fn refresh_pr_links(&self, terminal_id: &str, path: PathBuf) -> Vec<ApiClaudePrLink> {
+    /// A probe found the pane's shell running nothing, so its hooked `claude`
+    /// exited without `SessionEnd` — unless a hook or the channel spoke since
+    /// `hooks_seen` was read before the probe.
+    fn note_claude_gone(&self, terminal_id: &str, hooks_seen: u64) {
+        let cancelled = match self.terminals.lock().get_mut(terminal_id) {
+            Some(terminal)
+                if terminal.hooks_live()
+                    && terminal.hooks_seen == hooks_seen
+                    && !terminal.channel.is_attached(Instant::now()) =>
+            {
+                terminal.mark_gone()
+            }
+            _ => return,
+        };
+        cancelled.into_iter().for_each(OpenDialog::cancel);
+        self.bump_state_version();
+    }
+
+    /// Read the `pr-link` and `turn_duration` records appended to the pane's
+    /// transcript since the last read, end a turn Claude recorded as over, and
+    /// return its pull requests. A failed read keeps the known ones.
+    async fn refresh_transcript_scan(
+        self: &Arc<Self>,
+        terminal_id: &str,
+        path: PathBuf,
+    ) -> Vec<ApiClaudePrLink> {
         let from = self
             .terminals
             .lock()
             .get(terminal_id)
-            .map_or(0, |terminal| terminal.pr_links.resume_from(&path));
+            .map_or(0, |terminal| terminal.scan.resume_from(&path));
         let read_path = path.clone();
-        let read = tokio::task::spawn_blocking(move || read_pr_links(&read_path, from)).await;
+        let read = tokio::task::spawn_blocking(move || scan_transcript(&read_path, from)).await;
 
-        let (links, visible_change) = {
+        let (links, visible_change, turn_over) = {
             let mut terminals = self.terminals.lock();
             let terminal = terminals.entry(terminal_id.to_string()).or_default();
             let changed = match read {
-                Ok(Ok(read)) => terminal.pr_links.apply(&path, from, read),
+                Ok(Ok(read)) => terminal.scan.apply(&path, from, read),
                 Ok(Err(error)) => {
-                    log::debug!("claude remote: reading PR links of {terminal_id}: {error}");
+                    log::debug!("claude remote: reading the transcript of {terminal_id}: {error}");
                     false
                 }
                 Err(error) => {
-                    log::warn!("claude remote: PR link read of {terminal_id} panicked: {error}");
+                    log::warn!("claude remote: transcript read of {terminal_id} panicked: {error}");
                     false
                 }
             };
             let in_state = terminal.has_session(Instant::now())
                 && terminal.transcript_path.as_deref() == path.to_str();
-            (terminal.pr_links.links(&path), changed && in_state)
+            let turn_over = terminal.turn_recorded_over(&path).then(|| {
+                let ended = terminal.end_turn(self.next_id());
+                terminal.turn_ended_by_transcript = true;
+                ended
+            });
+            (terminal.scan.links(&path), changed && in_state, turn_over)
         };
-        if visible_change {
+        if let Some((cancelled, prompt_to_type)) = turn_over {
+            cancelled.into_iter().for_each(OpenDialog::cancel);
+            self.bump_state_version();
+            if let Some((prompt, generation)) = prompt_to_type {
+                self.spawn_queued_typing(terminal_id.to_string(), prompt, generation);
+            }
+        } else if visible_change {
             self.bump_state_version();
         }
         links
     }
 
-    fn spawn_pr_link_refresh(self: &Arc<Self>, terminal_id: String, path: String) {
+    fn spawn_transcript_scan(self: &Arc<Self>, terminal_id: String, path: String) {
         let hub = Arc::clone(self);
         drop(tokio::spawn(async move {
-            hub.refresh_pr_links(&terminal_id, PathBuf::from(path))
+            hub.refresh_transcript_scan(&terminal_id, PathBuf::from(path))
                 .await;
         }));
     }
@@ -627,7 +758,7 @@ impl ClaudeRemoteHub {
     /// `SessionEnd`. Of several such panes (`claude --resume` in two), the
     /// lowest terminal id.
     pub(crate) async fn session_by_id(
-        &self,
+        self: &Arc<Self>,
         session_id: &str,
     ) -> Result<ApiClaudeSession, ClaudeRemoteError> {
         let terminal_id = self
@@ -635,7 +766,9 @@ impl ClaudeRemoteHub {
             .lock()
             .iter()
             .filter(|(_, terminal)| {
-                !terminal.session_ended && terminal.session_id.as_deref() == Some(session_id)
+                !terminal.session_ended
+                    && !terminal.gone
+                    && terminal.session_id.as_deref() == Some(session_id)
             })
             .map(|(terminal_id, _)| terminal_id.clone())
             .min()
@@ -744,7 +877,15 @@ impl ClaudeRemoteHub {
         if text.len() > MAX_PROMPT_BYTES {
             return Err(ClaudeRemoteError::PromptTooLong);
         }
+        let hooks_seen = self
+            .terminals
+            .lock()
+            .get(terminal_id)
+            .map_or(0, |terminal| terminal.hooks_seen);
         let info = self.terminal_info(terminal_id, true).await?;
+        if info.shell_idle {
+            self.note_claude_gone(terminal_id, hooks_seen);
+        }
 
         let generation = self.next_id();
         {
@@ -769,11 +910,11 @@ impl ClaudeRemoteHub {
             }
             // Typing into a pane without Claude would run the prompt in a shell.
             // Hooks outlive a `claude` that crashed, so the foreground decides.
-            if !runs_claude(&info) || (!terminal.hooks_attached && info.lifecycle.is_none()) {
+            if !runs_claude(&info) || (!terminal.hooks_live() && info.lifecycle.is_none()) {
                 return Err(ClaudeRemoteError::NoClaudeSession);
             }
             if terminal.busy(now, info.lifecycle) == Some(true) {
-                if !terminal.hooks_attached {
+                if !terminal.hooks_live() {
                     return Err(ClaudeRemoteError::Busy);
                 }
                 if terminal.pty_queue.len() >= MAX_QUEUED_PROMPTS {
@@ -1012,7 +1153,7 @@ fn live_session_id<'a>(
         Some(terminal) if terminal.session_id.is_some() => terminal
             .session_id
             .as_deref()
-            .filter(|_| !terminal.session_ended),
+            .filter(|_| !terminal.session_ended && !terminal.gone),
         _ => info
             .session
             .as_ref()
@@ -1169,6 +1310,7 @@ mod tests {
                             fake.probes.fetch_add(1, Ordering::Relaxed);
                         } else {
                             info.foreground_command = None;
+                            info.shell_idle = false;
                         }
                         if !read_screen {
                             info.startup_dialog = None;
@@ -1781,6 +1923,182 @@ mod tests {
                 .expect("session")
                 .has_transcript
         );
+    }
+
+    #[tokio::test]
+    async fn stop_failure_ends_the_turn_and_types_the_queued_prompt() {
+        let (hub, _version, mut pty) = hub_with_daemon(claude_in_pane());
+        hub.hook_event(hook("t1", event("UserPromptSubmit")))
+            .expect("valid event");
+        let queued = hub.send_prompt("t1", "later".into(), None).await;
+        assert_eq!(queued.expect("accepted"), ApiClaudePromptDelivery::Queued);
+
+        hub.hook_event(hook("t1", event("StopFailure")))
+            .expect("valid event");
+
+        assert_eq!(pty.recv().await.as_deref(), Some("paste t1 later"));
+        assert_eq!(pty.recv().await.as_deref(), Some("enter t1"));
+    }
+
+    #[tokio::test]
+    async fn a_turn_end_in_the_transcript_ends_an_interrupted_turn() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let path = directory.path().join("s1.jsonl");
+        std::fs::write(&path, "").expect("write transcript");
+        let append_turn_end = |timestamp: &str| {
+            use std::io::Write as _;
+            let line = json!({
+                "type": "system",
+                "subtype": "turn_duration",
+                "timestamp": timestamp,
+            });
+            let mut file = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .expect("open transcript");
+            writeln!(file, "{line}").expect("append");
+        };
+        let (hub, _version, mut pty) = hub_with_daemon(claude_in_pane());
+        let mut start = event("SessionStart");
+        start["transcript_path"] = json!(path.to_string_lossy());
+        hub.hook_event(hook("t1", start)).expect("valid event");
+        hub.hook_event(hook("t1", event("UserPromptSubmit")))
+            .expect("valid event");
+        let queued = hub.send_prompt("t1", "later".into(), None).await;
+        assert_eq!(queued.expect("accepted"), ApiClaudePromptDelivery::Queued);
+
+        // The end of an earlier turn says nothing about this one.
+        append_turn_end("2000-01-01T00:00:00.000Z");
+        let session = hub.session("t1", false).await.expect("session");
+        assert_eq!(session.busy, Some(true));
+        assert!(pty.try_recv().is_err());
+
+        // An interrupt fires no `Stop`, but Claude records the turn's end.
+        append_turn_end("2999-01-01T00:00:00.000Z");
+        let session = hub.session("t1", false).await.expect("session");
+        assert_eq!(pty.recv().await.as_deref(), Some("paste t1 later"));
+        assert_eq!(pty.recv().await.as_deref(), Some("enter t1"));
+        assert_eq!(session.queued_prompts, 0);
+
+        // A late `Stop` of the ended turn types nothing more.
+        let queued = hub.send_prompt("t1", "after".into(), None).await;
+        assert_eq!(queued.expect("accepted"), ApiClaudePromptDelivery::Queued);
+        hub.hook_event(hook("t1", event("Stop")))
+            .expect("valid event");
+        tokio::task::yield_now().await;
+        assert!(pty.try_recv().is_err());
+        hub.hook_event(hook("t1", event("UserPromptSubmit")))
+            .expect("valid event");
+        hub.hook_event(hook("t1", event("Stop")))
+            .expect("valid event");
+        assert_eq!(pty.recv().await.as_deref(), Some("paste t1 after"));
+    }
+
+    #[tokio::test]
+    async fn a_turn_without_a_prompt_ignores_the_previous_turn_end() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let path = directory.path().join("s1.jsonl");
+        std::fs::write(&path, "").expect("write transcript");
+        let (hub, _version, _pty) = hub_with_daemon(claude_in_pane());
+        let mut start = event("SessionStart");
+        start["transcript_path"] = json!(path.to_string_lossy());
+        hub.hook_event(hook("t1", start)).expect("valid event");
+        hub.hook_event(hook("t1", event("UserPromptSubmit")))
+            .expect("valid event");
+        hub.hook_event(hook("t1", event("Stop")))
+            .expect("valid event");
+        let ended =
+            chrono::DateTime::from_timestamp_millis(i64::try_from(now_ms()).expect("ms fit i64"))
+                .expect("valid time");
+        let line = json!({
+            "type": "system",
+            "subtype": "turn_duration",
+            "timestamp": ended.to_rfc3339(),
+        });
+        std::fs::write(&path, format!("{line}\n")).expect("write transcript");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+
+        // A turn Claude starts on its own (a background task's notification)
+        // has no `UserPromptSubmit`.
+        hub.hook_event(hook("t1", event("PreToolUse")))
+            .expect("valid event");
+        let session = hub.session("t1", false).await.expect("session");
+        assert_eq!(session.busy, Some(true));
+    }
+
+    #[tokio::test]
+    async fn a_hooked_claude_gone_from_the_foreground_is_disconnected() {
+        let (hub, version, _pty, daemon) = hub_with_changing_daemon(claude_in_pane());
+        hub.hook_event(hook("t1", event("UserPromptSubmit")))
+            .expect("valid event");
+        let (_, waiting) =
+            open_dialog(&hub, "t1", permission("Bash", json!({"command": "ls"}))).await;
+        let session = hub.session("t1", false).await.expect("session");
+        assert!(session.hooks_attached);
+        assert_eq!(
+            daemon.probes.load(Ordering::SeqCst),
+            1,
+            "a hooked pane is probed"
+        );
+
+        let probe_again = || {
+            hub.terminals
+                .lock()
+                .get_mut("t1")
+                .expect("terminal")
+                .liveness_probed_at = None;
+        };
+        // No foreground command alone is no proof: the probe may have failed,
+        // or the shell was replaced by `exec claude`.
+        daemon.info.lock().foreground_command = None;
+        probe_again();
+        let session = hub.session("t1", false).await.expect("session");
+        assert!(session.hooks_attached, "an unsure probe keeps the session");
+
+        // Killed: no `SessionEnd`, the shell is back at its prompt.
+        daemon.info.lock().shell_idle = true;
+        let session = hub.session("t1", false).await.expect("session");
+        assert!(session.hooks_attached, "probed at most every 5 s");
+
+        probe_again();
+        let before = *version.borrow();
+        let session = hub.session("t1", false).await.expect("session");
+        assert!(!session.hooks_attached);
+        assert_eq!(session.session_id, None);
+        assert_eq!(session.busy, None);
+        assert!(session.dialogs.is_empty());
+        assert!(hub.session_terminals().is_empty());
+        assert!(*version.borrow() > before);
+        assert_eq!(answer_of(waiting).await, json!({}));
+
+        // A hook of the same session proves it alive after all.
+        hub.hook_event(hook("t1", event("Stop")))
+            .expect("valid event");
+        assert_eq!(hub.session_terminals(), vec!["t1".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn a_prompt_to_a_pane_whose_claude_is_gone_disconnects_it() {
+        let (hub, _version, mut pty, daemon) =
+            hub_with_changing_daemon(ClaudeTerminalInfo::default());
+        hub.hook_event(hook("t1", event("SessionStart")))
+            .expect("valid event");
+
+        // Unsure probe: refused, but the session stays.
+        let delivery = hub.send_prompt("t1", "hello".into(), None).await;
+        assert!(matches!(delivery, Err(ClaudeRemoteError::NoClaudeSession)));
+        assert_eq!(hub.session_terminals(), vec!["t1".to_string()]);
+
+        // The shell runs nothing.
+        daemon.info.lock().shell_idle = true;
+        let delivery = hub.send_prompt("t1", "hello".into(), None).await;
+        assert!(matches!(delivery, Err(ClaudeRemoteError::NoClaudeSession)));
+        assert!(pty.try_recv().is_err());
+        assert!(hub.session_terminals().is_empty());
+        assert!(matches!(
+            hub.session_by_id("s1").await,
+            Err(ClaudeRemoteError::SessionNotFound)
+        ));
     }
 
     #[tokio::test]

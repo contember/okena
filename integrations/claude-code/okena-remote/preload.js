@@ -73,6 +73,7 @@ const EVENT_HOOKS = [
   ["PostToolUse", "*"],
   ["PostToolUseFailure", "*"],
   ["Stop", null],
+  ["StopFailure", null],
   ["SessionEnd", null],
   ["SubagentStart", null],
   ["SubagentStop", null],

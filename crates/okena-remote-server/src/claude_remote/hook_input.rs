@@ -14,6 +14,8 @@ pub(super) enum HookEvent {
     PostToolUse,
     PostToolUseFailure,
     Stop,
+    /// An API error ended the turn.
+    StopFailure,
     SessionEnd,
     SubagentStart,
     SubagentStop,
@@ -31,6 +33,7 @@ impl HookEvent {
             "PostToolUse" => Self::PostToolUse,
             "PostToolUseFailure" => Self::PostToolUseFailure,
             "Stop" => Self::Stop,
+            "StopFailure" => Self::StopFailure,
             "SessionEnd" => Self::SessionEnd,
             "SubagentStart" => Self::SubagentStart,
             "SubagentStop" => Self::SubagentStop,
@@ -133,6 +136,16 @@ mod tests {
         assert_eq!(input.tool_name.as_deref(), Some("Bash"));
         assert_eq!(input.tool_input, json!({"command": "ls"}));
         assert_eq!(input.permission_suggestions.len(), 1);
+    }
+
+    #[test]
+    fn parses_stop_failure() {
+        let input = HookInput::parse(&json!({
+            "hook_event_name": "StopFailure",
+            "session_id": "s1"
+        }))
+        .expect("valid input");
+        assert_eq!(input.event, HookEvent::StopFailure);
     }
 
     #[test]

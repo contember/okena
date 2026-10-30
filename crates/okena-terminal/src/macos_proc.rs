@@ -31,6 +31,11 @@ pub fn child_pids(ppid: u32) -> Vec<u32> {
     pids_by_type(ProcFilter::ByParentProcess { ppid }).unwrap_or_default()
 }
 
+/// Direct child pids of `ppid`, `None` when libproc fails.
+pub fn checked_child_pids(ppid: u32) -> Option<Vec<u32>> {
+    pids_by_type(ProcFilter::ByParentProcess { ppid }).ok()
+}
+
 /// Whether `ppid` has any direct child process.
 pub fn has_children(ppid: u32) -> bool {
     !child_pids(ppid).is_empty()
