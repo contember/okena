@@ -1,9 +1,9 @@
 //! clap command tree for the agent-friendly CLI.
 //!
 //! [`Cli`] is the top-level parser; [`Command`] enumerates every subcommand.
-//! `try_handle_cli` claims every invocation whose first argument is not a
-//! flag, so a mistyped or unknown subcommand fails here instead of launching
-//! the GUI.
+//! `try_handle_cli` claims every invocation that is not a GUI launch (see
+//! `cli_args`), so a mistyped or unknown subcommand fails here instead of
+//! launching the GUI.
 
 use clap::{Parser, Subcommand};
 
@@ -819,12 +819,8 @@ mod tests {
     }
 
     #[test]
-    fn claude_remote_is_gated_but_hidden_from_help() {
+    fn claude_remote_is_hidden_from_help() {
         assert_eq!(crate::CLAUDE_REMOTE_SUBCOMMAND, "claude-remote");
-        assert!(crate::cli_claims(&[
-            "okena".into(),
-            crate::CLAUDE_REMOTE_SUBCOMMAND.into()
-        ]));
         let command = Cli::command();
         let claude_remote = command
             .find_subcommand(crate::CLAUDE_REMOTE_SUBCOMMAND)

@@ -30,45 +30,100 @@ pub struct CliConfig {
 /// Try to handle a CLI subcommand. Returns `Some(exit_code)` if a subcommand
 /// was matched (caller should exit), or `None` to continue with GUI startup.
 ///
-/// Gating: see [`cli_claims`]. Unclaimed arguments (none, or GUI flags such
-/// as `--profile`, `--headless`, macOS' `-psn_…`) return `None` so GUI launch
-/// and profile handling in `main.rs` stay untouched.
+/// Gating: see [`cli_args`]. Unclaimed arguments (none, GUI flags such as
+/// `--profile`, `--headless`, macOS' `-psn_…`, or a path dropped onto the app)
+/// return `None` so GUI launch and profile handling in `main.rs` stay untouched.
 pub fn try_handle_cli() -> Option<i32> {
-    let args: Vec<String> = std::env::args().collect();
-    if !cli_claims(&args) {
-        return None;
-    }
-
+    let args = cli_args(&std::env::args().collect::<Vec<_>>())?;
     match Cli::try_parse_from(&args) {
         Ok(cli) => Some(dispatch(cli)),
-        Err(e) => {
-            // clap formats help/usage and version into the error; print it and
-            // use exit code 2 for genuine parse errors (0 for --help/--version).
-            let _ = e.print();
-            let code = match e.kind() {
-                clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion => 0,
-                _ => 2,
-            };
-            Some(code)
-        }
+        Err(e) => Some(print_parse_error(&e)),
     }
 }
 
-/// Whether `args` (as `std::env::args`, the program first) are a CLI
-/// invocation: the first argument is a word, not a flag, or a help or version
-/// request.
-///
-/// The GUI takes flags only (`--profile`, `--headless`, `--listen`, `-psn_…`
-/// from older macOS launchers); it registers no document or URL types, so a
-/// launcher never passes it a bare word. Any word is therefore a subcommand,
-/// and one clap does not know fails with exit 2 instead of starting a GUI
-/// (an old build asked for a newer subcommand used to start a second instance).
-pub fn cli_claims(args: &[String]) -> bool {
-    match args.get(1).map(String::as_str) {
-        None => false,
-        Some("-h" | "--help" | "-V" | "--version") => true,
-        Some(first) => !first.starts_with('-'),
+/// Exit code for arguments the CLI claims but clap rejects (an unknown or
+/// mistyped subcommand), after printing clap's message; `None` otherwise.
+/// `main` calls this before it touches the profile, so a command an older
+/// build does not know changes nothing on disk. `--help` and `--version` are
+/// clap "errors" too and come out here with exit 0.
+pub fn reject_unparsable_args() -> Option<i32> {
+    let args = cli_args(&std::env::args().collect::<Vec<_>>())?;
+    Cli::try_parse_from(&args)
+        .err()
+        .map(|e| print_parse_error(&e))
+}
+
+fn print_parse_error(e: &clap::Error) -> i32 {
+    // clap formats help/usage and version into the error; print it and use
+    // exit code 2 for genuine parse errors (0 for --help/--version).
+    let _ = e.print();
+    match e.kind() {
+        clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion => 0,
+        _ => 2,
     }
+}
+
+/// The GUI's own flags and whether each takes a value: everything `main.rs`,
+/// the daemon spawn and Okena's relaunches (restart, profile switch, revert)
+/// pass to the binary. Anything else belongs to the CLI.
+const GUI_FLAGS: &[(&str, bool)] = &[
+    ("--profile", true),
+    ("--new-profile", true),
+    ("--list-profiles", false),
+    ("--headless", false),
+    ("--ui-owned", false),
+    ("--listen", true),
+    ("--remote", false),
+    ("--await-pid", true),
+    ("--complete-config-restore", false),
+    ("--revert-target-exe", true),
+];
+
+/// The arguments for clap when `args` (as `std::env::args`, the program
+/// first) are a CLI invocation, `None` when they launch the GUI.
+///
+/// The GUI's flags (with their values) are skipped, so `okena --profile work
+/// ls` runs `ls` in profile `work` (main resolves the profile from the same
+/// arguments). The first argument after them decides: nothing, an empty
+/// string, `-psn_…` (older macOS launchers) or a path (a folder dropped onto
+/// the app, `okena .`) launch the GUI as before; anything else is the CLI's,
+/// so an unknown or mistyped subcommand, or a flag the GUI does not know,
+/// fails with clap's error and exit 2 instead of starting a second instance.
+pub(crate) fn cli_args(args: &[String]) -> Option<Vec<String>> {
+    let mut rest = args.iter().skip(1);
+    while let Some(arg) = rest.next() {
+        if arg.is_empty() || arg.starts_with("-psn_") {
+            continue;
+        }
+        let flag = arg.split_once('=').map_or(arg.as_str(), |(name, _)| name);
+        if let Some(&(_, takes_value)) = GUI_FLAGS.iter().find(|(name, _)| *name == flag) {
+            if takes_value && !arg.contains('=') {
+                rest.next();
+            }
+            continue;
+        }
+        if looks_like_path(arg) {
+            return None;
+        }
+        let program = args.first().cloned().unwrap_or_else(|| "okena".into());
+        return Some(
+            std::iter::once(program)
+                .chain(std::iter::once(arg.clone()))
+                .chain(rest.cloned())
+                .collect(),
+        );
+    }
+    None
+}
+
+/// A path rather than a subcommand: subcommand names never contain a path
+/// separator, and `.`, `..` or a Windows drive (`C:`) are paths on their own.
+fn looks_like_path(arg: &str) -> bool {
+    arg.contains('/')
+        || arg.contains('\\')
+        || arg == "."
+        || arg == ".."
+        || (arg.len() == 2 && arg.ends_with(':') && arg.as_bytes()[0].is_ascii_alphabetic())
 }
 
 /// Whether a command actually honors the global `--window` flag. Used only to
@@ -527,49 +582,84 @@ fn api_action(token: &str, body: &str) -> Result<String, String> {
 
 #[cfg(test)]
 mod gate_tests {
-    use super::cli_claims;
+    use super::cli_args;
 
-    fn claims(args: &[&str]) -> bool {
+    fn claimed(args: &[&str]) -> Option<Vec<String>> {
         let args: Vec<String> = std::iter::once("okena")
             .chain(args.iter().copied())
             .map(String::from)
             .collect();
-        cli_claims(&args)
+        cli_args(&args)
     }
 
     #[test]
-    fn the_gui_keeps_no_arguments_and_its_flags() {
-        assert!(!claims(&[]));
-        assert!(!claims(&["--profile", "work"]));
-        assert!(!claims(&["--profile=work"]));
-        assert!(!claims(&["--new-profile", "x"]));
-        assert!(!claims(&["--list-profiles"]));
-        assert!(!claims(&["--headless", "--ui-owned"]));
-        assert!(!claims(&["--listen", "0.0.0.0:8080"]));
-        assert!(!claims(&["--await-pid", "123"]));
-        assert!(!claims(&["-psn_0_1234567"]));
+    fn the_gui_keeps_no_arguments_its_flags_and_paths() {
+        for args in [
+            &[][..],
+            &["--profile", "work"],
+            &["--profile=work"],
+            &["--new-profile", "x"],
+            &["--list-profiles"],
+            &["--headless", "--ui-owned"],
+            &["--listen", "0.0.0.0", "--remote"],
+            &["--await-pid", "123"],
+            &[
+                "--complete-config-restore",
+                "--revert-target-exe",
+                "/opt/okena",
+            ],
+            &["-psn_0_1234567"],
+            &[""],
+            // A folder dropped onto the app, or `okena .` from a shell.
+            &["C:\\projects\\site"],
+            &["C:"],
+            &["/Users/u/projects/site"],
+            &["."],
+            &["--profile", "work", "~/projects/site"],
+        ] {
+            assert_eq!(claimed(args), None, "{args:?}");
+        }
     }
 
     #[test]
-    fn every_word_is_a_subcommand_known_or_not() {
-        assert!(claims(&["ls"]));
-        assert!(claims(&["claude", "ls"]));
-        assert!(claims(&["help"]));
-        assert!(claims(&["-h"]));
-        assert!(claims(&["--version"]));
-        // Unknown: clap rejects these with exit 2, the GUI never starts.
-        assert!(claims(&["claud", "ls"]));
-        assert!(claims(&["frobnicate"]));
-    }
-
-    #[test]
-    fn an_unknown_subcommand_is_a_parse_error() {
-        use clap::Parser;
-        let error = match crate::parser::Cli::try_parse_from(["okena", "frobnicate"]) {
-            Ok(_) => panic!("an unknown subcommand must not parse"),
-            Err(error) => error,
+    fn everything_else_is_the_clis_after_the_gui_flags() {
+        let expect = |args: &[&str], clap: &[&str]| {
+            let clap: Vec<String> = clap.iter().map(|s| s.to_string()).collect();
+            assert_eq!(claimed(args), Some(clap), "{args:?}");
         };
-        assert_eq!(error.kind(), clap::error::ErrorKind::InvalidSubcommand);
-        assert_eq!(error.exit_code(), 2);
+        expect(&["ls"], &["okena", "ls"]);
+        expect(
+            &["claude", "ls", "--json"],
+            &["okena", "claude", "ls", "--json"],
+        );
+        expect(&["help"], &["okena", "help"]);
+        expect(&["-h"], &["okena", "-h"]);
+        // Profile flags select the profile (main reads them) and are not clap's.
+        expect(&["--profile", "work", "ls"], &["okena", "ls"]);
+        expect(&["--profile=work", "frobnicate"], &["okena", "frobnicate"]);
+        // A flag the GUI does not know goes to clap, which knows `--window`
+        // and rejects a typo.
+        expect(
+            &["--window", "main", "term", "focus", "x"],
+            &["okena", "--window", "main", "term", "focus", "x"],
+        );
+        expect(&["--jsno", "ls"], &["okena", "--jsno", "ls"]);
+        // Unknown subcommands are claimed, so clap can reject them.
+        expect(&["claud", "ls"], &["okena", "claud", "ls"]);
+    }
+
+    #[test]
+    fn clap_rejects_what_the_gate_claims_but_does_not_know() {
+        use clap::Parser;
+        for args in [&["frobnicate"][..], &["--jsno", "ls"]] {
+            let clap_args = claimed(args).unwrap();
+            let error = match crate::parser::Cli::try_parse_from(&clap_args) {
+                Ok(_) => panic!("{args:?} must not parse"),
+                Err(error) => error,
+            };
+            assert_eq!(error.exit_code(), 2, "{args:?}");
+        }
+        let window = claimed(&["--window", "main", "term", "focus", "x"]).unwrap();
+        assert!(crate::parser::Cli::try_parse_from(&window).is_ok());
     }
 }

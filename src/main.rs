@@ -227,6 +227,12 @@ fn main() {
     #[cfg(feature = "dhat-heap")]
     let _dhat = dhat::Profiler::new_heap();
 
+    // An unknown or mistyped subcommand fails here, before profile resolution
+    // and the start-up bookkeeping below write anything to the profile.
+    if let Some(exit_code) = okena_cli::reject_unparsable_args() {
+        std::process::exit(exit_code);
+    }
+
     let args: Vec<String> = std::env::args().collect();
 
     // Handle --list-profiles before anything else
