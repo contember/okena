@@ -30,19 +30,12 @@ pub struct CliConfig {
 /// Try to handle a CLI subcommand. Returns `Some(exit_code)` if a subcommand
 /// was matched (caller should exit), or `None` to continue with GUI startup.
 ///
-/// Gating: we only engage the CLI when `args[1]` is a known CLI subcommand (or
-/// an explicit help request). Anything else — empty args, `--profile`,
-/// `--list-profiles`, `--new-profile`, or any other GUI flag — returns `None`
-/// so GUI launch and profile handling in `main.rs` stay untouched.
+/// Gating: see [`cli_claims`]. Unclaimed arguments (none, or GUI flags such
+/// as `--profile`, `--headless`, macOS' `-psn_…`) return `None` so GUI launch
+/// and profile handling in `main.rs` stay untouched.
 pub fn try_handle_cli() -> Option<i32> {
     let args: Vec<String> = std::env::args().collect();
-    let first = args.get(1)?.as_str();
-
-    // Explicit top-level help / version request → let clap render it.
-    let is_help_or_version = matches!(first, "-h" | "--help" | "help" | "-V" | "--version");
-
-    // Only claim the args if the first token is one of our subcommands.
-    if !is_help_or_version && !parser::subcommand_names().contains(&first) {
+    if !cli_claims(&args) {
         return None;
     }
 
@@ -58,6 +51,23 @@ pub fn try_handle_cli() -> Option<i32> {
             };
             Some(code)
         }
+    }
+}
+
+/// Whether `args` (as `std::env::args`, the program first) are a CLI
+/// invocation: the first argument is a word, not a flag, or a help or version
+/// request.
+///
+/// The GUI takes flags only (`--profile`, `--headless`, `--listen`, `-psn_…`
+/// from older macOS launchers); it registers no document or URL types, so a
+/// launcher never passes it a bare word. Any word is therefore a subcommand,
+/// and one clap does not know fails with exit 2 instead of starting a GUI
+/// (an old build asked for a newer subcommand used to start a second instance).
+pub fn cli_claims(args: &[String]) -> bool {
+    match args.get(1).map(String::as_str) {
+        None => false,
+        Some("-h" | "--help" | "-V" | "--version") => true,
+        Some(first) => !first.starts_with('-'),
     }
 }
 
@@ -512,5 +522,54 @@ fn api_action(token: &str, body: &str) -> Result<String, String> {
             serde_json::to_string(&value).map_err(|e| format!("Failed to serialize response: {e}"))
         }
         None => Ok(String::new()),
+    }
+}
+
+#[cfg(test)]
+mod gate_tests {
+    use super::cli_claims;
+
+    fn claims(args: &[&str]) -> bool {
+        let args: Vec<String> = std::iter::once("okena")
+            .chain(args.iter().copied())
+            .map(String::from)
+            .collect();
+        cli_claims(&args)
+    }
+
+    #[test]
+    fn the_gui_keeps_no_arguments_and_its_flags() {
+        assert!(!claims(&[]));
+        assert!(!claims(&["--profile", "work"]));
+        assert!(!claims(&["--profile=work"]));
+        assert!(!claims(&["--new-profile", "x"]));
+        assert!(!claims(&["--list-profiles"]));
+        assert!(!claims(&["--headless", "--ui-owned"]));
+        assert!(!claims(&["--listen", "0.0.0.0:8080"]));
+        assert!(!claims(&["--await-pid", "123"]));
+        assert!(!claims(&["-psn_0_1234567"]));
+    }
+
+    #[test]
+    fn every_word_is_a_subcommand_known_or_not() {
+        assert!(claims(&["ls"]));
+        assert!(claims(&["claude", "ls"]));
+        assert!(claims(&["help"]));
+        assert!(claims(&["-h"]));
+        assert!(claims(&["--version"]));
+        // Unknown: clap rejects these with exit 2, the GUI never starts.
+        assert!(claims(&["claud", "ls"]));
+        assert!(claims(&["frobnicate"]));
+    }
+
+    #[test]
+    fn an_unknown_subcommand_is_a_parse_error() {
+        use clap::Parser;
+        let error = match crate::parser::Cli::try_parse_from(["okena", "frobnicate"]) {
+            Ok(_) => panic!("an unknown subcommand must not parse"),
+            Err(error) => error,
+        };
+        assert_eq!(error.kind(), clap::error::ErrorKind::InvalidSubcommand);
+        assert_eq!(error.exit_code(), 2);
     }
 }

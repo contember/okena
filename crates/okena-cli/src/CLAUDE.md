@@ -2,17 +2,19 @@
 
 `okena <subcommand>` controls a running daemon over the remote HTTP API
 (`crates/okena-remote-server/`). Entry point is `try_handle_cli()`, called early in `main.rs`
-*before* GUI startup. The gate only engages clap when the first arg is a known
-subcommand (or `--help`/`--version`), so a bare launch and the `--profile` /
-`--list-profiles` / `--new-profile` flags pass straight through to GUI/profile
-handling untouched.
+*before* GUI startup. The gate (`cli_claims`) engages clap whenever the first arg
+is not a flag (or is `-h`/`--help`/`-V`/`--version`): the GUI takes flags only,
+so an unknown or mistyped subcommand fails with clap's exit 2 instead of starting
+a GUI. A bare launch and GUI flags (`--profile`, `--list-profiles`,
+`--new-profile`, `--headless`, `--listen`, macOS' `-psn_…`) pass straight through
+to GUI/profile handling untouched.
 
 ## Files
 
 | File | Purpose |
 |------|---------|
 | `lib.rs` | The gate + `dispatch(Cli)`. HTTP/token infra: `discover_server`, `ensure_token`, `api_get`/`api_post_json`/`api_action`, `CliConfig` load/save. |
-| `parser.rs` | clap `Cli` parser + `Command`/`*Cmd` subcommand enums. `subcommand_names()` feeds the gate (a test asserts it covers the whole tree). |
+| `parser.rs` | clap `Cli` parser + `Command`/`*Cmd` subcommand enums. The gate needs no list of names; `cli_claims` lives in `lib.rs`. |
 | `resolve.rs` | Pure, unit-tested resolvers over a parsed `StateResponse`. No I/O. |
 | `commands.rs` | Command implementations — build an `ActionRequest` JSON body, POST it, render the result. |
 | `skill.md` | The agent skill, `include_str!`-embedded into `commands.rs` and emitted by `skill show` / written by `skill install`. Keep it concise — it's a reference, not a manual. |
@@ -24,7 +26,7 @@ handling untouched.
 
 - **Projects**: exact id, case-insensitive name, or absolute path (canonicalized).
 - **Terminals**: a bare terminal id, `<project>/<name>`, or `<project>:<index>` (DFS order). `<name>` matches a `terminal_names` entry first, then falls back to a terminal id scoped to that project (so the id `term ls` shows for unnamed terminals also works after the `/`). `<project>` may contain `/` (branch-named worktrees, absolute paths): every `/` split point is tried, and a filter that matches terminals under more than one split is an ambiguity error.
-- **Windows** (`--window`): `"main"`, a full id, or a unique id prefix → resolved to the exact id put in the action's `window` field. The flag is `global` but only `project add/clone/show/hide/focus`, `worktree add`, `term focus/fullscreen` and `window layout` honor it; `dispatch` warns when any other command receives it. It must come **after** the subcommand (`okena term focus X --window main`) — the gate only engages when `args[1]` is a subcommand, so `--window` *before* the subcommand falls through to GUI launch.
+- **Windows** (`--window`): `"main"`, a full id, or a unique id prefix → resolved to the exact id put in the action's `window` field. The flag is `global` but only `project add/clone/show/hide/focus`, `worktree add`, `term focus/fullscreen` and `window layout` honor it; `dispatch` warns when any other command receives it. It must come **after** the subcommand (`okena term focus X --window main`) — the gate only engages when `args[1]` is not a flag, so `--window` *before* the subcommand falls through to GUI launch.
 - **Layout `path`** for `term split`/`term tab` is resolved client-side from a terminal id (`resolve_terminal_path`), mirroring `okena_layout::LayoutNode::find_terminal_path` — agents never compute tree paths. `term tab` sends `in_group: false` (wrap-or-join, mirroring the UI), never `true` (which needs `path` to point at a Tabs node).
 
 ## Conventions

@@ -1,8 +1,9 @@
 //! clap command tree for the agent-friendly CLI.
 //!
 //! [`Cli`] is the top-level parser; [`Command`] enumerates every subcommand.
-//! [`subcommand_names`] feeds the gate in `try_handle_cli` so the GUI / profile
-//! launch path stays untouched for anything that isn't one of our commands.
+//! `try_handle_cli` claims every invocation whose first argument is not a
+//! flag, so a mistyped or unknown subcommand fails here instead of launching
+//! the GUI.
 
 use clap::{Parser, Subcommand};
 
@@ -746,39 +747,6 @@ pub enum TermCmd {
     },
 }
 
-/// The set of top-level subcommand names the CLI claims. Used by the gate in
-/// `try_handle_cli`: if `args[1]` isn't one of these (or a help flag), we hand
-/// control back to GUI/profile launch.
-pub fn subcommand_names() -> &'static [&'static str] {
-    &[
-        "pair",
-        "health",
-        "state",
-        "action",
-        "services",
-        "service",
-        "usage",
-        "whoami",
-        "ls",
-        "window",
-        "project",
-        "worktree",
-        "folder",
-        "term",
-        "send",
-        "run",
-        "key",
-        "read",
-        "skill",
-        "settings",
-        "theme",
-        "command",
-        "update",
-        "claude",
-        "claude-remote",
-    ]
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -851,25 +819,12 @@ mod tests {
     }
 
     #[test]
-    fn subcommand_names_cover_the_tree() {
-        // Every declared top-level subcommand must appear in subcommand_names()
-        // so the gate in try_handle_cli engages for it.
-        let declared: Vec<String> = Cli::command()
-            .get_subcommands()
-            .map(|c| c.get_name().to_string())
-            .collect();
-        for name in &declared {
-            assert!(
-                subcommand_names().contains(&name.as_str()),
-                "subcommand '{name}' missing from subcommand_names()"
-            );
-        }
-    }
-
-    #[test]
     fn claude_remote_is_gated_but_hidden_from_help() {
         assert_eq!(crate::CLAUDE_REMOTE_SUBCOMMAND, "claude-remote");
-        assert!(subcommand_names().contains(&crate::CLAUDE_REMOTE_SUBCOMMAND));
+        assert!(crate::cli_claims(&[
+            "okena".into(),
+            crate::CLAUDE_REMOTE_SUBCOMMAND.into()
+        ]));
         let command = Cli::command();
         let claude_remote = command
             .find_subcommand(crate::CLAUDE_REMOTE_SUBCOMMAND)
