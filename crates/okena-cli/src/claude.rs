@@ -22,6 +22,10 @@ const START_POLL_INTERVAL: Duration = Duration::from_millis(250);
 /// After a key press, the dialog needs a moment to redraw before the screen
 /// says anything new; pressing again earlier could answer the next dialog.
 const KEY_SETTLE: Duration = Duration::from_millis(700);
+/// How many times `claude start` re-probes a foreground program before it
+/// gives up (at [`START_POLL_INTERVAL`], about 3 s): a fresh pane's prompt may
+/// still run something short, like the `git` behind a branch indicator.
+const FOREGROUND_SETTLE_ATTEMPTS: u32 = 12;
 
 /// `okena claude ls [--json]`
 pub fn cli_ls(json_mode: bool) -> i32 {
@@ -177,13 +181,18 @@ pub fn cli_start(
         let shell = pane_shell(&state, &project_id, &terminal_id, &settings.default_shell);
         check_claude_args(claude_args, &shell)?;
         let wait_for_channel = settings.claude_remote_channel;
-        let body = api_get(
-            &terminal_path(&terminal_id, "?probe_foreground=true"),
-            &token,
-        )?;
-        let session: ApiClaudeSession =
-            serde_json::from_str(&body).map_err(|e| format!("Invalid session: {e}"))?;
-        match launch(&session).map_err(|e| format!("{terminal_id}: {e}"))? {
+        let probe = || {
+            let body = api_get(
+                &terminal_path(&terminal_id, "?probe_foreground=true"),
+                &token,
+            )?;
+            serde_json::from_str::<ApiClaudeSession>(&body)
+                .map_err(|e| format!("Invalid session: {e}"))
+        };
+        let launched = launch_once_settled(probe, FOREGROUND_SETTLE_ATTEMPTS, || {
+            std::thread::sleep(START_POLL_INTERVAL)
+        })?;
+        match launched.map_err(|e| format!("{terminal_id}: {e}"))? {
             Launch::Type => {
                 let run = serde_json::json!({
                     "action": "run_command",
@@ -504,6 +513,39 @@ fn program_name(program: &str) -> String {
 const UNCONNECTED_ARGS_HINT: &str = "if claude runs in the terminal but never connected, an \
      argument may keep Okena out (--settings, -p/--print, --tmux, --bg, a subcommand such as \
      mcp or update); if it is still starting, raise --timeout";
+
+/// Whether a refused launch may pass on a later probe: a program other than
+/// `claude` holds the foreground of an otherwise idle pane, and short-lived
+/// ones (a prompt's `git`) let go of it within moments.
+fn foreground_may_settle(session: &ApiClaudeSession) -> bool {
+    !session.hooks_attached
+        && !session.channel_attached
+        && session.startup_dialog.is_none()
+        && session
+            .foreground_command
+            .as_deref()
+            .is_some_and(|command| command != "claude")
+}
+
+/// [`launch`] on the session `probe` reads, re-probed up to `attempts` times
+/// (calling `pause` between them) while only a transient foreground program
+/// stands in the way. The outer `Result` carries probe errors, the inner one
+/// the final refusal.
+fn launch_once_settled(
+    mut probe: impl FnMut() -> Result<ApiClaudeSession, String>,
+    attempts: u32,
+    mut pause: impl FnMut(),
+) -> Result<Result<Launch, String>, String> {
+    let mut session = probe()?;
+    for _ in 0..attempts {
+        if !foreground_may_settle(&session) {
+            break;
+        }
+        pause();
+        session = probe()?;
+    }
+    Ok(launch(&session))
+}
 
 /// What one poll of the starting session asks for.
 #[derive(Debug, PartialEq)]
@@ -1333,6 +1375,61 @@ mod tests {
         // zsh would expand a bare `=opus` to the path of an `opus` command.
         assert_eq!(claude_command(&args(&["=opus"])), "claude '=opus'");
         assert_eq!(claude_command(&args(&["a=b"])), "claude a=b");
+    }
+
+    #[test]
+    fn launch_waits_out_a_transient_foreground_program() {
+        let run = |sessions: Vec<ApiClaudeSession>, attempts: u32| {
+            let mut sessions = sessions.into_iter();
+            let mut last = None;
+            let mut probes = 0;
+            let mut pauses = 0;
+            let result = launch_once_settled(
+                || {
+                    probes += 1;
+                    if let Some(next) = sessions.next() {
+                        last = Some(next);
+                    }
+                    Ok(last.clone().unwrap())
+                },
+                attempts,
+                || pauses += 1,
+            )
+            .unwrap();
+            (result, probes, pauses)
+        };
+
+        // The prompt's `git` lets go, the shell prompt follows.
+        let (result, probes, pauses) = run(
+            vec![
+                unconnected(Some("git")),
+                unconnected(Some("git")),
+                unconnected(None),
+            ],
+            12,
+        );
+        assert_eq!(result, Ok(Launch::Type));
+        assert_eq!((probes, pauses), (3, 2));
+
+        // A program that stays is refused once the attempts run out.
+        let (result, probes, pauses) = run(vec![unconnected(Some("vim"))], 12);
+        assert!(result.unwrap_err().contains("`vim` runs in the foreground"));
+        assert_eq!((probes, pauses), (13, 12));
+
+        // Nothing to wait out: a connected claude, an unhooked one, a shell prompt.
+        for session in [
+            session("t1"),
+            unconnected(Some("claude")),
+            unconnected(None),
+        ] {
+            let (_, probes, pauses) = run(vec![session], 12);
+            assert_eq!((probes, pauses), (1, 0));
+        }
+
+        // A dialog of a starting claude is resumed without waiting.
+        let mut waiting = unconnected(Some("claude"));
+        waiting.startup_dialog = Some(ApiClaudeStartupDialog::Channels);
+        assert_eq!(run(vec![waiting], 12), (Ok(Launch::Resume), 1, 0));
     }
 
     #[test]
