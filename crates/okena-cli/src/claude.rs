@@ -183,9 +183,7 @@ pub fn cli_start(
         )?;
         let session: ApiClaudeSession =
             serde_json::from_str(&body).map_err(|e| format!("Invalid session: {e}"))?;
-        let launched = launch(&session).map_err(|e| format!("{terminal_id}: {e}"))?;
-        let typed = launched == Launch::Type;
-        match launched {
+        match launch(&session).map_err(|e| format!("{terminal_id}: {e}"))? {
             Launch::Type => {
                 let run = serde_json::json!({
                     "action": "run_command",
@@ -212,7 +210,6 @@ pub fn cli_start(
             &terminal_id,
             wait_for_channel,
             trust,
-            typed,
             !claude_args.is_empty(),
             Duration::from_secs(timeout_secs),
         )?;
@@ -426,7 +423,8 @@ fn check_claude_args(args: &[String], shell: &ShellType) -> Result<(), String> {
 }
 
 /// The shell a terminal runs, resolved the way the daemon spawns it: its own
-/// setting, else the project's default, else the global `default_shell`.
+/// setting, else the project's default (a project set to `Default` means the
+/// system shell), else the global `default_shell`.
 fn pane_shell(
     state: &StateResponse,
     project_id: &str,
@@ -438,10 +436,7 @@ fn pane_shell(
         .and_then(|p| p.layout.as_ref())
         .and_then(|layout| terminal_shell(layout, terminal_id))
         .unwrap_or_default();
-    let project_default = project
-        .and_then(|p| p.default_shell.as_ref())
-        .filter(|shell| **shell != ShellType::Default);
-    own.resolve_default(project_default, global)
+    own.resolve_default(project.and_then(|p| p.default_shell.as_ref()), global)
 }
 
 fn terminal_shell(node: &ApiLayoutNode, terminal_id: &str) -> Option<ShellType> {
@@ -534,20 +529,6 @@ fn start_step(session: &ApiClaudeSession, wait_for_channel: bool, trust: bool) -
     }
 }
 
-/// How many connection polls pass between checks that the typed `claude`
-/// still runs (at [`START_POLL_INTERVAL`], every 2 s).
-const EXIT_PROBE_EVERY: u32 = 8;
-
-/// Whether the pane is back at a shell prompt: nothing runs in its foreground.
-fn shell_is_back(token: &str, terminal_id: &str) -> Result<bool, String> {
-    let body = api_get(&terminal_path(terminal_id, "?probe_foreground=true"), token)?;
-    let session: ApiClaudeSession =
-        serde_json::from_str(&body).map_err(|e| format!("Invalid session: {e}"))?;
-    Ok(!session.hooks_attached
-        && session.startup_dialog.is_none()
-        && session.foreground_command.is_none())
-}
-
 /// Poll the session until `claude` connects, answering the start-up dialogs on
 /// the way: the channel warning always, the folder trust only with `trust`.
 fn wait_until_connected(
@@ -555,13 +536,11 @@ fn wait_until_connected(
     terminal_id: &str,
     wait_for_channel: bool,
     trust: bool,
-    typed: bool,
     typed_args: bool,
     timeout: Duration,
 ) -> Result<ApiClaudeSession, String> {
     let deadline = Instant::now() + timeout;
     let mut last_key: Option<Instant> = None;
-    let mut polls: u32 = 0;
     loop {
         if Instant::now() > deadline {
             let mut error = format!(
@@ -574,28 +553,10 @@ fn wait_until_connected(
             return Err(error);
         }
         std::thread::sleep(START_POLL_INTERVAL);
-        polls += 1;
         let session = fetch_session(token, terminal_id)?;
         let dialog = match start_step(&session, wait_for_channel, trust) {
             StartStep::Connected => return Ok(session),
-            StartStep::Wait => {
-                // A claude that exits at once (an unknown option, `--help`)
-                // leaves the shell at its prompt; say so instead of waiting
-                // out the timeout. Probed every 2 s: the probe forks or scans.
-                if typed
-                    && polls.is_multiple_of(EXIT_PROBE_EVERY)
-                    && shell_is_back(token, terminal_id)?
-                {
-                    let mut error = format!(
-                        "claude exited before it connected; check the terminal (okena read {terminal_id})"
-                    );
-                    if typed_args {
-                        error.push_str("\nan argument after `--` may be wrong");
-                    }
-                    return Err(error);
-                }
-                continue;
-            }
+            StartStep::Wait => continue,
             StartStep::NeedsTrust => {
                 // A rerun with `--trust` resumes this claude, which already
                 // has the `--` arguments; repeating them would be refused.
@@ -1335,9 +1296,10 @@ mod tests {
             ShellType::Default
         );
         assert_eq!(pane_shell(&state, "p1", "t1", &fish), fish);
-        // A project default wins over the global one; `Default` there does not.
+        // A project default wins over the global one, even `Default` (the
+        // system shell), as `ShellType::resolve_default` has it.
         state.projects[0].default_shell = Some(ShellType::Default);
-        assert_eq!(pane_shell(&state, "p1", "t1", &fish), fish);
+        assert_eq!(pane_shell(&state, "p1", "t1", &fish), ShellType::Default);
         state.projects[0].default_shell = Some(zsh.clone());
         assert_eq!(pane_shell(&state, "p1", "t1", &fish), zsh);
         assert_eq!(pane_shell(&state, "missing", "t1", &fish), fish);

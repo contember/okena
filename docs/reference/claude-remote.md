@@ -78,9 +78,7 @@ cannot see, so it says to rerun without them (the trust error after a start
 with arguments says the same). Control characters in an argument are refused,
 since the pane's line editor would act on them, and so is an argument that
 needs quoting when the pane's shell (its own, else the project default, else
-the global `default_shell`, else `$SHELL`) is not sh, bash, zsh, dash, ksh or WSL.
-After typing `claude` start checks every 2 s that it still runs; one that exits
-before connecting (an unknown option) fails at once instead of at the timeout. Which arguments still let Okena connect is the
+the global `default_shell`, else `$SHELL`) is not sh, bash, zsh, dash, ksh or WSL. Which arguments still let Okena connect is the
 preload's decision (`GUARDED_FLAGS` and `SUBCOMMANDS` in
 `integrations/claude-code/okena-remote/preload.js`); the CLI does not copy it,
 and after typed `--` arguments a connection timeout names them as one possible
