@@ -16,6 +16,16 @@ cargo test --workspace
 
 On Windows, build from **x64 Native Tools Command Prompt for VS 2022** to avoid link.exe PATH conflicts with Git for Windows.
 
+**Don't share one `CARGO_TARGET_DIR` between git worktrees.** Cargo keys a
+workspace crate by its path relative to the workspace root and decides
+freshness by file mtimes, so two worktrees with the same layout share build
+units. A build in worktree A that finishes after you edited worktree B marks
+B's crates fresh, and B's next `cargo build` reuses A's code without
+recompiling: `Finished` in seconds, a binary from the wrong branch. Give every
+worktree its own `target/` (the default). If you must share one to save a
+rebuild, `touch` the files you changed before building, and check that cargo
+prints `Compiling` for those crates.
+
 ## Project Structure
 
 ```
