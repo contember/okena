@@ -1,4 +1,4 @@
-//! macOS process introspection via `libproc` syscalls.
+//! macOS process introspection via `libproc` and `sysctl` syscalls.
 //!
 //! Replaces fork+exec of `pgrep` / `lsof` / `ps` used for child-process
 //! detection, dtach socket → pid resolution and port detection. Each external
@@ -14,7 +14,7 @@
 use libproc::libproc::bsd_info::BSDInfo;
 use libproc::libproc::file_info::{ListFDs, ProcFDType, pidfdinfo};
 use libproc::libproc::net_info::{SocketFDInfo, SocketInfoKind, TcpSIState};
-use libproc::libproc::proc_pid::{listpidinfo, name, pidinfo};
+use libproc::libproc::proc_pid::{listpidinfo, name, pidinfo, pidpath};
 use libproc::processes::{ProcFilter, pids_by_type};
 use std::collections::HashMap;
 use std::ffi::OsStr;
@@ -47,9 +47,84 @@ pub fn first_child_pid(ppid: u32) -> Option<u32> {
     child_pids(ppid).into_iter().min()
 }
 
-/// Best-effort short accounting name of a process (e.g. "make", "vim").
+/// Best-effort short accounting name of a process (e.g. "make", "vim"): the
+/// file name of its executable, symlinks resolved. For what the user ran, see
+/// `terminal::process_name`.
 pub fn process_name(pid: u32) -> Option<String> {
     name(pid as i32).ok().filter(|s| !s.is_empty())
+}
+
+/// Path of the executable `pid` runs, symlinks resolved.
+pub fn process_path(pid: u32) -> Option<String> {
+    pidpath(pid as i32).ok().filter(|path| !path.is_empty())
+}
+
+/// `argv[0]` of `pid` (via `sysctl` `KERN_PROCARGS2`), `None` when the kernel
+/// refuses (another user's process) or the arguments are unreadable.
+pub fn process_arg0(pid: u32) -> Option<String> {
+    // Cached once read; a failed read is retried on the next call.
+    static ARG_MAX: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    let arg_max = match ARG_MAX.get() {
+        Some(&known) => known,
+        None => {
+            let read = arg_max()?;
+            *ARG_MAX.get_or_init(|| read)
+        }
+    };
+    let mut buf = vec![0u8; arg_max];
+    let mut size = buf.len();
+    let mut mib = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid as libc::c_int];
+    // SAFETY: `buf` is writable for `size` bytes; the kernel writes at most that.
+    let ok = unsafe {
+        libc::sysctl(
+            mib.as_mut_ptr(),
+            3,
+            buf.as_mut_ptr().cast(),
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    } == 0;
+    if !ok {
+        return None;
+    }
+    buf.truncate(size);
+    arg0_from_procargs2(&buf)
+}
+
+/// The kernel's limit on a process's arguments (`KERN_ARGMAX`), the buffer
+/// `KERN_PROCARGS2` needs.
+fn arg_max() -> Option<usize> {
+    let mut arg_max: libc::c_int = 0;
+    let mut size = std::mem::size_of::<libc::c_int>();
+    let mut mib = [libc::CTL_KERN, libc::KERN_ARGMAX];
+    // SAFETY: `mib` names an int-sized value and `size` holds its size.
+    let ok = unsafe {
+        libc::sysctl(
+            mib.as_mut_ptr(),
+            2,
+            (&mut arg_max as *mut libc::c_int).cast(),
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    } == 0;
+    (ok && arg_max > 0).then_some(arg_max as usize)
+}
+
+/// `argv[0]` from a `KERN_PROCARGS2` buffer: `argc` (a C int), the executable
+/// path, NUL padding, then `argv` as NUL-terminated strings.
+fn arg0_from_procargs2(buf: &[u8]) -> Option<String> {
+    const ARGC: usize = std::mem::size_of::<libc::c_int>();
+    let argc = libc::c_int::from_ne_bytes(buf.get(..ARGC)?.try_into().ok()?);
+    if argc < 1 {
+        return None;
+    }
+    let rest = &buf[ARGC..];
+    let rest = &rest[rest.iter().position(|&b| b == 0)?..];
+    let rest = &rest[rest.iter().position(|&b| b != 0)?..];
+    let end = rest.iter().position(|&b| b == 0).unwrap_or(rest.len());
+    String::from_utf8(rest[..end].to_vec()).ok()
 }
 
 /// pid → direct-children map for every process on the system — equivalent to a
@@ -163,4 +238,27 @@ unsafe fn sun_path(sun: &libc::sockaddr_un) -> Option<PathBuf> {
     // c_char is i8 on macOS; reinterpret the NUL-terminated path bytes as u8.
     let bytes = unsafe { std::slice::from_raw_parts(raw.as_ptr().cast::<u8>(), len) };
     Some(PathBuf::from(OsStr::from_bytes(bytes)))
+}
+
+#[cfg(test)]
+mod procargs_tests {
+    use super::arg0_from_procargs2;
+
+    fn procargs(argc: i32, rest: &[u8]) -> Vec<u8> {
+        let mut buf = argc.to_ne_bytes().to_vec();
+        buf.extend_from_slice(rest);
+        buf
+    }
+
+    #[test]
+    fn arg0_is_the_first_argument_after_the_executable_path() {
+        let buf = procargs(
+            2,
+            b"/Users/u/.local/share/claude/versions/2.1.316\0\0\0claude\0--resume\0HOME=/x\0",
+        );
+        assert_eq!(arg0_from_procargs2(&buf).as_deref(), Some("claude"));
+        assert_eq!(arg0_from_procargs2(&procargs(0, b"/bin/x\0\0")), None);
+        assert_eq!(arg0_from_procargs2(&procargs(1, b"/bin/x")), None);
+        assert_eq!(arg0_from_procargs2(&[1, 0]), None);
+    }
 }

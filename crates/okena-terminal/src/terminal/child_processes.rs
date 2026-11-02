@@ -73,16 +73,106 @@ pub fn has_no_child_processes(_pid: u32) -> bool {
     false
 }
 
-/// Name of the process `pid` (`comm` on Linux), `None` when unknown.
+/// Name of the process `pid` as the user would call it, `None` when unknown.
+///
+/// Normally the kernel's name: `comm` on Linux, libproc's on macOS. Claude
+/// Code's native installer keeps each release as `…/claude/versions/2.1.316`
+/// behind a `~/.local/bin/claude` symlink, and the kernel may name that process
+/// `2.1.316` (macOS always resolves the symlink; Linux does when it was started
+/// by the versioned path). Okena compares the name with `claude`, so only a
+/// version-shaped name is replaced: by the file name of `argv[0]`, else by the
+/// directory a `versions/<version>` executable lives under. Other processes
+/// keep the kernel's name, which a rewritten process title cannot garble.
 #[cfg(target_os = "linux")]
 pub fn process_name(pid: u32) -> Option<String> {
     let comm = std::fs::read_to_string(format!("/proc/{pid}/comm")).ok()?;
-    Some(comm.trim().to_string()).filter(|name| !name.is_empty())
+    let comm = comm.trim();
+    if comm.is_empty() {
+        return None;
+    }
+    if !looks_like_version(comm) {
+        return Some(comm.to_string());
+    }
+    let cmdline = std::fs::read(format!("/proc/{pid}/cmdline")).unwrap_or_default();
+    let arg0 = cmdline
+        .split(|&b| b == 0)
+        .next()
+        .and_then(|arg| std::str::from_utf8(arg).ok());
+    Some(name_for_version(comm, arg0, || {
+        std::fs::read_link(format!("/proc/{pid}/exe"))
+            .ok()
+            .and_then(|path| path.to_str().map(str::to_string))
+    }))
 }
 
 #[cfg(target_os = "macos")]
 pub fn process_name(pid: u32) -> Option<String> {
-    crate::macos_proc::process_name(pid)
+    let name = crate::macos_proc::process_name(pid)?;
+    if !looks_like_version(&name) {
+        return Some(name);
+    }
+    let arg0 = crate::macos_proc::process_arg0(pid);
+    Some(name_for_version(&name, arg0.as_deref(), || {
+        crate::macos_proc::process_path(pid)
+    }))
+}
+
+/// What to call a process the kernel named `version`: the command `arg0`
+/// names, else the command a versioned `arg0` or executable path belongs to
+/// (the executable is looked up only then), else `version`. A versioned argv[0]
+/// still names the command after an update deleted that version's file.
+#[cfg(any(target_os = "linux", target_os = "macos", test))]
+fn name_for_version(
+    version: &str,
+    arg0: Option<&str>,
+    exe: impl FnOnce() -> Option<String>,
+) -> String {
+    arg0.and_then(command_name)
+        .filter(|name| !looks_like_version(name))
+        .or_else(|| arg0.and_then(versioned_command))
+        .or_else(|| exe().as_deref().and_then(versioned_command))
+        .unwrap_or_else(|| version.to_string())
+}
+
+/// The command name `arg0` (a process's `argv[0]`) stands for: its file name,
+/// without the one `-` a login shell gets. `None` for anything that is not a
+/// plain command name: a rewritten process title (spaces), an environment
+/// entry, or an option (what an empty argv[0] leaves the parser with).
+#[cfg(any(target_os = "linux", target_os = "macos", test))]
+fn command_name(arg0: &str) -> Option<String> {
+    if arg0.contains([' ', '=']) {
+        return None;
+    }
+    let name = arg0.rsplit('/').next()?;
+    let name = name.strip_prefix('-').unwrap_or(name);
+    (!name.is_empty() && !name.starts_with('-')).then(|| name.to_string())
+}
+
+/// `claude` for `…/claude/versions/2.1.316`: the directory a versioned
+/// executable's `versions` folder sits in.
+#[cfg(any(target_os = "linux", target_os = "macos", test))]
+fn versioned_command(exe: &str) -> Option<String> {
+    // Linux marks the executable of a process whose file is gone.
+    let exe = exe.strip_suffix(" (deleted)").unwrap_or(exe);
+    let mut parts = exe.rsplit('/');
+    let file = parts.next()?;
+    if !looks_like_version(file) || parts.next()? != "versions" {
+        return None;
+    }
+    parts
+        .next()
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+}
+
+/// Whether `name` is a dotted version like `2.1.316`, the file name of a
+/// versioned executable rather than of a command.
+#[cfg(any(target_os = "linux", target_os = "macos", test))]
+fn looks_like_version(name: &str) -> bool {
+    name.contains('.')
+        && name
+            .split('.')
+            .all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()))
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
@@ -91,10 +181,9 @@ pub fn process_name(_pid: u32) -> Option<String> {
 }
 
 /// Best-effort name of the foreground command running under `pid` (the shell):
-/// the first child process's name (e.g. "make", "vim", "cargo"). On Linux reads
-/// `/proc/<child>/comm`; on macOS uses `libproc`; returns `None` elsewhere or
-/// when the shell has no child. Gives the soft-close toast a "what am I killing"
-/// hint.
+/// the first child process's [`process_name`] (e.g. "make", "vim", "cargo",
+/// "claude"); `None` elsewhere than Linux and macOS or when the shell has no
+/// child. Gives the soft-close toast a "what am I killing" hint.
 #[cfg(target_os = "linux")]
 pub fn foreground_command(pid: u32) -> Option<String> {
     let task_dir = format!("/proc/{pid}/task");
@@ -110,20 +199,17 @@ pub fn foreground_command(pid: u32) -> Option<String> {
         let Some(child_pid) = children.split_whitespace().next() else {
             continue;
         };
-        let Ok(comm) = std::fs::read_to_string(format!("/proc/{child_pid}/comm")) else {
+        let Some(name) = child_pid.parse().ok().and_then(process_name) else {
             continue;
         };
-        let name = comm.trim();
-        if !name.is_empty() {
-            return Some(name.to_string());
-        }
+        return Some(name);
     }
     None
 }
 
 #[cfg(target_os = "macos")]
 pub fn foreground_command(pid: u32) -> Option<String> {
-    crate::macos_proc::first_child_pid(pid).and_then(crate::macos_proc::process_name)
+    crate::macos_proc::first_child_pid(pid).and_then(process_name)
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
@@ -152,5 +238,120 @@ mod tests {
             "a missing pid is unknown"
         );
         assert_eq!(process_name(child.id()), None);
+    }
+}
+
+#[cfg(test)]
+mod name_tests {
+    use super::*;
+
+    #[test]
+    fn command_names_are_plain_file_names() {
+        assert_eq!(command_name("claude").as_deref(), Some("claude"));
+        assert_eq!(
+            command_name("/Users/u/.local/bin/claude").as_deref(),
+            Some("claude")
+        );
+        assert_eq!(command_name("-zsh").as_deref(), Some("zsh"));
+        assert_eq!(command_name(""), None);
+        assert_eq!(command_name("/usr/bin/"), None);
+        // A rewritten process title, or the environment after an empty argv.
+        assert_eq!(
+            command_name("npm run dev --config ./conf/vite.config.ts"),
+            None
+        );
+        assert_eq!(command_name("HOME=/Users/u"), None);
+        // An empty argv[0] leaves the parser on argv[1].
+        assert_eq!(command_name("--resume"), None);
+    }
+
+    #[test]
+    fn versions_are_dotted_numbers() {
+        assert!(looks_like_version("2.1.316"));
+        assert!(looks_like_version("1.0"));
+        assert!(!looks_like_version("claude"));
+        assert!(!looks_like_version("2"));
+        assert!(!looks_like_version("python3.12"));
+        assert!(!looks_like_version("1..2"));
+    }
+
+    #[test]
+    fn a_version_named_process_is_named_after_its_command() {
+        let versioned = "/Users/u/.local/share/claude/versions/2.1.316";
+        let exe = || Some(versioned.to_string());
+        // Started through the `claude` symlink: argv[0] says so, and the
+        // executable is not even looked up.
+        assert_eq!(
+            name_for_version("2.1.316", Some("/Users/u/.local/bin/claude"), || {
+                panic!("not needed")
+            }),
+            "claude"
+        );
+        // Started by the versioned path (a relaunch after an update).
+        assert_eq!(name_for_version("2.1.316", Some(versioned), exe), "claude");
+        assert_eq!(name_for_version("2.1.316", None, exe), "claude");
+        // That version's file was deleted by a later update.
+        assert_eq!(
+            name_for_version("2.1.316", Some(versioned), || None),
+            "claude"
+        );
+        assert_eq!(
+            name_for_version("2.1.316", None, || Some(format!("{versioned} (deleted)"))),
+            "claude"
+        );
+        // Nothing better known: the kernel's name stays.
+        assert_eq!(
+            name_for_version("1.2", Some("1.2"), || Some("/opt/x/1.2".into())),
+            "1.2"
+        );
+        assert_eq!(versioned_command("/opt/tool/versions/claude"), None);
+        assert_eq!(versioned_command("/versions/1.0"), None);
+    }
+
+    /// The case behind this, end to end: Claude's native-installer layout,
+    /// started through its symlink and by its versioned path.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_native_installer_claude_is_named_claude() {
+        let root = std::env::temp_dir().join(format!("okena-argv0-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let versions = root.join("claude").join("versions");
+        let bin = root.join("bin");
+        std::fs::create_dir_all(&versions).unwrap();
+        std::fs::create_dir_all(&bin).unwrap();
+        let release = versions.join("2.1.316");
+        std::fs::copy("/bin/sleep", &release).unwrap();
+        let link = bin.join("claude");
+        std::os::unix::fs::symlink(&release, &link).unwrap();
+
+        let name_of = |program: &std::path::Path| {
+            let mut child = std::process::Command::new(program)
+                .arg("30")
+                .spawn()
+                .unwrap();
+            let names = (
+                crate::macos_proc::process_name(child.id()),
+                process_name(child.id()),
+            );
+            child.kill().unwrap();
+            child.wait().unwrap();
+            names
+        };
+        let through_link = name_of(&link);
+        let direct = name_of(&release);
+        // Any other process keeps libproc's name.
+        let mut sleep = std::process::Command::new("/bin/sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let plain = process_name(sleep.id());
+        sleep.kill().unwrap();
+        sleep.wait().unwrap();
+        std::fs::remove_dir_all(&root).unwrap();
+
+        assert_eq!(through_link.0.as_deref(), Some("2.1.316"));
+        assert_eq!(through_link.1.as_deref(), Some("claude"));
+        assert_eq!(direct.1.as_deref(), Some("claude"));
+        assert_eq!(plain.as_deref(), Some("sleep"));
     }
 }
