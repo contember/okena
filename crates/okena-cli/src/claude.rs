@@ -180,7 +180,9 @@ pub fn cli_start(
         )?;
         let session: ApiClaudeSession =
             serde_json::from_str(&body).map_err(|e| format!("Invalid session: {e}"))?;
-        match launch(&session).map_err(|e| format!("{terminal_id}: {e}"))? {
+        let launched = launch(&session).map_err(|e| format!("{terminal_id}: {e}"))?;
+        let claude_args_applied = (!claude_args.is_empty()).then_some(launched == Launch::Type);
+        match launched {
             Launch::Type => {
                 let run = serde_json::json!({
                     "action": "run_command",
@@ -191,13 +193,9 @@ pub fn cli_start(
             }
             // Usually the claude a previous `start` typed with these same
             // arguments, left on the trust dialog ("rerun with --trust"). Its
-            // arguments are fixed by now, so say that rather than refuse.
-            Launch::Resume if !claude_args.is_empty() => {
-                eprintln!(
-                    "{terminal_id}: resuming the claude already waiting on a start-up dialog; \
-                     it keeps the arguments it was started with, the ones after `--` are not applied"
-                );
-            }
+            // arguments are fixed by now: resume it, and report that the `--`
+            // ones were not applied (`claude_args not-applied`), on stdout and
+            // in --json, so a caller cannot miss it.
             Launch::Resume => {}
         }
         let session = wait_until_connected(
@@ -206,13 +204,21 @@ pub fn cli_start(
             wait_for_channel,
             trust,
             Duration::from_secs(timeout_secs),
-        )?;
+        )
+        .map_err(|e| {
+            if claude_args_applied == Some(true) && e.contains("did not connect") {
+                format!("{e}\n{UNCONNECTED_ARGS_HINT}")
+            } else {
+                e
+            }
+        })?;
 
         let mut started = StartResult {
             terminal_id: terminal_id.clone(),
             session_id: session.session_id,
             delivery: None,
             state: None,
+            claude_args_applied,
         };
         if let Some(prompt) = prompt {
             let before = fetch_page(&token, &terminal_id, None).ok();
@@ -390,30 +396,11 @@ fn claude_command(args: &[String]) -> String {
         .join(" ")
 }
 
-/// Flags that make Okena's preload leave `claude`'s argv alone, so neither
-/// the hooks nor the channel ever attach and `start` could only time out.
-/// Mirrors `GUARDED_FLAGS` / `GUARDED_SHORT_FLAGS` in
-/// `integrations/claude-code/okena-remote/preload.js`; keep them in step.
-const PRELOAD_GUARDED_FLAGS: &[&str] = &[
-    "-p",
-    "--print",
-    "-v",
-    "--version",
-    "-h",
-    "--help",
-    "--bg",
-    "--background",
-    "--desktop",
-    "--cloud",
-    "--environment",
-    "--tmux",
-    "--settings",
-];
-
-/// Refuse arguments `start` cannot pass on: flags that keep Okena from
-/// connecting (see [`PRELOAD_GUARDED_FLAGS`]), and control characters, which
-/// the pane's line editor would act on (a newline submits the half-typed
-/// line, a tab completes) before the shell ever parses the quotes.
+/// Refuse arguments `start` cannot type faithfully: control characters, which
+/// the pane's line editor would act on (a newline submits the half-typed line,
+/// a tab completes) before the shell reads the quotes; and on Windows any
+/// argument that needs quoting, since the POSIX quoting `claude_command` uses
+/// means something else to cmd and PowerShell.
 fn check_claude_args(args: &[String]) -> Result<(), String> {
     for arg in args {
         if arg.chars().any(char::is_control) {
@@ -422,21 +409,24 @@ fn check_claude_args(args: &[String]) -> Result<(), String> {
                  `claude start` types the command into the terminal, so it cannot pass one"
             ));
         }
-        let name = arg.split('=').next().unwrap_or(arg);
-        let guarded = PRELOAD_GUARDED_FLAGS.contains(&name)
-            || (arg.len() > 2
-                && arg.starts_with('-')
-                && !arg.starts_with("--")
-                && arg[1..].chars().any(|c| matches!(c, 'p' | 'v' | 'h')));
-        if guarded {
+        if cfg!(windows) && okena_core::shell::shell_quote(arg) != *arg {
             return Err(format!(
-                "claude argument `{arg}` keeps Okena from connecting to the session \
-                 (no hooks, no channel); run that claude with `okena run` instead"
+                "claude argument {arg:?} would need quoting, which `claude start` does only \
+                 for POSIX shells; pass it without spaces or special characters"
             ));
         }
     }
     Ok(())
 }
+
+/// What `start` adds to a connection timeout when it typed `--` arguments:
+/// some make Okena's preload leave `claude` alone (see `GUARDED_FLAGS` and
+/// `SUBCOMMANDS` in `integrations/claude-code/okena-remote/preload.js`), so it
+/// runs but never connects. Deciding that here would copy the preload's rules
+/// into a second language; the timeout names the likely cause instead.
+const UNCONNECTED_ARGS_HINT: &str = "claude may be running without Okena: arguments such as \
+     --settings, -p/--print, --tmux, --bg or a subcommand (mcp, update, ...) make Okena leave \
+     that claude unconnected";
 
 /// What one poll of the starting session asks for.
 #[derive(Debug, PartialEq)]
@@ -742,6 +732,10 @@ struct StartResult {
     session_id: Option<String>,
     delivery: Option<ApiClaudePromptDelivery>,
     state: Option<TurnState>,
+    /// Whether the `--` arguments reached `claude`: `Some(false)` when start
+    /// resumed a claude already waiting on a start-up dialog, `None` without
+    /// `--` arguments.
+    claude_args_applied: Option<bool>,
 }
 
 impl StartResult {
@@ -754,6 +748,9 @@ impl StartResult {
         if let Some(state) = self.state {
             lines.push(format!("state\t{}", state.label()));
         }
+        if let Some(applied) = self.claude_args_applied {
+            lines.push(format!("claude_args\t{}", applied_label(applied)));
+        }
         lines
     }
 
@@ -763,11 +760,20 @@ impl StartResult {
             "session_id": self.session_id,
             "delivery": self.delivery.map(delivery_label),
         });
-        if let (Some(state), Some(object)) = (self.state, value.as_object_mut()) {
-            object.insert("state".into(), state.label().into());
+        if let Some(object) = value.as_object_mut() {
+            if let Some(state) = self.state {
+                object.insert("state".into(), state.label().into());
+            }
+            if let Some(applied) = self.claude_args_applied {
+                object.insert("claude_args".into(), applied_label(applied).into());
+            }
         }
         value
     }
+}
+
+fn applied_label(applied: bool) -> &'static str {
+    if applied { "applied" } else { "not-applied" }
 }
 
 fn startup_dialog_label(dialog: Option<ApiClaudeStartupDialog>) -> &'static str {
@@ -1135,31 +1141,15 @@ mod tests {
     }
 
     #[test]
-    fn claude_args_that_cannot_reach_a_connected_session_are_refused() {
+    fn claude_args_with_control_characters_are_refused() {
         let check = |list: &[&str]| {
             check_claude_args(&list.iter().map(|s| s.to_string()).collect::<Vec<_>>())
         };
         assert!(check(&[]).is_ok());
         assert!(check(&["--dangerously-skip-permissions", "--model", "opus"]).is_ok());
-        assert!(check(&["--resume", "0b9c1f2e-4a6d-4e1b-9c3f-2d5e8a7b6c41", "-c"]).is_ok());
-        assert!(check(&["--append-system-prompt", "be brief; don't $ask *"]).is_ok());
-        // The preload leaves argv alone for these: no hooks, no channel.
-        for guarded in [
-            "--settings",
-            "--settings=./mine.json",
-            "-p",
-            "--print",
-            "--tmux",
-            "--bg",
-            "-h",
-            "-cp",
-        ] {
-            let error = check(&[guarded]).unwrap_err();
-            assert!(
-                error.contains("keeps Okena from connecting"),
-                "{guarded}: {error}"
-            );
-        }
+        // Whether the preload connects with these is the preload's call, not
+        // second-guessed here (a timeout then names the likely cause).
+        assert!(check(&["-dapi", "-nhelper", "--add-dir", "import", "--settings"]).is_ok());
         // Typed into the pane, a newline would submit a half-typed line.
         for text in ["line one\nline two", "a\tb", "\u{3}"] {
             let error = check(&["--append-system-prompt", text]).unwrap_err();
@@ -1274,6 +1264,7 @@ mod tests {
             session_id: Some("s1".into()),
             delivery: Some(ApiClaudePromptDelivery::Channel),
             state: Some(TurnState::Dialog),
+            claude_args_applied: None,
         };
         assert_eq!(
             started.lines(),
@@ -1299,6 +1290,15 @@ mod tests {
         assert_eq!(started.lines()[2], "delivery\t-");
         assert_eq!(started.to_json()["delivery"], serde_json::Value::Null);
         assert!(started.to_json().get("state").is_none());
+        assert!(started.to_json().get("claude_args").is_none());
+
+        // A resumed claude kept its own arguments; a caller reading stdout or
+        // --json must see that the `--` ones did not apply.
+        started.claude_args_applied = Some(false);
+        assert_eq!(started.lines().last().unwrap(), "claude_args\tnot-applied");
+        assert_eq!(started.to_json()["claude_args"], "not-applied");
+        started.claude_args_applied = Some(true);
+        assert_eq!(started.to_json()["claude_args"], "applied");
     }
 
     #[test]

@@ -53,10 +53,11 @@ For terminals running `claude` with Claude Remote on (Settings → Terminal).
   until that turn ends: `state idle|dialog`, or `disconnected|timeout` with exit 1.
   Everything after `--` goes to `claude` itself, e.g.
   `okena claude start p:1 --trust -- --dangerously-skip-permissions --model opus`
-  or `-- --resume <session-id>`. Refused: flags that keep Okena from connecting
-  (`--settings`, `-p`/`--print`, `--tmux`, `--bg`, ...) and control characters
-  (pass multi-line text via a file flag instead). Don't type into the start-up
-  dialogs yourself.
+  or `-- --resume <session-id>`. Quoted for sh/bash/zsh; control characters are
+  refused (pass multi-line text via a file flag). Flags that keep Okena out
+  (`--settings`, `-p`, `--tmux`, `--bg`, subcommands) end in a timeout that says
+  so. If a claude already waits on a start-up dialog, start resumes it and prints
+  `claude_args not-applied`. Don't type into the start-up dialogs yourself.
 - `okena claude ls` — `term<TAB>project<TAB>name<TAB>session<TAB>busy|idle|-<TAB>dialogs<TAB>queued<TAB>subagents`.
 - `okena claude show <term>` — status lines (`startup_dialog trust|channels|-`:
   a start-up dialog `claude` waits on) plus `dialog<TAB>id<TAB>tool<TAB>tool_input-json` per open dialog.
