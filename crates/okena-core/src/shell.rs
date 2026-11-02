@@ -157,23 +157,27 @@ impl ShellType {
     }
 }
 
-/// Shell-quote a string for embedding in a shell command.
-/// Returns the string as-is if it contains no special characters,
-/// otherwise wraps in single quotes with proper escaping.
-fn shell_quote(s: &str) -> String {
+/// Shell-quote a string for embedding in a POSIX shell command (sh, bash,
+/// zsh). Returns the string as-is if it contains no special characters,
+/// otherwise wraps in single quotes with proper escaping. Not for fish, which
+/// reads `\\` and `\'` inside single quotes as escapes.
+pub fn shell_quote(s: &str) -> String {
     if s.is_empty() {
         return "''".to_string();
     }
-    // If it only contains safe characters, no quoting needed
-    if s.bytes().all(|b| {
-        b.is_ascii_alphanumeric()
-            || b == b'/'
-            || b == b'.'
-            || b == b'-'
-            || b == b'_'
-            || b == b'='
-            || b == b':'
-    }) {
+    // If it only contains safe characters, no quoting needed. A leading `=`
+    // is not safe: zsh expands `=cmd` to the command's path.
+    if !s.starts_with('=')
+        && s.bytes().all(|b| {
+            b.is_ascii_alphanumeric()
+                || b == b'/'
+                || b == b'.'
+                || b == b'-'
+                || b == b'_'
+                || b == b'='
+                || b == b':'
+        })
+    {
         return s.to_string();
     }
     // Single-quote and escape embedded single quotes

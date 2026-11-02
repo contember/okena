@@ -164,6 +164,7 @@ pub fn cli_start(
     claude_args: &[String],
 ) -> i32 {
     exit_code((|| {
+        check_claude_args(claude_args)?;
         let prompt = prompt_file
             .map(|path| {
                 std::fs::read_to_string(path)
@@ -188,14 +189,14 @@ pub fn cli_start(
                 });
                 api_action(&token, &run.to_string())?;
             }
-            // The waiting `claude` was started with whatever arguments it got;
-            // resuming it silently without the requested ones (say
-            // `--dangerously-skip-permissions`) would run a different session.
+            // Usually the claude a previous `start` typed with these same
+            // arguments, left on the trust dialog ("rerun with --trust"). Its
+            // arguments are fixed by now, so say that rather than refuse.
             Launch::Resume if !claude_args.is_empty() => {
-                return Err(format!(
-                    "{terminal_id}: a claude waiting on a start-up dialog already runs here; \
-                     its arguments cannot change (rerun without `-- …` to resume it)"
-                ));
+                eprintln!(
+                    "{terminal_id}: resuming the claude already waiting on a start-up dialog; \
+                     it keeps the arguments it was started with, the ones after `--` are not applied"
+                );
             }
             Launch::Resume => {}
         }
@@ -380,25 +381,61 @@ fn launch(session: &ApiClaudeSession) -> Result<Launch, String> {
 }
 
 /// The command line `claude start` types: `claude` and its arguments, each
-/// quoted for a POSIX shell (sh, bash, zsh; fish reads the same quoting).
-/// Plain arguments stay bare, so `--model opus` also works in other shells.
+/// quoted for a POSIX shell (sh, bash, zsh). Plain arguments stay bare, so
+/// `--model opus` also works in other shells.
 fn claude_command(args: &[String]) -> String {
     std::iter::once("claude".to_string())
-        .chain(args.iter().map(|arg| shell_quote(arg)))
+        .chain(args.iter().map(|arg| okena_core::shell::shell_quote(arg)))
         .collect::<Vec<_>>()
         .join(" ")
 }
 
-fn shell_quote(arg: &str) -> String {
-    let plain = !arg.is_empty()
-        && arg
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || "-_./=:,@+%".contains(c));
-    if plain {
-        arg.to_string()
-    } else {
-        format!("'{}'", arg.replace('\'', "'\\''"))
+/// Flags that make Okena's preload leave `claude`'s argv alone, so neither
+/// the hooks nor the channel ever attach and `start` could only time out.
+/// Mirrors `GUARDED_FLAGS` / `GUARDED_SHORT_FLAGS` in
+/// `integrations/claude-code/okena-remote/preload.js`; keep them in step.
+const PRELOAD_GUARDED_FLAGS: &[&str] = &[
+    "-p",
+    "--print",
+    "-v",
+    "--version",
+    "-h",
+    "--help",
+    "--bg",
+    "--background",
+    "--desktop",
+    "--cloud",
+    "--environment",
+    "--tmux",
+    "--settings",
+];
+
+/// Refuse arguments `start` cannot pass on: flags that keep Okena from
+/// connecting (see [`PRELOAD_GUARDED_FLAGS`]), and control characters, which
+/// the pane's line editor would act on (a newline submits the half-typed
+/// line, a tab completes) before the shell ever parses the quotes.
+fn check_claude_args(args: &[String]) -> Result<(), String> {
+    for arg in args {
+        if arg.chars().any(char::is_control) {
+            return Err(format!(
+                "claude argument {arg:?} contains a control character (newline, tab, ...); \
+                 `claude start` types the command into the terminal, so it cannot pass one"
+            ));
+        }
+        let name = arg.split('=').next().unwrap_or(arg);
+        let guarded = PRELOAD_GUARDED_FLAGS.contains(&name)
+            || (arg.len() > 2
+                && arg.starts_with('-')
+                && !arg.starts_with("--")
+                && arg[1..].chars().any(|c| matches!(c, 'p' | 'v' | 'h')));
+        if guarded {
+            return Err(format!(
+                "claude argument `{arg}` keeps Okena from connecting to the session \
+                 (no hooks, no channel); run that claude with `okena run` instead"
+            ));
+        }
     }
+    Ok(())
 }
 
 /// What one poll of the starting session asks for.
@@ -1098,6 +1135,39 @@ mod tests {
     }
 
     #[test]
+    fn claude_args_that_cannot_reach_a_connected_session_are_refused() {
+        let check = |list: &[&str]| {
+            check_claude_args(&list.iter().map(|s| s.to_string()).collect::<Vec<_>>())
+        };
+        assert!(check(&[]).is_ok());
+        assert!(check(&["--dangerously-skip-permissions", "--model", "opus"]).is_ok());
+        assert!(check(&["--resume", "0b9c1f2e-4a6d-4e1b-9c3f-2d5e8a7b6c41", "-c"]).is_ok());
+        assert!(check(&["--append-system-prompt", "be brief; don't $ask *"]).is_ok());
+        // The preload leaves argv alone for these: no hooks, no channel.
+        for guarded in [
+            "--settings",
+            "--settings=./mine.json",
+            "-p",
+            "--print",
+            "--tmux",
+            "--bg",
+            "-h",
+            "-cp",
+        ] {
+            let error = check(&[guarded]).unwrap_err();
+            assert!(
+                error.contains("keeps Okena from connecting"),
+                "{guarded}: {error}"
+            );
+        }
+        // Typed into the pane, a newline would submit a half-typed line.
+        for text in ["line one\nline two", "a\tb", "\u{3}"] {
+            let error = check(&["--append-system-prompt", text]).unwrap_err();
+            assert!(error.contains("control character"), "{text:?}: {error}");
+        }
+    }
+
+    #[test]
     fn claude_command_quotes_only_what_the_shell_would_split_or_expand() {
         let args = |list: &[&str]| list.iter().map(|s| s.to_string()).collect::<Vec<_>>();
         assert_eq!(claude_command(&[]), "claude");
@@ -1122,6 +1192,9 @@ mod tests {
             "claude --add-dir ''"
         );
         assert_eq!(claude_command(&args(&["~/x"])), "claude '~/x'");
+        // zsh would expand a bare `=opus` to the path of an `opus` command.
+        assert_eq!(claude_command(&args(&["=opus"])), "claude '=opus'");
+        assert_eq!(claude_command(&args(&["a=b"])), "claude a=b");
     }
 
     #[test]
