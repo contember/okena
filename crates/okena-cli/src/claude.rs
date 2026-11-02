@@ -173,16 +173,19 @@ pub fn cli_start(
             .transpose()?;
         let (token, state) = connect()?;
         let (project_id, terminal_id) = resolve::resolve_terminal(&state, terminal)?;
-        let shell = pane_shell(&state, &project_id, &terminal_id);
+        let settings = remote_settings(&token)?;
+        let shell = pane_shell(&state, &project_id, &terminal_id, &settings.default_shell);
         check_claude_args(claude_args, &shell)?;
-        let wait_for_channel = remote_settings(&token)?;
+        let wait_for_channel = settings.claude_remote_channel;
         let body = api_get(
             &terminal_path(&terminal_id, "?probe_foreground=true"),
             &token,
         )?;
         let session: ApiClaudeSession =
             serde_json::from_str(&body).map_err(|e| format!("Invalid session: {e}"))?;
-        match launch(&session).map_err(|e| format!("{terminal_id}: {e}"))? {
+        let launched = launch(&session).map_err(|e| format!("{terminal_id}: {e}"))?;
+        let typed = launched == Launch::Type;
+        match launched {
             Launch::Type => {
                 let run = serde_json::json!({
                     "action": "run_command",
@@ -209,6 +212,7 @@ pub fn cli_start(
             &terminal_id,
             wait_for_channel,
             trust,
+            typed,
             !claude_args.is_empty(),
             Duration::from_secs(timeout_secs),
         )?;
@@ -341,12 +345,15 @@ fn fetch_page(
 #[derive(serde::Deserialize)]
 struct RemoteSettings {
     claude_remote: bool,
+    /// Whether panes connect `claude` through the channel (else hooks only).
     claude_remote_channel: bool,
+    /// The shell new panes run unless the terminal or project says otherwise.
+    #[serde(default)]
+    default_shell: ShellType,
 }
 
-/// Whether panes connect `claude` through the channel (else hooks only).
 /// Fails when Claude remote is off: `claude` would never connect.
-fn remote_settings(token: &str) -> Result<bool, String> {
+fn remote_settings(token: &str) -> Result<RemoteSettings, String> {
     let body = api_action(
         token,
         &serde_json::json!({"action": "get_settings"}).to_string(),
@@ -359,7 +366,7 @@ fn remote_settings(token: &str) -> Result<bool, String> {
                 .into(),
         );
     }
-    Ok(settings.claude_remote_channel)
+    Ok(settings)
 }
 
 /// Whether `claude start` types `claude` or resumes one waiting on a
@@ -418,19 +425,23 @@ fn check_claude_args(args: &[String], shell: &ShellType) -> Result<(), String> {
     Ok(())
 }
 
-/// The shell a terminal runs: its own setting, else the project's default,
-/// else the system default.
-fn pane_shell(state: &StateResponse, project_id: &str, terminal_id: &str) -> ShellType {
+/// The shell a terminal runs, resolved the way the daemon spawns it: its own
+/// setting, else the project's default, else the global `default_shell`.
+fn pane_shell(
+    state: &StateResponse,
+    project_id: &str,
+    terminal_id: &str,
+    global: &ShellType,
+) -> ShellType {
     let project = state.projects.iter().find(|p| p.id == project_id);
     let own = project
         .and_then(|p| p.layout.as_ref())
-        .and_then(|layout| terminal_shell(layout, terminal_id));
-    match own {
-        Some(shell) if shell != ShellType::Default => shell,
-        _ => project
-            .and_then(|p| p.default_shell.clone())
-            .unwrap_or_default(),
-    }
+        .and_then(|layout| terminal_shell(layout, terminal_id))
+        .unwrap_or_default();
+    let project_default = project
+        .and_then(|p| p.default_shell.as_ref())
+        .filter(|shell| **shell != ShellType::Default);
+    own.resolve_default(project_default, global)
 }
 
 fn terminal_shell(node: &ApiLayoutNode, terminal_id: &str) -> Option<ShellType> {
@@ -448,35 +459,47 @@ fn terminal_shell(node: &ApiLayoutNode, terminal_id: &str) -> Option<ShellType> 
 }
 
 /// Whether `shell` reads the POSIX single quotes `claude_command` writes.
-/// The system default is the user's `$SHELL` on Unix (unknown: assumed POSIX)
-/// and cmd on Windows; a custom shell is judged by its program name.
+/// The system default is `$SHELL` on Unix (unknown: assumed POSIX) and cmd on
+/// Windows; a custom shell is judged by its program name, case-insensitively,
+/// looking through an `env` wrapper.
 fn reads_posix_quoting(shell: &ShellType) -> bool {
     let program = match shell {
-        ShellType::Custom { path, .. } => path.clone(),
+        ShellType::Custom { path, args } => {
+            if program_name(path) == "env" {
+                match args
+                    .iter()
+                    .find(|arg| !arg.starts_with('-') && !arg.contains('='))
+                {
+                    Some(program) => program.clone(),
+                    None => return false,
+                }
+            } else {
+                path.clone()
+            }
+        }
+        #[cfg(windows)]
+        ShellType::Wsl { .. } => return true,
+        #[cfg(windows)]
+        ShellType::Cmd | ShellType::PowerShell { .. } => return false,
         ShellType::Default if cfg!(windows) => return false,
         ShellType::Default => match std::env::var("SHELL") {
             Ok(path) => path,
             Err(_) => return true,
         },
-        #[allow(unreachable_patterns)]
-        _ => return is_wsl(shell),
     };
-    let name = program.rsplit(['/', '\\']).next().unwrap_or(&program);
-    let name = name.strip_suffix(".exe").unwrap_or(name);
     matches!(
-        name,
+        program_name(&program).as_str(),
         "sh" | "bash" | "zsh" | "dash" | "ksh" | "mksh" | "ash"
     )
 }
 
-#[cfg(windows)]
-fn is_wsl(shell: &ShellType) -> bool {
-    matches!(shell, ShellType::Wsl { .. })
-}
-
-#[cfg(not(windows))]
-fn is_wsl(_shell: &ShellType) -> bool {
-    false
+/// `program`'s file name, lower-cased, without `.exe`.
+fn program_name(program: &str) -> String {
+    let name = program.rsplit(['/', '\\']).next().unwrap_or(program);
+    let name = name.to_ascii_lowercase();
+    name.strip_suffix(".exe")
+        .map(str::to_string)
+        .unwrap_or(name)
 }
 
 /// What `start` adds to a connection timeout after it typed `--` arguments.
@@ -511,6 +534,20 @@ fn start_step(session: &ApiClaudeSession, wait_for_channel: bool, trust: bool) -
     }
 }
 
+/// How many connection polls pass between checks that the typed `claude`
+/// still runs (at [`START_POLL_INTERVAL`], every 2 s).
+const EXIT_PROBE_EVERY: u32 = 8;
+
+/// Whether the pane is back at a shell prompt: nothing runs in its foreground.
+fn shell_is_back(token: &str, terminal_id: &str) -> Result<bool, String> {
+    let body = api_get(&terminal_path(terminal_id, "?probe_foreground=true"), token)?;
+    let session: ApiClaudeSession =
+        serde_json::from_str(&body).map_err(|e| format!("Invalid session: {e}"))?;
+    Ok(!session.hooks_attached
+        && session.startup_dialog.is_none()
+        && session.foreground_command.is_none())
+}
+
 /// Poll the session until `claude` connects, answering the start-up dialogs on
 /// the way: the channel warning always, the folder trust only with `trust`.
 fn wait_until_connected(
@@ -518,11 +555,13 @@ fn wait_until_connected(
     terminal_id: &str,
     wait_for_channel: bool,
     trust: bool,
+    typed: bool,
     typed_args: bool,
     timeout: Duration,
 ) -> Result<ApiClaudeSession, String> {
     let deadline = Instant::now() + timeout;
     let mut last_key: Option<Instant> = None;
+    let mut polls: u32 = 0;
     loop {
         if Instant::now() > deadline {
             let mut error = format!(
@@ -535,10 +574,28 @@ fn wait_until_connected(
             return Err(error);
         }
         std::thread::sleep(START_POLL_INTERVAL);
+        polls += 1;
         let session = fetch_session(token, terminal_id)?;
         let dialog = match start_step(&session, wait_for_channel, trust) {
             StartStep::Connected => return Ok(session),
-            StartStep::Wait => continue,
+            StartStep::Wait => {
+                // A claude that exits at once (an unknown option, `--help`)
+                // leaves the shell at its prompt; say so instead of waiting
+                // out the timeout. Probed every 2 s: the probe forks or scans.
+                if typed
+                    && polls.is_multiple_of(EXIT_PROBE_EVERY)
+                    && shell_is_back(token, terminal_id)?
+                {
+                    let mut error = format!(
+                        "claude exited before it connected; check the terminal (okena read {terminal_id})"
+                    );
+                    if typed_args {
+                        error.push_str("\nan argument after `--` may be wrong");
+                    }
+                    return Err(error);
+                }
+                continue;
+            }
             StartStep::NeedsTrust => {
                 // A rerun with `--trust` resumes this claude, which already
                 // has the `--` arguments; repeating them would be refused.
@@ -1240,7 +1297,7 @@ mod tests {
             "/bin/sh",
             "/bin/zsh",
             "/usr/local/bin/bash",
-            "C:\\msys64\\usr\\bin\\bash.exe",
+            "C:\\Git\\bin\\BASH.EXE",
         ] {
             assert!(reads_posix_quoting(&custom(posix)), "{posix}");
         }
@@ -1252,6 +1309,13 @@ mod tests {
         ] {
             assert!(!reads_posix_quoting(&custom(other)), "{other}");
         }
+        let env = |args: &[&str]| ShellType::Custom {
+            path: "/usr/bin/env".into(),
+            args: args.iter().map(|s| s.to_string()).collect(),
+        };
+        assert!(reads_posix_quoting(&env(&["zsh", "-l"])));
+        assert!(reads_posix_quoting(&env(&["-i", "TERM=x", "bash"])));
+        assert!(!reads_posix_quoting(&env(&["fish"])));
     }
 
     #[test]
@@ -1260,11 +1324,23 @@ mod tests {
             path: "/usr/bin/fish".into(),
             args: vec![],
         };
+        let zsh = ShellType::Custom {
+            path: "/bin/zsh".into(),
+            args: vec![],
+        };
         let mut state = state_with_terminal("t1", "shell");
-        assert_eq!(pane_shell(&state, "p1", "t1"), ShellType::Default);
-        state.projects[0].default_shell = Some(fish.clone());
-        assert_eq!(pane_shell(&state, "p1", "t1"), fish);
-        assert_eq!(pane_shell(&state, "missing", "t1"), ShellType::Default);
+        // Nothing set anywhere: the global default, as the daemon spawns it.
+        assert_eq!(
+            pane_shell(&state, "p1", "t1", &ShellType::Default),
+            ShellType::Default
+        );
+        assert_eq!(pane_shell(&state, "p1", "t1", &fish), fish);
+        // A project default wins over the global one; `Default` there does not.
+        state.projects[0].default_shell = Some(ShellType::Default);
+        assert_eq!(pane_shell(&state, "p1", "t1", &fish), fish);
+        state.projects[0].default_shell = Some(zsh.clone());
+        assert_eq!(pane_shell(&state, "p1", "t1", &fish), zsh);
+        assert_eq!(pane_shell(&state, "missing", "t1", &fish), fish);
     }
 
     #[test]
