@@ -98,12 +98,11 @@ pub fn process_name(pid: u32) -> Option<String> {
         .split(|&b| b == 0)
         .next()
         .and_then(|arg| std::str::from_utf8(arg).ok());
-    let exe = std::fs::read_link(format!("/proc/{pid}/exe")).ok();
-    Some(name_for_version(
-        comm,
-        arg0,
-        exe.as_deref().and_then(|path| path.to_str()),
-    ))
+    Some(name_for_version(comm, arg0, || {
+        std::fs::read_link(format!("/proc/{pid}/exe"))
+            .ok()
+            .and_then(|path| path.to_str().map(str::to_string))
+    }))
 }
 
 #[cfg(target_os = "macos")]
@@ -113,36 +112,48 @@ pub fn process_name(pid: u32) -> Option<String> {
         return Some(name);
     }
     let arg0 = crate::macos_proc::process_arg0(pid);
-    let exe = crate::macos_proc::process_path(pid);
-    Some(name_for_version(&name, arg0.as_deref(), exe.as_deref()))
+    Some(name_for_version(&name, arg0.as_deref(), || {
+        crate::macos_proc::process_path(pid)
+    }))
 }
 
 /// What to call a process the kernel named `version`: the command `arg0`
-/// names, else the command a versioned `exe` path belongs to, else `version`.
+/// names, else the command a versioned `arg0` or executable path belongs to
+/// (the executable is looked up only then), else `version`. A versioned argv[0]
+/// still names the command after an update deleted that version's file.
 #[cfg(any(target_os = "linux", target_os = "macos", test))]
-fn name_for_version(version: &str, arg0: Option<&str>, exe: Option<&str>) -> String {
+fn name_for_version(
+    version: &str,
+    arg0: Option<&str>,
+    exe: impl FnOnce() -> Option<String>,
+) -> String {
     arg0.and_then(command_name)
         .filter(|name| !looks_like_version(name))
-        .or_else(|| exe.and_then(versioned_command))
+        .or_else(|| arg0.and_then(versioned_command))
+        .or_else(|| exe().as_deref().and_then(versioned_command))
         .unwrap_or_else(|| version.to_string())
 }
 
 /// The command name `arg0` (a process's `argv[0]`) stands for: its file name,
-/// without the `-` a login shell gets. `None` for anything that is not a plain
-/// command name: a rewritten process title (spaces) or an environment entry.
+/// without the one `-` a login shell gets. `None` for anything that is not a
+/// plain command name: a rewritten process title (spaces), an environment
+/// entry, or an option (what an empty argv[0] leaves the parser with).
 #[cfg(any(target_os = "linux", target_os = "macos", test))]
 fn command_name(arg0: &str) -> Option<String> {
     if arg0.contains([' ', '=']) {
         return None;
     }
-    let name = arg0.rsplit('/').next()?.trim_start_matches('-');
-    (!name.is_empty()).then(|| name.to_string())
+    let name = arg0.rsplit('/').next()?;
+    let name = name.strip_prefix('-').unwrap_or(name);
+    (!name.is_empty() && !name.starts_with('-')).then(|| name.to_string())
 }
 
 /// `claude` for `…/claude/versions/2.1.316`: the directory a versioned
 /// executable's `versions` folder sits in.
 #[cfg(any(target_os = "linux", target_os = "macos", test))]
 fn versioned_command(exe: &str) -> Option<String> {
+    // Linux marks the executable of a process whose file is gone.
+    let exe = exe.strip_suffix(" (deleted)").unwrap_or(exe);
     let mut parts = exe.rsplit('/');
     let file = parts.next()?;
     if !looks_like_version(file) || parts.next()? != "versions" {
@@ -250,6 +261,8 @@ mod name_tests {
             None
         );
         assert_eq!(command_name("HOME=/Users/u"), None);
+        // An empty argv[0] leaves the parser on argv[1].
+        assert_eq!(command_name("--resume"), None);
     }
 
     #[test]
@@ -265,24 +278,30 @@ mod name_tests {
     #[test]
     fn a_version_named_process_is_named_after_its_command() {
         let versioned = "/Users/u/.local/share/claude/versions/2.1.316";
-        // Started through the `claude` symlink: argv[0] says so.
+        let exe = || Some(versioned.to_string());
+        // Started through the `claude` symlink: argv[0] says so, and the
+        // executable is not even looked up.
         assert_eq!(
-            name_for_version(
-                "2.1.316",
-                Some("/Users/u/.local/bin/claude"),
-                Some(versioned)
-            ),
+            name_for_version("2.1.316", Some("/Users/u/.local/bin/claude"), || {
+                panic!("not needed")
+            }),
             "claude"
         );
         // Started by the versioned path (a relaunch after an update).
+        assert_eq!(name_for_version("2.1.316", Some(versioned), exe), "claude");
+        assert_eq!(name_for_version("2.1.316", None, exe), "claude");
+        // That version's file was deleted by a later update.
         assert_eq!(
-            name_for_version("2.1.316", Some(versioned), Some(versioned)),
+            name_for_version("2.1.316", Some(versioned), || None),
             "claude"
         );
-        assert_eq!(name_for_version("2.1.316", None, Some(versioned)), "claude");
+        assert_eq!(
+            name_for_version("2.1.316", None, || Some(format!("{versioned} (deleted)"))),
+            "claude"
+        );
         // Nothing better known: the kernel's name stays.
         assert_eq!(
-            name_for_version("1.2", Some("1.2"), Some("/opt/x/1.2")),
+            name_for_version("1.2", Some("1.2"), || Some("/opt/x/1.2".into())),
             "1.2"
         );
         assert_eq!(versioned_command("/opt/tool/versions/claude"), None);
@@ -295,6 +314,7 @@ mod name_tests {
     #[test]
     fn a_native_installer_claude_is_named_claude() {
         let root = std::env::temp_dir().join(format!("okena-argv0-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
         let versions = root.join("claude").join("versions");
         let bin = root.join("bin");
         std::fs::create_dir_all(&versions).unwrap();

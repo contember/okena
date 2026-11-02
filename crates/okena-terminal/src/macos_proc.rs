@@ -62,8 +62,15 @@ pub fn process_path(pid: u32) -> Option<String> {
 /// `argv[0]` of `pid` (via `sysctl` `KERN_PROCARGS2`), `None` when the kernel
 /// refuses (another user's process) or the arguments are unreadable.
 pub fn process_arg0(pid: u32) -> Option<String> {
-    static ARG_MAX: std::sync::OnceLock<Option<usize>> = std::sync::OnceLock::new();
-    let arg_max = (*ARG_MAX.get_or_init(arg_max))?;
+    // Cached once read; a failed read is retried on the next call.
+    static ARG_MAX: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    let arg_max = match ARG_MAX.get() {
+        Some(&known) => known,
+        None => {
+            let read = arg_max()?;
+            *ARG_MAX.get_or_init(|| read)
+        }
+    };
     let mut buf = vec![0u8; arg_max];
     let mut size = buf.len();
     let mut mib = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid as libc::c_int];
