@@ -3,12 +3,13 @@
 `okena <subcommand>` controls a running daemon over the remote HTTP API
 (`crates/okena-remote-server/`). Entry point is `try_handle_cli()`, called early in `main.rs`
 *before* GUI startup. The gate (`cli_args`) never decides on a flag (a relaunch
-may hand an older binary a flag it does not know yet). It skips the GUI's own
-flags (`GUI_FLAGS`, with their values) and lets the first word decide: a path (a
-dropped folder, `okena .`, an existing name that is not a subcommand) launches
-the GUI, any other word goes to clap with every non-GUI argument, so an unknown
-subcommand fails with exit 2 instead of starting a GUI. `okena --profile work ls`
-runs `ls` in that profile. `main.rs` calls `reject_unparsable_args()` (which
+may hand an older binary a flag it does not know yet; a word right after an
+unknown flag counts as its value). Before the first word it drops the GUI's own
+flags (`GUI_FLAGS`, with their values); that word decides: a path (a dropped
+folder, `okena .`, an existing name that is not a subcommand) launches the GUI,
+any other word goes to clap with everything after it unchanged, so an unknown
+subcommand fails with exit 2 instead of starting a GUI and `okena run` text is
+never filtered. `okena --profile work ls` runs `ls` in that profile. `main.rs` calls `reject_unparsable_args()` (which
 leaves `claude-remote` alone, it must exit 0) before it resolves the profile, so
 a rejected command writes nothing to it.
 
