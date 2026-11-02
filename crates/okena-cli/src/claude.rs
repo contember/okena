@@ -5,12 +5,13 @@
 use crate::commands::{fetch_state, with_state_post};
 use crate::parser::ClaudeDecisionArg;
 use crate::{api_action, api_get, api_post_json, ensure_token, resolve};
-use okena_core::api::StateResponse;
+use okena_core::api::{ApiLayoutNode, StateResponse};
 use okena_core::claude_remote::{
     ApiClaudeDecision, ApiClaudeEntry, ApiClaudePromptDelivery, ApiClaudePromptOrigin,
     ApiClaudePromptRequest, ApiClaudePromptResponse, ApiClaudeSession, ApiClaudeStartupDialog,
     ApiClaudeSubagentList, ApiClaudeTranscriptPage,
 };
+use okena_core::shell::ShellType;
 use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -151,9 +152,9 @@ pub fn cli_prompt(terminal: &str, session: Option<&str>, text: &[String]) -> i32
     })())
 }
 
-/// `okena claude start <term> [--prompt-file f] [--trust] [--wait] [--timeout s] [--json]`:
-/// run `claude` in the pane, accept the start-up dialogs, wait until it
-/// connects and send the first prompt.
+/// `okena claude start <term> [--prompt-file f] [--trust] [--wait] [--timeout s] [--json]
+/// [-- <claude args>]`: run `claude` (with `claude_args`) in the pane, accept
+/// the start-up dialogs, wait until it connects and send the first prompt.
 pub fn cli_start(
     terminal: &str,
     prompt_file: Option<&Path>,
@@ -161,6 +162,7 @@ pub fn cli_start(
     wait: Option<Duration>,
     timeout_secs: u64,
     json_mode: bool,
+    claude_args: &[String],
 ) -> i32 {
     exit_code((|| {
         let prompt = prompt_file
@@ -170,27 +172,45 @@ pub fn cli_start(
             })
             .transpose()?;
         let (token, state) = connect()?;
-        let (_project_id, terminal_id) = resolve::resolve_terminal(&state, terminal)?;
-        let wait_for_channel = remote_settings(&token)?;
+        let (project_id, terminal_id) = resolve::resolve_terminal(&state, terminal)?;
+        let settings = remote_settings(&token)?;
+        let shell = pane_shell(&state, &project_id, &terminal_id, &settings.default_shell);
+        check_claude_args(claude_args, &shell)?;
+        let wait_for_channel = settings.claude_remote_channel;
         let body = api_get(
             &terminal_path(&terminal_id, "?probe_foreground=true"),
             &token,
         )?;
         let session: ApiClaudeSession =
             serde_json::from_str(&body).map_err(|e| format!("Invalid session: {e}"))?;
-        if launch(&session).map_err(|e| format!("{terminal_id}: {e}"))? == Launch::Type {
-            let run = serde_json::json!({
-                "action": "run_command",
-                "terminal_id": terminal_id,
-                "command": "claude",
-            });
-            api_action(&token, &run.to_string())?;
+        match launch(&session).map_err(|e| format!("{terminal_id}: {e}"))? {
+            Launch::Type => {
+                let run = serde_json::json!({
+                    "action": "run_command",
+                    "terminal_id": terminal_id,
+                    "command": claude_command(claude_args),
+                });
+                api_action(&token, &run.to_string())?;
+            }
+            // The waiting claude runs with whatever arguments it was started
+            // with, and nothing here can see them. Carrying on would hand the
+            // caller a session it may not have asked for (another `--resume`,
+            // another permission mode), so refuse and say how to go on.
+            Launch::Resume if !claude_args.is_empty() => {
+                return Err(format!(
+                    "{terminal_id}: a claude already waits on a start-up dialog here, with \
+                     arguments start cannot check; rerun without `-- …` to resume it as it \
+                     is, or exit it and rerun"
+                ));
+            }
+            Launch::Resume => {}
         }
         let session = wait_until_connected(
             &token,
             &terminal_id,
             wait_for_channel,
             trust,
+            !claude_args.is_empty(),
             Duration::from_secs(timeout_secs),
         )?;
 
@@ -322,12 +342,15 @@ fn fetch_page(
 #[derive(serde::Deserialize)]
 struct RemoteSettings {
     claude_remote: bool,
+    /// Whether panes connect `claude` through the channel (else hooks only).
     claude_remote_channel: bool,
+    /// The shell new panes run unless the terminal or project says otherwise.
+    #[serde(default)]
+    default_shell: ShellType,
 }
 
-/// Whether panes connect `claude` through the channel (else hooks only).
 /// Fails when Claude remote is off: `claude` would never connect.
-fn remote_settings(token: &str) -> Result<bool, String> {
+fn remote_settings(token: &str) -> Result<RemoteSettings, String> {
     let body = api_action(
         token,
         &serde_json::json!({"action": "get_settings"}).to_string(),
@@ -340,7 +363,7 @@ fn remote_settings(token: &str) -> Result<bool, String> {
                 .into(),
         );
     }
-    Ok(settings.claude_remote_channel)
+    Ok(settings)
 }
 
 /// Whether `claude start` types `claude` or resumes one waiting on a
@@ -365,6 +388,122 @@ fn launch(session: &ApiClaudeSession) -> Result<Launch, String> {
         None => Ok(Launch::Type),
     }
 }
+
+/// The command line `claude start` types: `claude` and its arguments, each
+/// quoted for a POSIX shell (sh, bash, zsh). Plain arguments stay bare, so
+/// `--model opus` also works in other shells.
+fn claude_command(args: &[String]) -> String {
+    std::iter::once("claude".to_string())
+        .chain(args.iter().map(|arg| okena_core::shell::shell_quote(arg)))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Refuse arguments `start` cannot type faithfully: control characters, which
+/// the pane's line editor would act on (a newline submits the half-typed line,
+/// a tab completes) before the shell reads the quotes; and, when the pane's
+/// shell does not read POSIX quoting, any argument that needs quoting.
+fn check_claude_args(args: &[String], shell: &ShellType) -> Result<(), String> {
+    for arg in args {
+        if arg.chars().any(char::is_control) {
+            return Err(format!(
+                "claude argument {arg:?} contains a control character (newline, tab, ...); \
+                 `claude start` types the command into the terminal, so it cannot pass one"
+            ));
+        }
+        if !reads_posix_quoting(shell) && okena_core::shell::shell_quote(arg) != *arg {
+            return Err(format!(
+                "claude argument {arg:?} would need quoting, which `claude start` does only \
+                 for sh, bash and zsh, not for this terminal's shell; pass it without spaces \
+                 or special characters"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// The shell a terminal runs, resolved the way the daemon spawns it: its own
+/// setting, else the project's default (a project set to `Default` means the
+/// system shell), else the global `default_shell`.
+fn pane_shell(
+    state: &StateResponse,
+    project_id: &str,
+    terminal_id: &str,
+    global: &ShellType,
+) -> ShellType {
+    let project = state.projects.iter().find(|p| p.id == project_id);
+    let own = project
+        .and_then(|p| p.layout.as_ref())
+        .and_then(|layout| terminal_shell(layout, terminal_id))
+        .unwrap_or_default();
+    own.resolve_default(project.and_then(|p| p.default_shell.as_ref()), global)
+}
+
+fn terminal_shell(node: &ApiLayoutNode, terminal_id: &str) -> Option<ShellType> {
+    match node {
+        ApiLayoutNode::Terminal {
+            terminal_id: Some(id),
+            shell_type,
+            ..
+        } if id == terminal_id => Some(shell_type.clone()),
+        ApiLayoutNode::Terminal { .. } => None,
+        ApiLayoutNode::Split { children, .. } | ApiLayoutNode::Tabs { children, .. } => children
+            .iter()
+            .find_map(|child| terminal_shell(child, terminal_id)),
+    }
+}
+
+/// Whether `shell` reads the POSIX single quotes `claude_command` writes.
+/// The system default is `$SHELL` on Unix (unknown: assumed POSIX) and cmd on
+/// Windows; a custom shell is judged by its program name, case-insensitively,
+/// looking through an `env` wrapper.
+fn reads_posix_quoting(shell: &ShellType) -> bool {
+    let program = match shell {
+        ShellType::Custom { path, args } => {
+            if program_name(path) == "env" {
+                match args
+                    .iter()
+                    .find(|arg| !arg.starts_with('-') && !arg.contains('='))
+                {
+                    Some(program) => program.clone(),
+                    None => return false,
+                }
+            } else {
+                path.clone()
+            }
+        }
+        #[cfg(windows)]
+        ShellType::Wsl { .. } => return true,
+        #[cfg(windows)]
+        ShellType::Cmd | ShellType::PowerShell { .. } => return false,
+        ShellType::Default if cfg!(windows) => return false,
+        ShellType::Default => match std::env::var("SHELL") {
+            Ok(path) => path,
+            Err(_) => return true,
+        },
+    };
+    matches!(
+        program_name(&program).as_str(),
+        "sh" | "bash" | "zsh" | "dash" | "ksh" | "mksh" | "ash"
+    )
+}
+
+/// `program`'s file name, lower-cased, without `.exe`.
+fn program_name(program: &str) -> String {
+    let name = program.rsplit(['/', '\\']).next().unwrap_or(program);
+    let name = name.to_ascii_lowercase();
+    name.strip_suffix(".exe")
+        .map(str::to_string)
+        .unwrap_or(name)
+}
+
+/// What `start` adds to a connection timeout after it typed `--` arguments.
+/// Some keep Okena's preload from connecting the claude (see `GUARDED_FLAGS`
+/// and `SUBCOMMANDS` in `integrations/claude-code/okena-remote/preload.js`);
+/// deciding that here would copy the preload's rules into a second language.
+const UNCONNECTED_ARGS_HINT: &str = "if claude runs in the terminal but never connected, an \
+     argument may keep Okena out (--settings, -p/--print, --tmux, --bg, a subcommand such as \
+     mcp or update); if it is still starting, raise --timeout";
 
 /// What one poll of the starting session asks for.
 #[derive(Debug, PartialEq)]
@@ -397,16 +536,21 @@ fn wait_until_connected(
     terminal_id: &str,
     wait_for_channel: bool,
     trust: bool,
+    typed_args: bool,
     timeout: Duration,
 ) -> Result<ApiClaudeSession, String> {
     let deadline = Instant::now() + timeout;
     let mut last_key: Option<Instant> = None;
     loop {
         if Instant::now() > deadline {
-            return Err(format!(
+            let mut error = format!(
                 "claude did not connect within {}s; check the terminal (okena read {terminal_id})",
                 timeout.as_secs()
-            ));
+            );
+            if typed_args {
+                error = format!("{error}\n{UNCONNECTED_ARGS_HINT}");
+            }
+            return Err(error);
         }
         std::thread::sleep(START_POLL_INTERVAL);
         let session = fetch_session(token, terminal_id)?;
@@ -414,8 +558,15 @@ fn wait_until_connected(
             StartStep::Connected => return Ok(session),
             StartStep::Wait => continue,
             StartStep::NeedsTrust => {
+                // A rerun with `--trust` resumes this claude, which already
+                // has the `--` arguments; repeating them would be refused.
+                let rerun = if typed_args {
+                    "rerun with --trust and without the `-- …` arguments (this claude already has them)"
+                } else {
+                    "pass --trust to accept it"
+                };
                 return Err(format!(
-                    "claude asks whether to trust this folder; pass --trust to accept it, or answer it in the terminal ({terminal_id})"
+                    "claude asks whether to trust this folder; {rerun}, or answer it in the terminal ({terminal_id})"
                 ));
             }
             StartStep::Answer(dialog) => dialog,
@@ -1060,6 +1211,128 @@ mod tests {
         // Claude that runs without Okena's hooks would take `claude` as a prompt.
         assert!(launch(&unconnected(Some("claude"))).is_err());
         assert!(launch(&session("t1")).is_err());
+    }
+
+    #[test]
+    fn claude_args_are_refused_when_the_pane_cannot_take_them() {
+        let bash = ShellType::Custom {
+            path: "/bin/bash".into(),
+            args: vec![],
+        };
+        let fish = ShellType::Custom {
+            path: "/opt/homebrew/bin/fish".into(),
+            args: vec!["-l".into()],
+        };
+        let check = |list: &[&str], shell: &ShellType| {
+            check_claude_args(
+                &list.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+                shell,
+            )
+        };
+        assert!(check(&[], &fish).is_ok());
+        // Whether the preload connects with these is its call, not second-guessed.
+        assert!(check(&["-dapi", "--add-dir", "import", "--settings"], &bash).is_ok());
+        // Typed into the pane, a newline would submit a half-typed line.
+        for text in ["line one\nline two", "a\tb", "\u{3}"] {
+            let error = check(&["--append-system-prompt", text], &bash).unwrap_err();
+            assert!(error.contains("control character"), "{text:?}: {error}");
+        }
+        // POSIX quoting only where the shell reads it; plain arguments go anywhere.
+        let quoted = ["--append-system-prompt", "be brief"];
+        assert!(check(&quoted, &bash).is_ok());
+        assert!(
+            check(&quoted, &fish)
+                .unwrap_err()
+                .contains("would need quoting")
+        );
+        assert!(check(&["--model", "opus"], &fish).is_ok());
+    }
+
+    #[test]
+    fn posix_quoting_follows_the_shell_program() {
+        let custom = |path: &str| ShellType::Custom {
+            path: path.into(),
+            args: vec![],
+        };
+        for posix in [
+            "/bin/sh",
+            "/bin/zsh",
+            "/usr/local/bin/bash",
+            "C:\\Git\\bin\\BASH.EXE",
+        ] {
+            assert!(reads_posix_quoting(&custom(posix)), "{posix}");
+        }
+        for other in [
+            "/usr/bin/fish",
+            "/usr/local/bin/nu",
+            "/usr/bin/pwsh",
+            "xonsh",
+        ] {
+            assert!(!reads_posix_quoting(&custom(other)), "{other}");
+        }
+        let env = |args: &[&str]| ShellType::Custom {
+            path: "/usr/bin/env".into(),
+            args: args.iter().map(|s| s.to_string()).collect(),
+        };
+        assert!(reads_posix_quoting(&env(&["zsh", "-l"])));
+        assert!(reads_posix_quoting(&env(&["-i", "TERM=x", "bash"])));
+        assert!(!reads_posix_quoting(&env(&["fish"])));
+    }
+
+    #[test]
+    fn the_pane_shell_falls_back_to_the_project_default() {
+        let fish = ShellType::Custom {
+            path: "/usr/bin/fish".into(),
+            args: vec![],
+        };
+        let zsh = ShellType::Custom {
+            path: "/bin/zsh".into(),
+            args: vec![],
+        };
+        let mut state = state_with_terminal("t1", "shell");
+        // Nothing set anywhere: the global default, as the daemon spawns it.
+        assert_eq!(
+            pane_shell(&state, "p1", "t1", &ShellType::Default),
+            ShellType::Default
+        );
+        assert_eq!(pane_shell(&state, "p1", "t1", &fish), fish);
+        // A project default wins over the global one, even `Default` (the
+        // system shell), as `ShellType::resolve_default` has it.
+        state.projects[0].default_shell = Some(ShellType::Default);
+        assert_eq!(pane_shell(&state, "p1", "t1", &fish), ShellType::Default);
+        state.projects[0].default_shell = Some(zsh.clone());
+        assert_eq!(pane_shell(&state, "p1", "t1", &fish), zsh);
+        assert_eq!(pane_shell(&state, "missing", "t1", &fish), fish);
+    }
+
+    #[test]
+    fn claude_command_quotes_only_what_the_shell_would_split_or_expand() {
+        let args = |list: &[&str]| list.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(claude_command(&[]), "claude");
+        assert_eq!(
+            claude_command(&args(&[
+                "--dangerously-skip-permissions",
+                "--model",
+                "opus"
+            ])),
+            "claude --dangerously-skip-permissions --model opus"
+        );
+        assert_eq!(
+            claude_command(&args(&["--resume", "0b9c1f2e-4a6d-4e1b-9c3f-2d5e8a7b6c41"])),
+            "claude --resume 0b9c1f2e-4a6d-4e1b-9c3f-2d5e8a7b6c41"
+        );
+        assert_eq!(
+            claude_command(&args(&["--append-system-prompt", "be brief; don't $ask *"])),
+            "claude --append-system-prompt 'be brief; don'\\''t $ask *'"
+        );
+        assert_eq!(
+            claude_command(&args(&["--add-dir", ""])),
+            "claude --add-dir ''"
+        );
+        assert_eq!(claude_command(&args(&["~/x"])), "claude '~/x'");
+        // zsh would expand a bare `=opus` to the path of an `opus` command.
+        assert_eq!(claude_command(&args(&["=opus"])), "claude '=opus'");
+        assert_eq!(claude_command(&args(&["a=b"])), "claude a=b");
     }
 
     #[test]

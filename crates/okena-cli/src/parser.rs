@@ -239,6 +239,10 @@ pub enum ClaudeCmd {
         /// Output JSON instead of tab-separated text
         #[arg(long)]
         json: bool,
+        /// Arguments for `claude` itself, after `--` (e.g. `-- --model opus
+        /// --resume <id>`); quoted for a POSIX shell in the pane
+        #[arg(last = true, value_name = "CLAUDE_ARGS")]
+        claude_args: Vec<String>,
     },
     /// Show a session's status and open dialogs
     Show {
@@ -996,6 +1000,29 @@ mod tests {
         );
         // `--wait` waits for the first prompt's turn, so it needs a prompt.
         assert!(Cli::try_parse_from(["okena", "claude", "start", "p:0", "--wait"]).is_err());
+        // Everything after `--` belongs to `claude`, flags included.
+        let cli = Cli::try_parse_from([
+            "okena", "claude", "start", "p:0", "--trust", "--", "--model", "opus", "--json",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Claude {
+                cmd:
+                    ClaudeCmd::Start {
+                        trust,
+                        json,
+                        claude_args,
+                        ..
+                    },
+            } => {
+                assert!(trust);
+                assert!(!json, "--json after `--` is claude's, not okena's");
+                assert_eq!(claude_args, ["--model", "opus", "--json"]);
+            }
+            _ => panic!("expected claude start"),
+        }
+        // Without `--` a stray argument is still an error, not a claude argument.
+        assert!(Cli::try_parse_from(["okena", "claude", "start", "p:0", "--model"]).is_err());
         assert!(Cli::try_parse_from(["okena", "claude-remote", "hook", "permission"]).is_ok());
         assert!(Cli::try_parse_from(["okena", "claude-remote", "hook", "event"]).is_ok());
         assert!(Cli::try_parse_from(["okena", "claude-remote", "channel"]).is_ok());
