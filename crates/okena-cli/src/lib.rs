@@ -30,35 +30,145 @@ pub struct CliConfig {
 /// Try to handle a CLI subcommand. Returns `Some(exit_code)` if a subcommand
 /// was matched (caller should exit), or `None` to continue with GUI startup.
 ///
-/// Gating: we only engage the CLI when `args[1]` is a known CLI subcommand (or
-/// an explicit help request). Anything else — empty args, `--profile`,
-/// `--list-profiles`, `--new-profile`, or any other GUI flag — returns `None`
-/// so GUI launch and profile handling in `main.rs` stay untouched.
+/// Gating: see [`cli_args`]. Unclaimed arguments (none, GUI flags such as
+/// `--profile`, `--headless`, macOS' `-psn_…`, or a path dropped onto the app)
+/// return `None` so GUI launch and profile handling in `main.rs` stay untouched.
 pub fn try_handle_cli() -> Option<i32> {
-    let args: Vec<String> = std::env::args().collect();
-    let first = args.get(1)?.as_str();
-
-    // Explicit top-level help / version request → let clap render it.
-    let is_help_or_version = matches!(first, "-h" | "--help" | "help" | "-V" | "--version");
-
-    // Only claim the args if the first token is one of our subcommands.
-    if !is_help_or_version && !parser::subcommand_names().contains(&first) {
-        return None;
-    }
-
+    let args = cli_args(&std::env::args().collect::<Vec<_>>())?;
     match Cli::try_parse_from(&args) {
         Ok(cli) => Some(dispatch(cli)),
-        Err(e) => {
-            // clap formats help/usage and version into the error; print it and
-            // use exit code 2 for genuine parse errors (0 for --help/--version).
-            let _ = e.print();
-            let code = match e.kind() {
-                clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion => 0,
-                _ => 2,
-            };
-            Some(code)
-        }
+        Err(e) => Some(print_parse_error(&e)),
     }
+}
+
+/// Exit code for arguments the CLI claims but clap rejects (an unknown or
+/// mistyped subcommand), after printing clap's message; `None` otherwise.
+/// `main` calls this before it touches the profile, so a command an older
+/// build does not know changes nothing on disk. `--help` and `--version` are
+/// clap "errors" too and come out here with exit 0.
+pub fn reject_unparsable_args() -> Option<i32> {
+    let args = cli_args(&std::env::args().collect::<Vec<_>>())?;
+    // `claude-remote` runs as Claude's hook and must exit 0 on any failure,
+    // never block Claude; main gives it its own read-only path.
+    if args.get(1).map(String::as_str) == Some(CLAUDE_REMOTE_SUBCOMMAND) {
+        return None;
+    }
+    Cli::try_parse_from(&args)
+        .err()
+        .map(|e| print_parse_error(&e))
+}
+
+fn print_parse_error(e: &clap::Error) -> i32 {
+    // clap formats help/usage and version into the error; print it and use
+    // exit code 2 for genuine parse errors (0 for --help/--version).
+    let _ = e.print();
+    match e.kind() {
+        clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion => 0,
+        _ => 2,
+    }
+}
+
+/// The GUI's own flags and whether each takes a value: everything `main.rs`,
+/// the daemon spawn and Okena's relaunches (restart, profile switch, revert)
+/// pass to the binary. Only the profile flags also come as `--flag=value`.
+const GUI_FLAGS: &[(&str, bool)] = &[
+    ("--profile", true),
+    ("--new-profile", true),
+    ("--list-profiles", false),
+    ("--headless", false),
+    (okena_remote_server::local::UI_OWNED_FLAG, false),
+    ("--listen", true),
+    ("--remote", false),
+    (okena_remote_server::local::AWAIT_PID_FLAG, true),
+    (
+        okena_remote_server::local::COMPLETE_CONFIG_RESTORE_FLAG,
+        false,
+    ),
+    (okena_remote_server::local::REVERT_TARGET_EXE_FLAG, true),
+];
+
+/// The arguments for clap when `args` (as `std::env::args`, the program
+/// first) are a CLI invocation, `None` when they launch the GUI.
+///
+/// Flags never decide on their own: a relaunch may pass an older binary a flag
+/// it does not know yet (an update revert), and that must still start the
+/// daemon or GUI. So a word right after an unknown flag counts as that flag's
+/// value, and only the first word after that decides. A path (a folder
+/// dropped onto the app, `okena .`, or a relative name that exists and is not
+/// a subcommand) launches the GUI as before; any other word is the CLI's, so
+/// an unknown or mistyped subcommand fails with clap's error and exit 2
+/// instead of starting a second instance.
+///
+/// Only what comes before that word is filtered: the GUI's flags (main reads
+/// the profile from them, so `okena --profile work ls` runs `ls` in profile
+/// `work`), empty arguments and `-psn_…`. From the subcommand on, clap gets
+/// every argument as it was, so the text `okena run`, `send` or `claude prompt`
+/// pass on is never changed.
+pub(crate) fn cli_args(args: &[String]) -> Option<Vec<String>> {
+    let mut clap_args = vec![args.first().cloned().unwrap_or_else(|| "okena".into())];
+    let mut after_unknown_flag = false;
+    let mut rest = args.iter().skip(1);
+    while let Some(arg) = rest.next() {
+        if arg.is_empty() || arg.starts_with("-psn_") {
+            after_unknown_flag = false;
+            continue;
+        }
+        if let Some(takes_value) = gui_flag(arg) {
+            if takes_value {
+                rest.next();
+            }
+            after_unknown_flag = false;
+            continue;
+        }
+        let help = matches!(arg.as_str(), "-h" | "--help" | "-V" | "--version");
+        if !help && arg.starts_with('-') {
+            clap_args.push(arg.clone());
+            after_unknown_flag = !arg.contains('=');
+            continue;
+        }
+        if !help && after_unknown_flag {
+            clap_args.push(arg.clone());
+            after_unknown_flag = false;
+            continue;
+        }
+        if !help && looks_like_path(arg) {
+            return None;
+        }
+        clap_args.push(arg.clone());
+        clap_args.extend(rest.cloned());
+        return Some(clap_args);
+    }
+    None
+}
+
+/// `Some(takes_a_separate_value)` when `arg` is one of [`GUI_FLAGS`]. Only
+/// `--profile` also comes as `--profile=<id>`, the one form main reads.
+fn gui_flag(arg: &str) -> Option<bool> {
+    if let Some((name, _)) = arg.split_once('=') {
+        return (name == "--profile").then_some(false);
+    }
+    GUI_FLAGS
+        .iter()
+        .find(|(name, _)| *name == arg)
+        .map(|&(_, takes_value)| takes_value)
+}
+
+/// A path rather than a subcommand: subcommand names never contain a path
+/// separator, and `.`, `..` or a Windows drive (`C:`) are paths on their own.
+/// A bare name counts when it exists and is not a subcommand (`okena src`).
+fn looks_like_path(arg: &str) -> bool {
+    arg.contains('/')
+        || arg.contains('\\')
+        || arg == "."
+        || arg == ".."
+        || (arg.len() == 2 && arg.ends_with(':') && arg.as_bytes()[0].is_ascii_alphabetic())
+        || (!is_subcommand(arg) && std::path::Path::new(arg).exists())
+}
+
+fn is_subcommand(name: &str) -> bool {
+    use clap::CommandFactory as _;
+    // `help` is generated by clap when the tree is built, not declared.
+    name == "help" || Cli::command().find_subcommand(name).is_some()
 }
 
 /// Whether a command actually honors the global `--window` flag. Used only to
@@ -514,5 +624,127 @@ fn api_action(token: &str, body: &str) -> Result<String, String> {
             serde_json::to_string(&value).map_err(|e| format!("Failed to serialize response: {e}"))
         }
         None => Ok(String::new()),
+    }
+}
+
+#[cfg(test)]
+mod gate_tests {
+    use super::{cli_args, is_subcommand};
+
+    fn claimed(args: &[&str]) -> Option<Vec<String>> {
+        let args: Vec<String> = std::iter::once("okena")
+            .chain(args.iter().copied())
+            .map(String::from)
+            .collect();
+        cli_args(&args)
+    }
+
+    #[test]
+    fn the_gui_keeps_no_arguments_its_flags_and_paths() {
+        for args in [
+            &[][..],
+            &["--profile", "work"],
+            &["--profile=work"],
+            &["--new-profile", "x"],
+            &["--list-profiles"],
+            &["--headless", "--ui-owned"],
+            &["--listen", "0.0.0.0", "--remote"],
+            &["--await-pid", "123"],
+            &[
+                "--complete-config-restore",
+                "--revert-target-exe",
+                "/opt/okena",
+            ],
+            &["-psn_0_1234567"],
+            &[""],
+            // A folder dropped onto the app, or `okena .` from a shell.
+            &["C:\\projects\\site"],
+            &["C:"],
+            &["/Users/u/projects/site"],
+            &["."],
+            &["--profile", "work", "~/projects/site"],
+            // Flags never decide: an older binary relaunched with a newer
+            // flag still starts, with or without a value.
+            &[
+                "--headless",
+                "--ui-owned",
+                "--added-later",
+                "--await-pid",
+                "7",
+            ],
+            &["--headless", "--ui-owned", "--handoff-port", "4242"],
+            &["--jsno"],
+            &["--jsno", "ls"],
+            &["--listen=0.0.0.0"],
+            &["--new-profile=work"],
+            // A relative name that exists and is not a subcommand.
+            &["src"],
+        ] {
+            assert_eq!(claimed(args), None, "{args:?}");
+        }
+    }
+
+    #[test]
+    fn everything_else_is_the_clis_after_the_gui_flags() {
+        let expect = |args: &[&str], clap: &[&str]| {
+            let clap: Vec<String> = clap.iter().map(|s| s.to_string()).collect();
+            assert_eq!(claimed(args), Some(clap), "{args:?}");
+        };
+        expect(&["ls"], &["okena", "ls"]);
+        expect(
+            &["claude", "ls", "--json"],
+            &["okena", "claude", "ls", "--json"],
+        );
+        expect(&["help"], &["okena", "help"]);
+        expect(&["-h"], &["okena", "-h"]);
+        // Profile flags select the profile (main reads them) and are not clap's.
+        expect(&["--profile", "work", "ls"], &["okena", "ls"]);
+        expect(&["--profile=work", "frobnicate"], &["okena", "frobnicate"]);
+        // Other flags go to clap with the subcommand: it knows `--window` and
+        // rejects a typo. A word right after one is its value.
+        expect(
+            &["--window", "main", "term", "focus", "x"],
+            &["okena", "--window", "main", "term", "focus", "x"],
+        );
+        expect(&["--jsno", "x", "ls"], &["okena", "--jsno", "x", "ls"]);
+        // Unknown subcommands are claimed, so clap can reject them.
+        expect(&["claud", "ls"], &["okena", "claud", "ls"]);
+        // From the subcommand on nothing is filtered: command text stays whole.
+        expect(
+            &["run", "t1", "ssh", "--remote", "host"],
+            &["okena", "run", "t1", "ssh", "--remote", "host"],
+        );
+        expect(
+            &["--profile", "w", "settings", "set", "font_family", ""],
+            &["okena", "settings", "set", "font_family", ""],
+        );
+        expect(
+            &["ls", "--profile", "work"],
+            &["okena", "ls", "--profile", "work"],
+        );
+        // A subcommand wins over a same-named folder in the working directory.
+        expect(&["state"], &["okena", "state"]);
+    }
+
+    #[test]
+    fn clap_rejects_what_the_gate_claims_but_does_not_know() {
+        use clap::Parser;
+        for args in [&["frobnicate"][..], &["--jsno", "x", "ls"]] {
+            let clap_args = claimed(args).unwrap();
+            let error = match crate::parser::Cli::try_parse_from(&clap_args) {
+                Ok(_) => panic!("{args:?} must not parse"),
+                Err(error) => error,
+            };
+            assert_eq!(error.exit_code(), 2, "{args:?}");
+        }
+        let window = claimed(&["--window", "main", "term", "focus", "x"]).unwrap();
+        assert!(crate::parser::Cli::try_parse_from(&window).is_ok());
+    }
+
+    #[test]
+    fn help_is_a_subcommand_even_next_to_a_help_folder() {
+        assert!(is_subcommand("help"));
+        assert!(is_subcommand("ls"));
+        assert!(!is_subcommand("src"));
     }
 }
