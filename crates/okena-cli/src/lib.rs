@@ -261,6 +261,7 @@ fn dispatch(cli: Cli) -> i32 {
                 timeout,
                 wait_timeout,
                 json,
+                claude_args,
             } => claude::cli_start(
                 &terminal,
                 prompt_file.as_deref(),
@@ -268,6 +269,7 @@ fn dispatch(cli: Cli) -> i32 {
                 wait.then(|| std::time::Duration::from_secs(wait_timeout)),
                 timeout,
                 json,
+                &claude_args,
             ),
             ClaudeCmd::Show { terminal, json } => claude::cli_show(&terminal, json),
             ClaudeCmd::Find { session, json } => claude::cli_find(&session, json),

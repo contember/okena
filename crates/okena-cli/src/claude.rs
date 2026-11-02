@@ -151,9 +151,9 @@ pub fn cli_prompt(terminal: &str, session: Option<&str>, text: &[String]) -> i32
     })())
 }
 
-/// `okena claude start <term> [--prompt-file f] [--trust] [--wait] [--timeout s] [--json]`:
-/// run `claude` in the pane, accept the start-up dialogs, wait until it
-/// connects and send the first prompt.
+/// `okena claude start <term> [--prompt-file f] [--trust] [--wait] [--timeout s] [--json]
+/// [-- <claude args>]`: run `claude` (with `claude_args`) in the pane, accept
+/// the start-up dialogs, wait until it connects and send the first prompt.
 pub fn cli_start(
     terminal: &str,
     prompt_file: Option<&Path>,
@@ -161,6 +161,7 @@ pub fn cli_start(
     wait: Option<Duration>,
     timeout_secs: u64,
     json_mode: bool,
+    claude_args: &[String],
 ) -> i32 {
     exit_code((|| {
         let prompt = prompt_file
@@ -178,13 +179,25 @@ pub fn cli_start(
         )?;
         let session: ApiClaudeSession =
             serde_json::from_str(&body).map_err(|e| format!("Invalid session: {e}"))?;
-        if launch(&session).map_err(|e| format!("{terminal_id}: {e}"))? == Launch::Type {
-            let run = serde_json::json!({
-                "action": "run_command",
-                "terminal_id": terminal_id,
-                "command": "claude",
-            });
-            api_action(&token, &run.to_string())?;
+        match launch(&session).map_err(|e| format!("{terminal_id}: {e}"))? {
+            Launch::Type => {
+                let run = serde_json::json!({
+                    "action": "run_command",
+                    "terminal_id": terminal_id,
+                    "command": claude_command(claude_args),
+                });
+                api_action(&token, &run.to_string())?;
+            }
+            // The waiting `claude` was started with whatever arguments it got;
+            // resuming it silently without the requested ones (say
+            // `--dangerously-skip-permissions`) would run a different session.
+            Launch::Resume if !claude_args.is_empty() => {
+                return Err(format!(
+                    "{terminal_id}: a claude waiting on a start-up dialog already runs here; \
+                     its arguments cannot change (rerun without `-- …` to resume it)"
+                ));
+            }
+            Launch::Resume => {}
         }
         let session = wait_until_connected(
             &token,
@@ -363,6 +376,28 @@ fn launch(session: &ApiClaudeSession) -> Result<Launch, String> {
             "`{command}` runs in the foreground; claude start needs a shell prompt"
         )),
         None => Ok(Launch::Type),
+    }
+}
+
+/// The command line `claude start` types: `claude` and its arguments, each
+/// quoted for a POSIX shell (sh, bash, zsh; fish reads the same quoting).
+/// Plain arguments stay bare, so `--model opus` also works in other shells.
+fn claude_command(args: &[String]) -> String {
+    std::iter::once("claude".to_string())
+        .chain(args.iter().map(|arg| shell_quote(arg)))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn shell_quote(arg: &str) -> String {
+    let plain = !arg.is_empty()
+        && arg
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "-_./=:,@+%".contains(c));
+    if plain {
+        arg.to_string()
+    } else {
+        format!("'{}'", arg.replace('\'', "'\\''"))
     }
 }
 
@@ -1060,6 +1095,33 @@ mod tests {
         // Claude that runs without Okena's hooks would take `claude` as a prompt.
         assert!(launch(&unconnected(Some("claude"))).is_err());
         assert!(launch(&session("t1")).is_err());
+    }
+
+    #[test]
+    fn claude_command_quotes_only_what_the_shell_would_split_or_expand() {
+        let args = |list: &[&str]| list.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(claude_command(&[]), "claude");
+        assert_eq!(
+            claude_command(&args(&[
+                "--dangerously-skip-permissions",
+                "--model",
+                "opus"
+            ])),
+            "claude --dangerously-skip-permissions --model opus"
+        );
+        assert_eq!(
+            claude_command(&args(&["--resume", "0b9c1f2e-4a6d-4e1b-9c3f-2d5e8a7b6c41"])),
+            "claude --resume 0b9c1f2e-4a6d-4e1b-9c3f-2d5e8a7b6c41"
+        );
+        assert_eq!(
+            claude_command(&args(&["--append-system-prompt", "be brief; don't $ask *"])),
+            "claude --append-system-prompt 'be brief; don'\\''t $ask *'"
+        );
+        assert_eq!(
+            claude_command(&args(&["--add-dir", ""])),
+            "claude --add-dir ''"
+        );
+        assert_eq!(claude_command(&args(&["~/x"])), "claude '~/x'");
     }
 
     #[test]

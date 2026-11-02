@@ -69,8 +69,11 @@ that exited does not count (a dialog on screen costs a foreground probe).
 
 `okena claude start <term>` needs a shell prompt in the pane: it refuses a pane
 whose foreground is another program (or a `claude` started without Okena's
-hooks) and one with a connected `claude`. It types `claude`, or resumes one
-already waiting on a start-up dialog, and polls the session. It accepts the
+hooks) and one with a connected `claude`. It types `claude`, followed by
+whatever comes after `--` (`okena claude start p:1 -- --model opus --resume
+<id>`; each argument quoted for a POSIX shell, plain ones left bare), or resumes
+one already waiting on a start-up dialog, and polls the session. Resuming
+refuses `--` arguments: that `claude` already runs with its own. It accepts the
 channels warning; the trust dialog only with `--trust`, else it exits 1 and
 leaves the dialog open, and a second run with `--trust` resumes from it. A key
 is sent only when a fresh read of the screen still shows the dialog the session
