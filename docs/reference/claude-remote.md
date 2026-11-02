@@ -69,9 +69,12 @@ that exited does not count (a dialog on screen costs a foreground probe).
 
 `okena claude start <term>` needs a shell prompt in the pane: it refuses a pane
 whose foreground is another program (or a `claude` started without Okena's
-hooks) and one with a connected `claude`. Another program gets about 3 s to
-let go first (re-probed every 250 ms): a fresh pane's prompt often runs a
-short `git` for its branch indicator. It types `claude`, followed by
+hooks) and one with a connected `claude`. Another program gets 12 more probes
+250 ms apart to let go first (about 3 s plus the probes themselves, not counted
+in `--timeout`): a fresh pane's prompt often runs a short `git` for its branch
+indicator. A prompt seen after waiting is confirmed by one more probe, since a
+chain of commands shows no foreground program for a moment between them. It
+types `claude`, followed by
 whatever comes after `--` (`okena claude start p:1 -- --model opus --resume
 <id>`; each argument quoted for a POSIX shell, plain ones left bare), or resumes
 one already waiting on a start-up dialog, and polls the session. With `--`

@@ -529,20 +529,37 @@ fn foreground_may_settle(session: &ApiClaudeSession) -> bool {
 
 /// [`launch`] on the session `probe` reads, re-probed up to `attempts` times
 /// (calling `pause` between them) while only a transient foreground program
-/// stands in the way. The outer `Result` carries probe errors, the inner one
-/// the final refusal.
+/// stands in the way. The outer `Result` carries the first probe's error, the
+/// inner one the final refusal; a later probe that fails ends the waiting and
+/// the last good session decides.
+///
+/// A shell running a chain (`make && ./deploy`, a loop) shows no foreground
+/// program for a moment between its commands. So after waiting, a prompt is
+/// trusted only when one more probe still shows it; typing `claude` into a
+/// running script would hand it to the script's next command.
 fn launch_once_settled(
     mut probe: impl FnMut() -> Result<ApiClaudeSession, String>,
     attempts: u32,
     mut pause: impl FnMut(),
 ) -> Result<Result<Launch, String>, String> {
     let mut session = probe()?;
+    let mut waited = false;
     for _ in 0..attempts {
         if !foreground_may_settle(&session) {
             break;
         }
+        waited = true;
         pause();
-        session = probe()?;
+        match probe() {
+            Ok(next) => session = next,
+            Err(_) => break,
+        }
+    }
+    if waited && launch(&session) == Ok(Launch::Type) {
+        pause();
+        if let Ok(next) = probe() {
+            session = next;
+        }
     }
     Ok(launch(&session))
 }
@@ -1409,7 +1426,24 @@ mod tests {
             12,
         );
         assert_eq!(result, Ok(Launch::Type));
-        assert_eq!((probes, pauses), (3, 2));
+        // Two re-probes while `git` runs, one more to confirm the prompt.
+        assert_eq!((probes, pauses), (4, 3));
+
+        // Between two commands of a chain the prompt only seems free.
+        let (result, probes, _) = run(
+            vec![
+                unconnected(Some("make")),
+                unconnected(None),
+                unconnected(Some("deploy.sh")),
+            ],
+            12,
+        );
+        assert!(
+            result
+                .unwrap_err()
+                .contains("`deploy.sh` runs in the foreground")
+        );
+        assert_eq!(probes, 3);
 
         // A program that stays is refused once the attempts run out.
         let (result, probes, pauses) = run(vec![unconnected(Some("vim"))], 12);
