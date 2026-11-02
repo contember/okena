@@ -527,41 +527,47 @@ fn foreground_may_settle(session: &ApiClaudeSession) -> bool {
             .is_some_and(|command| command != "claude")
 }
 
-/// [`launch`] on the session `probe` reads, re-probed up to `attempts` times
-/// (calling `pause` between them) while only a transient foreground program
-/// stands in the way. The outer `Result` carries the first probe's error, the
-/// inner one the final refusal; a later probe that fails ends the waiting and
-/// the last good session decides.
+/// [`launch`] on the session `probe` reads, re-probed (calling `pause`
+/// between probes) while only a transient foreground program stands in the
+/// way, up to `attempts` times. The outer `Result` carries a failed probe's
+/// own error, the inner one the final refusal.
 ///
 /// A shell running a chain (`make && ./deploy`, a loop) shows no foreground
-/// program for a moment between its commands. So after waiting, a prompt is
-/// trusted only when one more probe still shows it; typing `claude` into a
-/// running script would hand it to the script's next command.
+/// program for a moment between its commands, and a prompt may run `git` again
+/// on a redraw. So a prompt counts only when two probes in a row show it free;
+/// typing `claude` into a running script would hand it to the script's next
+/// command.
 fn launch_once_settled(
     mut probe: impl FnMut() -> Result<ApiClaudeSession, String>,
     attempts: u32,
     mut pause: impl FnMut(),
 ) -> Result<Result<Launch, String>, String> {
     let mut session = probe()?;
-    let mut waited = false;
-    for _ in 0..attempts {
-        if !foreground_may_settle(&session) {
+    let mut prompts_in_a_row = 0;
+    let mut attempts_left = attempts;
+    loop {
+        if launch(&session) == Ok(Launch::Type) {
+            prompts_in_a_row += 1;
+            if prompts_in_a_row == 2 {
+                break;
+            }
+        } else if attempts_left > 0 && foreground_may_settle(&session) {
+            prompts_in_a_row = 0;
+            attempts_left -= 1;
+        } else {
             break;
         }
-        waited = true;
         pause();
-        match probe() {
-            Ok(next) => session = next,
-            Err(_) => break,
-        }
+        session = probe()?;
     }
-    if waited && launch(&session) == Ok(Launch::Type) {
-        pause();
-        if let Ok(next) = probe() {
-            session = next;
+    let waited = attempts_left < attempts;
+    Ok(launch(&session).map_err(|refusal| {
+        if waited {
+            format!("{refusal} (after waiting about 3 s for it to finish)")
+        } else {
+            refusal
         }
-    }
-    Ok(launch(&session))
+    }))
 }
 
 /// What one poll of the starting session asks for.
@@ -1396,7 +1402,7 @@ mod tests {
 
     #[test]
     fn launch_waits_out_a_transient_foreground_program() {
-        let run = |sessions: Vec<ApiClaudeSession>, attempts: u32| {
+        let run = |sessions: Vec<Result<ApiClaudeSession, String>>, attempts: u32| {
             let mut sessions = sessions.into_iter();
             let mut last = None;
             let mut probes = 0;
@@ -1407,63 +1413,67 @@ mod tests {
                     if let Some(next) = sessions.next() {
                         last = Some(next);
                     }
-                    Ok(last.clone().unwrap())
+                    last.clone().unwrap()
                 },
                 attempts,
                 || pauses += 1,
-            )
-            .unwrap();
+            );
             (result, probes, pauses)
         };
+        let ok = |foreground: Option<&str>| Ok(unconnected(foreground));
 
-        // The prompt's `git` lets go, the shell prompt follows.
-        let (result, probes, pauses) = run(
-            vec![
-                unconnected(Some("git")),
-                unconnected(Some("git")),
-                unconnected(None),
-            ],
+        // A prompt counts after two probes in a row show it free.
+        let (result, probes, pauses) = run(vec![ok(None)], 12);
+        assert_eq!(result, Ok(Ok(Launch::Type)));
+        assert_eq!((probes, pauses), (2, 1));
+
+        // The prompt's `git` lets go, then the prompt is confirmed.
+        let (result, probes, _) = run(vec![ok(Some("git")), ok(Some("git")), ok(None)], 12);
+        assert_eq!(result, Ok(Ok(Launch::Type)));
+        assert_eq!(probes, 4);
+
+        // `git` again on a redraw is waited out too.
+        let (result, _, _) = run(
+            vec![ok(Some("git")), ok(None), ok(Some("git")), ok(None)],
             12,
         );
-        assert_eq!(result, Ok(Launch::Type));
-        // Two re-probes while `git` runs, one more to confirm the prompt.
-        assert_eq!((probes, pauses), (4, 3));
+        assert_eq!(result, Ok(Ok(Launch::Type)));
 
-        // Between two commands of a chain the prompt only seems free.
-        let (result, probes, _) = run(
-            vec![
-                unconnected(Some("make")),
-                unconnected(None),
-                unconnected(Some("deploy.sh")),
-            ],
-            12,
-        );
+        // Between two commands of a chain the prompt only seems free, even
+        // on the very first probe.
+        let (result, _, _) = run(vec![ok(None), ok(Some("deploy.sh"))], 12);
+        let refusal = result.unwrap().unwrap_err();
         assert!(
-            result
-                .unwrap_err()
-                .contains("`deploy.sh` runs in the foreground")
+            refusal.contains("`deploy.sh` runs in the foreground"),
+            "{refusal}"
         );
-        assert_eq!(probes, 3);
+        assert!(refusal.contains("after waiting"), "{refusal}");
 
         // A program that stays is refused once the attempts run out.
-        let (result, probes, pauses) = run(vec![unconnected(Some("vim"))], 12);
-        assert!(result.unwrap_err().contains("`vim` runs in the foreground"));
+        let (result, probes, pauses) = run(vec![ok(Some("vim"))], 12);
+        assert!(
+            result
+                .unwrap()
+                .unwrap_err()
+                .contains("`vim` runs in the foreground")
+        );
         assert_eq!((probes, pauses), (13, 12));
 
-        // Nothing to wait out: a connected claude, an unhooked one, a shell prompt.
-        for session in [
-            session("t1"),
-            unconnected(Some("claude")),
-            unconnected(None),
-        ] {
-            let (_, probes, pauses) = run(vec![session], 12);
+        // Nothing to wait out: a connected claude, an unhooked one.
+        for session in [session("t1"), unconnected(Some("claude"))] {
+            let (result, probes, pauses) = run(vec![Ok(session)], 12);
+            assert!(result.unwrap().is_err());
             assert_eq!((probes, pauses), (1, 0));
         }
 
         // A dialog of a starting claude is resumed without waiting.
         let mut waiting = unconnected(Some("claude"));
         waiting.startup_dialog = Some(ApiClaudeStartupDialog::Channels);
-        assert_eq!(run(vec![waiting], 12), (Ok(Launch::Resume), 1, 0));
+        assert_eq!(run(vec![Ok(waiting)], 12), (Ok(Ok(Launch::Resume)), 1, 0));
+
+        // A probe that fails says why, instead of an old refusal.
+        let (result, _, _) = run(vec![ok(Some("git")), Err("terminal not found".into())], 12);
+        assert_eq!(result, Err("terminal not found".into()));
     }
 
     #[test]

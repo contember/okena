@@ -72,7 +72,7 @@ whose foreground is another program (or a `claude` started without Okena's
 hooks) and one with a connected `claude`. Another program gets 12 more probes
 250 ms apart to let go first (about 3 s plus the probes themselves, not counted
 in `--timeout`): a fresh pane's prompt often runs a short `git` for its branch
-indicator. A prompt seen after waiting is confirmed by one more probe, since a
+indicator. A prompt counts only when two probes in a row show it free, since a
 chain of commands shows no foreground program for a moment between them. It
 types `claude`, followed by
 whatever comes after `--` (`okena claude start p:1 -- --model opus --resume
