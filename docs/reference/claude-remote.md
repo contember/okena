@@ -72,15 +72,17 @@ whose foreground is another program (or a `claude` started without Okena's
 hooks) and one with a connected `claude`. It types `claude`, followed by
 whatever comes after `--` (`okena claude start p:1 -- --model opus --resume
 <id>`; each argument quoted for a POSIX shell, plain ones left bare), or resumes
-one already waiting on a start-up dialog, and polls the session. A resumed
-`claude` keeps the arguments it started with, and the result says so
-(`claude_args not-applied`; `applied` when start typed them). Control characters
-in an argument are refused, since the pane's line editor would act on them, and
-on Windows so is any argument that needs quoting. Which arguments still let
-Okena connect is the preload's decision (`GUARDED_FLAGS` and `SUBCOMMANDS` in
+one already waiting on a start-up dialog, and polls the session. With `--`
+arguments it refuses to resume: the waiting `claude` runs with arguments start
+cannot see, so it says to rerun without them (the trust error after a start
+with arguments says the same). Control characters in an argument are refused,
+since the pane's line editor would act on them, and so is an argument that
+needs quoting when the pane's shell (its own, else the project default, else
+`$SHELL`) is not sh, bash or zsh. Which arguments still let Okena connect is the
+preload's decision (`GUARDED_FLAGS` and `SUBCOMMANDS` in
 `integrations/claude-code/okena-remote/preload.js`); the CLI does not copy it,
-and when `--` arguments were typed a connection timeout names them as the likely
-cause. It accepts the
+and after typed `--` arguments a connection timeout names them as one possible
+cause, next to a slow start. It accepts the
 channels warning; the trust dialog only with `--trust`, else it exits 1 and
 leaves the dialog open, and a second run with `--trust` resumes from it. A key
 is sent only when a fresh read of the screen still shows the dialog the session
