@@ -4,6 +4,7 @@ pub mod commands;
 pub mod parser;
 pub mod register;
 pub mod resolve;
+pub mod status;
 
 use clap::Parser as _;
 use okena_core::process::is_process_alive;
@@ -11,7 +12,8 @@ use okena_transport::client::{LocalEndpoint, RemoteConnectionConfig};
 use okena_workspace::persistence::config_dir;
 use parser::{
     ClaudeCmd, ClaudeHookCmd, ClaudeRemoteCmd, Cli, Command, FolderCmd, PaletteCmd, ProjectCmd,
-    ServiceCmd, SettingsCmd, SkillCmd, TermCmd, ThemeCmd, UpdateCmd, WindowCmd, WorktreeCmd,
+    ServiceCmd, SettingsCmd, SkillCmd, StatusCmd, StatusColumnCmd, TermCmd, ThemeCmd, UpdateCmd,
+    WindowCmd, WorktreeCmd,
 };
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -189,6 +191,7 @@ fn command_uses_window(cmd: &Command) -> bool {
             matches!(cmd, TermCmd::Focus { .. } | TermCmd::Fullscreen { .. })
         }
         Command::Worktree { cmd } => matches!(cmd, WorktreeCmd::Add { .. }),
+        Command::Status { cmd } => matches!(cmd, StatusCmd::Lanes { .. }),
         Command::Window { .. } => true,
         Command::Cmd { cmd } => matches!(cmd, PaletteCmd::Run { .. }),
         _ => false,
@@ -200,7 +203,7 @@ fn dispatch(cli: Cli) -> i32 {
     let window = cli.window.as_deref();
     if cli.window.is_some() && !command_uses_window(&cli.command) {
         eprintln!(
-            "Warning: --window is ignored by this command. Only `project add/clone/show/hide/focus`, `worktree add`, `term focus/fullscreen` and `window layout` honor it."
+            "Warning: --window is ignored by this command. Only `project add/clone/show/hide/focus`, `worktree add`, `term focus/fullscreen`, `window layout` and `status lanes` honor it."
         );
     }
     match cli.command {
@@ -296,6 +299,36 @@ fn dispatch(cli: Cli) -> i32 {
             FolderCmd::Add { name } => commands::cli_folder_add(&name),
             FolderCmd::Rm { folder } => commands::cli_folder_rm(&folder),
             FolderCmd::Rename { folder, name } => commands::cli_folder_rename(&folder, &name),
+        },
+
+        Command::Status { cmd } => match cmd {
+            StatusCmd::Ls { project, json } => status::cli_status_ls(project.as_deref(), json),
+            StatusCmd::Get { project, json } => status::cli_status_get(project.as_deref(), json),
+            StatusCmd::Set { column, project } => {
+                status::cli_status_set(&column, project.as_deref())
+            }
+            StatusCmd::Clear { project } => status::cli_status_clear(project.as_deref()),
+            StatusCmd::Lanes { state, project } => {
+                status::cli_status_lanes(state, project.as_deref(), window)
+            }
+            StatusCmd::Enable => status::cli_status_enable(true),
+            StatusCmd::Disable => status::cli_status_enable(false),
+            StatusCmd::Column { cmd } => match cmd {
+                StatusColumnCmd::Ls { json } => status::cli_status_column_ls(json),
+                StatusColumnCmd::Add { name, color } => {
+                    status::cli_status_column_add(&name, color.as_deref())
+                }
+                StatusColumnCmd::Rename { column, name } => {
+                    status::cli_status_column_rename(&column, &name)
+                }
+                StatusColumnCmd::Color { column, color } => {
+                    status::cli_status_column_color(&column, &color)
+                }
+                StatusColumnCmd::Move { column, position } => {
+                    status::cli_status_column_move(&column, position)
+                }
+                StatusColumnCmd::Rm { column } => status::cli_status_column_rm(&column),
+            },
         },
 
         Command::Term { cmd } => match cmd {

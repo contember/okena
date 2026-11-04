@@ -1,6 +1,6 @@
 ---
 name: okena
-description: Drive a running Okena terminal multiplexer from the `okena` CLI — run commands in and read output from the user's terminals, and inspect or manage projects, worktrees, services and windows. Use whenever you need to act inside the user's Okena terminals instead of your own shell.
+description: Drive a running Okena terminal multiplexer from the `okena` CLI — run commands in and read output from the user's terminals, and inspect or manage projects, worktrees, their statuses, services and windows. Use whenever you need to act inside the user's Okena terminals instead of your own shell.
 ---
 
 # Okena CLI
@@ -90,6 +90,15 @@ For terminals running `claude` with Claude Remote on (Settings → Terminal).
 - Worktrees: `okena worktree add <project> <branch> [--new-branch] [--wait] [--layout single|parent] [--name <label>] [--window <w>] | rm`
   (desktops show the new worktree in `--window` only, else in the first window showing the parent;
   `--layout single` = one terminal instead of the parent's layout, `--name` labels the first terminal)
+- Statuses (a board column on a project / worktree, e.g. To do, Review, Done):
+  `okena status ls [project]` (`name<TAB>column<TAB>column-id` in board order;
+  with a project: just its family, parent + worktrees), `status get [project]`,
+  `status set <column> [project]`, `status clear [project]`. The project defaults
+  to the one YOUR terminal belongs to, so in a worktree `okena status set review`
+  marks it. Columns: `status column ls | add <name> [--color c] | rename | color |
+  move <column> <pos> | rm`; a column is an id or a name. `status enable|disable`
+  is the board's switch (statuses only show while it is on); `status lanes on|off
+  [project]` stacks the family's columns by status in a desktop window.
 - Services: `okena services [project]`, `okena service start|stop|restart <name> [project]`
 - Settings: `okena settings show [key] | schema | set <key> <value>` (dotted keys, e.g. `sidebar.width`).
 - Theme: `okena theme list | show [id] | set <id> | save <id> <json>`. To recolor
@@ -127,9 +136,10 @@ Commands that create things (`term new/split/tab`, `project add`, `project clone
 - **Find a window**: `okena ls` (or `ls --json` → `windows[].id`, `visible_project_ids`)
   lists attached desktops' windows; pass a full id or a unique prefix to `--window`.
 - **`--window` is honored only by** `project add/clone/show/hide/focus`, `worktree add`,
-  `term focus/fullscreen` and `window layout`, and must come AFTER the subcommand;
-  others just warn.
-- **`project show/hide`, `--hidden`, `term fullscreen` and `window layout` reach
-  attached desktops**: each applies them to the `--window` target, else its active window.
+  `term focus/fullscreen`, `window layout` and `status lanes`, and must come AFTER
+  the subcommand; others just warn.
+- **`project show/hide`, `--hidden`, `term fullscreen`, `window layout` and `status
+  lanes` reach attached desktops**: each applies them to the `--window` target, else
+  its active window.
 - Default output is tab-separated (grep/awk friendly); add `--json` for structured.
   `okena ls --json` is a structured overview; `okena state` is the raw dump.

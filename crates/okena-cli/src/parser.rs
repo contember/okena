@@ -116,6 +116,11 @@ pub enum Command {
         #[command(subcommand)]
         cmd: FolderCmd,
     },
+    /// Project / worktree statuses and the status board's columns
+    Status {
+        #[command(subcommand)]
+        cmd: StatusCmd,
+    },
     /// Terminal & layout operations
     Term {
         #[command(subcommand)]
@@ -688,6 +693,117 @@ pub enum FolderCmd {
     },
 }
 
+/// A project or worktree to address. Omitted, it is the project of the
+/// terminal the CLI runs in (`$OKENA_TERMINAL_ID`).
+const STATUS_PROJECT_HELP: &str = "Project or worktree (id / name / path); omit for the one \
+     this terminal belongs to";
+
+#[derive(Subcommand)]
+pub enum StatusCmd {
+    /// List projects with their status, in board order (columns, then no status)
+    ///
+    /// Default: tab-separated `name, column name, column id`; both column
+    /// fields are empty without a status, the name is empty for a removed
+    /// column's id. `--json` adds the columns and whether the board is on.
+    Ls {
+        /// Only this project's family: its parent and the parent's worktrees
+        /// (id / name / path)
+        project: Option<String>,
+        /// Output JSON instead of the default plain text
+        #[arg(long)]
+        json: bool,
+    },
+    /// Print a project's status as `column name, column id` (nothing when unset)
+    Get {
+        #[arg(help = STATUS_PROJECT_HELP)]
+        project: Option<String>,
+        /// Output JSON instead of the default plain text
+        #[arg(long)]
+        json: bool,
+    },
+    /// Set a project's or worktree's status
+    Set {
+        /// Column id or name (see `okena status column ls`)
+        column: String,
+        #[arg(help = STATUS_PROJECT_HELP)]
+        project: Option<String>,
+    },
+    /// Clear a project's or worktree's status
+    Clear {
+        #[arg(help = STATUS_PROJECT_HELP)]
+        project: Option<String>,
+    },
+    /// Show a project family's columns in status lanes, or flatten them
+    ///
+    /// Desktop presentation: attached desktops apply it in the --window target,
+    /// else their active window. A worktree addresses its parent's family.
+    Lanes {
+        state: OnOffArg,
+        #[arg(help = STATUS_PROJECT_HELP)]
+        project: Option<String>,
+    },
+    /// Turn the status board on (Settings > General > Status Board)
+    Enable,
+    /// Turn the status board off; statuses and columns are kept
+    Disable,
+    /// List or edit the board's columns
+    Column {
+        #[command(subcommand)]
+        cmd: StatusColumnCmd,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum StatusColumnCmd {
+    /// List the columns in board order: `id, name, color`
+    Ls {
+        /// Output JSON instead of the default plain text
+        #[arg(long)]
+        json: bool,
+    },
+    /// Add a column at the end; prints its new id
+    Add {
+        /// Column name (unique, case-insensitive)
+        name: String,
+        /// Color (default, red, orange, yellow, lime, green, teal, cyan, blue, indigo, purple, pink)
+        #[arg(long)]
+        color: Option<String>,
+    },
+    /// Rename a column; its id, and so every status in it, stays
+    Rename {
+        /// Column id or name
+        column: String,
+        /// New name (unique, case-insensitive)
+        name: String,
+    },
+    /// Set a column's color
+    Color {
+        /// Column id or name
+        column: String,
+        /// Color (default, red, orange, yellow, lime, green, teal, cyan, blue, indigo, purple, pink)
+        color: String,
+    },
+    /// Move a column to a position (1 = first)
+    Move {
+        /// Column id or name
+        column: String,
+        /// Target position, 1-based
+        #[arg(value_parser = clap::value_parser!(usize))]
+        position: usize,
+    },
+    /// Remove a column; projects in it keep the id and show as No status
+    Rm {
+        /// Column id or name
+        column: String,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum OnOffArg {
+    On,
+    Off,
+}
+
 #[derive(Subcommand)]
 pub enum TermCmd {
     /// List terminals
@@ -877,6 +993,27 @@ mod tests {
         assert!(
             Cli::try_parse_from(["okena", "worktree", "add", "p", "feat", "--name", ""]).is_err()
         );
+        assert!(Cli::try_parse_from(["okena", "status", "ls", "--json"]).is_ok());
+        assert!(Cli::try_parse_from(["okena", "status", "ls", "proj"]).is_ok());
+        assert!(Cli::try_parse_from(["okena", "status", "get"]).is_ok());
+        assert!(Cli::try_parse_from(["okena", "status", "set", "review"]).is_ok());
+        assert!(Cli::try_parse_from(["okena", "status", "set", "review", "feat-x"]).is_ok());
+        assert!(Cli::try_parse_from(["okena", "status", "set"]).is_err());
+        assert!(Cli::try_parse_from(["okena", "status", "clear", "feat-x"]).is_ok());
+        assert!(
+            Cli::try_parse_from(["okena", "status", "lanes", "on", "p", "--window", "main"])
+                .is_ok()
+        );
+        assert!(Cli::try_parse_from(["okena", "status", "lanes", "maybe"]).is_err());
+        assert!(Cli::try_parse_from(["okena", "status", "enable"]).is_ok());
+        assert!(Cli::try_parse_from(["okena", "status", "column", "ls"]).is_ok());
+        assert!(
+            Cli::try_parse_from(["okena", "status", "column", "add", "QA", "--color", "teal"])
+                .is_ok()
+        );
+        assert!(Cli::try_parse_from(["okena", "status", "column", "move", "qa", "1"]).is_ok());
+        assert!(Cli::try_parse_from(["okena", "status", "column", "move", "qa", "x"]).is_err());
+        assert!(Cli::try_parse_from(["okena", "status", "column", "rm", "qa"]).is_ok());
         assert!(Cli::try_parse_from(["okena", "skill", "show"]).is_ok());
         assert!(Cli::try_parse_from(["okena", "skill", "install", "--project"]).is_ok());
         assert!(Cli::try_parse_from(["okena", "settings", "show"]).is_ok());
