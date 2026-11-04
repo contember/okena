@@ -384,6 +384,52 @@ impl StatusBoardSettings {
         self.columns.push(BoardColumn::new(id.clone(), name));
         id
     }
+
+    /// Rename a column, keeping its id (and every project's status). Returns
+    /// whether anything changed.
+    pub fn rename_column(&mut self, id: &str, name: String) -> bool {
+        match self.columns.iter_mut().find(|c| c.id == id) {
+            Some(column) if column.name != name => {
+                column.name = name;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Recolour a column. Returns whether anything changed.
+    pub fn set_column_color(&mut self, id: &str, color: okena_core::theme::FolderColor) -> bool {
+        match self.columns.iter_mut().find(|c| c.id == id) {
+            Some(column) if column.color != color => {
+                column.color = color;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Remove a column. Projects in it keep their status id and render as
+    /// unassigned until they are re-sorted. Returns whether it existed.
+    pub fn remove_column(&mut self, id: &str) -> bool {
+        let before = self.columns.len();
+        self.columns.retain(|c| c.id != id);
+        self.columns.len() != before
+    }
+
+    /// Move a column to position `to` (0-based), shifting the ones between.
+    /// Returns whether anything changed; an unknown id or a position past the
+    /// end changes nothing.
+    pub fn move_column(&mut self, id: &str, to: usize) -> bool {
+        let Some(from) = self.columns.iter().position(|c| c.id == id) else {
+            return false;
+        };
+        if from == to || to >= self.columns.len() {
+            return false;
+        }
+        let column = self.columns.remove(from);
+        self.columns.insert(to, column);
+        true
+    }
 }
 
 /// Current settings schema version - increment when making breaking changes
@@ -1175,6 +1221,35 @@ mod tests {
         assert_eq!(config.project.on_open, Some("echo open".into()));
         assert!(config.worktree.pre_merge.is_none());
         assert!(config.worktree.after_remove.is_none());
+    }
+
+    #[test]
+    fn status_board_column_edits_keep_ids_and_report_changes() {
+        use okena_core::theme::FolderColor;
+        let mut board = StatusBoardSettings::default();
+        let ids =
+            |b: &StatusBoardSettings| b.columns.iter().map(|c| c.id.clone()).collect::<Vec<_>>();
+
+        assert!(board.rename_column("review", "QA".into()));
+        assert!(!board.rename_column("review", "QA".into()), "same name");
+        assert!(!board.rename_column("missing", "X".into()));
+        assert_eq!(board.column("review").unwrap().name, "QA");
+
+        assert!(board.set_column_color("done", FolderColor::Green));
+        assert!(!board.set_column_color("done", FolderColor::Green));
+        assert_eq!(board.column("done").unwrap().color, FolderColor::Green);
+
+        assert!(board.move_column("done", 0));
+        assert_eq!(ids(&board), ["done", "todo", "in-progress", "review"]);
+        assert!(board.move_column("done", 3));
+        assert_eq!(ids(&board), ["todo", "in-progress", "review", "done"]);
+        assert!(!board.move_column("done", 3), "already there");
+        assert!(!board.move_column("done", 4), "past the end");
+        assert!(!board.move_column("missing", 0));
+
+        assert!(board.remove_column("in-progress"));
+        assert!(!board.remove_column("in-progress"));
+        assert_eq!(ids(&board), ["todo", "review", "done"]);
     }
 
     #[test]

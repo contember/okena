@@ -397,20 +397,9 @@ impl SettingsState {
 
     /// Rename a column, keeping its id (and every project's status).
     pub fn rename_status_board_column(&mut self, id: &str, name: String, cx: &mut Context<Self>) {
-        let Some(column) = self
-            .settings
-            .status_board
-            .columns
-            .iter_mut()
-            .find(|c| c.id == id)
-        else {
-            return;
-        };
-        if column.name == name {
-            return;
+        if self.settings.status_board.rename_column(id, name) {
+            self.save_and_notify(cx);
         }
-        column.name = name;
-        self.save_and_notify(cx);
     }
 
     /// Recolour a column.
@@ -420,45 +409,31 @@ impl SettingsState {
         color: okena_core::theme::FolderColor,
         cx: &mut Context<Self>,
     ) {
-        let Some(column) = self
-            .settings
-            .status_board
-            .columns
-            .iter_mut()
-            .find(|c| c.id == id)
-        else {
-            return;
-        };
-        if column.color == color {
-            return;
+        if self.settings.status_board.set_column_color(id, color) {
+            self.save_and_notify(cx);
         }
-        column.color = color;
-        self.save_and_notify(cx);
     }
 
     /// Remove a column. Projects in it keep their status id and render as
     /// unassigned until they are re-sorted.
     pub fn remove_status_board_column(&mut self, id: &str, cx: &mut Context<Self>) {
-        let columns = &mut self.settings.status_board.columns;
-        let before = columns.len();
-        columns.retain(|c| c.id != id);
-        if columns.len() != before {
+        if self.settings.status_board.remove_column(id) {
             self.save_and_notify(cx);
         }
     }
 
     /// Move a column one step up (`-1`) or down (`1`).
     pub fn move_status_board_column(&mut self, id: &str, delta: i32, cx: &mut Context<Self>) {
-        let columns = &mut self.settings.status_board.columns;
-        let Some(index) = columns.iter().position(|c| c.id == id) else {
+        let board = &mut self.settings.status_board;
+        let Some(index) = board.columns.iter().position(|c| c.id == id) else {
             return;
         };
-        let target = index as i64 + delta as i64;
-        if target < 0 || target >= columns.len() as i64 {
+        let Ok(target) = usize::try_from(index as i64 + delta as i64) else {
             return;
+        };
+        if board.move_column(id, target) {
+            self.save_and_notify(cx);
         }
-        columns.swap(index, target as usize);
-        self.save_and_notify(cx);
     }
 
     /// Set sidebar width (clamped to min/max bounds)
