@@ -156,6 +156,20 @@ omitted while unset.
 { "action": "set_project_status", "project_id": "uuid", "status": "review" }
 ```
 
+#### `set_status_lanes`
+
+Show (`on: true`) or flatten a project family's status lanes in a desktop
+window. A worktree addresses its parent's family. Lanes are desktop
+presentation: the daemon only checks the project exists, and after success
+attached desktops receive a one-shot `status_lanes_requested` push and apply
+it to `window` (`"main"` or an extra window's id), else their active window.
+An extra window no attached desktop declared is rejected with
+`window not found`.
+
+```json
+{ "action": "set_status_lanes", "project_id": "uuid", "on": true, "window": "main" }
+```
+
 #### `send_special_key`
 
 Send a named key.

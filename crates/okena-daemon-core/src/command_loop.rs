@@ -4998,7 +4998,8 @@ impl TerminalBackend for DeferredKillBackend<'_> {
 /// the daemon has no desktop-side counterpart for.
 fn validate_extra_window_action(action: &ActionRequest, ws: &Workspace) -> Option<CommandResult> {
     let (project_id, terminal_id) = match action {
-        ActionRequest::SetProjectShowInOverview { project_id, .. } => (project_id, None),
+        ActionRequest::SetProjectShowInOverview { project_id, .. }
+        | ActionRequest::SetStatusLanes { project_id, .. } => (project_id, None),
         ActionRequest::SetFullscreen {
             project_id,
             terminal_id,

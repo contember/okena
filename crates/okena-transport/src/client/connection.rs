@@ -2201,6 +2201,19 @@ impl<H: ConnectionHandler> RemoteClient<H> {
                                             .await;
                                     }
                                 }
+                                "status_lanes_requested" => {
+                                    if let Some(request) = parse_presentation_request(
+                                        &value,
+                                        ClientPresentationRequest::StatusLanes,
+                                    ) {
+                                        let _ = event_tx_clone
+                                            .send(ConnectionEvent::PresentationRequested {
+                                                connection_id: config_id.clone(),
+                                                request,
+                                            })
+                                            .await;
+                                    }
+                                }
                                 "toast" => {
                                     // `WsOutbound::Toast` is internally tagged, so
                                     // the ApiToast fields sit at the top level of

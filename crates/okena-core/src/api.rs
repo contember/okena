@@ -449,6 +449,17 @@ pub struct ApiProjectLayoutRequest {
     pub window: Option<String>,
 }
 
+/// One-shot desktop presentation request emitted after an external
+/// `SetStatusLanes` action succeeds. Lanes are per desktop window, so each
+/// desktop applies the request to its own window.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApiStatusLanesRequest {
+    pub project_id: String,
+    pub on: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window: Option<String>,
+}
+
 /// The terminals a new worktree starts with.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -891,6 +902,16 @@ pub enum ActionRequest {
         project_id: String,
         #[serde(default)]
         status: Option<String>,
+    },
+    /// Show (`on`) or flatten a project family's status lanes in a desktop
+    /// window. A worktree stands for its parent's family. Pure desktop
+    /// presentation: the daemon only validates the project and pushes it on.
+    SetStatusLanes {
+        project_id: String,
+        on: bool,
+        /// Target window ("main" or an extra window's UUID). None = the focused window.
+        #[serde(default)]
+        window: Option<String>,
     },
     /// Switch the shell of an existing terminal: the daemon kills the old PTY
     /// and respawns at the same layout path with `shell` (resolving Default →
@@ -1512,7 +1533,8 @@ impl ActionRequest {
             ActionRequest::FocusTerminal { window, .. }
             | ActionRequest::SetProjectShowInOverview { window, .. }
             | ActionRequest::SetFullscreen { window, .. }
-            | ActionRequest::SetProjectLayout { window, .. } => window.as_deref(),
+            | ActionRequest::SetProjectLayout { window, .. }
+            | ActionRequest::SetStatusLanes { window, .. } => window.as_deref(),
             _ => None,
         }
     }
@@ -2480,6 +2502,32 @@ mod tests {
             window: Some("main".into()),
         };
         assert_eq!(layout.target_window(), Some("main"));
+
+        let lanes = ActionRequest::SetStatusLanes {
+            project_id: "p1".into(),
+            on: true,
+            window: Some("main".into()),
+        };
+        assert_eq!(lanes.target_window(), Some("main"));
+    }
+
+    #[test]
+    fn set_status_lanes_wire_shape() {
+        let action: ActionRequest =
+            serde_json::from_str(r#"{"action":"set_status_lanes","project_id":"p1","on":false}"#)
+                .unwrap();
+        assert!(matches!(
+            action,
+            ActionRequest::SetStatusLanes { ref project_id, on: false, window: None }
+                if project_id == "p1"
+        ));
+        assert!(
+            serde_json::from_str::<ActionRequest>(
+                r#"{"action":"set_status_lanes","project_id":"p1"}"#
+            )
+            .is_err(),
+            "on is required: a lanes request always says which way"
+        );
     }
 
     #[test]

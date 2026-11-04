@@ -201,6 +201,15 @@ pub fn execute_action(
             ws.set_project_status(&project_id, status, cx);
             ActionResult::Ok(None)
         }
+        // Desktop presentation only, like SetProjectLayout: the daemon checks
+        // the project exists and the server pushes the lanes to desktops.
+        ActionRequest::SetStatusLanes { project_id, .. } => {
+            if ws.project(&project_id).is_none() {
+                ActionResult::Err(format!("project not found: {project_id}"))
+            } else {
+                ActionResult::Ok(None)
+            }
+        }
         ActionRequest::SwitchTerminalShell {
             project_id,
             terminal_id,

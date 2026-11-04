@@ -258,6 +258,15 @@ pub enum RemoteManagerEvent {
         window: Option<WindowId>,
     },
 
+    /// An external API client showed or flattened a project family's status
+    /// lanes. The project id is already prefixed for this manager connection;
+    /// the desktop applies it to its own window (`None` = its active window).
+    StatusLanesRequested {
+        project_id: String,
+        on: bool,
+        window: Option<WindowId>,
+    },
+
     /// The implicit local-daemon loopback connection reached a terminal failed
     /// state (its own connect/reconnect retries are exhausted against a dead
     /// endpoint). The manager stays generic — it only reports; the app decides
@@ -1337,6 +1346,13 @@ fn presentation_event(
                 window: parse_window(request.window)?,
             }
         }
+        ClientPresentationRequest::StatusLanes(request) => {
+            RemoteManagerEvent::StatusLanesRequested {
+                project_id: make_prefixed_id(connection_id, &request.project_id),
+                on: request.on,
+                window: parse_window(request.window)?,
+            }
+        }
     })
 }
 
@@ -1344,12 +1360,12 @@ fn presentation_event(
 mod tests {
     use super::{
         ActionQueues, QueuedAction, RemoteConnectionManager, RemoteManagerEvent, activity_changed,
-        coalesce_settings_actions, is_local_connection_terminal_failure, merge_settings_patches,
-        presentation_event, run_action_queue, windows_for_connection,
+        coalesce_settings_actions, is_local_connection_terminal_failure, make_prefixed_id,
+        merge_settings_patches, presentation_event, run_action_queue, windows_for_connection,
     };
     use okena_core::api::{
         ActionRequest, ApiFullscreenRequest, ApiProjectLayoutRequest, ApiProjectPlacementRequest,
-        ApiProjectVisibilityRequest, ApiWindow,
+        ApiProjectVisibilityRequest, ApiStatusLanesRequest, ApiWindow,
     };
     use okena_core::ws::ClientPresentationRequest;
     use okena_transport::client::{ConnectionStatus, LOCAL_DAEMON_CONNECTION_ID};
@@ -1922,6 +1938,27 @@ mod tests {
                 window: Some(WindowId::Main)
             })
         ));
+    }
+
+    #[test]
+    fn presentation_event_maps_status_lanes_with_a_prefixed_project() {
+        let event = presentation_event(
+            "conn",
+            ClientPresentationRequest::StatusLanes(ApiStatusLanesRequest {
+                project_id: "p1".into(),
+                on: true,
+                window: None,
+            }),
+        );
+        let Ok(RemoteManagerEvent::StatusLanesRequested {
+            project_id,
+            on: true,
+            window: None,
+        }) = event
+        else {
+            panic!("expected a status lanes request");
+        };
+        assert_eq!(project_id, make_prefixed_id("conn", "p1"));
     }
 
     #[test]
