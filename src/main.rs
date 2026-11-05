@@ -755,6 +755,7 @@ fn main() {
             okena_ui::board::StatusBoard {
                 enabled: board.enabled,
                 columns: &board.columns,
+                no_status_color: board.no_status_color,
             }
         }));
 

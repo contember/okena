@@ -16,6 +16,8 @@ pub struct StatusBoard<'a> {
     /// Master switch; off hides every status surface.
     pub enabled: bool,
     pub columns: &'a [BoardColumn],
+    /// Colour of the "No status" group; `Default` draws it grey.
+    pub no_status_color: FolderColor,
 }
 
 impl StatusBoard<'_> {
@@ -34,6 +36,12 @@ impl StatusBoard<'_> {
             .map(|c| c.color)
             .filter(|c| *c != FolderColor::Default)
     }
+
+    /// The colour of a group caption: the column's own colour, or the
+    /// "No status" colour for the unassigned group (`None`).
+    pub fn group_color(&self, column: Option<&BoardColumn>) -> FolderColor {
+        column.map_or(self.no_status_color, |c| c.color)
+    }
 }
 
 /// Global function pointer that borrows the board from the host app's
@@ -50,6 +58,7 @@ pub fn status_board(cx: &App) -> StatusBoard<'_> {
         None => StatusBoard {
             enabled: false,
             columns: &DEFAULT_COLUMNS,
+            no_status_color: FolderColor::Default,
         },
     }
 }

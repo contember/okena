@@ -207,6 +207,7 @@ If the file contains invalid JSON, Okena recovers as many fields as possible and
 |-----|------|---------|-------------|
 | `status_board.enabled` | bool | `false` | Master switch for the status board (status pill in column headers, Status in the project menu, lanes, sidebar captions, the columns editor). Off, nothing of it renders. |
 | `status_board.columns` | array | `[{"id":"todo","name":"To do"}, {"id":"in-progress","name":"In progress"}, {"id":"review","name":"Review"}, {"id":"done","name":"Done"}]` | Ordered columns a project or worktree can be sorted into (status pill, project menu → Status, lanes). `id` is the stable key stored on projects, `name` is what you see, optional `color` (`red`, `orange`, `yellow`, `lime`, `green`, `teal`, `cyan`, `blue`, `indigo`, `purple`, `pink`) tints the status pill, the lane spine and the sidebar caption. Rename freely; removing a column leaves its projects unassigned. See [status-board.md](status-board.md). |
+| `status_board.no_status_color` | string | omitted (grey) | Colour of the *No status* group: its lane spine and sidebar caption. Same palette as a column `color`. Set it in Settings > General > Status Columns, on the *No status* row. |
 
 #### File Opener
 

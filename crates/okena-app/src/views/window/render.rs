@@ -589,9 +589,11 @@ impl WindowView {
                     None => elements.extend(inner),
                     Some(column) => {
                         let lane_t = theme(cx);
-                        let accent = match column.as_ref().map(|c| c.color) {
-                            Some(okena_core::theme::FolderColor::Default) | None => None,
-                            Some(color) => Some(lane_t.get_folder_color(color)),
+                        let accent = match okena_ui::board::status_board(cx)
+                            .group_color(column.as_ref())
+                        {
+                            okena_core::theme::FolderColor::Default => None,
+                            color => Some(lane_t.get_folder_color(color)),
                         };
                         let edge = accent.unwrap_or(lane_t.text_muted);
                         let label =

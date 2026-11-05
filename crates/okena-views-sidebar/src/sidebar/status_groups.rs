@@ -47,7 +47,7 @@ fn group_worktree_rows(statuses: &[Option<&str>], board: StatusBoard<'_>) -> Vec
                 caption: caption.map(|column| {
                     (
                         caption_label(&column).to_string(),
-                        column.map(|c| c.color).unwrap_or_default(),
+                        board.group_color(column.as_ref()),
                     )
                 }),
             })
@@ -149,6 +149,7 @@ impl Sidebar {
 #[cfg(test)]
 mod tests {
     use super::{StatusBoard, WorktreeRow, fold_extra_rows, group_worktree_rows, status_group};
+    use okena_core::theme::FolderColor;
     use okena_core::types::BoardColumn;
 
     fn columns() -> Vec<BoardColumn> {
@@ -170,6 +171,7 @@ mod tests {
         let board = StatusBoard {
             enabled: false,
             columns: &columns,
+            no_status_color: FolderColor::Default,
         };
         let rows = group_worktree_rows(&[Some("done"), None, Some("todo")], board);
         assert_eq!(shape(&rows), vec![(0, None), (1, None), (2, None)]);
@@ -181,6 +183,7 @@ mod tests {
         let board = StatusBoard {
             enabled: true,
             columns: &columns,
+            no_status_color: FolderColor::Default,
         };
         let rows = group_worktree_rows(&[Some("done"), None, Some("todo")], board);
         assert_eq!(
@@ -194,11 +197,29 @@ mod tests {
     }
 
     #[test]
+    fn no_status_caption_takes_the_no_status_color() {
+        let columns = columns();
+        let board = StatusBoard {
+            enabled: true,
+            columns: &columns,
+            no_status_color: FolderColor::Blue,
+        };
+        let rows = group_worktree_rows(&[Some("todo"), None], board);
+        let captions: Vec<FolderColor> = rows
+            .iter()
+            .filter_map(|r| r.caption.as_ref().map(|(_, color)| *color))
+            .collect();
+        let todo = columns.iter().find(|c| c.id == "todo").unwrap().color;
+        assert_eq!(captions, vec![todo, FolderColor::Blue]);
+    }
+
+    #[test]
     fn status_group_merges_unknown_into_no_status_and_ignores_a_disabled_board() {
         let columns = columns();
         let on = StatusBoard {
             enabled: true,
             columns: &columns,
+            no_status_color: FolderColor::Default,
         };
         assert_eq!(status_group(Some("todo"), on), Some("todo"));
         assert_eq!(status_group(Some("gone"), on), None);
@@ -206,6 +227,7 @@ mod tests {
         let off = StatusBoard {
             enabled: false,
             columns: &columns,
+            no_status_color: FolderColor::Default,
         };
         assert_eq!(status_group(Some("todo"), off), None);
     }

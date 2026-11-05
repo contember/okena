@@ -25,8 +25,8 @@ as it did before.
   passes through to the terminal): while that family is focused, its
   columns stand in lanes, one per board column that has a member, *No
   status* last. A narrow spine runs down the left of each lane: an edge
-  and a light tint in the column's colour (grey for *No status* or an
-  uncoloured column), the number of columns in the
+  and a light tint in the column's colour (*No status* uses its own
+  colour, see below; grey when uncoloured), the number of columns in the
   lane, and the name spelled letter by letter downwards (GPUI cannot
   rotate text). In a columns grid the spine is the whole gap between two
   lanes; in a rows grid a hairline separates the lanes. Inside a lane the
@@ -71,6 +71,10 @@ fresh install starts with `todo`, `in-progress`, `review`, `done`.
 - Removing a column leaves its projects' status ids in place; they render as
   *No status* until you re-sort them (or restore the column's id in
   `settings.json`). Nothing is deleted on your behalf.
+- *No status* is not a column (it cannot be renamed, moved or removed),
+  but it has a colour of its own: the *No status* row under the columns
+  sets it (`status_board.no_status_color`), grey by default. It tints the
+  *No status* lane spine and sidebar caption, never a project.
 - Adding a column gives it a fresh random id (a UUID), never derived from
   the name, so a new column never picks up the statuses of a removed one.
 
