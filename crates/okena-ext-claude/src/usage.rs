@@ -551,10 +551,18 @@ impl ClaudeUsage {
             .children(content)
             .child(
                 canvas(
-                    move |bounds, _window, app| {
-                        entity.update(app, |this, _cx| {
-                            this.trigger_bounds.insert(bounds_trigger.clone(), bounds);
+                    move |bounds, window, app| {
+                        let moved = entity.update(app, |this, _cx| {
+                            let previous =
+                                this.trigger_bounds.insert(bounds_trigger.clone(), bounds);
+                            previous != Some(bounds)
+                                && this.popover_visible
+                                && this.active == bounds_trigger
                         });
+                        // The open popover was placed from the old bounds.
+                        if moved {
+                            window.request_animation_frame();
+                        }
                     },
                     |_, _, _, _| {},
                 )

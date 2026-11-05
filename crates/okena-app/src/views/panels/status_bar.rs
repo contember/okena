@@ -920,26 +920,19 @@ impl Render for StatusBar {
                             )
                             .child(
                                 canvas(
-                                    move |bounds, _window, app| {
-                                        entity_for_bounds.update(
+                                    move |bounds, window, app| {
+                                        let moved = entity_for_bounds.update(
                                             app,
-                                            |this: &mut StatusBar, cx| {
-                                                if this.remote_status_bounds == bounds {
-                                                    return;
-                                                }
+                                            |this: &mut StatusBar, _cx| {
+                                                let moved = this.remote_status_bounds != bounds;
                                                 this.remote_status_bounds = bounds;
-                                                // The open popover was placed from the
-                                                // old bounds; a notify during draw is
-                                                // dropped, so re-render after it.
-                                                if this.remote_popover_visible {
-                                                    let this = cx.weak_entity();
-                                                    cx.defer(move |cx| {
-                                                        let _ =
-                                                            this.update(cx, |_, cx| cx.notify());
-                                                    });
-                                                }
+                                                moved && this.remote_popover_visible
                                             },
                                         );
+                                        // The open popover was placed from the old bounds.
+                                        if moved {
+                                            window.request_animation_frame();
+                                        }
                                     },
                                     |_, _, _, _| {},
                                 )

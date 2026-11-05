@@ -398,10 +398,16 @@ impl Render for CodexStatus {
                     .children(service_status_items("Codex", label, color, healthy, &t, cx))
                     .child(
                         canvas(
-                            move |bounds, _window, app| {
-                                entity_handle.update(app, |this, _cx| {
+                            move |bounds, window, app| {
+                                let moved = entity_handle.update(app, |this, _cx| {
+                                    let moved = this.trigger_bounds != bounds;
                                     this.trigger_bounds = bounds;
+                                    moved && this.popover_visible
                                 });
+                                // The open popover was placed from the old bounds.
+                                if moved {
+                                    window.request_animation_frame();
+                                }
                             },
                             |_, _, _, _| {},
                         )
