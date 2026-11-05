@@ -203,6 +203,10 @@ fn head_snapshot(repo: &gix::Repository) -> Option<HeadSnapshot> {
 pub struct IndexStamp {
     modified: Option<SystemTime>,
     len: u64,
+    /// Git writes the index by rename, so each write gets a new inode even
+    /// within a coarse mtime resolution.
+    #[cfg(unix)]
+    inode: u64,
 }
 
 /// [`HeadSnapshot`] plus the index stamp, from one repository open.
@@ -222,6 +226,8 @@ pub fn get_repo_poll_snapshot(path: &Path) -> Option<RepoPollSnapshot> {
         .map(|metadata| IndexStamp {
             modified: metadata.modified().ok(),
             len: metadata.len(),
+            #[cfg(unix)]
+            inode: std::os::unix::fs::MetadataExt::ino(&metadata),
         });
     Some(RepoPollSnapshot { head, index })
 }
