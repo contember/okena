@@ -221,6 +221,9 @@ pub struct WindowView {
     service_manager: Option<Entity<ServiceManager>>,
     /// Last focused project ID (for scroll-to-focused detection)
     last_scroll_project: Option<String>,
+    /// Project of the focused terminal when the daemon was last asked to
+    /// refresh its git status; switching projects asks again.
+    last_git_refresh_project: Option<String>,
     /// Whether a project was zoomed/focused in the last observation (for detecting unfocus)
     was_project_focused: bool,
     /// Project ID whose grid scroll position should be restored after the next
@@ -423,6 +426,7 @@ impl WindowView {
             pane_switch_active: false,
             pane_switcher_entity: None,
             last_scroll_project: None,
+            last_git_refresh_project: None,
             was_project_focused: false,
             pending_center_scroll: None,
             saved_grid_offset: None,
@@ -477,6 +481,15 @@ impl WindowView {
             // Consumed once per observation: an explicit jump (switcher Tab)
             // centers the target; other switches just ensure it's visible.
             let center_navigation = std::mem::take(&mut this.center_next_navigation);
+
+            // The daemon walks an idle project's worktree only every 30 s, so a
+            // switch to it asks for a fresh status at once.
+            if focused_terminal_project != this.last_git_refresh_project {
+                if let Some(project_id) = &focused_terminal_project {
+                    this.request_git_poll_for_visible_project(project_id, cx);
+                }
+                this.last_git_refresh_project = focused_terminal_project.clone();
+            }
 
             // Entering project zoom: capture the grid scroll position now (before
             // the zoomed single-project layout clamps it to 0) so it can be
