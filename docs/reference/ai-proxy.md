@@ -79,10 +79,13 @@ covers accounts added later.
   working. A preferred account does not pull a conversation away from its
   account; a forbidden one moves it.
 - Otherwise a preferred account goes before an allowed one. Among those, an
-  account whose weekly quota would expire unused goes first: one that has more
-  remaining than 20% per day until its weekly reset can consume. The account
-  that would lose the most goes first. When no account would lose quota, the
-  account with the lowest 5-hour utilization is chosen.
+  account with room in its 5-hour window (below 90%, or no known 5-hour
+  window) goes first. Then the account whose weekly window resets first, so
+  quota that would expire is used before quota that lasts; an account without
+  a known weekly reset goes last. Ties go to the lower weekly utilization, then
+  to the account that served fewer requests. A window whose reset time has
+  passed counts as empty until new usage arrives; its weekly reset counts as
+  unknown.
 - **429**: the account cools down until the provider's reset time
   (`anthropic-ratelimit-unified-reset`), else `retry-after`, else one minute,
   and the request moves to the next permitted account. Each permitted account
@@ -116,7 +119,8 @@ covers accounts added later.
   already given up on.
 
 Utilization comes from the `anthropic-ratelimit-unified-5h/7d-*` response
-headers and from polling the usage endpoint every five minutes.
+headers and from polling the usage endpoint every five minutes. A poll that
+reports no 5-hour window drops the one the account had.
 
 The status bar shows a separate entry for each pool account, with both
 **5h** and **7d** when available. Disabled accounts and accounts needing login
