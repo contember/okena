@@ -3,9 +3,11 @@
 //!
 //! A status is a user-set column id on a project (`ProjectData::status`),
 //! typically on the worktrees of one parent project. Grouping resolves ids
-//! against the ordered columns from settings: columns first, in their order,
-//! then an unassigned bucket for projects with no status or a status whose
-//! column no longer exists. Input order is kept inside every group.
+//! against the ordered columns from settings, in their order, with an
+//! unassigned bucket ("No status": no status, or a status whose column no
+//! longer exists) standing after `no_status_at` of them (last by default,
+//! see `StatusBoardSettings::no_status_index`). Input order is kept inside
+//! every group.
 
 use okena_core::types::BoardColumn;
 
@@ -42,10 +44,14 @@ pub fn has_status_groups(statuses: &[Option<&str>], columns: &[BoardColumn]) -> 
 }
 
 /// Group the items whose statuses are `statuses` by column: columns in
-/// settings order (empty ones skipped), then the unassigned bucket. Returns
-/// `None` when nothing resolves to a column, so the caller keeps its flat
-/// list.
-pub fn lanes(statuses: &[Option<&str>], columns: &[BoardColumn]) -> Option<Vec<Lane>> {
+/// settings order with the unassigned bucket after the first `no_status_at`
+/// of them, empty groups skipped. Returns `None` when nothing resolves to a
+/// column, so the caller keeps its flat list.
+pub fn lanes(
+    statuses: &[Option<&str>],
+    columns: &[BoardColumn],
+    no_status_at: usize,
+) -> Option<Vec<Lane>> {
     if !has_status_groups(statuses, columns) {
         return None;
     }
@@ -63,20 +69,25 @@ pub fn lanes(statuses: &[Option<&str>], columns: &[BoardColumn]) -> Option<Vec<L
             None => unassigned.push(index),
         }
     }
-    lanes.retain(|lane| !lane.indices.is_empty());
-    if !unassigned.is_empty() {
-        lanes.push(Lane {
+    lanes.insert(
+        no_status_at.min(lanes.len()),
+        Lane {
             column: None,
             indices: unassigned,
-        });
-    }
+        },
+    );
+    lanes.retain(|lane| !lane.indices.is_empty());
     Some(lanes)
 }
 
 /// [`lanes`] flattened into rows, each group's first row carrying the
 /// caption. `None` when nothing resolves to a column.
-pub fn grouped_rows(statuses: &[Option<&str>], columns: &[BoardColumn]) -> Option<Vec<GroupedRow>> {
-    let lanes = lanes(statuses, columns)?;
+pub fn grouped_rows(
+    statuses: &[Option<&str>],
+    columns: &[BoardColumn],
+    no_status_at: usize,
+) -> Option<Vec<GroupedRow>> {
+    let lanes = lanes(statuses, columns, no_status_at)?;
     let mut rows = Vec::with_capacity(statuses.len());
     for lane in lanes {
         for (i, index) in lane.indices.into_iter().enumerate() {
@@ -111,16 +122,16 @@ mod tests {
 
     #[test]
     fn no_resolvable_status_keeps_the_flat_list() {
-        assert!(lanes(&[None, None], &columns()).is_none());
-        assert!(grouped_rows(&[None, None], &columns()).is_none());
+        assert!(lanes(&[None, None], &columns(), 3).is_none());
+        assert!(grouped_rows(&[None, None], &columns(), 3).is_none());
         // A status whose column is gone does not count.
-        assert!(lanes(&[Some("gone"), None], &columns()).is_none());
+        assert!(lanes(&[Some("gone"), None], &columns(), 3).is_none());
     }
 
     #[test]
     fn lanes_follow_column_order_skip_empty_and_put_unassigned_last() {
         let statuses = [Some("done"), None, Some("todo"), Some("done"), Some("gone")];
-        let lanes = lanes(&statuses, &columns()).unwrap();
+        let lanes = lanes(&statuses, &columns(), 3).unwrap();
         let shape: Vec<(Option<&str>, Vec<usize>)> = lanes
             .iter()
             .map(|l| (l.column.as_ref().map(|c| c.id.as_str()), l.indices.clone()))
@@ -136,10 +147,55 @@ mod tests {
         assert_eq!(lanes[2].label(), "No status");
     }
 
+    fn lane_shape(lanes: &[Lane]) -> Vec<(Option<&str>, Vec<usize>)> {
+        lanes
+            .iter()
+            .map(|l| (l.column.as_ref().map(|c| c.id.as_str()), l.indices.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn no_status_stands_where_the_settings_put_it() {
+        let statuses = [Some("done"), None, Some("todo"), Some("review")];
+        let first = lanes(&statuses, &columns(), 0).unwrap();
+        assert_eq!(
+            lane_shape(&first),
+            vec![
+                (None, vec![1]),
+                (Some("todo"), vec![2]),
+                (Some("review"), vec![3]),
+                (Some("done"), vec![0]),
+            ]
+        );
+        let middle = lanes(&statuses, &columns(), 2).unwrap();
+        assert_eq!(
+            lane_shape(&middle),
+            vec![
+                (Some("todo"), vec![2]),
+                (Some("review"), vec![3]),
+                (None, vec![1]),
+                (Some("done"), vec![0]),
+            ]
+        );
+        // Past the end (a stale position) reads as last.
+        let past = lanes(&statuses, &columns(), 9).unwrap();
+        assert_eq!(lane_shape(&past).last().unwrap().0, None);
+    }
+
+    #[test]
+    fn no_status_position_counts_empty_columns_too() {
+        // "No status" after "todo" (position 1) stays before "done" even
+        // when "todo" has no member.
+        let statuses = [Some("done"), None];
+        let rows = grouped_rows(&statuses, &columns(), 1).unwrap();
+        let order: Vec<usize> = rows.iter().map(|r| r.index).collect();
+        assert_eq!(order, vec![1, 0]);
+    }
+
     #[test]
     fn rows_carry_one_caption_per_group() {
         let statuses = [Some("done"), None, Some("todo"), Some("done"), Some("gone")];
-        let rows = grouped_rows(&statuses, &columns()).unwrap();
+        let rows = grouped_rows(&statuses, &columns(), 3).unwrap();
         let shape: Vec<(usize, Option<Option<&str>>)> = rows
             .iter()
             .map(|r| {

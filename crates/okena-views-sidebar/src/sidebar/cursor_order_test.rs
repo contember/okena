@@ -23,6 +23,7 @@ fn board_on(_: &App) -> StatusBoard<'_> {
         enabled: true,
         columns: &COLUMNS,
         no_status_color: okena_core::theme::FolderColor::Default,
+        no_status_at: usize::MAX,
     }
 }
 
@@ -31,6 +32,7 @@ fn board_off(_: &App) -> StatusBoard<'_> {
         enabled: false,
         columns: &COLUMNS,
         no_status_color: okena_core::theme::FolderColor::Default,
+        no_status_at: usize::MAX,
     }
 }
 

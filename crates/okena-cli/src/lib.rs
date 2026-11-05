@@ -330,8 +330,8 @@ fn dispatch(cli: Cli) -> i32 {
                     status::cli_status_column_move(&column, position)
                 }
                 StatusColumnCmd::Rm { column } => status::cli_status_column_rm(&column),
-                StatusColumnCmd::NoStatus { color } => {
-                    status::cli_status_column_no_status(color.as_deref())
+                StatusColumnCmd::NoStatus { color, position } => {
+                    status::cli_status_column_no_status(color.as_deref(), position)
                 }
             },
         },

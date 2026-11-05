@@ -108,7 +108,8 @@ pub struct WindowState {
     #[serde(default)]
     pub show_attention_section: bool,
     /// Parent projects whose family (main checkout + worktrees) this window
-    /// shows in status lanes (one lane per board column, "No status" last)
+    /// shows in status lanes (one lane per board column, "No status" where
+    /// the board settings put it)
     /// while focused. Only honoured while the status board is enabled.
     #[serde(default, skip_serializing_if = "HashSet::is_empty")]
     pub status_lanes_projects: HashSet<String>,

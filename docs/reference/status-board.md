@@ -24,15 +24,15 @@ as it did before.
   lanes*, or `Cmd+Shift+K` / `Ctrl+Shift+K` for the focused project;
   remembered per window and project; with the board off the shortcut
   passes through to the terminal): while that family is focused, its
-  columns stand in lanes, one per board column that has a member, *No
-  status* last. A narrow spine runs down the left of each lane: an edge
-  and a light tint in the column's colour (*No status* uses its own
-  colour, see below; grey when uncoloured), the number of columns in the
-  lane, and the name spelled letter by letter downwards (GPUI cannot
-  rotate text). In a columns grid the spine is the whole gap between two
-  lanes; in a rows grid a hairline separates the lanes. Project colours
-  stay where
-  they always are (header line and dot). Columns stay live terminals and
+  columns stand in lanes, one per board column that has a member, with
+  *No status* where the settings put it (last by default). A narrow spine
+  runs down the left of each lane: an edge and a light tint in the
+  column's colour (*No status* uses its own colour, see below; grey when
+  uncoloured), the number of columns in the lane, and the name spelled
+  letter by letter downwards (GPUI cannot rotate text). In a columns grid
+  the spine is the whole gap between two lanes; in a rows grid a hairline
+  separates the lanes. Project colours stay where they always are (header
+  line and dot). Columns stay live terminals and
   resize as before; the divider between two columns only exists inside a
   lane. With no status
   among the visible columns, or a single focused column, the grid is flat,
@@ -71,10 +71,15 @@ fresh install starts with `todo`, `in-progress`, `review`, `done`.
 - Removing a column leaves its projects' status ids in place; they render as
   *No status* until you re-sort them (or restore the column's id in
   `settings.json`). Nothing is deleted on your behalf.
-- *No status* is not a column (it cannot be renamed, moved or removed),
-  but it has a colour of its own: the *No status* row under the columns
-  sets it (`status_board.no_status_color`), grey by default. It tints the
-  *No status* lane spine and sidebar caption, never a project.
+- *No status* is not a column (it cannot be renamed or removed), but it
+  has a colour and a place of its own. Its row stands among the columns in
+  the board order: its swatches set the colour
+  (`status_board.no_status_color`), grey by default, which tints the
+  *No status* lane spine and sidebar caption, never a project; its arrows
+  move it (`status_board.no_status_position`, last by default), and the
+  lanes, the sidebar groups and `okena status ls` follow. Moving a column
+  past it moves *No status* instead; removing a column keeps it between
+  the same neighbours.
 - Adding a column gives it a fresh random id (a UUID), never derived from
   the name, so a new column never picks up the statuses of a removed one.
 
@@ -107,15 +112,15 @@ lanes with `set_status_lanes` and the overview's with
 
 | Command | Does |
 |---|---|
-| `okena status ls [project] [--json]` | Every project, or one family (the parent and its worktrees), in board order: `name`, column name, column id. `--json` adds the columns and whether the board is on. |
+| `okena status ls [project] [--json]` | Every project, or one family (the parent and its worktrees), in board order: `name`, column name, column id. `--json` adds the columns, whether the board is on and the *No status* colour and position. |
 | `okena status get [project]` | One project's column name and id (nothing when unset). |
 | `okena status set <column> [project]` | Set a status. The column is an id or a case-insensitive name. |
 | `okena status clear [project]` | Clear it. |
 | `okena status lanes <on\|off> [project] [--window w]` | Lanes for the project's family in the `--window` target, else each attached desktop's active window. |
 | `okena status lanes <on\|off> --overview [--window w]` | The overview's lanes, in the same target window. |
 | `okena status enable` / `disable` | The master switch. |
-| `okena status column ls \| add <name> [--color c] \| rename \| color \| move <column> <position> \| rm` | Edit the columns as the settings editor does: ids stay, a new column gets a random id, removing one keeps its projects' ids. `add` prints the new id. |
-| `okena status column no-status [color]` | Print the *No status* colour, or set it. |
+| `okena status column ls \| add <name> [--color c] \| rename \| color \| move <column> <position> \| rm` | Edit the columns as the settings editor does: ids stay, a new column gets a random id, removing one keeps its projects' ids. `add` prints the new id. `move` counts columns only; *No status* keeps its place. |
+| `okena status column no-status [color] [--position n]` | Print the *No status* colour and position (`color<TAB>position`), or set either. The position is 1-based in the board order (columns + 1 = last). |
 
 A project is an id, a case-insensitive name or a path. Omitted, it is the
 project of the terminal the command runs in (`$OKENA_TERMINAL_ID`), so an

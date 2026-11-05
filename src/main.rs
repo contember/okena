@@ -756,6 +756,7 @@ fn main() {
                 enabled: board.enabled,
                 columns: &board.columns,
                 no_status_color: board.no_status_color,
+                no_status_at: board.no_status_index(),
             }
         }));
 

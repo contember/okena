@@ -371,6 +371,11 @@ pub struct StatusBoardSettings {
     /// `Default` (the default) draws it grey.
     #[serde(default, skip_serializing_if = "is_default_folder_color")]
     pub no_status_color: okena_core::theme::FolderColor,
+    /// Where the "No status" group stands among the columns: the number of
+    /// columns before it. `None` (the default) puts it last. Read through
+    /// [`Self::no_status_index`], which clamps a stale value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub no_status_position: Option<usize>,
 }
 
 fn is_default_folder_color(color: &okena_core::theme::FolderColor) -> bool {
@@ -383,6 +388,7 @@ impl Default for StatusBoardSettings {
             enabled: false,
             columns: default_board_columns(),
             no_status_color: okena_core::theme::FolderColor::Default,
+            no_status_position: None,
         }
     }
 }
@@ -426,11 +432,72 @@ impl StatusBoardSettings {
     }
 
     /// Remove a column. Projects in it keep their status id and render as
-    /// unassigned until they are re-sorted. Returns whether it existed.
+    /// unassigned until they are re-sorted. "No status" keeps its neighbours.
+    /// Returns whether it existed.
     pub fn remove_column(&mut self, id: &str) -> bool {
-        let before = self.columns.len();
-        self.columns.retain(|c| c.id != id);
-        self.columns.len() != before
+        let Some(index) = self.columns.iter().position(|c| c.id == id) else {
+            return false;
+        };
+        let no_status = self.no_status_index();
+        self.columns.remove(index);
+        if index < no_status {
+            self.set_no_status_index(no_status - 1);
+        } else {
+            self.set_no_status_index(no_status);
+        }
+        true
+    }
+
+    /// The number of columns before the "No status" group: where it stands
+    /// in the board order. Always within `0..=columns.len()`.
+    pub fn no_status_index(&self) -> usize {
+        self.no_status_position
+            .map_or(self.columns.len(), |at| at.min(self.columns.len()))
+    }
+
+    /// Put "No status" after `index` columns (clamped). Stored as `None` at
+    /// the end, so it stays last while columns are added. Returns whether
+    /// the order changed.
+    pub fn set_no_status_index(&mut self, index: usize) -> bool {
+        let before = self.no_status_index();
+        let index = index.min(self.columns.len());
+        self.no_status_position = (index < self.columns.len()).then_some(index);
+        index != before
+    }
+
+    /// Move a column, or "No status" (`None`), one step up (`delta < 0`) or
+    /// down in the board order, the order the settings list shows: columns
+    /// with "No status" among them. Stepping past "No status" moves it
+    /// instead of reordering columns. Returns whether anything changed.
+    pub fn step_in_board_order(&mut self, id: Option<&str>, delta: i32) -> bool {
+        let no_status = self.no_status_index();
+        let Some(id) = id else {
+            let Some(to) = no_status.checked_add_signed(delta as isize) else {
+                return false;
+            };
+            return to <= self.columns.len() && self.set_no_status_index(to);
+        };
+        let Some(index) = self.columns.iter().position(|c| c.id == id) else {
+            return false;
+        };
+        // The column's slot in the board order, then its neighbour's.
+        let slot = index + usize::from(index >= no_status);
+        let Some(neighbour) = slot.checked_add_signed(delta.signum() as isize) else {
+            return false;
+        };
+        if neighbour > self.columns.len() {
+            return false;
+        }
+        if neighbour == no_status {
+            // Swap with "No status": the columns keep their order.
+            return self.set_no_status_index(if delta < 0 {
+                no_status + 1
+            } else {
+                no_status - 1
+            });
+        }
+        let to = neighbour - usize::from(neighbour > no_status);
+        self.move_column(id, to)
     }
 
     /// Move a column to position `to` (0-based), shifting the ones between.
@@ -1313,6 +1380,91 @@ mod tests {
         let json = serde_json::to_string(&board).unwrap();
         let back: StatusBoardSettings = serde_json::from_str(&json).unwrap();
         assert_eq!(back.no_status_color, FolderColor::Blue);
+    }
+
+    #[test]
+    fn status_board_no_status_position_defaults_last_and_round_trips() {
+        let settings: AppSettings = serde_json::from_str("{}").unwrap();
+        let mut board = settings.status_board;
+        assert_eq!(board.no_status_index(), board.columns.len());
+        // Last is the default, so it stays out of settings.json.
+        let json = serde_json::to_value(&board).unwrap();
+        assert!(json.get("no_status_position").is_none());
+
+        assert!(board.set_no_status_index(1));
+        let json = serde_json::to_string(&board).unwrap();
+        let back: StatusBoardSettings = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.no_status_index(), 1);
+
+        // A stale position past the end reads as last.
+        board.no_status_position = Some(99);
+        assert_eq!(board.no_status_index(), board.columns.len());
+    }
+
+    fn board_order(board: &StatusBoardSettings) -> Vec<String> {
+        let mut order: Vec<String> = board.columns.iter().map(|c| c.id.clone()).collect();
+        order.insert(board.no_status_index(), "-".to_string());
+        order
+    }
+
+    fn abc() -> StatusBoardSettings {
+        StatusBoardSettings {
+            columns: vec![
+                BoardColumn::new("a", "A"),
+                BoardColumn::new("b", "B"),
+                BoardColumn::new("c", "C"),
+            ],
+            ..StatusBoardSettings::default()
+        }
+    }
+
+    #[test]
+    fn stepping_no_status_moves_it_between_columns() {
+        let mut board = abc();
+        assert_eq!(board_order(&board), ["a", "b", "c", "-"]);
+        assert!(!board.step_in_board_order(None, 1));
+        assert!(board.step_in_board_order(None, -1));
+        assert_eq!(board_order(&board), ["a", "b", "-", "c"]);
+        assert!(board.step_in_board_order(None, -1));
+        assert!(board.step_in_board_order(None, -1));
+        assert_eq!(board_order(&board), ["-", "a", "b", "c"]);
+        assert!(!board.step_in_board_order(None, -1));
+        assert!(board.step_in_board_order(None, 3));
+        assert_eq!(board_order(&board), ["a", "b", "c", "-"]);
+        assert_eq!(board.no_status_position, None);
+    }
+
+    #[test]
+    fn stepping_a_column_past_no_status_moves_no_status() {
+        let mut board = abc();
+        board.set_no_status_index(1);
+        assert_eq!(board_order(&board), ["a", "-", "b", "c"]);
+        assert!(board.step_in_board_order(Some("b"), -1));
+        assert_eq!(board_order(&board), ["a", "b", "-", "c"]);
+        assert!(board.step_in_board_order(Some("b"), 1));
+        assert_eq!(board_order(&board), ["a", "-", "b", "c"]);
+        assert!(board.step_in_board_order(Some("c"), -1));
+        assert_eq!(board_order(&board), ["a", "-", "c", "b"]);
+        assert!(board.step_in_board_order(Some("a"), 1));
+        assert_eq!(board_order(&board), ["-", "a", "c", "b"]);
+        assert!(!board.step_in_board_order(Some("b"), 1));
+        assert!(board.step_in_board_order(Some("a"), -1));
+        assert_eq!(board_order(&board), ["a", "-", "c", "b"]);
+        assert!(!board.step_in_board_order(Some("gone"), 1));
+    }
+
+    #[test]
+    fn removing_a_column_keeps_no_status_between_its_neighbours() {
+        let mut board = abc();
+        board.set_no_status_index(2);
+        assert!(board.remove_column("a"));
+        assert_eq!(board_order(&board), ["b", "-", "c"]);
+        assert!(board.remove_column("c"));
+        assert_eq!(board_order(&board), ["b", "-"]);
+        assert_eq!(board.no_status_position, None);
+        // Added columns land before a last "No status".
+        board.add_column("D");
+        assert_eq!(board.no_status_index(), 2);
     }
 
     #[test]

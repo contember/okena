@@ -435,16 +435,15 @@ impl SettingsState {
         }
     }
 
-    /// Move a column one step up (`-1`) or down (`1`).
-    pub fn move_status_board_column(&mut self, id: &str, delta: i32, cx: &mut Context<Self>) {
-        let board = &mut self.settings.status_board;
-        let Some(index) = board.columns.iter().position(|c| c.id == id) else {
-            return;
-        };
-        let Ok(target) = usize::try_from(index as i64 + delta as i64) else {
-            return;
-        };
-        if board.move_column(id, target) {
+    /// Move a column, or "No status" (`None`), one step up (`-1`) or down
+    /// (`1`) in the board order the settings list shows.
+    pub fn step_status_board_entry(
+        &mut self,
+        id: Option<&str>,
+        delta: i32,
+        cx: &mut Context<Self>,
+    ) {
+        if self.settings.status_board.step_in_board_order(id, delta) {
             self.save_and_notify(cx);
         }
     }

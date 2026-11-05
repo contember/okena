@@ -35,7 +35,7 @@ pub(crate) fn worktree_rows(statuses: &[Option<&str>], cx: &App) -> Vec<Worktree
 
 fn group_worktree_rows(statuses: &[Option<&str>], board: StatusBoard<'_>) -> Vec<WorktreeRow> {
     let grouped = if board.enabled {
-        grouped_rows(statuses, board.columns)
+        grouped_rows(statuses, board.columns, board.no_status_at)
     } else {
         None
     };
@@ -172,6 +172,7 @@ mod tests {
             enabled: false,
             columns: &columns,
             no_status_color: FolderColor::Default,
+            no_status_at: usize::MAX,
         };
         let rows = group_worktree_rows(&[Some("done"), None, Some("todo")], board);
         assert_eq!(shape(&rows), vec![(0, None), (1, None), (2, None)]);
@@ -184,6 +185,7 @@ mod tests {
             enabled: true,
             columns: &columns,
             no_status_color: FolderColor::Default,
+            no_status_at: usize::MAX,
         };
         let rows = group_worktree_rows(&[Some("done"), None, Some("todo")], board);
         assert_eq!(
@@ -203,6 +205,7 @@ mod tests {
             enabled: true,
             columns: &columns,
             no_status_color: FolderColor::Blue,
+            no_status_at: usize::MAX,
         };
         let rows = group_worktree_rows(&[Some("todo"), None], board);
         let captions: Vec<FolderColor> = rows
@@ -220,6 +223,7 @@ mod tests {
             enabled: true,
             columns: &columns,
             no_status_color: FolderColor::Default,
+            no_status_at: usize::MAX,
         };
         assert_eq!(status_group(Some("todo"), on), Some("todo"));
         assert_eq!(status_group(Some("gone"), on), None);
@@ -228,6 +232,7 @@ mod tests {
             enabled: false,
             columns: &columns,
             no_status_color: FolderColor::Default,
+            no_status_at: usize::MAX,
         };
         assert_eq!(status_group(Some("todo"), off), None);
     }
