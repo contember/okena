@@ -29,6 +29,12 @@ as it did before.
   divider between two columns only exists inside a lane. With no status
   among the visible columns, or a single focused column, the grid is flat,
   lanes or not.
+- **Overview lanes** (Overview row's view menu → *Status lanes*, or
+  `Cmd+Shift+K` / `Ctrl+Shift+K` with no project focused; remembered per
+  window): the overview stands every visible column in lanes by its own
+  status, whatever family it belongs to, a folder filter included. This is
+  a separate switch from a family's lanes: turning one on leaves the other
+  as it was. The tile grid layout stays flat.
 - **Sidebar**: once any worktree of a parent has a status, the parent's
   worktree rows split under small captions (a dot and the name in the
   column's colour), one per non-empty column in the columns' order, then
@@ -77,9 +83,11 @@ column id), omitted when unset. Clients set it through the
 but have no UI for it yet. A status set from another client repaints the
 cached terminal panes like a rename or recolour does (it is part of
 `Workspace::project_presentation`). The lanes view is client presentation,
-per window: `status_lanes_projects` (the parent ids with lanes on) on each
-window in `window-layout.json`, like the sort mode. An API client switches it
-with `set_status_lanes`, which the server pushes on to attached desktops.
+per window: `status_lanes_projects` (the parent ids with lanes on) and
+`status_lanes_overview` (omitted when off) on each window in
+`window-layout.json`, like the sort mode. An API client switches a family's
+lanes with `set_status_lanes`, which the server pushes on to attached
+desktops; the overview's lanes have no API yet.
 
 ## From the command line
 

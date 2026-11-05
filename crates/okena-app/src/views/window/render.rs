@@ -94,8 +94,9 @@ impl WindowView {
         project_pixel_widths(widths, available_width, min_col_width, persisted_scale)
     }
 
-    /// The grid's column order and spans: lanes by status while the focused
-    /// family has them on, the flat grid otherwise. A single column needs no
+    /// The grid's column order and spans: lanes by status while the current
+    /// view has them on (the focused family's flag, or the overview's when
+    /// nothing is focused), the flat grid otherwise. A single column needs no
     /// caption either way, and the tile grid keeps the window's order.
     fn grid_layout(&self, visible: Vec<String>, cx: &App) -> GridLayout {
         if visible.len() <= 1 || !okena_ui::board::status_board_enabled(cx) {
@@ -105,11 +106,8 @@ impl WindowView {
         if workspace.project_layout_mode(self.window_id).is_grid() {
             return GridLayout::flat(visible);
         }
-        let lanes_on = self
-            .focus_manager
-            .read(cx)
-            .focused_project_id()
-            .is_some_and(|root| workspace.status_lanes(self.window_id, root));
+        let focused = self.focus_manager.read(cx).focused_project_id().cloned();
+        let lanes_on = workspace.status_lanes_for_view(self.window_id, focused.as_deref());
         if !lanes_on {
             return GridLayout::flat(visible);
         }
@@ -1343,20 +1341,20 @@ impl Render for WindowView {
                     overlay_manager.update(cx, |om, cx| om.toggle_hook_log(cx));
                 }
             }))
-            // Status lanes: regroup this window's columns by status.
+            // Status lanes: regroup this window's columns by status — the
+            // focused family's, or every overview column when nothing is
+            // focused.
             .on_action(cx.listener(|this, _: &ToggleStatusLanes, _window, cx| {
-                let window_id = this.window_id;
-                let focused = this.focus_manager.read(cx).focused_project_id().cloned();
-                // The binding has no context: with nothing to toggle, hand the
+                // The binding has no context: with the board off, hand the
                 // keystroke on to the focused terminal instead of swallowing it.
-                let Some(project_id) =
-                    focused.filter(|_| okena_ui::board::status_board_enabled(cx))
-                else {
+                if !okena_ui::board::status_board_enabled(cx) {
                     cx.propagate();
                     return;
-                };
+                }
+                let window_id = this.window_id;
+                let focused = this.focus_manager.read(cx).focused_project_id().cloned();
                 this.workspace.update(cx, |ws, cx| {
-                    ws.toggle_status_lanes(window_id, &project_id, cx)
+                    ws.toggle_status_lanes_for_view(window_id, focused.as_deref(), cx)
                 });
             }))
             // Handle show log console action

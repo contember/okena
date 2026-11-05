@@ -231,6 +231,10 @@ pub struct WindowView {
     /// so the project stays in the same place rather than jumping to center.
     /// (The offset is otherwise clamped to 0 while a single project is zoomed.)
     saved_grid_offset: Option<Point<Pixels>>,
+    /// Last-seen overview status-lanes flag. A flip regroups the overview
+    /// columns, so the observer re-reveals the focused column (or, while
+    /// zoomed, drops `saved_grid_offset`, which was taken on the old order).
+    last_overview_lanes: bool,
     /// Set by an explicit "jump to project" (project switcher Tab) so the next
     /// focus-change observation centers the target. Other project switches
     /// (cmd+alt+arrow, mouse click) leave it unset and only ensure visibility.
@@ -422,6 +426,7 @@ impl WindowView {
             was_project_focused: false,
             pending_center_scroll: None,
             saved_grid_offset: None,
+            last_overview_lanes: false,
             center_next_navigation: false,
             last_project_paths: HashMap::new(),
             last_data_replacement_epoch,
@@ -519,8 +524,24 @@ impl WindowView {
             }
             this.refresh_for_project_path_changes(cx);
             this.prune_project_inspector_cache(cx);
+
+            let overview_lanes = this.workspace.read(cx).status_lanes_overview(this.window_id);
+            if overview_lanes != this.last_overview_lanes {
+                this.last_overview_lanes = overview_lanes;
+                let fm = this.focus_manager.read(cx);
+                if fm.focused_project_id().is_some() {
+                    // The offset saved on zoom-in belongs to the old order;
+                    // unzoom falls back to revealing the focused column.
+                    this.saved_grid_offset = None;
+                } else {
+                    let focused = fm.focused_terminal_state().map(|f| f.project_id.clone());
+                    this.scroll_to_focused_project(focused.as_deref(), false, cx);
+                }
+            }
         })
         .detach();
+
+        view.last_overview_lanes = view.workspace.read(cx).status_lanes_overview(view.window_id);
 
         // Initialize project columns
         view.sync_project_columns(cx);

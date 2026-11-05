@@ -348,6 +348,14 @@ impl WorkspaceData {
         })
     }
 
+    /// Flip the status-lanes view of the targeted window's overview and
+    /// return the new value. Unknown extra ids are a silent no-op (`None`).
+    pub fn toggle_status_lanes_overview(&mut self, id: WindowId) -> Option<bool> {
+        let w = self.window_mut(id)?;
+        w.status_lanes_overview = !w.status_lanes_overview;
+        Some(w.status_lanes_overview)
+    }
+
     /// Append a fresh extra window onto `extra_windows` and return its id.
     ///
     /// Snapshots the current set of project IDs into the new window's
