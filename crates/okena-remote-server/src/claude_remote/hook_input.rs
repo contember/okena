@@ -75,7 +75,9 @@ pub(super) struct HookInput {
     pub permission_suggestions: Vec<serde_json::Value>,
     /// `SessionStart` only: `startup`, `resume`, `clear` or `compact`.
     pub source: Option<String>,
-    /// `SubagentStart`/`SubagentStop` only. Only an id that passes
+    /// Set on every hook a subagent fires (`SubagentStart`/`SubagentStop`,
+    /// and its tool hooks such as `PermissionRequest` and `PostToolUse`);
+    /// `None` for the main agent. Only an id that passes
     /// [`is_valid_agent_id`]: clients build a file name from it.
     pub agent_id: Option<String>,
     pub agent_type: Option<String>,
