@@ -698,6 +698,9 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
         ActionRequest::SetProjectLayout { mode, window } => {
             ActionRequest::SetProjectLayout { mode, window }
         }
+        ActionRequest::SetOverviewStatusLanes { on, window } => {
+            ActionRequest::SetOverviewStatusLanes { on, window }
+        }
         ActionRequest::RenameTerminal {
             project_id,
             terminal_id,

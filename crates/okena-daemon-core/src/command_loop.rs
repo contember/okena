@@ -4235,11 +4235,13 @@ pub async fn daemon_command_loop(
                             &action,
                             ActionRequest::FocusTerminal { .. }
                                 | ActionRequest::SetProjectLayout { .. }
+                                | ActionRequest::SetOverviewStatusLanes { .. }
                         );
                         // Resolve the action's explicit target window (if any)
                         // BEFORE moving `action` into `execute_action`. The daemon
-                        // serves only the synthetic main window. FocusTerminal and
-                        // SetProjectLayout run here for an extra UI window too; the
+                        // serves only the synthetic main window. FocusTerminal,
+                        // SetProjectLayout and SetOverviewStatusLanes run here for
+                        // an extra UI window too; the
                         // other per-window actions are only validated, and the
                         // server pushes them to the desktop that owns the window.
                         let parsed_target = match action.target_window() {

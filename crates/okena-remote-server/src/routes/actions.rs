@@ -6,8 +6,9 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use okena_core::api::{
-    ApiFullscreenRequest, ApiProjectLayoutRequest, ApiProjectPlacementRequest,
-    ApiProjectVisibilityRequest, ApiStatusLanesRequest, ApiTerminalFocusRequest, ApiWindow,
+    ApiFullscreenRequest, ApiOverviewStatusLanesRequest, ApiProjectLayoutRequest,
+    ApiProjectPlacementRequest, ApiProjectVisibilityRequest, ApiStatusLanesRequest,
+    ApiTerminalFocusRequest, ApiWindow,
 };
 use okena_core::ws::ClientPresentationRequest;
 use okena_workspace::state::WindowId;
@@ -70,6 +71,12 @@ fn presentation_request(action: &ActionRequest) -> Option<ClientPresentationRequ
                 window: window.clone(),
             },
         )),
+        ActionRequest::SetOverviewStatusLanes { on, window } => Some(
+            ClientPresentationRequest::OverviewStatusLanes(ApiOverviewStatusLanesRequest {
+                on: *on,
+                window: window.clone(),
+            }),
+        ),
         _ => None,
     }
 }
@@ -347,6 +354,10 @@ mod tests {
                 on: true,
                 window: Some(EXTRA.into()),
             },
+            ActionRequest::SetOverviewStatusLanes {
+                on: true,
+                window: Some(EXTRA.into()),
+            },
         ] {
             let (result, pushed, reached_daemon) =
                 presentation_with_windows(action, CommandResult::Ok(None), &declared).await;
@@ -450,6 +461,18 @@ mod tests {
                     project_id: "project-1".into(),
                     on: false,
                     window: None,
+                }
+            ))
+        );
+        assert_eq!(
+            presentation_request(&ActionRequest::SetOverviewStatusLanes {
+                on: true,
+                window: Some("main".into()),
+            }),
+            Some(ClientPresentationRequest::OverviewStatusLanes(
+                ApiOverviewStatusLanesRequest {
+                    on: true,
+                    window: Some("main".into()),
                 }
             ))
         );

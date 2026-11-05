@@ -96,9 +96,11 @@ For terminals running `claude` with Claude Remote on (Settings → Terminal).
   `status set <column> [project]`, `status clear [project]`. The project defaults
   to the one YOUR terminal belongs to, so in a worktree `okena status set review`
   marks it. Columns: `status column ls | add <name> [--color c] | rename | color |
-  move <column> <pos> | rm`; a column is an id or a name. `status enable|disable`
-  is the board's switch (statuses only show while it is on); `status lanes on|off
-  [project]` stacks the family's columns by status in a desktop window.
+  move <column> <pos> | rm | no-status [color]`; a column is an id or a name
+  (`no-status` prints or sets the No status group's color). `status
+  enable|disable` is the board's switch (statuses only show while it is on);
+  `status lanes on|off [project]` stacks the family's columns by status in a
+  desktop window, `status lanes on|off --overview` does it for the overview.
 - Services: `okena services [project]`, `okena service start|stop|restart <name> [project]`
 - Settings: `okena settings show [key] | schema | set <key> <value>` (dotted keys, e.g. `sidebar.width`).
 - Theme: `okena theme list | show [id] | set <id> | save <id> <json>`. To recolor

@@ -460,6 +460,16 @@ pub struct ApiStatusLanesRequest {
     pub window: Option<String>,
 }
 
+/// One-shot desktop presentation request emitted after an external
+/// `SetOverviewStatusLanes` action succeeds. The overview's lanes are per
+/// desktop window, so each desktop applies the request to its own window.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApiOverviewStatusLanesRequest {
+    pub on: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window: Option<String>,
+}
+
 /// The terminals a new worktree starts with.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -908,6 +918,15 @@ pub enum ActionRequest {
     /// presentation: the daemon only validates the project and pushes it on.
     SetStatusLanes {
         project_id: String,
+        on: bool,
+        /// Target window ("main" or an extra window's UUID). None = the focused window.
+        #[serde(default)]
+        window: Option<String>,
+    },
+    /// Show (`on`) or flatten the status lanes of a desktop window's overview
+    /// (no project focused), which group every visible column by status. Pure
+    /// desktop presentation: the daemon only validates it and pushes it on.
+    SetOverviewStatusLanes {
         on: bool,
         /// Target window ("main" or an extra window's UUID). None = the focused window.
         #[serde(default)]
@@ -1534,7 +1553,8 @@ impl ActionRequest {
             | ActionRequest::SetProjectShowInOverview { window, .. }
             | ActionRequest::SetFullscreen { window, .. }
             | ActionRequest::SetProjectLayout { window, .. }
-            | ActionRequest::SetStatusLanes { window, .. } => window.as_deref(),
+            | ActionRequest::SetStatusLanes { window, .. }
+            | ActionRequest::SetOverviewStatusLanes { window, .. } => window.as_deref(),
             _ => None,
         }
     }
@@ -2509,6 +2529,27 @@ mod tests {
             window: Some("main".into()),
         };
         assert_eq!(lanes.target_window(), Some("main"));
+
+        let overview = ActionRequest::SetOverviewStatusLanes {
+            on: true,
+            window: Some("main".into()),
+        };
+        assert_eq!(overview.target_window(), Some("main"));
+    }
+
+    #[test]
+    fn set_overview_status_lanes_wire_shape() {
+        let action: ActionRequest =
+            serde_json::from_str(r#"{"action":"set_overview_status_lanes","on":true}"#).unwrap();
+        assert!(matches!(
+            action,
+            ActionRequest::SetOverviewStatusLanes { on: true, window: None }
+        ));
+        assert!(
+            serde_json::from_str::<ActionRequest>(r#"{"action":"set_overview_status_lanes"}"#)
+                .is_err(),
+            "on is required: a lanes request always says which way"
+        );
     }
 
     #[test]

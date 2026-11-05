@@ -348,6 +348,16 @@ impl WorkspaceData {
         })
     }
 
+    /// Show (`on`) or flatten the status-lanes view of the targeted window's
+    /// overview. Returns whether anything changed; unknown extra ids are a
+    /// silent no-op (`None`).
+    pub fn set_status_lanes_overview(&mut self, id: WindowId, on: bool) -> Option<bool> {
+        let w = self.window_mut(id)?;
+        let changed = w.status_lanes_overview != on;
+        w.status_lanes_overview = on;
+        Some(changed)
+    }
+
     /// Flip the status-lanes view of the targeted window's overview and
     /// return the new value. Unknown extra ids are a silent no-op (`None`).
     pub fn toggle_status_lanes_overview(&mut self, id: WindowId) -> Option<bool> {

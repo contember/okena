@@ -1598,6 +1598,20 @@ impl Workspace {
         }
     }
 
+    /// Show (`on`) or flatten a window's overview lanes: the explicit form of
+    /// [`Self::toggle_status_lanes_overview`] for external requests.
+    /// Persisted via `notify_data` only when it changed.
+    pub fn set_status_lanes_overview(
+        &mut self,
+        window_id: WindowId,
+        on: bool,
+        cx: &mut impl WorkspaceCx,
+    ) {
+        if self.data.set_status_lanes_overview(window_id, on) == Some(true) {
+            self.notify_data(cx);
+        }
+    }
+
     /// Whether a window's overview stands its columns in status lanes.
     pub fn status_lanes_overview(&self, window_id: WindowId) -> bool {
         self.data
@@ -4305,6 +4319,11 @@ mod workspace_tests {
         ws.data.toggle_status_lanes(WindowId::Main, "p1");
         assert!(!ws.status_lanes_for_view(WindowId::Main, Some("p1")));
         assert!(ws.status_lanes_for_view(WindowId::Main, None));
+
+        // The explicit setter reports a change only when there is one.
+        assert_eq!(ws.data.set_status_lanes_overview(WindowId::Main, true), Some(false));
+        assert_eq!(ws.data.set_status_lanes_overview(WindowId::Main, false), Some(true));
+        assert!(!ws.status_lanes_overview(WindowId::Main));
     }
 }
 
