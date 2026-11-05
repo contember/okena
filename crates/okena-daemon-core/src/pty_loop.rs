@@ -1120,6 +1120,10 @@ mod tests {
         run_git(&repo, &["init", "-q", "-b", "main"]);
         run_git(&repo, &["config", "user.email", "test@okena.local"]);
         run_git(&repo, &["config", "user.name", "Okena Test"]);
+        // A global `commit.gpgsign = true` would sign the fixture commit, and
+        // parallel tests signing at once make gpg-agent fail. Repo-local, so
+        // it also covers the linked worktree.
+        run_git(&repo, &["config", "commit.gpgsign", "false"]);
         std::fs::write(repo.join("file.txt"), "base\n").expect("write fixture");
         run_git(&repo, &["add", "file.txt"]);
         run_git(&repo, &["commit", "-q", "-m", "base"]);

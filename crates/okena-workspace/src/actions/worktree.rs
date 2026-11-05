@@ -1708,7 +1708,14 @@ mod merge_pipeline_tests {
     }
 
     fn git(args: &[&str]) {
-        let output = Command::new("git").args(args).output().unwrap();
+        // The user's global config may sign commits; parallel tests then all
+        // queue on one gpg-agent, which fails some of them ("signing failed:
+        // Cannot allocate memory"). Fixture commits prove nothing by signing.
+        let output = Command::new("git")
+            .args(["-c", "commit.gpgsign=false"])
+            .args(args)
+            .output()
+            .unwrap();
         assert!(
             output.status.success(),
             "git {:?} failed: {}",
@@ -1755,6 +1762,15 @@ mod merge_pipeline_tests {
             "config",
             "user.name",
             "Okena Test",
+        ]);
+        // Persisted, not only passed by `git()`: the merge pipeline under test
+        // writes its own `--no-ff` merge commit here and would sign that too.
+        git(&[
+            "-C",
+            path_str(&main_repo),
+            "config",
+            "commit.gpgsign",
+            "false",
         ]);
         std::fs::write(main_repo.join("base.txt"), "base\n").unwrap();
         git(&["-C", path_str(&main_repo), "add", "base.txt"]);
