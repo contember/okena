@@ -1038,7 +1038,7 @@ impl Okena {
             .read(cx)
             .settings
             .cap_unfocused_window_fps;
-        let active_window = self.active_window_id(cx);
+        let active_window = self.activated_window_id(cx);
         let now = Instant::now();
         let pacer = &self.unfocused_window_pacer;
         let mut presented_windows = HashSet::new();
@@ -1080,6 +1080,24 @@ impl Okena {
         );
 
         self.queue_sidebar_activity_repaint(cx);
+    }
+
+    /// The main or extra window the compositor shows as active. This is the
+    /// state `observe_window_activation` reports; `cx.active_window()` follows
+    /// keyboard focus on Wayland, which a window can be active without.
+    fn activated_window_id(&self, cx: &mut App) -> Option<WindowId> {
+        let is_active = |handle: AnyWindowHandle, cx: &mut App| {
+            handle
+                .update(cx, |_, window, _| window.is_window_active())
+                .unwrap_or(false)
+        };
+        if is_active(self.main_window_handle, cx) {
+            return Some(WindowId::Main);
+        }
+        self.extra_window_handles
+            .iter()
+            .find(|(_, handle)| is_active(**handle, cx))
+            .map(|(window_id, _)| *window_id)
     }
 
     /// Arm a timer that presents deferred unfocused-window repaints when the
