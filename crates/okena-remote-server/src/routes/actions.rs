@@ -7,7 +7,7 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use okena_core::api::{
     ApiFullscreenRequest, ApiProjectLayoutRequest, ApiProjectPlacementRequest,
-    ApiProjectVisibilityRequest, ApiTerminalFocusRequest, ApiWindow,
+    ApiProjectVisibilityRequest, ApiStatusLanesRequest, ApiTerminalFocusRequest, ApiWindow,
 };
 use okena_core::ws::ClientPresentationRequest;
 use okena_workspace::state::WindowId;
@@ -59,6 +59,17 @@ fn presentation_request(action: &ActionRequest) -> Option<ClientPresentationRequ
                 window: window.clone(),
             }),
         ),
+        ActionRequest::SetStatusLanes {
+            project_id,
+            on,
+            window,
+        } => Some(ClientPresentationRequest::StatusLanes(
+            ApiStatusLanesRequest {
+                project_id: project_id.clone(),
+                on: *on,
+                window: window.clone(),
+            },
+        )),
         _ => None,
     }
 }
@@ -331,6 +342,11 @@ mod tests {
                 mode: okena_core::types::ProjectLayoutMode::Grid,
                 window: Some(EXTRA.into()),
             },
+            ActionRequest::SetStatusLanes {
+                project_id: "project-1".into(),
+                on: true,
+                window: Some(EXTRA.into()),
+            },
         ] {
             let (result, pushed, reached_daemon) =
                 presentation_with_windows(action, CommandResult::Ok(None), &declared).await;
@@ -420,6 +436,20 @@ mod tests {
                 ApiProjectLayoutRequest {
                     mode: okena_core::types::ProjectLayoutMode::Grid,
                     window: Some("main".into()),
+                }
+            ))
+        );
+        assert_eq!(
+            presentation_request(&ActionRequest::SetStatusLanes {
+                project_id: "project-1".into(),
+                on: false,
+                window: None,
+            }),
+            Some(ClientPresentationRequest::StatusLanes(
+                ApiStatusLanesRequest {
+                    project_id: "project-1".into(),
+                    on: false,
+                    window: None,
                 }
             ))
         );

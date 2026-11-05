@@ -240,6 +240,53 @@ fn terminal_names_list(project: &ApiProject) -> String {
     }
 }
 
+/// The project a terminal belongs to: in its layout, among its named
+/// terminals, or running one of its services. `None` when no project has it.
+pub fn project_of_terminal<'a>(
+    state: &'a StateResponse,
+    terminal_id: &str,
+) -> Option<&'a ApiProject> {
+    state.projects.iter().find(|project| {
+        project
+            .layout
+            .as_ref()
+            .is_some_and(|layout| layout_contains_terminal(layout, terminal_id))
+            || project.terminal_names.contains_key(terminal_id)
+            || project
+                .services
+                .iter()
+                .any(|service| service.terminal_id.as_deref() == Some(terminal_id))
+    })
+}
+
+/// The family `project` belongs to: its parent project (itself, unless it is
+/// a worktree of a project still in the state) first, then the parent's
+/// worktrees in state order.
+pub fn project_family<'a>(state: &'a StateResponse, project: &ApiProject) -> Vec<&'a ApiProject> {
+    let root = project
+        .worktree_info
+        .as_ref()
+        .map(|wt| wt.parent_project_id.as_str())
+        .filter(|parent| state.projects.iter().any(|p| p.id == *parent))
+        .unwrap_or(project.id.as_str());
+    let is_child = |p: &ApiProject| {
+        p.worktree_info
+            .as_ref()
+            .is_some_and(|wt| wt.parent_project_id == root)
+    };
+    state
+        .projects
+        .iter()
+        .filter(|p| p.id == root)
+        .chain(
+            state
+                .projects
+                .iter()
+                .filter(|p| p.id != root && is_child(p)),
+        )
+        .collect()
+}
+
 fn layout_contains_terminal(node: &ApiLayoutNode, target: &str) -> bool {
     match node {
         ApiLayoutNode::Terminal {
@@ -439,6 +486,67 @@ mod tests {
             bounds: None,
             sidebar_open: None,
         }
+    }
+
+    fn worktree_of(id: &str, name: &str, parent: &str) -> ApiProject {
+        let mut p = project(id, name, &format!("/tmp/{id}"), None);
+        p.terminal_names.clear();
+        p.worktree_info = Some(okena_core::api::ApiWorktreeMetadata {
+            parent_project_id: parent.into(),
+            color_override: None,
+            custom_name: false,
+        });
+        p
+    }
+
+    #[test]
+    fn project_of_terminal_finds_layout_named_and_service_terminals() {
+        let mut a = project("a", "A", "/tmp/a", Some(term("t9")));
+        a.terminal_names.clear();
+        let mut b = project("b", "B", "/tmp/b", None);
+        b.terminal_names.clear();
+        b.terminal_names.insert("named".into(), "shell".into());
+        b.services.push(okena_core::api::ApiServiceInfo {
+            name: "web".into(),
+            status: "running".into(),
+            terminal_id: Some("svc".into()),
+            ports: vec![],
+            exit_code: None,
+            kind: "okena".into(),
+            is_extra: false,
+        });
+        let state = state_with(vec![a, b], vec![]);
+        let id_of = |t: &str| project_of_terminal(&state, t).map(|p| p.id.clone());
+        assert_eq!(id_of("t9").as_deref(), Some("a"));
+        assert_eq!(id_of("named").as_deref(), Some("b"));
+        assert_eq!(id_of("svc").as_deref(), Some("b"));
+        assert_eq!(id_of("nope"), None);
+    }
+
+    #[test]
+    fn project_family_is_the_parent_then_its_worktrees() {
+        let state = state_with(
+            vec![
+                worktree_of("w1", "feat-a", "p"),
+                project("other", "Other", "/tmp/other", None),
+                project("p", "Parent", "/tmp/p", None),
+                worktree_of("w2", "feat-b", "p"),
+                worktree_of("orphan", "lost", "gone"),
+            ],
+            vec![],
+        );
+        let ids = |filter: &str| {
+            let p = resolve_project(&state, filter).unwrap();
+            project_family(&state, p)
+                .iter()
+                .map(|p| p.id.as_str())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(ids("p"), ["p", "w1", "w2"]);
+        assert_eq!(ids("feat-b"), ["p", "w1", "w2"]);
+        assert_eq!(ids("other"), ["other"]);
+        // A worktree whose parent is gone stands for itself.
+        assert_eq!(ids("orphan"), ["orphan"]);
     }
 
     #[test]

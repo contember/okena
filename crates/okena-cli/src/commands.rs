@@ -569,32 +569,24 @@ pub fn cli_whoami(json_mode: bool) -> i32 {
 
     match fetch_state(&token) {
         Ok(state) => {
-            for project in &state.projects {
-                if has_terminal_id(&project.layout, &terminal_id)
-                    || project.terminal_names.contains_key(&terminal_id)
-                    || project
-                        .services
-                        .iter()
-                        .any(|s| s.terminal_id.as_deref() == Some(&terminal_id))
-                {
-                    if json_mode {
-                        println!(
-                            "{}",
-                            serde_json::json!({
-                                "terminal_id": terminal_id,
-                                "project_id": project.id,
-                                "project_name": project.name,
-                                "project_path": project.path,
-                            })
-                        );
-                    } else {
-                        println!(
-                            "{}\t{}\t{}\t{}",
-                            terminal_id, project.id, project.name, project.path
-                        );
-                    }
-                    return 0;
+            if let Some(project) = resolve::project_of_terminal(&state, &terminal_id) {
+                if json_mode {
+                    println!(
+                        "{}",
+                        serde_json::json!({
+                            "terminal_id": terminal_id,
+                            "project_id": project.id,
+                            "project_name": project.name,
+                            "project_path": project.path,
+                        })
+                    );
+                } else {
+                    println!(
+                        "{}\t{}\t{}\t{}",
+                        terminal_id, project.id, project.name, project.path
+                    );
                 }
+                return 0;
             }
 
             // Terminal not found in any project
@@ -614,23 +606,6 @@ pub fn cli_whoami(json_mode: bool) -> i32 {
             eprintln!("Warning: could not fetch state: {e}");
             0
         }
-    }
-}
-
-/// Check if a layout tree contains a terminal with the given ID.
-fn has_terminal_id(node: &Option<okena_core::api::ApiLayoutNode>, terminal_id: &str) -> bool {
-    use okena_core::api::ApiLayoutNode;
-    match node {
-        None => false,
-        Some(ApiLayoutNode::Terminal {
-            terminal_id: Some(id),
-            ..
-        }) => id == terminal_id,
-        Some(ApiLayoutNode::Terminal { .. }) => false,
-        Some(ApiLayoutNode::Split { children, .. })
-        | Some(ApiLayoutNode::Tabs { children, .. }) => children
-            .iter()
-            .any(|c| has_terminal_id(&Some(c.clone()), terminal_id)),
     }
 }
 
@@ -717,7 +692,7 @@ where
 }
 
 /// POST an action body and print any non-empty response on stdout.
-fn post_action(token: &str, body: &serde_json::Value) -> i32 {
+pub(crate) fn post_action(token: &str, body: &serde_json::Value) -> i32 {
     match api_action(token, &body.to_string()) {
         Ok(resp) => {
             if !resp.trim().is_empty() {
@@ -810,7 +785,7 @@ fn resolve_folder_id(state: &StateResponse, filter: &str) -> Result<String, Stri
 }
 
 /// Validate a color against FolderColor's serde names (all lowercase).
-fn validate_color(color: &str) -> Result<String, String> {
+pub(crate) fn validate_color(color: &str) -> Result<String, String> {
     const COLORS: &[&str] = &[
         "default", "red", "orange", "yellow", "lime", "green", "teal", "cyan", "blue", "indigo",
         "purple", "pink",
@@ -942,6 +917,7 @@ pub fn cli_ls(json_mode: bool) -> i32 {
                     "name": p.name,
                     "path": p.path,
                     "hidden": !p.show_in_overview,
+                    "status": p.status,
                     "git": p.git_status,
                     "terminals": terminals,
                     "layout": p.layout,
@@ -958,7 +934,13 @@ pub fn cli_ls(json_mode: bool) -> i32 {
         }
         return 0;
     }
-    render_ls(&state);
+    let board = state
+        .projects
+        .iter()
+        .any(|p| p.status.is_some())
+        .then(|| crate::status::try_fetch_board(&token))
+        .flatten();
+    render_ls(&state, board.as_ref());
     0
 }
 
@@ -993,7 +975,10 @@ fn short_window_id(id: &str) -> String {
 }
 
 /// Render the human-readable `ls` overview (windows + projects + layout tree).
-fn render_ls(state: &StateResponse) {
+fn render_ls(
+    state: &StateResponse,
+    board: Option<&okena_workspace::settings::StatusBoardSettings>,
+) {
     if !state.windows.is_empty() {
         println!("WINDOWS");
         for w in &state.windows {
@@ -1032,6 +1017,12 @@ fn render_ls(state: &StateResponse) {
             header.push_str(&format!(
                 "\t[{} +{} -{}]",
                 branch, git.lines_added, git.lines_removed
+            ));
+        }
+        if let Some(status) = &p.status {
+            header.push_str(&format!(
+                "\tstatus: {}",
+                crate::status::status_label(status, board)
             ));
         }
         if !p.show_in_overview {

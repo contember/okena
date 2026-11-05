@@ -711,6 +711,15 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
             project_id: s(&project_id),
             status,
         },
+        ActionRequest::SetStatusLanes {
+            project_id,
+            on,
+            window,
+        } => ActionRequest::SetStatusLanes {
+            project_id: s(&project_id),
+            on,
+            window,
+        },
         ActionRequest::SwitchTerminalShell {
             project_id,
             terminal_id,

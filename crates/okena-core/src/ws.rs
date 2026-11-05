@@ -1,7 +1,7 @@
 use crate::api::{
     ApiFullscreenRequest, ApiGitStatus, ApiProjectLayoutRequest, ApiProjectPlacementRequest,
-    ApiProjectVisibilityRequest, ApiSystemStats, ApiTerminalFocusRequest, ApiToast, ApiUsage,
-    ApiWindow,
+    ApiProjectVisibilityRequest, ApiStatusLanesRequest, ApiSystemStats, ApiTerminalFocusRequest,
+    ApiToast, ApiUsage, ApiWindow,
 };
 use crate::keys::SpecialKey;
 use serde::{Deserialize, Serialize};
@@ -116,6 +116,10 @@ pub enum WsOutbound {
     /// One-shot request for a connected desktop client to switch one of its
     /// windows to a project layout mode after an external API action succeeds.
     ProjectLayoutRequested(ApiProjectLayoutRequest),
+    /// One-shot request for a connected desktop client to show or flatten a
+    /// project family's status lanes in one of its windows after an external
+    /// API action succeeds.
+    StatusLanesRequested(ApiStatusLanesRequest),
     TerminalResized {
         terminal_id: String,
         cols: u16,
@@ -139,6 +143,7 @@ pub enum ClientPresentationRequest {
     Fullscreen(ApiFullscreenRequest),
     ProjectPlacement(ApiProjectPlacementRequest),
     ProjectLayout(ApiProjectLayoutRequest),
+    StatusLanes(ApiStatusLanesRequest),
 }
 
 impl From<ClientPresentationRequest> for WsOutbound {
@@ -158,6 +163,9 @@ impl From<ClientPresentationRequest> for WsOutbound {
             }
             ClientPresentationRequest::ProjectLayout(request) => {
                 WsOutbound::ProjectLayoutRequested(request)
+            }
+            ClientPresentationRequest::StatusLanes(request) => {
+                WsOutbound::StatusLanesRequested(request)
             }
         }
     }
@@ -386,6 +394,24 @@ mod tests {
         assert_eq!(
             serde_json::from_value::<ApiProjectLayoutRequest>(value).unwrap(),
             layout
+        );
+
+        let lanes = ApiStatusLanesRequest {
+            project_id: "p1".into(),
+            on: true,
+            window: None,
+        };
+        let value = serde_json::to_value(WsOutbound::from(ClientPresentationRequest::StatusLanes(
+            lanes.clone(),
+        )))
+        .unwrap();
+        assert_eq!(value["type"], "status_lanes_requested");
+        assert_eq!(value["project_id"], "p1");
+        assert_eq!(value["on"], true);
+        assert!(value.get("window").is_none());
+        assert_eq!(
+            serde_json::from_value::<ApiStatusLanesRequest>(value).unwrap(),
+            lanes
         );
     }
 

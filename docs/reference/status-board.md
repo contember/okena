@@ -78,7 +78,30 @@ but have no UI for it yet. A status set from another client repaints the
 cached terminal panes like a rename or recolour does (it is part of
 `Workspace::project_presentation`). The lanes view is client presentation,
 per window: `status_lanes_projects` (the parent ids with lanes on) on each
-window in `window-layout.json`, like the sort mode.
+window in `window-layout.json`, like the sort mode. An API client switches it
+with `set_status_lanes`, which the server pushes on to attached desktops.
+
+## From the command line
+
+`okena status` covers everything above (see `okena status --help`):
+
+| Command | Does |
+|---|---|
+| `okena status ls [project] [--json]` | Every project, or one family (the parent and its worktrees), in board order: `name`, column name, column id. `--json` adds the columns and whether the board is on. |
+| `okena status get [project]` | One project's column name and id (nothing when unset). |
+| `okena status set <column> [project]` | Set a status. The column is an id or a case-insensitive name. |
+| `okena status clear [project]` | Clear it. |
+| `okena status lanes <on\|off> [project] [--window w]` | Lanes for the project's family in the `--window` target, else each attached desktop's active window. |
+| `okena status enable` / `disable` | The master switch. |
+| `okena status column ls \| add <name> [--color c] \| rename \| color \| move <column> <position> \| rm` | Edit the columns as the settings editor does: ids stay, a new column gets a random id, removing one keeps its projects' ids. `add` prints the new id. |
+
+A project is an id, a case-insensitive name or a path. Omitted, it is the
+project of the terminal the command runs in (`$OKENA_TERMINAL_ID`), so an
+agent working in a worktree can run `okena status set review`; the focused
+project is never assumed. The CLI refuses a blank column name or one another
+column already has, so names stay usable as addresses. `set` and `lanes`
+warn on stderr while the board is off. `okena ls` shows each project's status
+too.
 
 ## Remote projects
 

@@ -1566,6 +1566,22 @@ impl Workspace {
         }
     }
 
+    /// Show (`on`) or flatten the status-lanes view of a project's family in
+    /// a window: the explicit form of [`Self::toggle_status_lanes`] for
+    /// external requests. Persisted via `notify_data` only when it changed.
+    pub fn set_status_lanes(
+        &mut self,
+        window_id: WindowId,
+        project_id: &str,
+        on: bool,
+        cx: &mut impl WorkspaceCx,
+    ) {
+        let root = self.status_lanes_root(project_id);
+        if self.data.set_status_lanes(window_id, &root, on) == Some(true) {
+            self.notify_data(cx);
+        }
+    }
+
     /// Whether a window shows a project's family in status lanes.
     pub fn status_lanes(&self, window_id: WindowId, project_id: &str) -> bool {
         let root = self.status_lanes_root(project_id);
@@ -5590,6 +5606,53 @@ mod gpui_tests {
         });
         workspace.read_with(cx, |ws: &Workspace, _cx| {
             assert_eq!(ws.get_project_width(WindowId::Main, "p1", 1), 23.5);
+        });
+    }
+
+    #[gpui::test]
+    fn set_status_lanes_addresses_the_family_and_is_idempotent(cx: &mut gpui::TestAppContext) {
+        let mut parent = make_project("p1");
+        parent.worktree_ids = vec!["w1".to_string()];
+        let mut worktree = make_project("w1");
+        worktree.worktree_info = Some(crate::state::WorktreeMetadata {
+            parent_project_id: "p1".to_string(),
+            color_override: None,
+            custom_name: false,
+            main_repo_path: String::new(),
+            worktree_path: "/tmp/wt1".to_string(),
+            branch_name: String::new(),
+        });
+        let extra = WindowState::default();
+        let extra_id = extra.id;
+        let mut data = make_workspace_data(vec![parent, worktree], vec!["p1"]);
+        data.extra_windows.push(extra);
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        // A worktree stands for its parent: the whole family switches.
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.set_status_lanes(WindowId::Main, "w1", true, cx);
+        });
+        let version = workspace.read_with(cx, |ws: &Workspace, _cx| {
+            assert!(ws.status_lanes(WindowId::Main, "p1"));
+            assert!(ws.status_lanes(WindowId::Main, "w1"));
+            assert!(!ws.status_lanes(WindowId::Extra(extra_id), "p1"));
+            ws.data_version()
+        });
+
+        // Asking for the current state again changes nothing to persist.
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.set_status_lanes(WindowId::Main, "p1", true, cx);
+        });
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            assert_eq!(ws.data_version(), version);
+        });
+
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.set_status_lanes(WindowId::Main, "p1", false, cx);
+        });
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            assert!(!ws.status_lanes(WindowId::Main, "w1"));
+            assert!(ws.data_version() > version);
         });
     }
 

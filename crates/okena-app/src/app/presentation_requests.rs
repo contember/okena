@@ -1,6 +1,7 @@
 //! External presentation requests (`okena project show|hide`, `okena term
-//! fullscreen`, `okena window layout`; `okena worktree add --window` is applied
-//! by the workspace) pushed by the daemon after the action succeeded there. The
+//! fullscreen`, `okena window layout`, `okena status lanes`; `okena worktree add
+//! --window` is applied by the workspace) pushed by the daemon after the action
+//! succeeded there. The
 //! desktop owns per-window presentation, so it applies each request to its own
 //! window here; the daemon's copy only serves its synthetic main window.
 
@@ -93,6 +94,25 @@ impl Okena {
         }
         self.workspace.update(cx, |ws, cx| {
             ws.set_project_layout_mode(target, mode, cx);
+        });
+    }
+
+    /// Show or flatten the status lanes of `project_id`'s family in the target
+    /// window. Idempotent.
+    pub(super) fn apply_status_lanes_request(
+        &mut self,
+        project_id: &str,
+        on: bool,
+        requested_window: Option<WindowId>,
+        cx: &mut Context<Self>,
+    ) {
+        let target = self.presentation_target_window(requested_window, cx);
+        if self.window_view_and_handle(target).is_none() {
+            log::warn!("Ignoring status lanes request for unknown window {target:?}");
+            return;
+        }
+        self.workspace.update(cx, |ws, cx| {
+            ws.set_status_lanes(target, project_id, on, cx);
         });
     }
 }

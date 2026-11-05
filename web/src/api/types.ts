@@ -284,6 +284,8 @@ export type ActionRequest =
   | { action: "toggle_minimized"; project_id: string; terminal_id: string }
   | { action: "set_fullscreen"; project_id: string; terminal_id: string | null; window?: string | null }
   | { action: "set_project_layout"; mode: "columns" | "rows" | "grid"; window?: string | null }
+  | { action: "set_project_status"; project_id: string; status?: string | null }
+  | { action: "set_status_lanes"; project_id: string; on: boolean; window?: string | null }
   | { action: "rename_terminal"; project_id: string; terminal_id: string; name: string }
   | { action: "switch_terminal_shell"; project_id: string; terminal_id: string; shell: ShellType }
   | { action: "add_tab"; project_id: string; path: number[]; in_group: boolean }
