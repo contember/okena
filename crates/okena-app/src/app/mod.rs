@@ -1009,13 +1009,15 @@ impl Okena {
         cx: &mut Context<Self>,
     ) {
         let frame = self.unfocused_window_pacer.frame(Instant::now());
-        self.present_paced_repaints(terminal_ids, frame, cx);
+        self.present_paced_repaints(terminal_ids, frame, None, cx);
     }
 
+    /// `activated` names a window that just gained focus.
     fn present_paced_repaints(
         &mut self,
         terminal_ids: &[String],
         mut frame: PacedFrame<WindowId, String>,
+        activated: Option<WindowId>,
         cx: &mut Context<Self>,
     ) {
         for terminal_id in terminal_ids {
@@ -1029,8 +1031,10 @@ impl Okena {
             .read(cx)
             .settings
             .cap_unfocused_window_fps;
+        // On X11 `cx.active_window()` still names no window while the newly
+        // focused one reports its activation.
         let active_window = if cap_unfocused {
-            self.active_window_id(cx)
+            activated.or_else(|| self.active_window_id(cx))
         } else {
             None
         };
@@ -1068,7 +1072,7 @@ impl Okena {
                 .await;
             let _ = this.update(cx, |this, cx| {
                 if this.unfocused_window_pacer.is_flush_current(deadline) {
-                    this.flush_unfocused_repaints(cx);
+                    this.flush_unfocused_repaints(None, cx);
                 }
             });
         })
@@ -1077,10 +1081,10 @@ impl Okena {
 
     /// Present every deferred unfocused-window pane now; one whose window is
     /// still not due is deferred again.
-    fn flush_unfocused_repaints(&mut self, cx: &mut Context<Self>) {
+    fn flush_unfocused_repaints(&mut self, activated: Option<WindowId>, cx: &mut Context<Self>) {
         let (frame, terminal_ids) = self.unfocused_window_pacer.start_flush(Instant::now());
         if !terminal_ids.is_empty() {
-            self.present_paced_repaints(&terminal_ids, frame, cx);
+            self.present_paced_repaints(&terminal_ids, frame, activated, cx);
         }
     }
 

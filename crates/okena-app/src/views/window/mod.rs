@@ -172,8 +172,8 @@ pub enum WindowViewEvent {
     RebuildLocal,
     /// Restart the UI-owned daemon and app with the rebuilt release binary.
     RestartLocalBuild,
-    /// The OS window gained or lost focus.
-    ActivationChanged,
+    /// The OS window gained (`active`) or lost focus.
+    ActivationChanged { active: bool },
 }
 
 pub struct WindowView {
@@ -460,11 +460,13 @@ impl WindowView {
         // path coalesce. Conversion mirrors the inverse path in
         // `src/app/extras.rs::open_extra_window` (gpui `Bounds<Pixels>` ->
         // `PersistedWindowBounds` via four `f32::from(...)` calls).
-        cx.observe_window_activation(window, |_this, _window, cx| {
+        cx.observe_window_activation(window, |_this, window, cx| {
             // Refresh key-window chrome while activity-driven presentation stays
             // live in every visible window.
             cx.notify();
-            cx.emit(WindowViewEvent::ActivationChanged);
+            cx.emit(WindowViewEvent::ActivationChanged {
+                active: window.is_window_active(),
+            });
         })
         .detach();
 
