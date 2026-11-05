@@ -1,5 +1,6 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
+use std::time::{Duration, Instant};
 
 /// Immediate presentation work produced by one activity event.
 #[derive(Debug)]
@@ -119,10 +120,53 @@ impl<T: Eq + Hash> ActivityRepaintBatch<T> {
     }
 }
 
+/// Paces activity repaints of windows without OS focus to one frame per
+/// `interval`. A window is due once `interval` has passed since it last
+/// presented. The caller defers a pane whose window is not due and presents it
+/// again at [`next_due`](Self::next_due), so a burst's last frame still lands.
+#[derive(Debug)]
+pub struct UnfocusedWindowPacer<W> {
+    interval: Duration,
+    last_presented: HashMap<W, Instant>,
+}
+
+impl<W: Eq + Hash + Copy> UnfocusedWindowPacer<W> {
+    pub fn new(interval: Duration) -> Self {
+        Self {
+            interval,
+            last_presented: HashMap::new(),
+        }
+    }
+
+    pub fn is_due(&self, window: W, now: Instant) -> bool {
+        self.last_presented
+            .get(&window)
+            .is_none_or(|last| now.saturating_duration_since(*last) >= self.interval)
+    }
+
+    pub fn mark_presented(&mut self, window: W, now: Instant) {
+        self.last_presented.insert(window, now);
+    }
+
+    /// The earliest instant any of `windows` is due again.
+    pub fn next_due(&self, windows: impl IntoIterator<Item = W>) -> Option<Instant> {
+        windows
+            .into_iter()
+            .filter_map(|window| self.last_presented.get(&window))
+            .map(|last| *last + self.interval)
+            .min()
+    }
+
+    pub fn forget(&mut self, window: W) {
+        self.last_presented.remove(&window);
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{ActivityRepaintBatch, ActivityRepaintThrottle};
+    use super::{ActivityRepaintBatch, ActivityRepaintThrottle, UnfocusedWindowPacer};
     use std::collections::HashSet;
+    use std::time::{Duration, Instant};
 
     #[test]
     fn leading_edge_is_immediate_and_starts_one_timer() {
@@ -195,5 +239,47 @@ mod tests {
         let decision = batch.queue_activity([], []);
         assert!(!decision.start_timer);
         assert!(decision.immediate.is_empty());
+    }
+    #[test]
+    fn unfocused_window_presents_at_most_once_per_interval() {
+        let interval = Duration::from_millis(100);
+        let mut pacer = UnfocusedWindowPacer::new(interval);
+        let start = Instant::now();
+
+        assert!(
+            pacer.is_due("a", start),
+            "a window that never presented is due"
+        );
+        pacer.mark_presented("a", start);
+
+        let soon = start + Duration::from_millis(20);
+        assert!(!pacer.is_due("a", soon));
+        assert!(pacer.is_due("b", soon), "windows are paced independently");
+        assert_eq!(pacer.next_due(["a"]), Some(start + interval));
+
+        assert!(pacer.is_due("a", start + interval));
+    }
+
+    #[test]
+    fn next_due_is_the_earliest_deferred_window() {
+        let interval = Duration::from_millis(100);
+        let mut pacer = UnfocusedWindowPacer::new(interval);
+        let start = Instant::now();
+        pacer.mark_presented("late", start + Duration::from_millis(50));
+        pacer.mark_presented("early", start);
+
+        assert_eq!(pacer.next_due(["late", "early"]), Some(start + interval));
+        assert_eq!(pacer.next_due(["never"]), None);
+    }
+
+    #[test]
+    fn a_forgotten_window_is_due_at_once() {
+        let mut pacer = UnfocusedWindowPacer::new(Duration::from_millis(100));
+        let start = Instant::now();
+        pacer.mark_presented("a", start);
+
+        pacer.forget("a");
+
+        assert!(pacer.is_due("a", start));
     }
 }

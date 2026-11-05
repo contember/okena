@@ -90,15 +90,19 @@ pub struct ContentPaneRepaintStats {
 
 /// Request activity repaints from concrete terminal-content panes. Calls are
 /// already limited by the app-wide presentation cadence, so every visible copy
-/// remains live without each stream driving an independent clock.
+/// remains live without each stream driving an independent clock. `admit`
+/// sees each pane's terminal and window; a pane it refuses is left as is.
 pub fn request_registered_content_pane_repaints(
     registry: &mut HashMap<String, Vec<WeakEntity<super::layout::terminal_pane::TerminalContent>>>,
     terminal_ids: &[String],
     cx: &mut App,
+    mut admit: impl FnMut(&str, Option<WindowId>) -> bool,
 ) -> ContentPaneRepaintStats {
-    update_registered_panes_with_stats(registry, terminal_ids, cx, |weaks, cx| {
+    update_registered_panes_with_stats(registry, terminal_ids, cx, |terminal_id, weaks, cx| {
         update_pane_weaks(weaks, cx, |pane, cx| {
-            pane.request_activity_repaint(cx);
+            if admit(terminal_id, pane.window_id()) {
+                pane.request_activity_repaint(cx);
+            }
         })
     })
 }
@@ -107,22 +111,23 @@ fn update_registered_panes<T: 'static>(
     registry: &mut HashMap<String, Vec<WeakEntity<T>>>,
     terminal_ids: &[String],
     cx: &mut App,
-    update: impl FnMut(&mut Vec<WeakEntity<T>>, &mut App) -> bool,
+    mut update: impl FnMut(&mut Vec<WeakEntity<T>>, &mut App) -> bool,
 ) -> usize {
-    update_registered_panes_with_stats(registry, terminal_ids, cx, update).terminals
+    update_registered_panes_with_stats(registry, terminal_ids, cx, |_, weaks, cx| update(weaks, cx))
+        .terminals
 }
 
 fn update_registered_panes_with_stats<T: 'static>(
     registry: &mut HashMap<String, Vec<WeakEntity<T>>>,
     terminal_ids: &[String],
     cx: &mut App,
-    mut update: impl FnMut(&mut Vec<WeakEntity<T>>, &mut App) -> bool,
+    mut update: impl FnMut(&str, &mut Vec<WeakEntity<T>>, &mut App) -> bool,
 ) -> ContentPaneRepaintStats {
     let mut stats = ContentPaneRepaintStats::default();
     let mut empty = Vec::new();
     for terminal_id in terminal_ids {
         if let Some(weaks) = registry.get_mut(terminal_id) {
-            if update(weaks, cx) {
+            if update(terminal_id, weaks, cx) {
                 stats.terminals = stats.terminals.saturating_add(1);
                 stats.panes = stats.panes.saturating_add(weaks.len());
             }
@@ -1116,7 +1121,7 @@ mod tests {
                 &mut registry,
                 &["target".to_string()],
                 cx,
-                notify_pane_weaks,
+                |_, weaks, cx| notify_pane_weaks(weaks, cx),
             );
             assert_eq!(stats.terminals, 1);
             assert_eq!(stats.panes, 2);

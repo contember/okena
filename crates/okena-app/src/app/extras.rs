@@ -162,6 +162,7 @@ impl Okena {
                 });
             }
             self.extra_windows.remove(&window_id);
+            self.unfocused_window_pacer.forget(window_id);
         }
 
         let to_open = extras_to_open(&data, &opened);
@@ -232,7 +233,11 @@ impl Okena {
             }
             WindowViewEvent::RebuildLocal => self.rebuild_local(cx),
             WindowViewEvent::RestartLocalBuild => self.restart_local_build(cx),
-            WindowViewEvent::ActivationChanged => self.publish_windows(cx),
+            WindowViewEvent::ActivationChanged => {
+                self.publish_windows(cx);
+                // A window that gained focus shows its deferred frame at once.
+                self.flush_unfocused_repaints(cx);
+            }
         }
     }
 

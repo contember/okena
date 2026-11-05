@@ -175,6 +175,7 @@ impl SettingsState {
         detached_overlays_by_default,
         bool
     );
+    setting_setter!(set_cap_unfocused_window_fps, cap_unfocused_window_fps, bool);
 
     /// Persist the most recent detached overlay window bounds.
     pub fn set_detached_overlay_bounds(
