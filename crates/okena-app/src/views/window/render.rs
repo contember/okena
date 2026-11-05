@@ -927,6 +927,7 @@ impl WindowView {
 
 impl Render for WindowView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        okena_core::render_probe::chrome_render(okena_core::render_probe::ChromeView::Window);
         let t = theme(cx);
         let pane_move_source = self.pane_move.read(cx).source().cloned();
 

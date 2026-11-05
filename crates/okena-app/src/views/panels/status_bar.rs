@@ -700,6 +700,7 @@ impl StatusBar {
 
 impl Render for StatusBar {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        okena_core::render_probe::chrome_render(okena_core::render_probe::ChromeView::StatusBar);
         let t = theme(cx);
         let stats = self.cache.lock().stats();
         let remote_snapshots = self.remote_snapshots(cx);

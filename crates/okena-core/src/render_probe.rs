@@ -28,9 +28,18 @@ pub struct TerminalPaintStats {
     pub background_rects: usize,
 }
 
+/// Window-level views whose render rate the probe counts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChromeView {
+    Window,
+    TitleBar,
+    StatusBar,
+    Toast,
+}
+
 #[cfg(feature = "render-perf-probe")]
 mod imp {
-    use super::TerminalPaintStats;
+    use super::{ChromeView, TerminalPaintStats};
     use std::sync::{Mutex, OnceLock};
     use std::time::{Duration, Instant};
 
@@ -110,6 +119,27 @@ mod imp {
         grid_renders: u64,
         grid_columns_total: u64,
         grid_columns_max: u64,
+        chrome_renders: ChromeRenders,
+    }
+
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+    struct ChromeRenders {
+        window_view: u64,
+        title_bar: u64,
+        status_bar: u64,
+        toast: u64,
+    }
+
+    impl ChromeRenders {
+        fn record(&mut self, view: ChromeView) {
+            let count = match view {
+                ChromeView::Window => &mut self.window_view,
+                ChromeView::TitleBar => &mut self.title_bar,
+                ChromeView::StatusBar => &mut self.status_bar,
+                ChromeView::Toast => &mut self.toast,
+            };
+            *count = count.saturating_add(1);
+        }
     }
 
     impl MetricsWindow {
@@ -139,6 +169,7 @@ mod imp {
                 grid_renders: 0,
                 grid_columns_total: 0,
                 grid_columns_max: 0,
+                chrome_renders: ChromeRenders::default(),
             }
         }
 
@@ -258,6 +289,7 @@ mod imp {
                 grid_renders: self.grid_renders,
                 grid_columns_total: self.grid_columns_total,
                 grid_columns_max: self.grid_columns_max,
+                chrome_renders: self.chrome_renders,
             }
         }
     }
@@ -288,6 +320,7 @@ mod imp {
         grid_renders: u64,
         grid_columns_total: u64,
         grid_columns_max: u64,
+        chrome_renders: ChromeRenders,
     }
 
     static ENABLED: OnceLock<bool> = OnceLock::new();
@@ -319,6 +352,10 @@ mod imp {
     /// panes ride on. Its rate is the frame rate everything else is multiplied by.
     pub fn grid_render(columns: usize) {
         record(|metrics| metrics.record_grid_render(columns));
+    }
+
+    pub fn chrome_render(view: ChromeView) {
+        record(|metrics| metrics.chrome_renders.record(view));
     }
 
     pub struct TerminalPaintGuard {
@@ -378,7 +415,7 @@ mod imp {
 
     fn format_summary(summary: Summary) -> String {
         format!(
-            "render_perf window_ms={} activity_frames={} repaint_terminal_total={} repaint_terminal_max={} registered_terminal_total={} registered_terminal_max={} repaint_pane_total={} repaint_pane_max={} terminal_paints={} terminal_timing_retained={} terminal_paint_us_p50={} terminal_paint_us_p95={} terminal_paint_us_max={} terminal_live_viewers_total={} terminal_live_viewers_max={} terminal_grid_cache_hits={} terminal_grid_cache_misses={} cells_scanned={} changed_cell_samples={} cells_changed={} cells_changed_scroll_aware={} text_runs={} background_rects={} sidebar_activity_invalidations={} sidebar_renders={} sidebar_timing_retained={} sidebar_render_us_p50={} sidebar_render_us_p95={} sidebar_render_us_max={} terminal_timing_overwritten={} sidebar_timing_overwritten={} grid_renders={} grid_columns_total={} grid_columns_max={}",
+            "render_perf window_ms={} activity_frames={} repaint_terminal_total={} repaint_terminal_max={} registered_terminal_total={} registered_terminal_max={} repaint_pane_total={} repaint_pane_max={} terminal_paints={} terminal_timing_retained={} terminal_paint_us_p50={} terminal_paint_us_p95={} terminal_paint_us_max={} terminal_live_viewers_total={} terminal_live_viewers_max={} terminal_grid_cache_hits={} terminal_grid_cache_misses={} cells_scanned={} changed_cell_samples={} cells_changed={} cells_changed_scroll_aware={} text_runs={} background_rects={} sidebar_activity_invalidations={} sidebar_renders={} sidebar_timing_retained={} sidebar_render_us_p50={} sidebar_render_us_p95={} sidebar_render_us_max={} terminal_timing_overwritten={} sidebar_timing_overwritten={} grid_renders={} grid_columns_total={} grid_columns_max={} window_view_renders={} title_bar_renders={} status_bar_renders={} toast_renders={}",
             summary.window_ms,
             summary.activity_frames,
             summary.repaint_terminal_total,
@@ -413,6 +450,10 @@ mod imp {
             summary.grid_renders,
             summary.grid_columns_total,
             summary.grid_columns_max,
+            summary.chrome_renders.window_view,
+            summary.chrome_renders.title_bar,
+            summary.chrome_renders.status_bar,
+            summary.chrome_renders.toast,
         )
     }
 
@@ -471,6 +512,9 @@ mod imp {
             metrics.record_terminal_paint(Duration::from_micros(300), stats(None, true));
             metrics.record_sidebar_activity_invalidation();
             metrics.record_sidebar_render(Duration::from_micros(50));
+            metrics.chrome_renders.record(ChromeView::Window);
+            metrics.chrome_renders.record(ChromeView::Window);
+            metrics.chrome_renders.record(ChromeView::StatusBar);
 
             let summary = metrics
                 .take_summary_if_due(start + REPORT_INTERVAL)
@@ -500,6 +544,15 @@ mod imp {
             assert_eq!(summary.sidebar_activity_invalidations, 1);
             assert_eq!(summary.sidebar_renders.count, 1);
             assert_eq!(summary.sidebar_renders.max_us, 50);
+            assert_eq!(
+                summary.chrome_renders,
+                ChromeRenders {
+                    window_view: 2,
+                    title_bar: 0,
+                    status_bar: 1,
+                    toast: 0,
+                }
+            );
         }
 
         #[test]
@@ -525,6 +578,7 @@ mod imp {
             let start = Instant::now();
             let mut metrics = MetricsWindow::new(start);
             metrics.record_activity_frame(4, 3, 6);
+            metrics.chrome_renders.record(ChromeView::TitleBar);
             let first = metrics
                 .take_summary_if_due(start + REPORT_INTERVAL)
                 .expect("first summary");
@@ -538,6 +592,7 @@ mod imp {
             assert_eq!(second.repaint_terminal_total, 0);
             assert_eq!(second.sidebar_activity_invalidations, 1);
             assert_eq!(second.terminal_paints, TimingSummary::default());
+            assert_eq!(second.chrome_renders, ChromeRenders::default());
         }
 
         #[test]
@@ -617,6 +672,10 @@ mod imp {
                     "grid_renders",
                     "grid_columns_total",
                     "grid_columns_max",
+                    "window_view_renders",
+                    "title_bar_renders",
+                    "status_bar_renders",
+                    "toast_renders",
                 ]
             );
         }
@@ -625,7 +684,7 @@ mod imp {
 
 #[cfg(not(feature = "render-perf-probe"))]
 mod imp {
-    use super::TerminalPaintStats;
+    use super::{ChromeView, TerminalPaintStats};
 
     #[inline(always)]
     pub fn enabled() -> bool {
@@ -645,6 +704,9 @@ mod imp {
 
     #[inline(always)]
     pub fn grid_render(_columns: usize) {}
+
+    #[inline(always)]
+    pub fn chrome_render(_view: ChromeView) {}
 
     pub struct TerminalPaintGuard;
 
@@ -675,6 +737,7 @@ mod imp {
             terminal_activity_frame(3, 2, 4);
             sidebar_activity_invalidation();
             grid_render(46);
+            chrome_render(ChromeView::Window);
             terminal_paint().finish(TerminalPaintStats::default());
             let _sidebar_render = sidebar_render();
         }

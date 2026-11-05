@@ -231,6 +231,7 @@ impl TitleBar {
 
 impl Render for TitleBar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        okena_core::render_probe::chrome_render(okena_core::render_probe::ChromeView::TitleBar);
         let t = theme(cx);
         let is_maximized = window.is_maximized();
         // On Windows, always show custom window controls since we use a custom titlebar

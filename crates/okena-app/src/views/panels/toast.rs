@@ -122,6 +122,7 @@ impl EventEmitter<ToastActionEvent> for ToastOverlay {}
 
 impl Render for ToastOverlay {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        okena_core::render_probe::chrome_render(okena_core::render_probe::ChromeView::Toast);
         if self.toasts.is_empty() {
             return div().into_any_element();
         }
