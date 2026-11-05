@@ -1500,7 +1500,14 @@ mod worktree_rename_tests {
     }
 
     fn git(args: &[&str]) {
-        let output = Command::new("git").args(args).output().unwrap();
+        // The user's global config may sign commits; parallel tests then all
+        // queue on one gpg-agent, which fails some of them ("signing failed:
+        // Cannot allocate memory"). Fixture commits prove nothing by signing.
+        let output = Command::new("git")
+            .args(["-c", "commit.gpgsign=false"])
+            .args(args)
+            .output()
+            .unwrap();
         assert!(
             output.status.success(),
             "git {:?} failed: {}",
@@ -3016,7 +3023,13 @@ mod gpui_tests {
     }
 
     fn git(args: &[&str]) {
-        let output = Command::new("git").args(args).output().expect("run git");
+        // Unsigned for the same reason as the fixture helper above: a signing
+        // global config makes parallel tests fail on a shared gpg-agent.
+        let output = Command::new("git")
+            .args(["-c", "commit.gpgsign=false"])
+            .args(args)
+            .output()
+            .expect("run git");
         assert!(
             output.status.success(),
             "git {:?} failed: {}",

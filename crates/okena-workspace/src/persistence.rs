@@ -1814,7 +1814,10 @@ mod tests {
         }
 
         fn git(&self, args: &[&str]) {
+            // The user's global config may sign commits; parallel tests then
+            // all queue on one gpg-agent, which fails some of them.
             let output = std::process::Command::new("git")
+                .args(["-c", "commit.gpgsign=false"])
                 .args(args)
                 .output()
                 .expect("run git");

@@ -666,7 +666,7 @@ mod tests {
             while let Some(request) = refresh_rx.recv().await {
                 let _ = seen_tx.send(request.provider);
                 if let Some(applied) = request.applied {
-                    let _ = applied.send(());
+                    let _ = applied.send(Default::default());
                 }
             }
         });

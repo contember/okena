@@ -1032,6 +1032,28 @@ mod tests {
         .expect("service task condition timed out");
     }
 
+    /// Wait until a service's launch task has fully landed, not merely reached
+    /// the backend. `reconnect_terminal` records the call on the blocking pool
+    /// before the launch applies its result on the `LocalSet`; a replacement
+    /// started in that gap leaves the launch stale, and its late cleanup kills
+    /// the reserved ID a second time once the successor's failure released it.
+    async fn wait_for_service_running(
+        sm: &Arc<parking_lot::Mutex<ServiceManager>>,
+        project_id: &str,
+        service_name: &str,
+    ) {
+        wait_for_test_condition(|| {
+            sm.lock()
+                .services_for_project(project_id)
+                .iter()
+                .any(|service| {
+                    service.definition.name == service_name
+                        && service.status == okena_services::manager::ServiceStatus::Running
+                })
+        })
+        .await;
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn blocking_service_preparation_keeps_localset_live_and_discards_stale_snapshot() {
         let workspace = Arc::new(parking_lot::Mutex::new(workspace_with_project(
@@ -1822,14 +1844,7 @@ mod tests {
                     let mut cx = rr.cx();
                     sync_services(&[initial], &mut sync_state, &mut manager, &mut cx);
                 }
-                wait_for_test_condition(|| {
-                    !backend
-                        .reconnected
-                        .lock()
-                        .expect("reconnect lock")
-                        .is_empty()
-                })
-                .await;
+                wait_for_service_running(&sm, "project", "web").await;
 
                 let mut replacement = project("project", &project_path);
                 replacement.data_replacement_epoch = 1;
@@ -1901,14 +1916,7 @@ mod tests {
                     let mut cx = rr.cx();
                     sync_services(&[initial], &mut sync_state, &mut manager, &mut cx);
                 }
-                wait_for_test_condition(|| {
-                    !backend
-                        .reconnected
-                        .lock()
-                        .expect("reconnect lock")
-                        .is_empty()
-                })
-                .await;
+                wait_for_service_running(&sm, "project", "web").await;
 
                 std::fs::write(
                     &config_path,
@@ -1986,14 +1994,7 @@ mod tests {
                     let mut cx = rr.cx();
                     sync_services(&[initial], &mut sync_state, &mut manager, &mut cx);
                 }
-                wait_for_test_condition(|| {
-                    !backend
-                        .reconnected
-                        .lock()
-                        .expect("reconnect lock")
-                        .is_empty()
-                })
-                .await;
+                wait_for_service_running(&sm, "project", "web").await;
 
                 let mut replacement = project("project", &project_path);
                 replacement.data_replacement_epoch = 1;
@@ -2152,14 +2153,7 @@ mod tests {
                     let mut cx = rr.cx();
                     sync_services(&[initial], &mut sync_state, &mut manager, &mut cx);
                 }
-                wait_for_test_condition(|| {
-                    !backend
-                        .reconnected
-                        .lock()
-                        .expect("reconnect lock")
-                        .is_empty()
-                })
-                .await;
+                wait_for_service_running(&sm, "project", "web").await;
 
                 let mut replacement = project("project", &recovered_path);
                 replacement.data_replacement_epoch = 1;

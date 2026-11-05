@@ -7132,6 +7132,8 @@ mod tests {
         git(&repo, &["init", "-q", "-b", "main"]);
         git(&repo, &["config", "user.email", "test@okena.local"]);
         git(&repo, &["config", "user.name", "Okena Test"]);
+        // Never sign fixture commits: see `direct_removal_fixture`.
+        git(&repo, &["config", "commit.gpgsign", "false"]);
         std::fs::write(repo.join("file.txt"), "base\n").expect("write fixture");
         git(&repo, &["add", "file.txt"]);
         git(&repo, &["commit", "-q", "-m", "base"]);
@@ -9120,6 +9122,10 @@ mod tests {
         git(&repo, &["init", "-q", "-b", "main"]);
         git(&repo, &["config", "user.email", "test@okena.local"]);
         git(&repo, &["config", "user.name", "Okena Test"]);
+        // A global `commit.gpgsign = true` would sign the fixture commit, and
+        // parallel tests signing at once make gpg-agent fail ("Cannot allocate
+        // memory"). Repo-local, so it also covers the linked worktree.
+        git(&repo, &["config", "commit.gpgsign", "false"]);
         std::fs::write(repo.join("base.txt"), "base\n").expect("write base");
         git(&repo, &["add", "base.txt"]);
         git(&repo, &["commit", "-q", "-m", "base"]);
@@ -10158,6 +10164,8 @@ mod tests {
         git(&repo, &["init", "-q", "-b", "main"]);
         git(&repo, &["config", "user.email", "test@okena.local"]);
         git(&repo, &["config", "user.name", "Okena Test"]);
+        // Never sign fixture commits: see `direct_removal_fixture`.
+        git(&repo, &["config", "commit.gpgsign", "false"]);
         std::fs::write(repo.join("base.txt"), "base\n").expect("write base");
         git(&repo, &["add", "base.txt"]);
         git(&repo, &["commit", "-q", "-m", "base"]);
@@ -10260,6 +10268,8 @@ mod tests {
         git(&repo, &["init", "-q", "-b", "main"]);
         git(&repo, &["config", "user.email", "test@okena.local"]);
         git(&repo, &["config", "user.name", "Okena Test"]);
+        // Never sign fixture commits: see `direct_removal_fixture`.
+        git(&repo, &["config", "commit.gpgsign", "false"]);
         std::fs::write(repo.join("base.txt"), "base\n").expect("write base");
         git(&repo, &["add", "base.txt"]);
         git(&repo, &["commit", "-q", "-m", "base"]);
@@ -10418,6 +10428,8 @@ mod tests {
         git(&repo, &["init", "-q", "-b", "main"]);
         git(&repo, &["config", "user.email", "test@okena.local"]);
         git(&repo, &["config", "user.name", "Okena Test"]);
+        // Never sign fixture commits: see `direct_removal_fixture`.
+        git(&repo, &["config", "commit.gpgsign", "false"]);
         std::fs::write(repo.join("file.txt"), "base\n").expect("write fixture");
         git(&repo, &["add", "file.txt"]);
         git(&repo, &["commit", "-q", "-m", "base"]);
@@ -10621,6 +10633,7 @@ mod tests {
                 &["init", "-q", "-b", "main"][..],
                 &["config", "user.email", "wait@okena.test"],
                 &["config", "user.name", "Wait"],
+                &["config", "commit.gpgsign", "false"],
                 &["commit", "-q", "--allow-empty", "-m", "seed"],
             ] {
                 let out = std::process::Command::new("git")
@@ -10842,6 +10855,8 @@ mod tests {
         git(&["init", "-q", "-b", "main"]);
         git(&["config", "user.email", "proof@okena.test"]);
         git(&["config", "user.name", "Proof"]);
+        // Never sign fixture commits: see `direct_removal_fixture`.
+        git(&["config", "commit.gpgsign", "false"]);
         std::fs::write(repo.join("README.md"), "seed\n").expect("seed file");
         git(&["add", "."]);
         git(&["commit", "-qm", "seed"]);

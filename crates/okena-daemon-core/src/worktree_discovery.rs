@@ -492,6 +492,8 @@ mod tests {
         let root = std::fs::canonicalize(dir.path()).unwrap().join("repo");
         std::fs::create_dir_all(&root).unwrap();
         git(&root, &["init", "-q", "-b", "main"]);
+        // A global `commit.gpgsign` would send every parallel test through
+        // gpg-agent, which fails some signatures under load.
         git(
             &root,
             &[
@@ -499,6 +501,8 @@ mod tests {
                 "user.name=t",
                 "-c",
                 "user.email=t@t",
+                "-c",
+                "commit.gpgsign=false",
                 "commit",
                 "-q",
                 "--allow-empty",

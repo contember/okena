@@ -157,6 +157,10 @@ pub(crate) mod test_support {
     /// Run a git command in `repo`, asserting success.
     pub(crate) fn git_in(repo: &Path, args: &[&str]) {
         let status = std::process::Command::new("git")
+            // Never sign fixture commits: a global `commit.gpgsign = true`
+            // sends every parallel test through one gpg-agent, which fails
+            // some of them.
+            .args(["-c", "commit.gpgsign=false"])
             .args(args)
             .current_dir(repo)
             .env("GIT_AUTHOR_NAME", "test")

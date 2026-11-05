@@ -1410,6 +1410,10 @@ mod clone_project_tests {
     fn git(dir: &Path, args: &[&str]) {
         let output = Command::new("git")
             .current_dir(dir)
+            // Never sign fixture commits: a global `commit.gpgsign = true`
+            // sends every parallel test through one gpg-agent, which fails
+            // some of them.
+            .args(["-c", "commit.gpgsign=false"])
             .args(args)
             .output()
             .expect("run git");

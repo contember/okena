@@ -27,9 +27,11 @@ const REFRESH_APPLY_TIMEOUT: Duration = Duration::from_secs(2);
 pub struct UsageRefresh {
     /// One provider, or `None` for all enabled ones.
     pub provider: Option<ApiUsageProvider>,
-    /// Signalled once the poller has applied the request (started the
-    /// fetches it allows) and published the resulting snapshot.
-    pub applied: Option<oneshot::Sender<()>>,
+    /// Answered once the poller has applied the request (started the
+    /// fetches it allows), with the snapshot it published then. Taken there,
+    /// not read later: a fast fetch can land before the caller wakes, and a
+    /// later snapshot would show `fetching: false` for a fetch that ran.
+    pub applied: Option<oneshot::Sender<ApiUsage>>,
 }
 
 /// Cloneable handle shared by the poller, the AI proxy's accounts poll and
@@ -210,10 +212,10 @@ impl UsageHub {
         });
     }
 
-    /// Ask the poller to refetch and return the snapshot once it has applied
-    /// the request, so `fetching` tells the caller whether a fetch actually
-    /// started (or was already running). Falls back to the current snapshot
-    /// when nobody polls or the poller does not answer within 2 s.
+    /// Ask the poller to refetch and return the snapshot it published when it
+    /// applied the request, so `fetching` tells the caller whether a fetch
+    /// actually started (or was already running). Falls back to the current
+    /// snapshot when nobody polls or the poller does not answer within 2 s.
     pub async fn refresh(&self, provider: Option<ApiUsageProvider>) -> ApiUsage {
         let (applied, done) = oneshot::channel();
         if self
@@ -223,8 +225,9 @@ impl UsageHub {
                 applied: Some(applied),
             })
             .is_ok()
+            && let Ok(Ok(applied)) = tokio::time::timeout(REFRESH_APPLY_TIMEOUT, done).await
         {
-            let _ = tokio::time::timeout(REFRESH_APPLY_TIMEOUT, done).await;
+            return applied;
         }
         self.snapshot()
     }
@@ -446,7 +449,11 @@ mod tests {
                 working_days: vec![1],
                 ..ApiUsage::default()
             });
-            request.applied.unwrap().send(()).unwrap();
+            request
+                .applied
+                .unwrap()
+                .send(poller_hub.snapshot())
+                .unwrap();
             refresh_rx
         });
         assert_eq!(hub.refresh(None).await.working_days, vec![1]);
