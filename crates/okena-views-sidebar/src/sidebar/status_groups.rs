@@ -233,11 +233,18 @@ pub(crate) fn fold_extra_rows(scroll_indices: &mut [usize], extra_rows: &[usize]
     }
 }
 
+/// Width of the family guide line. Whole pixels with a whole-pixel centre
+/// keep it crisp on 1x and 2x displays.
+const TREE_GUIDE_WIDTH: f32 = 2.0;
+
 /// Draw a thin tree guide in the parent's colour down the left of every
 /// row of an expanded family (main checkout, captions, worktrees and their
-/// expanded children). Each row is wrapped so consecutive rows join into one
-/// continuous line at `x`; the row itself is untouched.
-pub(crate) fn add_tree_guide(rows: &mut [AnyElement], x: f32, color: u32) {
+/// expanded children), centred under the expand arrow of the family's
+/// header row, whose left padding is `header_padding`. Each row is wrapped
+/// so consecutive rows join into one continuous line; the row itself is
+/// untouched.
+pub(crate) fn add_tree_guide(rows: &mut [AnyElement], header_padding: f32, color: u32) {
+    let centre = header_padding + crate::item_widgets::EXPAND_ARROW_WIDTH / 2.0;
     let mut line = rgb(color);
     line.a = 0.55;
     for row in rows.iter_mut() {
@@ -251,8 +258,8 @@ pub(crate) fn add_tree_guide(rows: &mut [AnyElement], x: f32, color: u32) {
                     .absolute()
                     .top_0()
                     .bottom_0()
-                    .left(px(x))
-                    .w(px(1.5))
+                    .left(px(centre - TREE_GUIDE_WIDTH / 2.0))
+                    .w(px(TREE_GUIDE_WIDTH))
                     .bg(line),
             )
             .into_any_element();

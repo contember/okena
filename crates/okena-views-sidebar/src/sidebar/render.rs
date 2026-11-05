@@ -1179,9 +1179,10 @@ impl Render for Sidebar {
                                 }
                             }
                             if worktree_guide {
+                                // Under the group header's arrow (its padding is 4).
                                 super::status_groups::add_tree_guide(
                                     &mut flat_elements[guide_start..],
-                                    12.0,
+                                    4.0,
                                     t.get_folder_color(project.folder_color),
                                 );
                             }
@@ -1410,9 +1411,11 @@ impl Render for Sidebar {
                                         }
                                     }
                                     if worktree_guide {
+                                        // Under the folder group header's arrow
+                                        // (its padding is 20).
                                         super::status_groups::add_tree_guide(
                                             &mut flat_elements[guide_start..],
-                                            28.0,
+                                            20.0,
                                             t.get_folder_color(fp.folder_color),
                                         );
                                     }
