@@ -131,16 +131,9 @@ impl Render for SimpleRoot {
                     )
                 },
             )
-            // NOTE: do NOT wrap the view in `.cached()`. The root is the common
-            // ancestor of every view, so any descendant invalidation marks it
-            // dirty (GPUI ancestor-marking) — its cache would never hit. Worse,
-            // a cached view re-rendering sets `window.refreshing = true` for its
-            // entire subtree, which bypasses EVERY nested `.cached()` (project
-            // columns, terminal panes). Caching the root therefore defeats all
-            // nested caching: render-stats showed every column and pane
-            // re-rendering on every window draw. Render the root uncached so
-            // nested caches actually work and only dirty views re-render.
-            // `tests::view_cache_cascade` pins both halves of this.
+            // Not `.cached()`: the root is an ancestor of every view, so any
+            // notify marks it dirty and its cache would never hit.
+            // `view_cache_cascade` pins how the nested caches behave.
             .child(self.view.clone())
     }
 }
@@ -169,19 +162,12 @@ fn detect_resize_edge(pos: Point<Pixels>, size: Size<Pixels>) -> Option<ResizeEd
     Some(edge)
 }
 
-/// Pins the GPUI view-caching behaviour the terminal grid cache is sized for.
+/// Pins the GPUI view-caching behaviour the window is built on.
 ///
-/// One `cx.notify()` on a terminal's content view (what
-/// `TerminalContent::request_activity_repaint` does on every activity tick)
-/// does *not* repaint only that pane: GPUI marks the whole ancestor path dirty
-/// (`Window::mark_view_dirty`), and a dirty `.cached()` ancestor re-renders with
-/// `window.refreshing = true` for its entire subtree, bypassing every nested
-/// `.cached()`. So the notified pane's whole project column repaints — which is
-/// exactly why `TerminalRenderCache` exists, and why the cache's value scales
-/// with panes-per-column rather than being a fixed percentage.
-///
-/// Sibling *columns* stay cached. If that ever stops holding, the cost of one
-/// terminal's output grows to the whole window and this needs revisiting.
+/// A `cx.notify()` on a terminal's content view repaints only that pane. Its
+/// `.cached()` ancestors are dirty and re-render, but only a view that was
+/// notified itself refreshes its subtree, so sibling panes and sibling columns
+/// reuse their last frame.
 #[cfg(test)]
 mod view_cache_cascade {
     use gpui::{
@@ -190,6 +176,9 @@ mod view_cache_cascade {
     };
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    const COLUMNS: usize = 2;
+    const PANES_PER_COLUMN: usize = 3;
 
     /// Stands in for `TerminalContent` — the view that gets notified.
     struct Content {
@@ -203,14 +192,16 @@ mod view_cache_cascade {
         }
     }
 
-    /// Stands in for the `.cached()` chain above it: terminal pane -> layout
-    /// container -> project column. One level is enough; `refreshing` propagates.
+    /// Stands in for the `.cached()` chain above a pane: terminal pane ->
+    /// layout container -> project column.
     struct Column {
+        renders: Arc<AtomicUsize>,
         contents: Vec<Entity<Content>>,
     }
 
     impl Render for Column {
         fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            self.renders.fetch_add(1, Ordering::SeqCst);
             div().size_full().children(
                 self.contents.iter().map(|c| {
                     AnyView::from(c.clone()).cached(StyleRefinement::default().size_full())
@@ -234,74 +225,134 @@ mod view_cache_cascade {
         }
     }
 
-    #[gpui::test]
-    fn one_notify_repaints_its_whole_column_and_no_other(cx: &mut TestAppContext) {
-        const COLUMNS: usize = 2;
-        const PANES_PER_COLUMN: usize = 3;
+    struct Harness {
+        columns: Vec<Entity<Column>>,
+        column_renders: Vec<Arc<AtomicUsize>>,
+        pane_renders: Vec<Vec<Arc<AtomicUsize>>>,
+    }
 
-        let counters: Vec<Vec<Arc<AtomicUsize>>> = (0..COLUMNS)
-            .map(|_| {
-                (0..PANES_PER_COLUMN)
-                    .map(|_| Arc::new(AtomicUsize::new(0)))
-                    .collect()
-            })
-            .collect();
+    impl Harness {
+        fn new(cx: &mut TestAppContext) -> Self {
+            let column_renders: Vec<_> = (0..COLUMNS)
+                .map(|_| Arc::new(AtomicUsize::new(0)))
+                .collect();
+            let pane_renders: Vec<Vec<_>> = (0..COLUMNS)
+                .map(|_| {
+                    (0..PANES_PER_COLUMN)
+                        .map(|_| Arc::new(AtomicUsize::new(0)))
+                        .collect()
+                })
+                .collect();
 
-        let mut notified = None;
-        let window = {
-            let counters = counters.clone();
-            let notified = &mut notified;
-            cx.add_window(move |_, cx| {
-                let columns = counters
-                    .iter()
-                    .enumerate()
-                    .map(|(col_idx, column)| {
-                        let contents: Vec<_> = column
-                            .iter()
-                            .enumerate()
-                            .map(|(pane_idx, renders)| {
-                                let content = cx.new(|_| Content {
-                                    renders: renders.clone(),
-                                });
-                                if (col_idx, pane_idx) == (0, 0) {
-                                    *notified = Some(content.clone());
-                                }
-                                content
+            let window = {
+                let column_renders = column_renders.clone();
+                let pane_renders = pane_renders.clone();
+                cx.add_window(move |_, cx| {
+                    let columns = column_renders
+                        .iter()
+                        .zip(&pane_renders)
+                        .map(|(renders, panes)| {
+                            let contents = panes
+                                .iter()
+                                .map(|renders| {
+                                    cx.new(|_| Content {
+                                        renders: renders.clone(),
+                                    })
+                                })
+                                .collect();
+                            cx.new(|_| Column {
+                                renders: renders.clone(),
+                                contents,
                             })
-                            .collect();
-                        cx.new(|_| Column { contents })
-                    })
-                    .collect();
-                Root { columns }
-            })
-        };
-        let notified = notified.expect("first pane registered");
+                        })
+                        .collect();
+                    Root { columns }
+                })
+            };
+            let columns = window
+                .read_with(cx, |root, _| root.columns.clone())
+                .expect("window is open");
 
-        // `add_window` already drew once; start counting from a settled tree.
-        cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear(cx))
-            .unwrap();
-        for renders in counters.iter().flatten() {
-            renders.store(0, Ordering::SeqCst);
+            let harness = Self {
+                columns,
+                column_renders,
+                pane_renders,
+            };
+            // `add_window` already drew once; count from a settled tree.
+            harness.reset();
+            harness
         }
 
-        cx.update(|cx| notified.update(cx, |_, cx| cx.notify()));
-        cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear(cx))
-            .unwrap();
+        fn pane(&self, cx: &mut TestAppContext, column: usize, pane: usize) -> Entity<Content> {
+            self.columns[column].read_with(cx, |column, _| column.contents[pane].clone())
+        }
 
-        let repaints: Vec<Vec<usize>> = counters
-            .iter()
-            .map(|column| column.iter().map(|c| c.load(Ordering::SeqCst)).collect())
-            .collect();
+        /// Notify inside `cx.update`; the test context draws the dirty window
+        /// when the update ends. No extra `draw`: a frame where nothing is
+        /// dirty leaves skipped caches a frame stale, and GPUI then re-renders
+        /// them as a safety measure.
+        fn notify<V: 'static>(&self, cx: &mut TestAppContext, entity: &Entity<V>) {
+            cx.update(|cx| entity.update(cx, |_, cx| cx.notify()));
+        }
 
+        fn reset(&self) {
+            for renders in self
+                .column_renders
+                .iter()
+                .chain(self.pane_renders.iter().flatten())
+            {
+                renders.store(0, Ordering::SeqCst);
+            }
+        }
+
+        fn column_renders(&self) -> Vec<usize> {
+            self.column_renders
+                .iter()
+                .map(|c| c.load(Ordering::SeqCst))
+                .collect()
+        }
+
+        fn pane_renders(&self) -> Vec<Vec<usize>> {
+            self.pane_renders
+                .iter()
+                .map(|column| column.iter().map(|c| c.load(Ordering::SeqCst)).collect())
+                .collect()
+        }
+    }
+
+    #[gpui::test]
+    fn a_pane_notify_repaints_only_that_pane(cx: &mut TestAppContext) {
+        let harness = Harness::new(cx);
+        let notified = harness.pane(cx, 0, 0);
+
+        for frame in 0..3 {
+            harness.notify(cx, &notified);
+            assert_eq!(
+                harness.pane_renders(),
+                vec![vec![1, 0, 0], vec![0, 0, 0]],
+                "frame {frame}: only the notified pane repaints"
+            );
+            assert_eq!(
+                harness.column_renders(),
+                vec![1, 0],
+                "frame {frame}: the dirty ancestor column re-renders, the sibling column stays cached"
+            );
+            harness.reset();
+        }
+    }
+
+    #[gpui::test]
+    fn a_column_notify_repaints_its_whole_subtree(cx: &mut TestAppContext) {
+        let harness = Harness::new(cx);
+        let column = harness.columns[1].clone();
+
+        harness.notify(cx, &column);
+
+        assert_eq!(harness.column_renders(), vec![0, 1]);
         assert_eq!(
-            repaints[0],
-            vec![1; PANES_PER_COLUMN],
-            "notifying one pane repaints every pane in its column"
-        );
-        assert_eq!(
-            repaints[1],
-            vec![0; PANES_PER_COLUMN],
-            "other columns stay cached"
+            harness.pane_renders(),
+            vec![vec![0; PANES_PER_COLUMN], vec![1; PANES_PER_COLUMN]],
+            "a notified view refreshes its cached descendants; other columns stay cached"
         );
     }
 }

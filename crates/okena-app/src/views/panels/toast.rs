@@ -72,6 +72,9 @@ pub struct ToastOverlay {
 
 impl ToastOverlay {
     pub fn new(cx: &mut Context<Self>) -> Self {
+        crate::views::chrome::repaint::repaint_on_theme_change(cx);
+        crate::views::chrome::repaint::repaint_on_ui_font_size_change(cx);
+
         // Start async tick loop for animations and expiry
         cx.spawn(async move |this: WeakEntity<ToastOverlay>, cx| {
             loop {
@@ -130,7 +133,7 @@ impl Render for ToastOverlay {
         // the action buttons need.
         let toasts = self.toasts.clone();
 
-        div()
+        let stack = div()
             .absolute()
             .bottom(px(32.0)) // above status bar
             .right(px(12.0))
@@ -306,8 +309,10 @@ impl Render for ToastOverlay {
                                     }),
                             ),
                     )
-            }))
-            .into_any_element()
+            }));
+
+        // The cached box spans the window; the stack is placed inside it.
+        div().size_full().child(stack).into_any_element()
     }
 }
 
@@ -419,5 +424,34 @@ mod tests {
         let toast = Toast::error("x").with_ttl(Duration::from_secs(30));
         assert_eq!(toast.ttl, Duration::from_secs(30));
         assert_eq!(toast.level, ToastLevel::Error);
+    }
+}
+
+#[cfg(test)]
+mod repaint_tests {
+    use super::{ToastManager, ToastOverlay};
+    use crate::theme::ThemeMode;
+    use crate::views::chrome::repaint::test_support::{
+        NotifyCount, init_appearance_globals, notify_theme_unchanged, set_theme_mode,
+        update_settings,
+    };
+    use gpui::{AppContext as _, TestAppContext};
+
+    #[gpui::test]
+    fn repaints_on_appearance_changes_and_nothing_else(cx: &mut TestAppContext) {
+        init_appearance_globals(cx);
+        cx.update(|cx| cx.set_global(ToastManager::new()));
+        let overlay = cx.update(|cx| cx.new(ToastOverlay::new));
+        let notifies = NotifyCount::new(cx, &overlay);
+
+        notify_theme_unchanged(cx);
+        update_settings(cx, |s, cx| s.set_sidebar_show_agents(false, cx));
+        assert_eq!(notifies.get(), 0, "unrelated changes leave it cached");
+
+        set_theme_mode(cx, ThemeMode::Light);
+        assert_eq!(notifies.get(), 1, "theme colors");
+
+        update_settings(cx, |s, cx| s.set_ui_font_size(16.0, cx));
+        assert_eq!(notifies.get(), 2, "ui font size");
     }
 }

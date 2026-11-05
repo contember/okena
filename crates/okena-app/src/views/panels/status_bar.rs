@@ -19,6 +19,9 @@ use std::time::Duration;
 use sysinfo::System;
 use time::OffsetDateTime;
 
+/// Height of the status bar.
+pub const STATUS_BAR_HEIGHT: Pixels = px(22.0);
+
 /// Refresh interval for system stats
 const REFRESH_INTERVAL: Duration = Duration::from_secs(2);
 
@@ -206,6 +209,9 @@ impl StatusBar {
             this.sync_extensions(&enabled, cx);
         })
         .detach();
+
+        // Every settings change already notifies through `sync_extensions`.
+        crate::views::chrome::repaint::repaint_on_theme_change(cx);
 
         // Re-render when workspace changes (for focused project updates)
         cx.observe(&workspace, |_, _, cx| cx.notify()).detach();
@@ -757,7 +763,8 @@ impl Render for StatusBar {
 
         div()
             .id("status-bar")
-            .h(px(22.0))
+            .h(STATUS_BAR_HEIGHT)
+            .w_full()
             .px(px(12.0))
             .flex()
             .items_center()
@@ -915,8 +922,21 @@ impl Render for StatusBar {
                                     move |bounds, _window, app| {
                                         entity_for_bounds.update(
                                             app,
-                                            |this: &mut StatusBar, _cx| {
+                                            |this: &mut StatusBar, cx| {
+                                                if this.remote_status_bounds == bounds {
+                                                    return;
+                                                }
                                                 this.remote_status_bounds = bounds;
+                                                // The open popover was placed from the
+                                                // old bounds; a notify during draw is
+                                                // dropped, so re-render after it.
+                                                if this.remote_popover_visible {
+                                                    let this = cx.weak_entity();
+                                                    cx.defer(move |cx| {
+                                                        let _ =
+                                                            this.update(cx, |_, cx| cx.notify());
+                                                    });
+                                                }
                                             },
                                         );
                                     },
@@ -992,5 +1012,46 @@ impl Render for StatusBar {
                     .child(div().text_color(rgb(t.text_secondary)).child(time_str))
                     .child(self.render_remote_status_popover(&remote_snapshots, &t, cx))
             })
+    }
+}
+
+#[cfg(test)]
+mod repaint_tests {
+    use super::StatusBar;
+    use crate::theme::ThemeMode;
+    use crate::views::chrome::repaint::test_support::{
+        NotifyCount, init_appearance_globals, notify_theme_unchanged, set_theme_mode,
+        update_settings,
+    };
+    use crate::views::project_hover::ProjectHoverState;
+    use crate::workspace::focus::FocusManager;
+    use crate::workspace::state::{Workspace, WorkspaceData};
+    use gpui::{AppContext as _, TestAppContext};
+
+    #[gpui::test]
+    fn repaints_on_what_it_renders_from_and_nothing_else(cx: &mut TestAppContext) {
+        init_appearance_globals(cx);
+        let (status_bar, focus_manager, hover) = cx.update(|cx| {
+            let workspace = cx.new(|_| Workspace::new(WorkspaceData::empty()));
+            let focus_manager = cx.new(|_| FocusManager::new());
+            let status_bar =
+                cx.new(|cx| StatusBar::new(workspace.clone(), focus_manager.clone(), cx));
+            let hover = cx.new(|_| ProjectHoverState::new());
+            (status_bar, focus_manager, hover)
+        });
+        let notifies = NotifyCount::new(cx, &status_bar);
+
+        notify_theme_unchanged(cx);
+        cx.update(|cx| hover.update(cx, |_, cx| cx.notify()));
+        assert_eq!(notifies.get(), 0, "unrelated notifies leave it cached");
+
+        set_theme_mode(cx, ThemeMode::Light);
+        assert_eq!(notifies.get(), 1, "theme colors");
+
+        update_settings(cx, |s, cx| s.set_status_bar_show_metrics(false, cx));
+        assert_eq!(notifies.get(), 2, "status bar settings");
+
+        cx.update(|cx| focus_manager.update(cx, |_, cx| cx.notify()));
+        assert_eq!(notifies.get(), 3, "focused project");
     }
 }
