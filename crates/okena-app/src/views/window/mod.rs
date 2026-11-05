@@ -484,11 +484,11 @@ impl WindowView {
 
             // The daemon walks an idle project's worktree only every 30 s, so a
             // switch to it asks for a fresh status at once.
-            if focused_terminal_project != this.last_git_refresh_project {
-                if let Some(project_id) = &focused_terminal_project {
-                    this.request_git_poll_for_visible_project(project_id, cx);
-                }
-                this.last_git_refresh_project = focused_terminal_project.clone();
+            if let Some(project_id) = &focused_terminal_project
+                && this.last_git_refresh_project.as_ref() != Some(project_id)
+            {
+                this.request_git_poll_for_visible_project(project_id, cx);
+                this.last_git_refresh_project = Some(project_id.clone());
             }
 
             // Entering project zoom: capture the grid scroll position now (before
