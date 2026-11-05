@@ -1,7 +1,8 @@
 //! Settings > General > "Status Columns": a small list editor for
 //! the status board columns (rename in place, move up / down,
-//! remove, add). Ids never change here, only names and order, so every
-//! project keeps its status through an edit.
+//! remove, add), with the "No status" row standing among them in the board
+//! order (colour and position only). Ids never change here, only names and
+//! order, so every project keeps its status through an edit.
 
 use crate::settings::settings_entity;
 use crate::theme::theme;
@@ -62,20 +63,24 @@ impl SettingsPanel {
 
     pub(super) fn render_board_columns(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
-        let columns = settings_entity(cx)
-            .read(cx)
-            .settings
-            .status_board
-            .columns
-            .clone();
+        let (columns, no_status_at, no_status_color) = {
+            let board = &settings_entity(cx).read(cx).settings.status_board;
+            (
+                board.columns.clone(),
+                board.no_status_index(),
+                board.no_status_color,
+            )
+        };
         self.sync_board_column_inputs(&columns, cx);
-        let count = self.board_column_inputs.len();
+        // Rows in the board order: the columns with "No status" among them.
+        let last_slot = self.board_column_inputs.len();
 
-        let rows: Vec<AnyElement> = self
+        let mut rows: Vec<AnyElement> = self
             .board_column_inputs
             .iter()
             .enumerate()
             .map(|(index, (id, input))| {
+                let slot = index + usize::from(index >= no_status_at);
                 let id_up = id.clone();
                 let id_down = id.clone();
                 let id_remove = id.clone();
@@ -112,11 +117,11 @@ impl SettingsPanel {
                             "icons/chevron-up.svg",
                             &t,
                         )
-                        .when(index == 0, |b| b.opacity(0.3))
+                        .when(slot == 0, |b| b.opacity(0.3))
                         .on_click(cx.listener(
                             move |_this, _, _window, cx| {
                                 settings_entity(cx).update(cx, |state, cx| {
-                                    state.move_status_board_column(&id_up, -1, cx);
+                                    state.step_status_board_entry(Some(&id_up), -1, cx);
                                 });
                             },
                         )),
@@ -127,11 +132,11 @@ impl SettingsPanel {
                             "icons/chevron-down.svg",
                             &t,
                         )
-                        .when(index + 1 == count, |b| b.opacity(0.3))
+                        .when(slot == last_slot, |b| b.opacity(0.3))
                         .on_click(cx.listener(
                             move |_this, _, _window, cx| {
                                 settings_entity(cx).update(cx, |state, cx| {
-                                    state.move_status_board_column(&id_down, 1, cx);
+                                    state.step_status_board_entry(Some(&id_down), 1, cx);
                                 });
                             },
                         )),
@@ -154,13 +159,8 @@ impl SettingsPanel {
             })
             .collect();
 
-        // "No status" is not a column: no name to edit, no place to move,
-        // nothing to remove. Only its colour is the user's.
-        let no_status_color = settings_entity(cx)
-            .read(cx)
-            .settings
-            .status_board
-            .no_status_color;
+        // "No status" is not a column: no name to edit, nothing to remove.
+        // Its colour and its place in the board order are the user's.
         let no_status_row = div()
             .flex()
             .items_center()
@@ -184,9 +184,31 @@ impl SettingsPanel {
                 },
                 cx,
             ))
-            // Keep the swatches aligned with the column rows above, whose
-            // three icon buttons follow them.
-            .child(div().w(px(3.0 * 18.0 + 2.0 * 6.0)).flex_shrink_0());
+            .child(
+                icon_button("board-no-status-up", "icons/chevron-up.svg", &t)
+                    .when(no_status_at == 0, |b| b.opacity(0.3))
+                    .on_click(cx.listener(|_this, _, _window, cx| {
+                        settings_entity(cx).update(cx, |state, cx| {
+                            state.step_status_board_entry(None, -1, cx);
+                        });
+                    })),
+            )
+            .child(
+                icon_button("board-no-status-down", "icons/chevron-down.svg", &t)
+                    .when(no_status_at == last_slot, |b| b.opacity(0.3))
+                    .on_click(cx.listener(|_this, _, _window, cx| {
+                        settings_entity(cx).update(cx, |state, cx| {
+                            state.step_status_board_entry(None, 1, cx);
+                        });
+                    })),
+            )
+            // Keep the buttons aligned with the column rows, whose trash
+            // button follows them.
+            .child(div().w(px(18.0)).flex_shrink_0());
+        rows.insert(
+            no_status_at.min(rows.len()),
+            no_status_row.into_any_element(),
+        );
 
         settings_input_row(
             "status-board-columns",
@@ -197,7 +219,6 @@ impl SettingsPanel {
             true,
         )
         .children(rows)
-        .child(no_status_row)
         .child(
             div().child(
                 button("status-board-add-column", "+ Add column", &t).on_click(cx.listener(

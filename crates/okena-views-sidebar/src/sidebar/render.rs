@@ -1086,92 +1086,103 @@ impl Render for Sidebar {
                         let is_expanded = self.is_project_expanded(&project.id, true);
                         if is_expanded {
                             let guide_start = flat_elements.len();
-                            // Main project as first child — highlights when focused individual
-                            let is_cursor = cursor_index == Some(flat_idx);
-                            let is_focused_project = focused_project_id.as_ref()
-                                == Some(&project.id)
-                                && focus_individual;
-                            flat_elements.push(
-                                self.render_project_group_child(
-                                    &project,
-                                    20.0,
-                                    "gc",
-                                    "group-child-item",
-                                    is_cursor,
-                                    is_focused_project,
-                                    window,
-                                    cx,
-                                )
-                                .into_any_element(),
-                            );
-                            flat_idx += 1;
-
-                            if self.expanded_projects.contains(&project.id) {
-                                self.render_expanded_children(
-                                    &project,
-                                    34.0,
-                                    48.0,
-                                    "gm-",
-                                    cursor_index,
-                                    &mut flat_idx,
-                                    &mut flat_elements,
-                                    cx,
-                                );
-                            }
-
-                            // Worktree children as siblings
-                            for row in super::status_groups::worktree_rows(
+                            // The main checkout and its worktrees, grouped by
+                            // status the way the lanes group them.
+                            for row in super::status_groups::family_rows(
+                                project.status.as_deref(),
                                 &worktree_children
                                     .iter()
                                     .map(|c| c.status.as_deref())
                                     .collect::<Vec<_>>(),
                                 cx,
                             ) {
-                                if let Some((label, color)) = row.caption {
+                                if let Some(caption) = &row.caption {
                                     extra_rows.push(flat_idx);
                                     flat_elements.push(
-                                        self.render_status_group_header(&label, color, 20.0, cx)
-                                            .into_any_element(),
+                                        self.render_status_group_header(
+                                            caption,
+                                            &project.id,
+                                            20.0,
+                                            cx,
+                                        )
+                                        .into_any_element(),
                                     );
                                 }
-                                let wt_idx = row.index;
-                                let child = &worktree_children[wt_idx];
                                 let is_cursor = cursor_index == Some(flat_idx);
-                                let is_focused_project =
-                                    focused_project_id.as_ref() == Some(&child.id);
-                                flat_elements.push(
-                                    self.render_worktree_item(
-                                        child,
-                                        20.0,
-                                        wt_idx,
-                                        is_cursor,
-                                        is_focused_project,
-                                        worktree_marker,
-                                        focused_terminal_id.as_deref(),
-                                        window,
-                                        cx,
-                                    )
-                                    .into_any_element(),
-                                );
-                                flat_idx += 1;
+                                match row.member {
+                                    super::status_groups::FamilyMember::Main => {
+                                        // Highlights when focused individual.
+                                        let is_focused_project = focused_project_id.as_ref()
+                                            == Some(&project.id)
+                                            && focus_individual;
+                                        flat_elements.push(
+                                            self.render_project_group_child(
+                                                &project,
+                                                20.0,
+                                                "gc",
+                                                "group-child-item",
+                                                is_cursor,
+                                                is_focused_project,
+                                                window,
+                                                cx,
+                                            )
+                                            .into_any_element(),
+                                        );
+                                        flat_idx += 1;
 
-                                if self.expanded_projects.contains(&child.id) {
-                                    self.render_expanded_children(
-                                        child,
-                                        34.0,
-                                        48.0,
-                                        "wt-",
-                                        cursor_index,
-                                        &mut flat_idx,
-                                        &mut flat_elements,
-                                        cx,
-                                    );
+                                        if self.expanded_projects.contains(&project.id) {
+                                            self.render_expanded_children(
+                                                &project,
+                                                34.0,
+                                                48.0,
+                                                "gm-",
+                                                cursor_index,
+                                                &mut flat_idx,
+                                                &mut flat_elements,
+                                                cx,
+                                            );
+                                        }
+                                    }
+                                    super::status_groups::FamilyMember::Worktree(wt_idx) => {
+                                        let child = &worktree_children[wt_idx];
+                                        let is_focused_project =
+                                            focused_project_id.as_ref() == Some(&child.id);
+                                        flat_elements.push(
+                                            self.render_worktree_item(
+                                                child,
+                                                20.0,
+                                                wt_idx,
+                                                is_cursor,
+                                                is_focused_project,
+                                                worktree_marker,
+                                                focused_terminal_id.as_deref(),
+                                                window,
+                                                cx,
+                                            )
+                                            .into_any_element(),
+                                        );
+                                        flat_idx += 1;
+
+                                        if self.expanded_projects.contains(&child.id) {
+                                            self.render_expanded_children(
+                                                child,
+                                                34.0,
+                                                48.0,
+                                                "wt-",
+                                                cursor_index,
+                                                &mut flat_idx,
+                                                &mut flat_elements,
+                                                cx,
+                                            );
+                                        }
+                                    }
                                 }
                             }
                             if worktree_guide {
+                                // Under the group header's arrow (its padding is 4).
                                 super::status_groups::add_tree_guide(
                                     &mut flat_elements[guide_start..],
-                                    12.0,
+                                    4.0,
                                     t.get_folder_color(project.folder_color),
                                 );
                             }
@@ -1306,96 +1317,105 @@ impl Render for Sidebar {
                                 let is_expanded = self.is_project_expanded(&fp.id, true);
                                 if is_expanded {
                                     let guide_start = flat_elements.len();
-                                    // Main project as first child
-                                    let is_cursor = cursor_index == Some(flat_idx);
-                                    let is_focused_project = focused_project_id.as_ref()
-                                        == Some(&fp.id)
-                                        && focus_individual;
-                                    flat_elements.push(
-                                        self.render_project_group_child(
-                                            fp,
-                                            36.0,
-                                            "fgc",
-                                            "fgc-item",
-                                            is_cursor,
-                                            is_focused_project,
-                                            window,
-                                            cx,
-                                        )
-                                        .into_any_element(),
-                                    );
-                                    flat_idx += 1;
-
-                                    if self.expanded_projects.contains(&fp.id) {
-                                        self.render_expanded_children(
-                                            fp,
-                                            50.0,
-                                            64.0,
-                                            "gm-",
-                                            cursor_index,
-                                            &mut flat_idx,
-                                            &mut flat_elements,
-                                            cx,
-                                        );
-                                    }
-
-                                    // Worktree children as siblings
-                                    if let Some(wt_children) = fp_wt_children {
-                                        for row in super::status_groups::worktree_rows(
-                                            &wt_children
-                                                .iter()
-                                                .map(|c| c.status.as_deref())
-                                                .collect::<Vec<_>>(),
-                                            cx,
-                                        ) {
-                                            if let Some((label, color)) = row.caption {
-                                                extra_rows.push(flat_idx);
-                                                flat_elements.push(
-                                                    self.render_status_group_header(
-                                                        &label, color, 36.0, cx,
-                                                    )
-                                                    .into_any_element(),
-                                                );
-                                            }
-                                            let wt_idx = row.index;
-                                            let child = &wt_children[wt_idx];
-                                            let is_cursor = cursor_index == Some(flat_idx);
-                                            let is_focused_project =
-                                                focused_project_id.as_ref() == Some(&child.id);
+                                    // The main checkout and its worktrees,
+                                    // grouped by status the way the lanes
+                                    // group them.
+                                    let wt_children: &[_] =
+                                        fp_wt_children.map_or(&[], |c| c.as_slice());
+                                    for row in super::status_groups::family_rows(
+                                        fp.status.as_deref(),
+                                        &wt_children
+                                            .iter()
+                                            .map(|c| c.status.as_deref())
+                                            .collect::<Vec<_>>(),
+                                        cx,
+                                    ) {
+                                        if let Some(caption) = &row.caption {
+                                            extra_rows.push(flat_idx);
                                             flat_elements.push(
-                                                self.render_worktree_item(
-                                                    child,
-                                                    36.0,
-                                                    wt_idx,
-                                                    is_cursor,
-                                                    is_focused_project,
-                                                    worktree_marker,
-                                                    focused_terminal_id.as_deref(),
-                                                    window,
-                                                    cx,
+                                                self.render_status_group_header(
+                                                    caption, &fp.id, 36.0, cx,
                                                 )
                                                 .into_any_element(),
                                             );
-                                            flat_idx += 1;
-
-                                            if self.expanded_projects.contains(&child.id) {
-                                                self.render_expanded_children(
-                                                    child,
-                                                    50.0,
-                                                    64.0,
-                                                    "wt-",
-                                                    cursor_index,
-                                                    &mut flat_idx,
-                                                    &mut flat_elements,
-                                                    cx,
+                                        }
+                                        let is_cursor = cursor_index == Some(flat_idx);
+                                        match row.member {
+                                            super::status_groups::FamilyMember::Main => {
+                                                let is_focused_project =
+                                                    focused_project_id.as_ref() == Some(&fp.id)
+                                                        && focus_individual;
+                                                flat_elements.push(
+                                                    self.render_project_group_child(
+                                                        fp,
+                                                        36.0,
+                                                        "fgc",
+                                                        "fgc-item",
+                                                        is_cursor,
+                                                        is_focused_project,
+                                                        window,
+                                                        cx,
+                                                    )
+                                                    .into_any_element(),
                                                 );
+                                                flat_idx += 1;
+
+                                                if self.expanded_projects.contains(&fp.id) {
+                                                    self.render_expanded_children(
+                                                        fp,
+                                                        50.0,
+                                                        64.0,
+                                                        "gm-",
+                                                        cursor_index,
+                                                        &mut flat_idx,
+                                                        &mut flat_elements,
+                                                        cx,
+                                                    );
+                                                }
+                                            }
+                                            super::status_groups::FamilyMember::Worktree(
+                                                wt_idx,
+                                            ) => {
+                                                let child = &wt_children[wt_idx];
+                                                let is_focused_project =
+                                                    focused_project_id.as_ref() == Some(&child.id);
+                                                flat_elements.push(
+                                                    self.render_worktree_item(
+                                                        child,
+                                                        36.0,
+                                                        wt_idx,
+                                                        is_cursor,
+                                                        is_focused_project,
+                                                        worktree_marker,
+                                                        focused_terminal_id.as_deref(),
+                                                        window,
+                                                        cx,
+                                                    )
+                                                    .into_any_element(),
+                                                );
+                                                flat_idx += 1;
+
+                                                if self.expanded_projects.contains(&child.id) {
+                                                    self.render_expanded_children(
+                                                        child,
+                                                        50.0,
+                                                        64.0,
+                                                        "wt-",
+                                                        cursor_index,
+                                                        &mut flat_idx,
+                                                        &mut flat_elements,
+                                                        cx,
+                                                    );
+                                                }
                                             }
                                         }
                                     }
                                     if worktree_guide {
+                                        // Under the folder group header's arrow
+                                        // (its padding is 20).
                                         super::status_groups::add_tree_guide(
                                             &mut flat_elements[guide_start..],
-                                            28.0,
+                                            20.0,
                                             t.get_folder_color(fp.folder_color),
                                         );
                                     }

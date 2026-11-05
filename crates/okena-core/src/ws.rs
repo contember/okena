@@ -1,7 +1,7 @@
 use crate::api::{
-    ApiFullscreenRequest, ApiGitStatus, ApiProjectLayoutRequest, ApiProjectPlacementRequest,
-    ApiOverviewStatusLanesRequest, ApiProjectVisibilityRequest, ApiStatusLanesRequest,
-    ApiSystemStats, ApiTerminalFocusRequest, ApiToast, ApiUsage, ApiWindow,
+    ApiFullscreenRequest, ApiGitStatus, ApiOverviewStatusLanesRequest, ApiProjectLayoutRequest,
+    ApiProjectPlacementRequest, ApiProjectVisibilityRequest, ApiStatusLanesRequest, ApiSystemStats,
+    ApiTerminalFocusRequest, ApiToast, ApiUsage, ApiWindow,
 };
 use crate::keys::SpecialKey;
 use serde::{Deserialize, Serialize};

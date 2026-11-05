@@ -178,11 +178,6 @@ pub struct ProjectColumn {
     /// (`must call prepaint before paint`) — the hover state can differ between
     /// prepaint and paint. State + `notify` re-renders a consistent tree.
     header_hovered: bool,
-    /// Whether the window currently draws this column inside a status lane.
-    /// The lane's spine already names the status, so the header pill only
-    /// shows while the header is hovered (to keep the picker one click away).
-    /// Set by the window's grid render via [`Self::set_in_status_lane`].
-    in_status_lane: bool,
 }
 
 impl ProjectColumn {
@@ -304,7 +299,6 @@ impl ProjectColumn {
             hook_panel,
             tip_index: crate::views::tips::next_start_index(),
             header_hovered: false,
-            in_status_lane: false,
         }
     }
 
@@ -631,15 +625,6 @@ impl ProjectColumn {
             })
     }
 
-    /// Tell the column whether it is drawn inside a status lane. Repaints
-    /// only on a change, so the grid can call it every frame.
-    pub fn set_in_status_lane(&mut self, in_lane: bool, cx: &mut Context<Self>) {
-        if self.in_status_lane != in_lane {
-            self.in_status_lane = in_lane;
-            cx.notify();
-        }
-    }
-
     /// The status pill after the project name: the column's name in its
     /// colour when a status is set, a muted "Status" affordance while the
     /// header is hovered otherwise. Click opens the status picker. Nothing
@@ -650,9 +635,6 @@ impl ProjectColumn {
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         if !okena_ui::board::status_board_enabled(cx) {
-            return None;
-        }
-        if self.in_status_lane && !self.header_hovered {
             return None;
         }
         let t = theme(cx);

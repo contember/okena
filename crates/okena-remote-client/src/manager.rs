@@ -270,10 +270,7 @@ pub enum RemoteManagerEvent {
     /// An external API client showed or flattened a window's overview status
     /// lanes. The desktop applies it to its own window (`None` = its active
     /// window).
-    OverviewStatusLanesRequested {
-        on: bool,
-        window: Option<WindowId>,
-    },
+    OverviewStatusLanesRequested { on: bool, window: Option<WindowId> },
 
     /// The implicit local-daemon loopback connection reached a terminal failed
     /// state (its own connect/reconnect retries are exhausted against a dead
@@ -1378,8 +1375,9 @@ mod tests {
         merge_settings_patches, presentation_event, run_action_queue, windows_for_connection,
     };
     use okena_core::api::{
-        ActionRequest, ApiFullscreenRequest, ApiOverviewStatusLanesRequest, ApiProjectLayoutRequest,
-        ApiProjectPlacementRequest, ApiProjectVisibilityRequest, ApiStatusLanesRequest, ApiWindow,
+        ActionRequest, ApiFullscreenRequest, ApiOverviewStatusLanesRequest,
+        ApiProjectLayoutRequest, ApiProjectPlacementRequest, ApiProjectVisibilityRequest,
+        ApiStatusLanesRequest, ApiWindow,
     };
     use okena_core::ws::ClientPresentationRequest;
     use okena_transport::client::{ConnectionStatus, LOCAL_DAEMON_CONNECTION_ID};

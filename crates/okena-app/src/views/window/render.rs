@@ -116,7 +116,8 @@ impl WindowView {
             .iter()
             .map(|id| workspace.project(id).and_then(|p| p.status.as_deref()))
             .collect();
-        match okena_workspace::status_board::lanes(&statuses, okena_ui::board::board_columns(cx)) {
+        let board = okena_ui::board::status_board(cx);
+        match okena_workspace::status_board::lanes(&statuses, board.columns, board.no_status_at) {
             Some(lanes) => GridLayout::with_lanes(&visible, lanes),
             None => GridLayout::flat(visible),
         }
@@ -477,13 +478,6 @@ impl WindowView {
 
         let mut elements: Vec<AnyElement> = Vec::new();
         if mode.is_grid() {
-            // The tile grid never has lanes; a column that just left one
-            // gets its header pill back.
-            for project_id in &visible_projects {
-                if let Some(col) = self.project_columns.get(project_id).cloned() {
-                    col.update(cx, |col, cx| col.set_in_status_lane(false, cx));
-                }
-            }
             elements.push(self.render_tile_grid(
                 &visible_projects,
                 container_bounds.borrow().size,
@@ -537,8 +531,6 @@ impl WindowView {
                     let pixel_size = pixel_widths.get(i).copied().unwrap_or(200.0);
 
                     if let Some(col) = self.project_columns.get(project_id).cloned() {
-                        let in_lane = caption.is_some();
-                        col.update(cx, |col, cx| col.set_in_status_lane(in_lane, cx));
                         let is_hovered = hovered_project.as_deref() == Some(project_id.as_str());
                         let col_element = div()
                             // Fixed size along the grid axis, stretch on the cross axis.
@@ -589,12 +581,11 @@ impl WindowView {
                     None => elements.extend(inner),
                     Some(column) => {
                         let lane_t = theme(cx);
-                        let accent = match okena_ui::board::status_board(cx)
-                            .group_color(column.as_ref())
-                        {
-                            okena_core::theme::FolderColor::Default => None,
-                            color => Some(lane_t.get_folder_color(color)),
-                        };
+                        let accent =
+                            match okena_ui::board::status_board(cx).group_color(column.as_ref()) {
+                                okena_core::theme::FolderColor::Default => None,
+                                color => Some(lane_t.get_folder_color(color)),
+                            };
                         let edge = accent.unwrap_or(lane_t.text_muted);
                         let label =
                             okena_workspace::status_board::caption_label(&column).to_uppercase();
@@ -608,7 +599,11 @@ impl WindowView {
                                 // Full-width cell, centred text: every glyph
                                 // shares one axis instead of each box
                                 // centring on its own width.
-                                div().w_full().text_center().child(g.to_string()).into_any_element()
+                                div()
+                                    .w_full()
+                                    .text_center()
+                                    .child(g.to_string())
+                                    .into_any_element()
                             }
                         });
                         // The label sits out of flow: in a rows grid the
@@ -655,14 +650,18 @@ impl WindowView {
                                             .items_center()
                                             .line_height(relative(1.05))
                                             .font_weight(FontWeight::SEMIBOLD)
-                                            .text_color(rgb(
-                                                accent.unwrap_or(lane_t.text_secondary),
-                                            ))
+                                            .text_color(
+                                                rgb(accent.unwrap_or(lane_t.text_secondary)),
+                                            )
                                             .children(letters),
                                     ),
                             )
                             .child(
-                                div().w(px(1.0)).h_full().flex_shrink_0().bg(rgb(lane_t.border)),
+                                div()
+                                    .w(px(1.0))
+                                    .h_full()
+                                    .flex_shrink_0()
+                                    .bg(rgb(lane_t.border)),
                             );
                         if is_rows && span_index > 0 {
                             elements.push(

@@ -700,11 +700,13 @@ const STATUS_PROJECT_HELP: &str = "Project or worktree (id / name / path); omit 
 
 #[derive(Subcommand)]
 pub enum StatusCmd {
-    /// List projects with their status, in board order (columns, then no status)
+    /// List projects with their status, in board order (the columns, with no
+    /// status at its set position, last by default)
     ///
     /// Default: tab-separated `name, column name, column id`; both column
     /// fields are empty without a status, the name is empty for a removed
-    /// column's id. `--json` adds the columns and whether the board is on.
+    /// column's id. `--json` adds the columns, whether the board is on, and
+    /// the No status color and 1-based position.
     Ls {
         /// Only this project's family: its parent and the parent's worktrees
         /// (id / name / path)
@@ -801,11 +803,14 @@ pub enum StatusColumnCmd {
         /// Column id or name
         column: String,
     },
-    /// Print or set the color of the No status group (its lane spine and
-    /// sidebar caption); not a column, so it cannot be renamed or moved
+    /// Print or set the color and position of the No status group (its lane
+    /// spine and sidebar caption); not a column, so it cannot be renamed
     NoStatus {
-        /// Color (default, red, orange, yellow, lime, green, teal, cyan, blue, indigo, purple, pink); omit to print it
+        /// Color (default, red, orange, yellow, lime, green, teal, cyan, blue, indigo, purple, pink); omit both to print `color<TAB>position`
         color: Option<String>,
+        /// Position in the board order, 1-based (columns + 1 = last)
+        #[arg(long, value_parser = clap::value_parser!(usize))]
+        position: Option<usize>,
     },
 }
 
@@ -1017,8 +1022,16 @@ mod tests {
         );
         assert!(Cli::try_parse_from(["okena", "status", "lanes", "maybe"]).is_err());
         assert!(
-            Cli::try_parse_from(["okena", "status", "lanes", "on", "--overview", "--window", "main"])
-                .is_ok()
+            Cli::try_parse_from([
+                "okena",
+                "status",
+                "lanes",
+                "on",
+                "--overview",
+                "--window",
+                "main"
+            ])
+            .is_ok()
         );
         assert!(
             Cli::try_parse_from(["okena", "status", "lanes", "on", "p", "--overview"]).is_err(),
@@ -1035,6 +1048,10 @@ mod tests {
         assert!(Cli::try_parse_from(["okena", "status", "column", "rm", "qa"]).is_ok());
         assert!(Cli::try_parse_from(["okena", "status", "column", "no-status"]).is_ok());
         assert!(Cli::try_parse_from(["okena", "status", "column", "no-status", "blue"]).is_ok());
+        assert!(
+            Cli::try_parse_from(["okena", "status", "column", "no-status", "--position", "1"])
+                .is_ok()
+        );
         assert!(Cli::try_parse_from(["okena", "skill", "show"]).is_ok());
         assert!(Cli::try_parse_from(["okena", "skill", "install", "--project"]).is_ok());
         assert!(Cli::try_parse_from(["okena", "settings", "show"]).is_ok());

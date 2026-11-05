@@ -18,6 +18,9 @@ pub struct StatusBoard<'a> {
     pub columns: &'a [BoardColumn],
     /// Colour of the "No status" group; `Default` draws it grey.
     pub no_status_color: FolderColor,
+    /// The number of columns before the "No status" group in the board
+    /// order (`columns.len()` = last).
+    pub no_status_at: usize,
 }
 
 impl StatusBoard<'_> {
@@ -59,6 +62,7 @@ pub fn status_board(cx: &App) -> StatusBoard<'_> {
             enabled: false,
             columns: &DEFAULT_COLUMNS,
             no_status_color: FolderColor::Default,
+            no_status_at: DEFAULT_COLUMNS.len(),
         },
     }
 }

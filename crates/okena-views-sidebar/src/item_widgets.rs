@@ -13,7 +13,10 @@ use okena_ui::simple_input::SimpleInput;
 use okena_ui::tokens::{ui_text_md, ui_text_sm, ui_text_xs};
 use okena_ui::truncated_text::truncated_text;
 
-/// Expand/collapse arrow (chevron-down/right, 16x16).
+/// Width of [`sidebar_expand_arrow`]; the family guide centres under it.
+pub(crate) const EXPAND_ARROW_WIDTH: f32 = 12.0;
+
+/// Expand/collapse arrow (chevron-down/right, 12x16).
 ///
 /// Caller chains `.on_click()` to toggle.
 pub fn sidebar_expand_arrow(
@@ -24,7 +27,7 @@ pub fn sidebar_expand_arrow(
     div()
         .id(id)
         .flex_shrink_0()
-        .w(px(12.0))
+        .w(px(EXPAND_ARROW_WIDTH))
         .h(px(16.0))
         .flex()
         .items_center()

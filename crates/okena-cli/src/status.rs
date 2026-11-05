@@ -143,14 +143,25 @@ struct StatusRow<'a> {
     column: Option<&'a BoardColumn>,
 }
 
-/// `projects` in board order: the columns in their order, then everything
-/// without a (still existing) column. Input order is kept inside each group,
-/// like the sidebar and the lanes.
-fn board_rows<'a>(projects: Vec<&'a ApiProject>, columns: &'a [BoardColumn]) -> Vec<StatusRow<'a>> {
+/// `projects` in board order: the columns in their order, with everything
+/// without a (still existing) column after the first `no_status_at` of them
+/// ("No status"). Input order is kept inside each group, like the sidebar
+/// and the lanes.
+fn board_rows<'a>(
+    projects: Vec<&'a ApiProject>,
+    columns: &'a [BoardColumn],
+    no_status_at: usize,
+) -> Vec<StatusRow<'a>> {
     let position = |p: &ApiProject| {
         p.status
             .as_deref()
             .and_then(|s| columns.iter().position(|c| c.id == s))
+    };
+    // Board-order slots: "No status" takes slot `no_status_at`, the columns
+    // from there on move one down.
+    let slot_of = |column: Option<usize>| match column {
+        Some(i) => i + usize::from(i >= no_status_at),
+        None => no_status_at,
     };
     let mut rows: Vec<(usize, StatusRow<'a>)> = projects
         .into_iter()
@@ -160,7 +171,7 @@ fn board_rows<'a>(projects: Vec<&'a ApiProject>, columns: &'a [BoardColumn]) -> 
                 project,
                 column: slot.map(|i| &columns[i]),
             };
-            (slot.unwrap_or(usize::MAX), row)
+            (slot_of(slot), row)
         })
         .collect();
     rows.sort_by_key(|(slot, _)| *slot);
@@ -228,8 +239,17 @@ fn save_board_patch(token: &str, patch: Value) -> Result<(), String> {
     api_action(token, &body.to_string()).map(|_| ())
 }
 
-fn save_columns(token: &str, columns: &[BoardColumn]) -> Result<(), String> {
-    save_board_patch(token, json!({ "columns": columns }))
+/// Save the columns and where "No status" stands among them (a column edit
+/// can move it, see `StatusBoardSettings::remove_column`). `null` clears the
+/// position, i.e. "last".
+fn save_columns(token: &str, board: &StatusBoardSettings) -> Result<(), String> {
+    save_board_patch(
+        token,
+        json!({
+            "columns": board.columns,
+            "no_status_position": board.no_status_position,
+        }),
+    )
 }
 
 /// Authenticate, then run `f`; print its error and exit 1 on failure. An
@@ -266,12 +286,13 @@ pub fn cli_status_ls(project: Option<&str>, json_mode: bool) -> i32 {
             }
             None => state.projects.iter().collect(),
         };
-        let rows = board_rows(projects, &board.columns);
+        let rows = board_rows(projects, &board.columns, board.no_status_index());
         if json_mode {
             return print_json(&json!({
                 "enabled": board.enabled,
                 "columns": board.columns.iter().map(column_json).collect::<Vec<_>>(),
                 "no_status_color": color_name(board.no_status_color),
+                "no_status_position": board.no_status_index() + 1,
                 "projects": rows.iter().map(row_json).collect::<Vec<_>>(),
             }));
         }
@@ -411,7 +432,7 @@ pub fn cli_status_column_add(name: &str, color: Option<&str>) -> i32 {
         if let Some(color) = color {
             board.set_column_color(&id, color);
         }
-        save_columns(token, &board.columns)?;
+        save_columns(token, &board)?;
         println!("{id}");
         Ok(())
     })
@@ -434,7 +455,8 @@ pub fn cli_status_column_color(column: &str, color: &str) -> i32 {
     })
 }
 
-/// `okena status column move <column> <position>` (1-based)
+/// `okena status column move <column> <position>` (1-based, among the
+/// columns; "No status" keeps its place, see `no-status --position`)
 pub fn cli_status_column_move(column: &str, position: usize) -> i32 {
     edit_columns(column, |board, id| {
         let count = board.columns.len();
@@ -452,7 +474,7 @@ pub fn cli_status_column_rm(column: &str) -> i32 {
         let mut board = fetch_board(token)?;
         let id = resolve_column(&board.columns, column)?.id.clone();
         board.remove_column(&id);
-        save_columns(token, &board.columns)?;
+        save_columns(token, &board)?;
         // Like the settings editor, nothing is deleted on the user's behalf.
         let kept = fetch_state(token)
             .map(|state| {
@@ -472,18 +494,37 @@ pub fn cli_status_column_rm(column: &str) -> i32 {
     })
 }
 
-/// `okena status column no-status [color]`: print the No status colour, or
-/// set it.
-pub fn cli_status_column_no_status(color: Option<&str>) -> i32 {
-    run(|token| match color {
-        None => {
-            println!("{}", color_name(fetch_board(token)?.no_status_color));
-            Ok(())
+/// `okena status column no-status [color] [--position n]`: print the No
+/// status colour and position (`color<TAB>position`), or set either.
+/// `position` is 1-based in the board order, `columns + 1` = last.
+pub fn cli_status_column_no_status(color: Option<&str>, position: Option<usize>) -> i32 {
+    run(|token| {
+        if color.is_none() && position.is_none() {
+            let board = fetch_board(token)?;
+            println!(
+                "{}\t{}",
+                color_name(board.no_status_color),
+                board.no_status_index() + 1
+            );
+            return Ok(());
         }
-        Some(color) => {
-            let color = parse_color(color)?;
-            save_board_patch(token, json!({ "no_status_color": color_name(color) }))
+        let mut patch = serde_json::Map::new();
+        if let Some(color) = color {
+            patch.insert(
+                "no_status_color".into(),
+                json!(color_name(parse_color(color)?)),
+            );
         }
+        if let Some(position) = position {
+            let mut board = fetch_board(token)?;
+            let last = board.columns.len() + 1;
+            if position == 0 || position > last {
+                return Err(format!("Position must be between 1 and {last}."));
+            }
+            board.set_no_status_index(position - 1);
+            patch.insert("no_status_position".into(), json!(board.no_status_position));
+        }
+        save_board_patch(token, Value::Object(patch))
     })
 }
 
@@ -496,7 +537,7 @@ fn edit_columns(
         let mut board = fetch_board(token)?;
         let id = resolve_column(&board.columns, column)?.id.clone();
         edit(&mut board, &id)?;
-        save_columns(token, &board.columns)
+        save_columns(token, &board)
     })
 }
 
@@ -642,7 +683,7 @@ mod tests {
             project("d", Some("todo")),
             project("e", Some("review")),
         ];
-        let rows = board_rows(projects.iter().collect(), &columns);
+        let rows = board_rows(projects.iter().collect(), &columns, columns.len());
         let lines: Vec<String> = rows.iter().map(row_line).collect();
         assert_eq!(
             lines,
@@ -652,6 +693,20 @@ mod tests {
                 "E\tReview\treview",
                 "A\t\t",
                 "C\t\tgone",
+            ]
+        );
+
+        // "No status" moved before "review" (after todo, in-progress).
+        let rows = board_rows(projects.iter().collect(), &columns, 2);
+        let lines: Vec<String> = rows.iter().map(row_line).collect();
+        assert_eq!(
+            lines,
+            [
+                "D\tTo do\ttodo",
+                "A\t\t",
+                "C\t\tgone",
+                "B\tReview\treview",
+                "E\tReview\treview",
             ]
         );
     }

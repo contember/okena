@@ -4304,14 +4304,19 @@ mod workspace_tests {
     #[test]
     fn overview_lanes_are_independent_of_family_lanes() {
         let mut data = make_workspace_data(vec![make_project("p1")], vec!["p1"]);
-        data.main_window.status_lanes_projects.insert("p1".to_string());
+        data.main_window
+            .status_lanes_projects
+            .insert("p1".to_string());
         let mut ws = Workspace::new(data);
 
         // A family with lanes on does not turn them on for the overview.
         assert!(ws.status_lanes_for_view(WindowId::Main, Some("p1")));
         assert!(!ws.status_lanes_for_view(WindowId::Main, None));
 
-        assert_eq!(ws.data.toggle_status_lanes_overview(WindowId::Main), Some(true));
+        assert_eq!(
+            ws.data.toggle_status_lanes_overview(WindowId::Main),
+            Some(true)
+        );
         assert!(ws.status_lanes_for_view(WindowId::Main, None));
         assert!(ws.status_lanes_overview(WindowId::Main));
 
@@ -4321,8 +4326,14 @@ mod workspace_tests {
         assert!(ws.status_lanes_for_view(WindowId::Main, None));
 
         // The explicit setter reports a change only when there is one.
-        assert_eq!(ws.data.set_status_lanes_overview(WindowId::Main, true), Some(false));
-        assert_eq!(ws.data.set_status_lanes_overview(WindowId::Main, false), Some(true));
+        assert_eq!(
+            ws.data.set_status_lanes_overview(WindowId::Main, true),
+            Some(false)
+        );
+        assert_eq!(
+            ws.data.set_status_lanes_overview(WindowId::Main, false),
+            Some(true)
+        );
         assert!(!ws.status_lanes_overview(WindowId::Main));
     }
 }
