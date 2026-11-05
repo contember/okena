@@ -24,6 +24,7 @@
 //! GitHub reports the API rate limit as exhausted.
 
 use std::collections::{HashMap, HashSet};
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::Path;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
@@ -578,8 +579,8 @@ pub struct GitChangeSignals {
 /// Each cycle snapshots all local projects and their current relevance, selects
 /// only due or explicitly triggered repositories, and runs their gix work on the
 /// blocking pool. Results merge into the prior cache so skipped hidden projects
-/// remain published. The independent wall-clock interval keeps 5s/30s deadlines
-/// stable even when targeted triggers wake the loop between cadence ticks.
+/// remain published. The independent wall-clock interval keeps the schedule's
+/// cycles stable even when targeted triggers wake the loop between cadence ticks.
 /// PR/CI lookups retain their existing visible-project adaptive cadence.
 ///
 /// Bumps `state_version` on a real change so a snapshot/broadcast observer can
@@ -730,7 +731,6 @@ pub async fn run_git_poll(
             .iter()
             .filter(|(id, _)| status_poll_ids.contains(id))
         {
-            walk_schedule.note_walked(id, cycle);
             let id = id.clone();
             let path = path.clone();
             let status = tokio::task::spawn_blocking(move || {
@@ -739,6 +739,7 @@ pub async fn run_git_poll(
             .await;
             match status {
                 Ok(Some(mut status)) => {
+                    walk_schedule.note_walked(&id, cycle);
                     // Inject whatever PR/CI we already have cached so a still-fresh
                     // badge doesn't blank between GitHub cadence cycles.
                     status.pr_info = pr_infos.get(&id).cloned().flatten();
@@ -746,6 +747,7 @@ pub async fn run_git_poll(
                     attempted.insert(id, Some(status));
                 }
                 Ok(None) => {
+                    walk_schedule.note_walked(&id, cycle);
                     attempted.insert(id, None);
                 }
                 Err(error) => {
@@ -904,8 +906,8 @@ pub async fn run_git_poll(
     }
 }
 
-/// Sum each project's terminal content generations. Any output, resize or
-/// terminal opening/closing changes the sum.
+/// Hash each project's `(terminal id, content generation)` pairs. Any output,
+/// resize or terminal opening/closing changes the hash.
 fn output_fingerprints_by_project(
     terminals: &TerminalsRegistry,
     project_terminals: Vec<(String, Vec<String>)>,
@@ -914,13 +916,13 @@ fn output_fingerprints_by_project(
     project_terminals
         .into_iter()
         .map(|(id, terminal_ids)| {
-            let fingerprint = terminal_ids
-                .iter()
-                .filter_map(|terminal_id| terminals.get(terminal_id))
-                .fold(0u64, |sum, terminal| {
-                    sum.wrapping_add(terminal.content_generation())
-                });
-            (id, fingerprint)
+            let mut hasher = DefaultHasher::new();
+            for terminal_id in &terminal_ids {
+                if let Some(terminal) = terminals.get(terminal_id) {
+                    (terminal_id, terminal.content_generation()).hash(&mut hasher);
+                }
+            }
+            (id, hasher.finish())
         })
         .collect()
 }
@@ -1574,8 +1576,7 @@ mod tests {
             .await;
     }
 
-    /// Real time: the HEAD poll's own blocking reads must finish between ticks.
-    #[tokio::test(flavor = "current_thread")]
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
     async fn the_head_poll_reports_a_rewritten_index() {
         let repo = committed_repo();
         let mut data = workspace_data_with_projects(&[("p", "t")]);
