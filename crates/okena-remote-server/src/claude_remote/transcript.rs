@@ -19,6 +19,9 @@ use super::hook_input::is_valid_agent_id;
 /// The first page reads at most this much of the transcript's tail. A cursor
 /// further behind than this also gets a first page instead of a huge read.
 const PAGE_WINDOW: u64 = 4 * 1024 * 1024;
+/// The first page starts from this much of the tail and grows it fourfold, up
+/// to [`PAGE_WINDOW`], only while it holds fewer than [`FIRST_PAGE_ENTRIES`].
+const FIRST_PAGE_INITIAL_WINDOW: u64 = 64 * 1024;
 const FIRST_PAGE_ENTRIES: usize = 200;
 const TOOL_RESULT_MAX_CHARS: usize = 2000;
 const SUMMARY_MAX_CHARS: usize = 200;
@@ -56,15 +59,69 @@ pub(super) fn read_transcript(
         });
     }
 
-    let start = len.saturating_sub(PAGE_WINDOW);
-    let (mut entries, cursor) = read_complete_lines(&mut file, start, len, start > 0)?;
-    let excess = entries.len().saturating_sub(FIRST_PAGE_ENTRIES);
-    entries.drain(..excess);
+    let (entries, cursor) = read_first_page(&mut file, len)?;
     Ok(TranscriptChunk {
         entries,
         cursor,
         reset: true,
     })
+}
+
+/// The last [`FIRST_PAGE_ENTRIES`] entries of the first `len` bytes and the
+/// offset just past the last complete line, reading as little of the tail as
+/// that takes. A line the window cuts into is skipped, never half-parsed.
+fn read_first_page<R: Read + Seek>(
+    reader: &mut R,
+    len: u64,
+) -> io::Result<(Vec<ApiClaudeEntry>, u64)> {
+    // `tail` holds bytes `[start, len)`; `entries` come from the complete lines
+    // in `[parsed_from, cursor)`, and each growth step parses only what it adds.
+    let mut start = len;
+    let mut tail = Vec::new();
+    let mut entries = Vec::new();
+    let mut parsed: Option<(u64, u64)> = None;
+    let mut window = FIRST_PAGE_INITIAL_WINDOW;
+    loop {
+        let new_start = len.saturating_sub(window);
+        let mut chunk = vec![0; usize::try_from(start - new_start).map_err(io::Error::other)?];
+        reader.seek(SeekFrom::Start(new_start))?;
+        reader.read_exact(&mut chunk)?;
+        chunk.extend_from_slice(&tail);
+        tail = chunk;
+        start = new_start;
+
+        let region_end = match parsed {
+            Some((parsed_from, _)) => parsed_from,
+            None => tail
+                .iter()
+                .rposition(|&byte| byte == b'\n')
+                .map_or(start, |newline| start + newline as u64 + 1),
+        };
+        let region = &tail[..usize::try_from(region_end - start).map_err(io::Error::other)?];
+        let begin = if start == 0 {
+            Some(0)
+        } else {
+            region
+                .iter()
+                .position(|&byte| byte == b'\n')
+                .map(|newline| newline + 1)
+        };
+        if let Some(begin) = begin {
+            let mut older = parse_lines(&String::from_utf8_lossy(&region[begin..]));
+            older.append(&mut entries);
+            entries = older;
+            let cursor = parsed.map_or(region_end, |(_, cursor)| cursor);
+            parsed = Some((start + begin as u64, cursor));
+        }
+
+        if entries.len() >= FIRST_PAGE_ENTRIES || start == 0 || window >= PAGE_WINDOW {
+            break;
+        }
+        window = (window * 4).min(PAGE_WINDOW);
+    }
+    let excess = entries.len().saturating_sub(FIRST_PAGE_ENTRIES);
+    entries.drain(..excess);
+    Ok((entries, parsed.map_or(start, |(_, cursor)| cursor)))
 }
 
 fn open_transcript(path: &Path) -> io::Result<(File, u64)> {
@@ -1412,6 +1469,89 @@ mod tests {
         assert!(page.reset);
         assert_eq!(page.entries.len(), FIRST_PAGE_ENTRIES);
         assert_eq!(page.entries[0], assistant("a5", "x"));
+    }
+
+    /// Counts the bytes read through it.
+    struct CountingReader<R> {
+        inner: R,
+        read: u64,
+    }
+
+    impl<R: Read> Read for CountingReader<R> {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            let n = self.inner.read(buf)?;
+            self.read += n as u64;
+            Ok(n)
+        }
+    }
+
+    impl<R: Seek> Seek for CountingReader<R> {
+        fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
+            self.inner.seek(pos)
+        }
+    }
+
+    fn first_page_of(text: &str) -> (Vec<ApiClaudeEntry>, u64, u64) {
+        let mut reader = CountingReader {
+            inner: io::Cursor::new(text.as_bytes().to_vec()),
+            read: 0,
+        };
+        let len = u64::try_from(text.len()).expect("fits");
+        let (entries, cursor) = read_first_page(&mut reader, len).expect("read");
+        (entries, cursor, reader.read)
+    }
+
+    #[test]
+    fn first_page_reads_only_the_tail_it_needs() {
+        let text: String = (0..50_000)
+            .map(|n| assistant_text(&format!("a{n}"), "x"))
+            .collect();
+        assert!(text.len() as u64 > PAGE_WINDOW);
+
+        let (entries, cursor, read) = first_page_of(&text);
+        assert_eq!(entries.len(), FIRST_PAGE_ENTRIES);
+        assert_eq!(entries.last(), Some(&assistant("a49999", "x")));
+        assert_eq!(entries[0], assistant("a49800", "x"));
+        assert_eq!(cursor, text.len() as u64);
+        assert!(read <= 4 * FIRST_PAGE_INITIAL_WINDOW, "read {read} bytes");
+    }
+
+    #[test]
+    fn first_page_grows_its_window_until_it_holds_a_page() {
+        // Each line is bigger than the initial window divided by the page size,
+        // so a page needs several growth steps.
+        let body = "y".repeat(2000);
+        let text: String = (0..FIRST_PAGE_ENTRIES + 50)
+            .map(|n| assistant_text(&format!("a{n}"), &body))
+            .collect();
+
+        let (entries, cursor, _) = first_page_of(&text);
+        assert_eq!(entries.len(), FIRST_PAGE_ENTRIES);
+        assert_eq!(entries[0], assistant("a50", &body));
+        assert_eq!(
+            entries.last(),
+            Some(&assistant(&format!("a{}", FIRST_PAGE_ENTRIES + 49), &body))
+        );
+        assert_eq!(cursor, text.len() as u64);
+    }
+
+    #[test]
+    fn a_line_spanning_a_growth_boundary_is_parsed_once_whole() {
+        let big = "z".repeat(usize::try_from(FIRST_PAGE_INITIAL_WINDOW).expect("fits"));
+        let text = assistant_text("a0", "head")
+            + &assistant_text("a1", &big)
+            + &assistant_text("a2", "tail");
+
+        let (entries, cursor, _) = first_page_of(&text);
+        assert_eq!(
+            entries,
+            vec![
+                assistant("a0", "head"),
+                assistant("a1", &big),
+                assistant("a2", "tail")
+            ]
+        );
+        assert_eq!(cursor, text.len() as u64);
     }
 
     #[test]
