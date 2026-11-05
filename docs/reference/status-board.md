@@ -43,13 +43,21 @@ as it did before.
   status, whatever family it belongs to, a folder filter included. This is
   a separate switch from a family's lanes: turning one on leaves the other
   as it was. The tile grid layout stays flat.
-- **Sidebar**: once any worktree of a parent has a status, the parent's
-  worktree rows split under small captions (a dot and the name in the
-  column's colour), one per non-empty column in the columns' order, then
-  *No status*. Settings > General > *Sidebar Family Guide* (off by
-  default, independent of the board) draws a thin guide in the parent's
-  colour down the expanded family, so a worktree still reads as its
-  parent's while the captions say where it stands. With the board on, the
+- **Sidebar**: once any member of a family (the main checkout or one of
+  its worktrees) has a status, the family's rows, the main checkout among
+  them, split under small captions (a dot and the name in the column's
+  colour), one per non-empty group in the board order (the columns, with
+  *No status* where the settings put it, last by default). A family
+  without any status stays as before, main checkout first. Drag a row
+  onto a row or caption of another group to move it there: it takes that
+  group's status (*No status* clears it), and a worktree dropped on a
+  worktree also takes that row's place. Within a group, dragging a worktree
+  reorders as before. The main checkout drags too, while the board is on;
+  it only changes status. Settings > General > *Sidebar Family Guide* (off
+  by default, independent of the board) draws a thin guide in the parent's
+  colour down the expanded family, under the family's expand arrow, so a
+  worktree still reads as its parent's while the captions say where it
+  stands. With the board on, the
   ring before each worktree can show the project colour (the default) or
   the status colour (*Sidebar Worktree Marker*). Keyboard navigation walks
   the rows in the same order.

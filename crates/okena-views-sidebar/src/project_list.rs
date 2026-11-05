@@ -14,7 +14,7 @@ use okena_views_terminal::actions::{MinimizeTerminal, ToggleFullscreen};
 
 use crate::drag::{FolderDrag, ProjectDrag, ProjectDragView, WorktreeDrag, WorktreeDragView};
 use crate::item_widgets::*;
-use crate::sidebar::status_groups::status_group;
+use crate::sidebar::status_groups::FamilyDropSpot;
 use crate::sidebar::{Sidebar, SidebarProjectInfo};
 use std::collections::HashMap;
 
@@ -443,7 +443,12 @@ impl Sidebar {
         let is_busy = is_closing || is_creating;
         let project_id = project.id.clone();
         let project_name = project.name.clone();
-        let parent_id = project.parent_project_id.clone().unwrap_or_default();
+        // The family the row is drawn in: none for an orphan, whose parent
+        // is gone and which stands alone.
+        let family_id = project
+            .parent_project_id
+            .clone()
+            .filter(|_| !project.is_orphan);
 
         let row = div()
             .id(ElementId::Name(
@@ -464,61 +469,6 @@ impl Sidebar {
                 d.border_l_2().border_color(rgb(t.border_active))
             })
             .when(!project.show_in_overview && !is_busy, |d| d.opacity(0.75))
-            .when(!parent_id.is_empty(), |d| {
-                let wt_id = project_id.clone();
-                let wt_name = project_name.clone();
-                let pid = parent_id.clone();
-                d.on_drag(
-                    WorktreeDrag {
-                        worktree_id: wt_id,
-                        parent_id: pid,
-                        worktree_name: wt_name,
-                    },
-                    move |drag, _position, _window, cx| {
-                        cx.new(|_| WorktreeDragView {
-                            name: drag.worktree_name.clone(),
-                        })
-                    },
-                )
-            })
-            .drag_over::<WorktreeDrag>(move |style, _, _, _| {
-                style.border_t_2().border_color(rgb(t.border_active))
-            })
-            // `worktree_index` is the data order; inside one status group that
-            // matches the drawn order, across groups the drop would be invisible.
-            .can_drop({
-                let workspace = self.workspace.clone();
-                let target_status = project.status.clone();
-                move |dragged, _window, cx| {
-                    let Some(drag) = dragged.downcast_ref::<WorktreeDrag>() else {
-                        return true;
-                    };
-                    let board = okena_ui::board::status_board(cx);
-                    let dragged_status = workspace
-                        .read(cx)
-                        .project(&drag.worktree_id)
-                        .and_then(|p| p.status.as_deref());
-                    status_group(dragged_status, board)
-                        == status_group(target_status.as_deref(), board)
-                }
-            })
-            .on_drop(cx.listener({
-                let project_id = project_id.clone();
-                let parent_id = parent_id.clone();
-                move |this, drag: &WorktreeDrag, _window, cx| {
-                    if drag.worktree_id != project_id && drag.parent_id == parent_id {
-                        this.dispatch_action_for_project(
-                            &parent_id,
-                            ActionRequest::ReorderWorktree {
-                                parent_id: parent_id.clone(),
-                                worktree_id: drag.worktree_id.clone(),
-                                new_index: worktree_index,
-                            },
-                            cx,
-                        );
-                    }
-                }
-            }))
             .on_mouse_down(
                 MouseButton::Right,
                 cx.listener({
@@ -542,6 +492,34 @@ impl Sidebar {
                     });
                 }
             }));
+
+        // A family member drags within its family: to reorder inside its
+        // status group, or to another status.
+        let row = match family_id {
+            Some(family_id) => self.family_drop_target(
+                row.on_drag(
+                    WorktreeDrag {
+                        worktree_id: project_id.clone(),
+                        parent_id: family_id.clone(),
+                        worktree_name: project_name.clone(),
+                        main_checkout: false,
+                    },
+                    |drag, _position, _window, cx| {
+                        cx.new(|_| WorktreeDragView {
+                            name: drag.worktree_name.clone(),
+                        })
+                    },
+                ),
+                family_id,
+                FamilyDropSpot::Row {
+                    project_id: project_id.clone(),
+                    status: project.status.clone(),
+                    worktree_index: Some(worktree_index),
+                },
+                cx,
+            ),
+            None => row,
+        };
 
         let busy_label = if is_creating {
             // Prefer git's own percentage: a clone can run for minutes, and a
@@ -1135,6 +1113,36 @@ impl Sidebar {
                     }
                 }),
             );
+
+        // With the board on, the main checkout moves from status to status
+        // like its worktrees (it has no place in the worktree order), and a
+        // member dropped on it takes its status.
+        let row = if okena_ui::board::status_board_enabled(cx) {
+            self.family_drop_target(
+                row.on_drag(
+                    WorktreeDrag {
+                        worktree_id: project_id.clone(),
+                        parent_id: project_id.clone(),
+                        worktree_name: project.name.clone(),
+                        main_checkout: true,
+                    },
+                    |drag, _position, _window, cx| {
+                        cx.new(|_| WorktreeDragView {
+                            name: drag.worktree_name.clone(),
+                        })
+                    },
+                ),
+                project_id.clone(),
+                FamilyDropSpot::Row {
+                    project_id: project_id.clone(),
+                    status: project.status.clone(),
+                    worktree_index: None,
+                },
+                cx,
+            )
+        } else {
+            row
+        };
 
         self.append_project_row_content(
             row,

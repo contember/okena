@@ -1,6 +1,7 @@
-//! The keyboard cursor walks a family's worktrees in the order the rows are
-//! drawn: data order while the status board is off, grouped by status while
-//! it is on.
+//! The keyboard cursor walks a family (main checkout and worktrees) in the
+//! order the rows are drawn: main first and data order while the status
+//! board is off, grouped by status, the main checkout included, while it is
+//! on.
 
 use super::{Sidebar, SidebarCursorItem};
 use gpui::{App, AppContext as _, Entity, TestAppContext};
@@ -36,9 +37,9 @@ fn board_off(_: &App) -> StatusBoard<'_> {
     }
 }
 
-/// A parent with worktrees `a` (done), `b` (none) and `c` (todo), in that
-/// data order.
-fn family() -> WorkspaceData {
+/// A parent (status `parent_status`) with worktrees `a` (done), `b` (none)
+/// and `c` (todo), in that data order.
+fn family(parent_status: Option<&str>) -> WorkspaceData {
     let worktree = |id: &str, status: Option<&str>| {
         serde_json::json!({
             "id": id,
@@ -55,6 +56,7 @@ fn family() -> WorkspaceData {
                 "id": "parent",
                 "name": "parent",
                 "path": "/tmp/parent",
+                "status": parent_status,
                 "worktree_ids": ["a", "b", "c"],
             },
             worktree("a", Some("done")),
@@ -66,9 +68,9 @@ fn family() -> WorkspaceData {
     .unwrap()
 }
 
-fn new_sidebar(cx: &mut TestAppContext) -> Entity<Sidebar> {
+fn new_sidebar(parent_status: Option<&str>, cx: &mut TestAppContext) -> Entity<Sidebar> {
     cx.update(|cx| {
-        let workspace = cx.new(|_| Workspace::new(family()));
+        let workspace = cx.new(|_| Workspace::new(family(parent_status)));
         let focus_manager = cx.new(|_| FocusManager::new());
         let request_broker = cx.new(|_| RequestBroker::new());
         cx.new(|cx| {
@@ -100,7 +102,7 @@ fn worktree_cursor_order(sidebar: &Entity<Sidebar>, cx: &mut TestAppContext) -> 
 #[gpui::test]
 fn board_off_cursor_walks_worktrees_in_data_order(cx: &mut TestAppContext) {
     cx.update(|cx| cx.set_global(GlobalStatusBoard(board_off)));
-    let sidebar = new_sidebar(cx);
+    let sidebar = new_sidebar(Some("todo"), cx);
     assert_eq!(
         worktree_cursor_order(&sidebar, cx),
         vec!["parent", "a", "b", "c"]
@@ -110,10 +112,21 @@ fn board_off_cursor_walks_worktrees_in_data_order(cx: &mut TestAppContext) {
 #[gpui::test]
 fn board_on_cursor_walks_worktrees_grouped_by_status(cx: &mut TestAppContext) {
     cx.update(|cx| cx.set_global(GlobalStatusBoard(board_on)));
-    let sidebar = new_sidebar(cx);
-    // To do (c), Done (a), then No status (b); the main checkout stays first.
+    let sidebar = new_sidebar(None, cx);
+    // To do (c), Done (a), then No status: the main checkout, then b.
     assert_eq!(
         worktree_cursor_order(&sidebar, cx),
-        vec!["parent", "c", "a", "b"]
+        vec!["c", "a", "parent", "b"]
+    );
+}
+
+#[gpui::test]
+fn board_on_cursor_puts_the_main_checkout_in_its_status_group(cx: &mut TestAppContext) {
+    cx.update(|cx| cx.set_global(GlobalStatusBoard(board_on)));
+    let sidebar = new_sidebar(Some("done"), cx);
+    // To do (c), Done (the main checkout, then a), then No status (b).
+    assert_eq!(
+        worktree_cursor_order(&sidebar, cx),
+        vec!["c", "parent", "a", "b"]
     );
 }

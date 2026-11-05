@@ -29,12 +29,18 @@ impl Render for ProjectDragView {
     }
 }
 
-/// Drag payload for worktree reordering within a parent
+/// Drag payload for a family member: reorders worktrees within a parent
+/// and, with the status board on, moves a member from status to status.
 #[derive(Clone)]
 pub struct WorktreeDrag {
+    /// The dragged project: a worktree, or the parent itself when
+    /// `main_checkout`.
     pub worktree_id: String,
     pub parent_id: String,
     pub worktree_name: String,
+    /// The parent's own checkout: it only changes status, it has no place
+    /// in the worktree order.
+    pub main_checkout: bool,
 }
 
 /// Drag preview view for worktree items

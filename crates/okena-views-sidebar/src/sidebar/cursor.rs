@@ -187,38 +187,30 @@ impl Sidebar {
 
             let is_expanded = self.is_project_expanded(&project.id, true);
             if is_expanded {
-                // Main project as first child
-                cursor_items.push(SidebarCursorItem::WorktreeProject {
-                    project_id: project.id.clone(),
-                });
-
-                if self.expanded_projects.contains(&project.id) {
-                    self.push_group_cursor_items(
-                        project,
-                        service_names,
-                        hook_terminal_ids,
-                        cursor_items,
-                    );
-                }
-
-                // Worktree children as siblings
-                if let Some(children) = worktree_children_map.get(&project.id) {
-                    // Same grouped order the rows are drawn in.
-                    let statuses: Vec<Option<&str>> =
-                        children.iter().map(|c| c.status.as_deref()).collect();
-                    for row in super::status_groups::worktree_rows(&statuses, cx) {
-                        let child = children[row.index];
-                        cursor_items.push(SidebarCursorItem::WorktreeProject {
-                            project_id: child.id.clone(),
-                        });
-                        if self.expanded_projects.contains(&child.id) {
-                            self.push_group_cursor_items(
-                                child,
-                                service_names,
-                                hook_terminal_ids,
-                                cursor_items,
-                            );
-                        }
+                // The main checkout and its worktrees, in the grouped order
+                // the rows are drawn in.
+                let children: &[_] = worktree_children_map
+                    .get(&project.id)
+                    .map_or(&[], |c| c.as_slice());
+                let statuses: Vec<Option<&str>> =
+                    children.iter().map(|c| c.status.as_deref()).collect();
+                for row in
+                    super::status_groups::family_rows(project.status.as_deref(), &statuses, cx)
+                {
+                    let member = match row.member {
+                        super::status_groups::FamilyMember::Main => project,
+                        super::status_groups::FamilyMember::Worktree(i) => children[i],
+                    };
+                    cursor_items.push(SidebarCursorItem::WorktreeProject {
+                        project_id: member.id.clone(),
+                    });
+                    if self.expanded_projects.contains(&member.id) {
+                        self.push_group_cursor_items(
+                            member,
+                            service_names,
+                            hook_terminal_ids,
+                            cursor_items,
+                        );
                     }
                 }
             }
