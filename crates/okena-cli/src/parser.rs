@@ -737,10 +737,15 @@ pub enum StatusCmd {
     ///
     /// Desktop presentation: attached desktops apply it in the --window target,
     /// else their active window. A worktree addresses its parent's family.
+    /// `--overview` switches the overview's lanes instead (no project focused:
+    /// every visible column grouped by status), a separate switch per window.
     Lanes {
         state: OnOffArg,
         #[arg(help = STATUS_PROJECT_HELP)]
         project: Option<String>,
+        /// The overview's lanes instead of a project family's
+        #[arg(long, conflicts_with = "project")]
+        overview: bool,
     },
     /// Turn the status board on (Settings > General > Status Board)
     Enable,
@@ -795,6 +800,12 @@ pub enum StatusColumnCmd {
     Rm {
         /// Column id or name
         column: String,
+    },
+    /// Print or set the color of the No status group (its lane spine and
+    /// sidebar caption); not a column, so it cannot be renamed or moved
+    NoStatus {
+        /// Color (default, red, orange, yellow, lime, green, teal, cyan, blue, indigo, purple, pink); omit to print it
+        color: Option<String>,
     },
 }
 
@@ -1005,6 +1016,14 @@ mod tests {
                 .is_ok()
         );
         assert!(Cli::try_parse_from(["okena", "status", "lanes", "maybe"]).is_err());
+        assert!(
+            Cli::try_parse_from(["okena", "status", "lanes", "on", "--overview", "--window", "main"])
+                .is_ok()
+        );
+        assert!(
+            Cli::try_parse_from(["okena", "status", "lanes", "on", "p", "--overview"]).is_err(),
+            "the overview has no project"
+        );
         assert!(Cli::try_parse_from(["okena", "status", "enable"]).is_ok());
         assert!(Cli::try_parse_from(["okena", "status", "column", "ls"]).is_ok());
         assert!(
@@ -1014,6 +1033,8 @@ mod tests {
         assert!(Cli::try_parse_from(["okena", "status", "column", "move", "qa", "1"]).is_ok());
         assert!(Cli::try_parse_from(["okena", "status", "column", "move", "qa", "x"]).is_err());
         assert!(Cli::try_parse_from(["okena", "status", "column", "rm", "qa"]).is_ok());
+        assert!(Cli::try_parse_from(["okena", "status", "column", "no-status"]).is_ok());
+        assert!(Cli::try_parse_from(["okena", "status", "column", "no-status", "blue"]).is_ok());
         assert!(Cli::try_parse_from(["okena", "skill", "show"]).is_ok());
         assert!(Cli::try_parse_from(["okena", "skill", "install", "--project"]).is_ok());
         assert!(Cli::try_parse_from(["okena", "settings", "show"]).is_ok());

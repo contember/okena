@@ -191,7 +191,9 @@ pub fn execute_action(
         } => terminal::set_fullscreen(ws, focus_manager, project_id, terminal_id, cx),
         // Desktop presentation only: the daemon's synthetic window renders
         // nothing, so success just lets the server push it to desktops.
-        ActionRequest::SetProjectLayout { .. } => ActionResult::Ok(None),
+        ActionRequest::SetProjectLayout { .. } | ActionRequest::SetOverviewStatusLanes { .. } => {
+            ActionResult::Ok(None)
+        }
         ActionRequest::RenameTerminal {
             project_id,
             terminal_id,

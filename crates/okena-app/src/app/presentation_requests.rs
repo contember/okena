@@ -1,9 +1,9 @@
 //! External presentation requests (`okena project show|hide`, `okena term
-//! fullscreen`, `okena window layout`, `okena status lanes`; `okena worktree add
-//! --window` is applied by the workspace) pushed by the daemon after the action
-//! succeeded there. The
-//! desktop owns per-window presentation, so it applies each request to its own
-//! window here; the daemon's copy only serves its synthetic main window.
+//! fullscreen`, `okena window layout`, `okena status lanes [--overview]`;
+//! `okena worktree add --window` is applied by the workspace) pushed by the
+//! daemon after the action succeeded there. The desktop owns per-window
+//! presentation, so it applies each request to its own window here; the
+//! daemon's copy only serves its synthetic main window.
 
 use crate::workspace::state::{ProjectLayoutMode, WindowId};
 use gpui::*;
@@ -113,6 +113,23 @@ impl Okena {
         }
         self.workspace.update(cx, |ws, cx| {
             ws.set_status_lanes(target, project_id, on, cx);
+        });
+    }
+
+    /// Show or flatten the overview lanes of the target window. Idempotent.
+    pub(super) fn apply_overview_status_lanes_request(
+        &mut self,
+        on: bool,
+        requested_window: Option<WindowId>,
+        cx: &mut Context<Self>,
+    ) {
+        let target = self.presentation_target_window(requested_window, cx);
+        if self.window_view_and_handle(target).is_none() {
+            log::warn!("Ignoring overview status lanes request for unknown window {target:?}");
+            return;
+        }
+        self.workspace.update(cx, |ws, cx| {
+            ws.set_status_lanes_overview(target, on, cx);
         });
     }
 }

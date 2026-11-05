@@ -8,10 +8,12 @@ use std::ops::Range;
 
 /// Thickness of the divider between two adjacent columns of one span.
 pub(super) const DIVIDER_SIZE: f32 = 1.0;
-/// Height of a lane caption; along the grid axis only in a rows grid.
-pub(super) const LANE_CAPTION_HEIGHT: f32 = 22.0;
-/// Gap after every lane; along the grid axis only in a columns grid.
-pub(super) const LANE_GAP: f32 = 16.0;
+/// Width of the spine down the left of every lane; along the grid axis only
+/// in a columns grid (in a rows grid it sits across the axis).
+pub(super) const LANE_SPINE_WIDTH: f32 = 20.0;
+/// Line between two lanes of a rows grid, where no spine separates them
+/// along the axis.
+pub(super) const LANE_SEPARATOR: f32 = 1.0;
 
 /// A run of adjacent columns in [`GridLayout::order`] with dividers between
 /// them. `caption` is `Some` for a lane (`Some(None)` = "No status").
@@ -57,13 +59,14 @@ impl GridLayout {
     }
 
     /// Everything along the grid axis that is not a column: dividers inside
-    /// spans plus, per lane, its gap (columns) or caption (rows).
+    /// spans plus, per lane, what leads it (see [`Self::lane_lead`]).
     pub fn chrome(&self, is_rows: bool) -> f32 {
         self.spans
             .iter()
-            .map(|span| {
+            .enumerate()
+            .map(|(index, span)| {
                 let dividers = span.range.len().saturating_sub(1) as f32 * DIVIDER_SIZE;
-                dividers + Self::lane_extra(span, is_rows)
+                dividers + Self::lane_lead(index, span, is_rows)
             })
             .sum()
     }
@@ -73,10 +76,8 @@ impl GridLayout {
     pub fn leading_edges(&self, sizes: &[f32], is_rows: bool) -> Vec<f32> {
         let mut edges = vec![0.0; self.order.len()];
         let mut lead = 0.0;
-        for span in &self.spans {
-            if is_rows && span.caption.is_some() {
-                lead += LANE_CAPTION_HEIGHT;
-            }
+        for (index, span) in self.spans.iter().enumerate() {
+            lead += Self::lane_lead(index, span, is_rows);
             for i in span.range.clone() {
                 edges[i] = lead;
                 lead += sizes.get(i).copied().unwrap_or(0.0);
@@ -84,18 +85,19 @@ impl GridLayout {
                     lead += DIVIDER_SIZE;
                 }
             }
-            if !is_rows && span.caption.is_some() {
-                lead += LANE_GAP;
-            }
         }
         edges
     }
 
-    fn lane_extra(span: &GridSpan, is_rows: bool) -> f32 {
+    /// What stands before a lane along the grid axis: its spine in a columns
+    /// grid, a separator from the lane above in a rows grid (none before the
+    /// first). Nothing for the caption-less flat span.
+    pub fn lane_lead(index: usize, span: &GridSpan, is_rows: bool) -> f32 {
         match (&span.caption, is_rows) {
             (None, _) => 0.0,
-            (Some(_), true) => LANE_CAPTION_HEIGHT,
-            (Some(_), false) => LANE_GAP,
+            (Some(_), false) => LANE_SPINE_WIDTH,
+            (Some(_), true) if index == 0 => 0.0,
+            (Some(_), true) => LANE_SEPARATOR,
         }
     }
 }
@@ -148,22 +150,23 @@ mod tests {
         assert_eq!(layout.order, ids(&["c", "a", "d", "b"]));
         let ranges: Vec<Range<usize>> = layout.spans.iter().map(|s| s.range.clone()).collect();
         assert_eq!(ranges, vec![0..1, 1..3, 3..4]);
-        // One divider (inside the Done lane) plus three lane gaps / captions.
-        assert_eq!(layout.chrome(false), 1.0 + 3.0 * LANE_GAP);
-        assert_eq!(layout.chrome(true), 1.0 + 3.0 * LANE_CAPTION_HEIGHT);
+        // One divider (inside the Done lane) plus three spines in columns,
+        // two separators between three lanes in rows.
+        assert_eq!(layout.chrome(false), 1.0 + 3.0 * LANE_SPINE_WIDTH);
+        assert_eq!(layout.chrome(true), 1.0 + 2.0 * LANE_SEPARATOR);
     }
 
     #[test]
-    fn lane_leading_edges_count_gaps_in_columns_and_captions_in_rows() {
+    fn lane_leading_edges_count_spines_in_columns_and_separators_in_rows() {
         let layout = three_lanes();
         let sizes = [100.0, 100.0, 100.0, 100.0];
         assert_eq!(
             layout.leading_edges(&sizes, false),
-            vec![0.0, 116.0, 217.0, 333.0]
+            vec![20.0, 140.0, 241.0, 361.0]
         );
         assert_eq!(
             layout.leading_edges(&sizes, true),
-            vec![22.0, 144.0, 245.0, 367.0]
+            vec![0.0, 101.0, 202.0, 303.0]
         );
     }
 
@@ -174,8 +177,7 @@ mod tests {
         for is_rows in [false, true] {
             let edges = layout.leading_edges(&sizes, is_rows);
             let last = edges.len() - 1;
-            let trailing = if is_rows { 0.0 } else { LANE_GAP };
-            let total = edges[last] + sizes[last] + trailing;
+            let total = edges[last] + sizes[last];
             assert_eq!(total, sizes.iter().sum::<f32>() + layout.chrome(is_rows));
         }
     }

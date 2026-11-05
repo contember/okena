@@ -800,6 +800,8 @@ impl Sidebar {
                     .data()
                     .window(window_id)
                     .is_some_and(|window| window.show_attention_section);
+                let status_board = okena_ui::board::status_board_enabled(cx);
+                let overview_lanes = self.workspace.read(cx).status_lanes_overview(window_id);
                 context_menu_panel("project-view-menu", &t)
                     .min_w(px(200.0))
                     .on_mouse_down_out(cx.listener(|this, _, _, cx| {
@@ -875,6 +877,34 @@ impl Sidebar {
                                 },
                             )),
                         )
+                    })
+                    // Lanes for the overview grid (no project focused); a
+                    // focused family keeps its own toggle in the project menu.
+                    .when(status_board, |panel| {
+                        panel
+                            .child(menu_separator(&t))
+                            .child(menu_section("Overview", &t))
+                            .child(
+                                menu_item(
+                                    "overview-status-lanes",
+                                    if overview_lanes {
+                                        "icons/check.svg"
+                                    } else {
+                                        "icons/kanban.svg"
+                                    },
+                                    "Status lanes",
+                                    &t,
+                                )
+                                .on_click(cx.listener(
+                                    move |this, _, _window, cx| {
+                                        this.header_menu = None;
+                                        this.workspace.update(cx, |ws, cx| {
+                                            ws.toggle_status_lanes_overview(window_id, cx);
+                                        });
+                                        cx.notify();
+                                    },
+                                )),
+                            )
                     })
                     .into_any_element()
             }

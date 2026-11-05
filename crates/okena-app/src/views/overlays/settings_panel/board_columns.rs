@@ -84,30 +84,17 @@ impl SettingsPanel {
                     .find(|c| &c.id == id)
                     .map(|c| c.color)
                     .unwrap_or_default();
-                let swatches: Vec<AnyElement> = FolderColor::all()
-                    .iter()
-                    .map(|&color| {
-                        let id_color = id.clone();
-                        let selected = color == current_color;
-                        div()
-                            .id(ElementId::Name(
-                                format!("board-col-color-{id}-{color:?}").into(),
-                            ))
-                            .size(px(12.0))
-                            .rounded(px(3.0))
-                            .bg(rgb(t.get_folder_color(color)))
-                            .cursor_pointer()
-                            .when(selected, |d| d.border_2().border_color(rgb(t.text_primary)))
-                            .when(!selected, |d| d.border_1().border_color(rgb(t.border)))
-                            .hover(|s| s.opacity(0.8))
-                            .on_click(cx.listener(move |_this, _, _window, cx| {
-                                settings_entity(cx).update(cx, |state, cx| {
-                                    state.set_status_board_column_color(&id_color, color, cx);
-                                });
-                            }))
-                            .into_any_element()
-                    })
-                    .collect();
+                let id_color = id.clone();
+                let swatches = color_swatches(
+                    &format!("board-col-color-{id}"),
+                    current_color,
+                    move |color, cx| {
+                        settings_entity(cx).update(cx, |state, cx| {
+                            state.set_status_board_column_color(&id_color, color, cx);
+                        });
+                    },
+                    cx,
+                );
                 div()
                     .flex()
                     .items_center()
@@ -118,7 +105,7 @@ impl SettingsPanel {
                             .min_w_0()
                             .child(SimpleInput::new(input).text_size(ui_text_md(cx))),
                     )
-                    .child(div().flex().items_center().gap(px(3.0)).children(swatches))
+                    .child(swatches)
                     .child(
                         icon_button(
                             ElementId::Name(format!("board-col-up-{id}").into()),
@@ -167,6 +154,40 @@ impl SettingsPanel {
             })
             .collect();
 
+        // "No status" is not a column: no name to edit, no place to move,
+        // nothing to remove. Only its colour is the user's.
+        let no_status_color = settings_entity(cx)
+            .read(cx)
+            .settings
+            .status_board
+            .no_status_color;
+        let no_status_row = div()
+            .flex()
+            .items_center()
+            .gap(px(6.0))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .px(px(8.0))
+                    .text_size(ui_text_md(cx))
+                    .text_color(rgb(t.text_secondary))
+                    .child("No status"),
+            )
+            .child(color_swatches(
+                "board-no-status-color",
+                no_status_color,
+                |color, cx| {
+                    settings_entity(cx).update(cx, |state, cx| {
+                        state.set_status_board_no_status_color(color, cx);
+                    });
+                },
+                cx,
+            ))
+            // Keep the swatches aligned with the column rows above, whose
+            // three icon buttons follow them.
+            .child(div().w(px(3.0 * 18.0 + 2.0 * 6.0)).flex_shrink_0());
+
         settings_input_row(
             "status-board-columns",
             "Status Columns",
@@ -176,6 +197,7 @@ impl SettingsPanel {
             true,
         )
         .children(rows)
+        .child(no_status_row)
         .child(
             div().child(
                 button("status-board-add-column", "+ Add column", &t).on_click(cx.listener(
@@ -188,4 +210,34 @@ impl SettingsPanel {
             ),
         )
     }
+}
+
+/// One swatch per palette colour, the current one outlined; a click calls
+/// `on_pick` with the colour.
+fn color_swatches(
+    id_prefix: &str,
+    current: FolderColor,
+    on_pick: impl Fn(FolderColor, &mut App) + Clone + 'static,
+    cx: &App,
+) -> AnyElement {
+    let t = theme(cx);
+    div()
+        .flex()
+        .items_center()
+        .gap(px(3.0))
+        .children(FolderColor::all().iter().map(|&color| {
+            let selected = color == current;
+            let on_pick = on_pick.clone();
+            div()
+                .id(ElementId::Name(format!("{id_prefix}-{color:?}").into()))
+                .size(px(12.0))
+                .rounded(px(3.0))
+                .bg(rgb(t.get_folder_color(color)))
+                .cursor_pointer()
+                .when(selected, |d| d.border_2().border_color(rgb(t.text_primary)))
+                .when(!selected, |d| d.border_1().border_color(rgb(t.border)))
+                .hover(|s| s.opacity(0.8))
+                .on_click(move |_, _window, cx| on_pick(color, cx))
+        }))
+        .into_any_element()
 }

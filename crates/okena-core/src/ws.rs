@@ -1,7 +1,7 @@
 use crate::api::{
     ApiFullscreenRequest, ApiGitStatus, ApiProjectLayoutRequest, ApiProjectPlacementRequest,
-    ApiProjectVisibilityRequest, ApiStatusLanesRequest, ApiSystemStats, ApiTerminalFocusRequest,
-    ApiToast, ApiUsage, ApiWindow,
+    ApiOverviewStatusLanesRequest, ApiProjectVisibilityRequest, ApiStatusLanesRequest,
+    ApiSystemStats, ApiTerminalFocusRequest, ApiToast, ApiUsage, ApiWindow,
 };
 use crate::keys::SpecialKey;
 use serde::{Deserialize, Serialize};
@@ -120,6 +120,10 @@ pub enum WsOutbound {
     /// project family's status lanes in one of its windows after an external
     /// API action succeeds.
     StatusLanesRequested(ApiStatusLanesRequest),
+    /// One-shot request for a connected desktop client to show or flatten the
+    /// status lanes of one of its windows' overview after an external API
+    /// action succeeds.
+    OverviewStatusLanesRequested(ApiOverviewStatusLanesRequest),
     TerminalResized {
         terminal_id: String,
         cols: u16,
@@ -144,6 +148,7 @@ pub enum ClientPresentationRequest {
     ProjectPlacement(ApiProjectPlacementRequest),
     ProjectLayout(ApiProjectLayoutRequest),
     StatusLanes(ApiStatusLanesRequest),
+    OverviewStatusLanes(ApiOverviewStatusLanesRequest),
 }
 
 impl From<ClientPresentationRequest> for WsOutbound {
@@ -166,6 +171,9 @@ impl From<ClientPresentationRequest> for WsOutbound {
             }
             ClientPresentationRequest::StatusLanes(request) => {
                 WsOutbound::StatusLanesRequested(request)
+            }
+            ClientPresentationRequest::OverviewStatusLanes(request) => {
+                WsOutbound::OverviewStatusLanesRequested(request)
             }
         }
     }
@@ -412,6 +420,22 @@ mod tests {
         assert_eq!(
             serde_json::from_value::<ApiStatusLanesRequest>(value).unwrap(),
             lanes
+        );
+
+        let overview = ApiOverviewStatusLanesRequest {
+            on: false,
+            window: Some("main".into()),
+        };
+        let value = serde_json::to_value(WsOutbound::from(
+            ClientPresentationRequest::OverviewStatusLanes(overview.clone()),
+        ))
+        .unwrap();
+        assert_eq!(value["type"], "overview_status_lanes_requested");
+        assert_eq!(value["on"], false);
+        assert_eq!(value["window"], "main");
+        assert_eq!(
+            serde_json::from_value::<ApiOverviewStatusLanesRequest>(value).unwrap(),
+            overview
         );
     }
 

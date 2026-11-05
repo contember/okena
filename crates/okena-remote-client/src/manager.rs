@@ -267,6 +267,14 @@ pub enum RemoteManagerEvent {
         window: Option<WindowId>,
     },
 
+    /// An external API client showed or flattened a window's overview status
+    /// lanes. The desktop applies it to its own window (`None` = its active
+    /// window).
+    OverviewStatusLanesRequested {
+        on: bool,
+        window: Option<WindowId>,
+    },
+
     /// The implicit local-daemon loopback connection reached a terminal failed
     /// state (its own connect/reconnect retries are exhausted against a dead
     /// endpoint). The manager stays generic — it only reports; the app decides
@@ -1353,6 +1361,12 @@ fn presentation_event(
                 window: parse_window(request.window)?,
             }
         }
+        ClientPresentationRequest::OverviewStatusLanes(request) => {
+            RemoteManagerEvent::OverviewStatusLanesRequested {
+                on: request.on,
+                window: parse_window(request.window)?,
+            }
+        }
     })
 }
 
@@ -1364,8 +1378,8 @@ mod tests {
         merge_settings_patches, presentation_event, run_action_queue, windows_for_connection,
     };
     use okena_core::api::{
-        ActionRequest, ApiFullscreenRequest, ApiProjectLayoutRequest, ApiProjectPlacementRequest,
-        ApiProjectVisibilityRequest, ApiStatusLanesRequest, ApiWindow,
+        ActionRequest, ApiFullscreenRequest, ApiOverviewStatusLanesRequest, ApiProjectLayoutRequest,
+        ApiProjectPlacementRequest, ApiProjectVisibilityRequest, ApiStatusLanesRequest, ApiWindow,
     };
     use okena_core::ws::ClientPresentationRequest;
     use okena_transport::client::{ConnectionStatus, LOCAL_DAEMON_CONNECTION_ID};
@@ -1959,6 +1973,24 @@ mod tests {
             panic!("expected a status lanes request");
         };
         assert_eq!(project_id, make_prefixed_id("conn", "p1"));
+    }
+
+    #[test]
+    fn presentation_event_maps_overview_status_lanes() {
+        let event = presentation_event(
+            "conn",
+            ClientPresentationRequest::OverviewStatusLanes(ApiOverviewStatusLanesRequest {
+                on: true,
+                window: Some("main".into()),
+            }),
+        );
+        assert!(matches!(
+            event,
+            Ok(RemoteManagerEvent::OverviewStatusLanesRequested {
+                on: true,
+                window: Some(WindowId::Main),
+            })
+        ));
     }
 
     #[test]

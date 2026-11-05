@@ -359,6 +359,14 @@ pub struct StatusBoardSettings {
     /// Ordered columns. Ids are stable; names are free to change.
     #[serde(default = "default_board_columns")]
     pub columns: Vec<BoardColumn>,
+    /// Colour of the "No status" group (lane spine, sidebar caption).
+    /// `Default` (the default) draws it grey.
+    #[serde(default, skip_serializing_if = "is_default_folder_color")]
+    pub no_status_color: okena_core::theme::FolderColor,
+}
+
+fn is_default_folder_color(color: &okena_core::theme::FolderColor) -> bool {
+    *color == okena_core::theme::FolderColor::Default
 }
 
 impl Default for StatusBoardSettings {
@@ -366,6 +374,7 @@ impl Default for StatusBoardSettings {
         Self {
             enabled: false,
             columns: default_board_columns(),
+            no_status_color: okena_core::theme::FolderColor::Default,
         }
     }
 }
@@ -1280,6 +1289,22 @@ mod tests {
             settings.status_board.columns,
             vec![BoardColumn::new("qa", "QA")]
         );
+    }
+
+    #[test]
+    fn status_board_no_status_color_defaults_grey_and_round_trips() {
+        use okena_core::theme::FolderColor;
+        let settings: AppSettings = serde_json::from_str("{}").unwrap();
+        assert_eq!(settings.status_board.no_status_color, FolderColor::Default);
+        // Grey is the default, so it stays out of settings.json.
+        let json = serde_json::to_value(&settings.status_board).unwrap();
+        assert!(json.get("no_status_color").is_none());
+
+        let mut board = settings.status_board;
+        board.no_status_color = FolderColor::Blue;
+        let json = serde_json::to_string(&board).unwrap();
+        let back: StatusBoardSettings = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.no_status_color, FolderColor::Blue);
     }
 
     #[test]

@@ -112,6 +112,13 @@ pub struct WindowState {
     /// while focused. Only honoured while the status board is enabled.
     #[serde(default, skip_serializing_if = "HashSet::is_empty")]
     pub status_lanes_projects: HashSet<String>,
+    /// Whether this window's overview (no project focused) stands its
+    /// columns in status lanes, every visible column grouped by its own
+    /// status. Independent of `status_lanes_projects`, which applies only
+    /// while a family is focused. Only honoured while the status board is
+    /// enabled.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub status_lanes_overview: bool,
     /// Per-folder collapsed state in this window's sidebar.
     #[serde(default)]
     pub folder_collapsed: HashMap<String, bool>,
@@ -138,6 +145,7 @@ impl Default for WindowState {
             project_sort_mode: ProjectSortMode::default(),
             show_attention_section: false,
             status_lanes_projects: HashSet::new(),
+            status_lanes_overview: false,
             folder_collapsed: HashMap::new(),
             os_bounds: None,
             sidebar_open: None,
@@ -182,6 +190,7 @@ mod tests {
             project_sort_mode: ProjectSortMode::Activity,
             show_attention_section: true,
             status_lanes_projects: HashSet::new(),
+            status_lanes_overview: true,
             folder_collapsed: collapsed,
             os_bounds: Some(WindowBounds {
                 origin_x: 100.0,
@@ -206,6 +215,10 @@ mod tests {
             reloaded.show_attention_section,
             original.show_attention_section
         );
+        assert_eq!(
+            reloaded.status_lanes_overview,
+            original.status_lanes_overview
+        );
         assert_eq!(reloaded.folder_collapsed, original.folder_collapsed);
         assert_eq!(reloaded.os_bounds, original.os_bounds);
         assert_eq!(reloaded.sidebar_open, original.sidebar_open);
@@ -215,6 +228,14 @@ mod tests {
     fn missing_sidebar_open_deserializes_as_unset() {
         let s: WindowState = serde_json::from_str("{}").unwrap();
         assert_eq!(s.sidebar_open, None);
+    }
+
+    #[test]
+    fn overview_lanes_default_off_and_omitted_when_off() {
+        let s: WindowState = serde_json::from_str("{}").unwrap();
+        assert!(!s.status_lanes_overview);
+        let json = serde_json::to_value(WindowState::default()).unwrap();
+        assert!(json.get("status_lanes_overview").is_none());
     }
 
     #[test]

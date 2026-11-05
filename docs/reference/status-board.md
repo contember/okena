@@ -14,7 +14,7 @@ as it did before.
 ## What you see (with the board enabled)
 
 - **Status pill** in a project column's header, after the name: the
-  column's name in its colour. A project without a status shows a muted
+  column's name in its colour (inside a lane only while hovered). A project without a status shows a muted
   *Status* affordance while the header is hovered. Click opens the picker:
   the columns, *No status*, and *Edit columns…* (opens settings).
 - **Project menu → Status** (right-click a project or worktree row in the
@@ -24,11 +24,25 @@ as it did before.
   remembered per window and project; with the board off the shortcut
   passes through to the terminal): while that family is focused, its
   columns stand in lanes, one per board column that has a member, *No
-  status* last, each under a thin caption (dot in the column's colour,
-  name, hairline). Columns stay live terminals and resize as before; the
-  divider between two columns only exists inside a lane. With no status
+  status* last. A narrow spine runs down the left of each lane: an edge
+  and a light tint in the column's colour (*No status* uses its own
+  colour, see below; grey when uncoloured), the number of columns in the
+  lane, and the name spelled letter by letter downwards (GPUI cannot
+  rotate text). In a columns grid the spine is the whole gap between two
+  lanes; in a rows grid a hairline separates the lanes. Inside a lane the
+  header's status pill hides, since the spine already names the status,
+  and comes back while the header is hovered. Project colours stay where
+  they always are (header line and dot). Columns stay live terminals and
+  resize as before; the divider between two columns only exists inside a
+  lane. With no status
   among the visible columns, or a single focused column, the grid is flat,
   lanes or not.
+- **Overview lanes** (Overview row's view menu → *Status lanes*, or
+  `Cmd+Shift+K` / `Ctrl+Shift+K` with no project focused; remembered per
+  window): the overview stands every visible column in lanes by its own
+  status, whatever family it belongs to, a folder filter included. This is
+  a separate switch from a family's lanes: turning one on leaves the other
+  as it was. The tile grid layout stays flat.
 - **Sidebar**: once any worktree of a parent has a status, the parent's
   worktree rows split under small captions (a dot and the name in the
   column's colour), one per non-empty column in the columns' order, then
@@ -49,7 +63,7 @@ Each column has a stable `id`, a display `name` and an optional colour. A
 fresh install starts with `todo`, `in-progress`, `review`, `done`.
 
 - A colour (the same palette as projects) marks the status, never the
-  project: it tints the pill, the lane caption, the sidebar caption and,
+  project: it tints the pill, the lane spine, the sidebar caption and,
   with "Color Tinted Background" on, the terminal background of a project
   that has the status. The project's own dot and ring keep the project
   colour, so a worktree still reads as its parent's.
@@ -57,6 +71,10 @@ fresh install starts with `todo`, `in-progress`, `review`, `done`.
 - Removing a column leaves its projects' status ids in place; they render as
   *No status* until you re-sort them (or restore the column's id in
   `settings.json`). Nothing is deleted on your behalf.
+- *No status* is not a column (it cannot be renamed, moved or removed),
+  but it has a colour of its own: the *No status* row under the columns
+  sets it (`status_board.no_status_color`), grey by default. It tints the
+  *No status* lane spine and sidebar caption, never a project.
 - Adding a column gives it a fresh random id (a UUID), never derived from
   the name, so a new column never picks up the statuses of a removed one.
 
@@ -77,9 +95,11 @@ column id), omitted when unset. Clients set it through the
 but have no UI for it yet. A status set from another client repaints the
 cached terminal panes like a rename or recolour does (it is part of
 `Workspace::project_presentation`). The lanes view is client presentation,
-per window: `status_lanes_projects` (the parent ids with lanes on) on each
-window in `window-layout.json`, like the sort mode. An API client switches it
-with `set_status_lanes`, which the server pushes on to attached desktops.
+per window: `status_lanes_projects` (the parent ids with lanes on) and
+`status_lanes_overview` (omitted when off) on each window in
+`window-layout.json`, like the sort mode. An API client switches a family's
+lanes with `set_status_lanes` and the overview's with
+`set_overview_status_lanes`; the server pushes both on to attached desktops.
 
 ## From the command line
 
@@ -92,8 +112,10 @@ with `set_status_lanes`, which the server pushes on to attached desktops.
 | `okena status set <column> [project]` | Set a status. The column is an id or a case-insensitive name. |
 | `okena status clear [project]` | Clear it. |
 | `okena status lanes <on\|off> [project] [--window w]` | Lanes for the project's family in the `--window` target, else each attached desktop's active window. |
+| `okena status lanes <on\|off> --overview [--window w]` | The overview's lanes, in the same target window. |
 | `okena status enable` / `disable` | The master switch. |
 | `okena status column ls \| add <name> [--color c] \| rename \| color \| move <column> <position> \| rm` | Edit the columns as the settings editor does: ids stay, a new column gets a random id, removing one keeps its projects' ids. `add` prints the new id. |
+| `okena status column no-status [color]` | Print the *No status* colour, or set it. |
 
 A project is an id, a case-insensitive name or a path. Omitted, it is the
 project of the terminal the command runs in (`$OKENA_TERMINAL_ID`), so an

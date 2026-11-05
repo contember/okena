@@ -1590,6 +1590,58 @@ impl Workspace {
             .is_some_and(|w| w.status_lanes_projects.contains(&root))
     }
 
+    /// Flip the status-lanes view of a window's overview (no project
+    /// focused). Persisted via `notify_data`.
+    pub fn toggle_status_lanes_overview(&mut self, window_id: WindowId, cx: &mut impl WorkspaceCx) {
+        if self.data.toggle_status_lanes_overview(window_id).is_some() {
+            self.notify_data(cx);
+        }
+    }
+
+    /// Show (`on`) or flatten a window's overview lanes: the explicit form of
+    /// [`Self::toggle_status_lanes_overview`] for external requests.
+    /// Persisted via `notify_data` only when it changed.
+    pub fn set_status_lanes_overview(
+        &mut self,
+        window_id: WindowId,
+        on: bool,
+        cx: &mut impl WorkspaceCx,
+    ) {
+        if self.data.set_status_lanes_overview(window_id, on) == Some(true) {
+            self.notify_data(cx);
+        }
+    }
+
+    /// Whether a window's overview stands its columns in status lanes.
+    pub fn status_lanes_overview(&self, window_id: WindowId) -> bool {
+        self.data
+            .window(window_id)
+            .is_some_and(|w| w.status_lanes_overview)
+    }
+
+    /// Whether the window's current view shows lanes: the focused family's
+    /// flag while a project is focused, the overview's flag otherwise.
+    pub fn status_lanes_for_view(&self, window_id: WindowId, focused: Option<&str>) -> bool {
+        match focused {
+            Some(project_id) => self.status_lanes(window_id, project_id),
+            None => self.status_lanes_overview(window_id),
+        }
+    }
+
+    /// Flip lanes for the window's current view: the focused family, or the
+    /// overview when nothing is focused.
+    pub fn toggle_status_lanes_for_view(
+        &mut self,
+        window_id: WindowId,
+        focused: Option<&str>,
+        cx: &mut impl WorkspaceCx,
+    ) {
+        match focused {
+            Some(project_id) => self.toggle_status_lanes(window_id, project_id, cx),
+            None => self.toggle_status_lanes_overview(window_id, cx),
+        }
+    }
+
     /// Toggle whether a project is pinned to the top of the activity-sorted
     /// view. No-op for an unknown project id. Persisted via `notify_data`.
     pub fn toggle_project_pinned(&mut self, project_id: &str, cx: &mut impl WorkspaceCx) {
@@ -4247,6 +4299,31 @@ mod workspace_tests {
         assert_eq!(visible.len(), 2);
         assert_eq!(visible[0].id, "p1");
         assert_eq!(visible[1].id, "p2");
+    }
+
+    #[test]
+    fn overview_lanes_are_independent_of_family_lanes() {
+        let mut data = make_workspace_data(vec![make_project("p1")], vec!["p1"]);
+        data.main_window.status_lanes_projects.insert("p1".to_string());
+        let mut ws = Workspace::new(data);
+
+        // A family with lanes on does not turn them on for the overview.
+        assert!(ws.status_lanes_for_view(WindowId::Main, Some("p1")));
+        assert!(!ws.status_lanes_for_view(WindowId::Main, None));
+
+        assert_eq!(ws.data.toggle_status_lanes_overview(WindowId::Main), Some(true));
+        assert!(ws.status_lanes_for_view(WindowId::Main, None));
+        assert!(ws.status_lanes_overview(WindowId::Main));
+
+        // ...and the overview's flag leaves the family's alone.
+        ws.data.toggle_status_lanes(WindowId::Main, "p1");
+        assert!(!ws.status_lanes_for_view(WindowId::Main, Some("p1")));
+        assert!(ws.status_lanes_for_view(WindowId::Main, None));
+
+        // The explicit setter reports a change only when there is one.
+        assert_eq!(ws.data.set_status_lanes_overview(WindowId::Main, true), Some(false));
+        assert_eq!(ws.data.set_status_lanes_overview(WindowId::Main, false), Some(true));
+        assert!(!ws.status_lanes_overview(WindowId::Main));
     }
 }
 

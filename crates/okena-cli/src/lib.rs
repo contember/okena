@@ -308,9 +308,11 @@ fn dispatch(cli: Cli) -> i32 {
                 status::cli_status_set(&column, project.as_deref())
             }
             StatusCmd::Clear { project } => status::cli_status_clear(project.as_deref()),
-            StatusCmd::Lanes { state, project } => {
-                status::cli_status_lanes(state, project.as_deref(), window)
-            }
+            StatusCmd::Lanes {
+                state,
+                project,
+                overview,
+            } => status::cli_status_lanes(state, project.as_deref(), overview, window),
             StatusCmd::Enable => status::cli_status_enable(true),
             StatusCmd::Disable => status::cli_status_enable(false),
             StatusCmd::Column { cmd } => match cmd {
@@ -328,6 +330,9 @@ fn dispatch(cli: Cli) -> i32 {
                     status::cli_status_column_move(&column, position)
                 }
                 StatusColumnCmd::Rm { column } => status::cli_status_column_rm(&column),
+                StatusColumnCmd::NoStatus { color } => {
+                    status::cli_status_column_no_status(color.as_deref())
+                }
             },
         },
 

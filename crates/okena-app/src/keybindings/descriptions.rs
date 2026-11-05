@@ -575,7 +575,7 @@ pub fn get_action_descriptions() -> HashMap<&'static str, ActionDescription> {
         "ToggleStatusLanes",
         ActionDescription {
             name: "Toggle Status Lanes",
-            description: "Group this window's project columns by status (needs the status board enabled in settings)",
+            description: "Group this window's project columns by status: the focused project's family, or the whole overview when no project is focused (needs the status board enabled in settings)",
             category: "Global",
             factory: || Box::new(ToggleStatusLanes),
         },

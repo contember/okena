@@ -558,6 +558,9 @@ impl Okena {
             } => {
                 this.apply_status_lanes_request(project_id, *on, *window, cx);
             }
+            RemoteManagerEvent::OverviewStatusLanesRequested { on, window } => {
+                this.apply_overview_status_lanes_request(*on, *window, cx);
+            }
             // Local daemon connection dead-ended — re-run discovery/ensure so
             // the GUI recovers instead of staying wedged on a dead socket.
             RemoteManagerEvent::LocalConnectionFailed => {

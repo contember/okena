@@ -170,6 +170,20 @@ An extra window no attached desktop declared is rejected with
 { "action": "set_status_lanes", "project_id": "uuid", "on": true, "window": "main" }
 ```
 
+#### `set_overview_status_lanes`
+
+Show (`on: true`) or flatten the status lanes of a desktop window's
+overview (no project focused: every visible column grouped by status).
+Desktop presentation like `set_project_layout`: the daemon only validates
+the window, and after success attached desktops receive a one-shot
+`overview_status_lanes_requested` push and apply it to `window`, else their
+active window. An extra window no attached desktop declared is rejected with
+`window not found`.
+
+```json
+{ "action": "set_overview_status_lanes", "on": true, "window": "main" }
+```
+
 #### `send_special_key`
 
 Send a named key.

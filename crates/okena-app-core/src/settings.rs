@@ -414,6 +414,19 @@ impl SettingsState {
         }
     }
 
+    /// Recolour the "No status" group.
+    pub fn set_status_board_no_status_color(
+        &mut self,
+        color: okena_core::theme::FolderColor,
+        cx: &mut Context<Self>,
+    ) {
+        if self.settings.status_board.no_status_color == color {
+            return;
+        }
+        self.settings.status_board.no_status_color = color;
+        self.save_and_notify(cx);
+    }
+
     /// Remove a column. Projects in it keep their status id and render as
     /// unassigned until they are re-sorted.
     pub fn remove_status_board_column(&mut self, id: &str, cx: &mut Context<Self>) {

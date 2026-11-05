@@ -1,10 +1,12 @@
 //! `okena status …`: the status board from the command line — a project's or
 //! worktree's status, the board's columns, its master switch and the
-//! per-window lanes view. See `docs/reference/status-board.md`.
+//! per-window lanes view (a family's, or the overview's). See
+//! `docs/reference/status-board.md`.
 //!
 //! Statuses live on the daemon's projects (`set_project_status`); columns and
 //! the switch are app settings (`get_settings` / `set_settings`); lanes are
-//! desktop presentation the server pushes on (`set_status_lanes`). Everything
+//! desktop presentation the server pushes on (`set_status_lanes`,
+//! `set_overview_status_lanes`). Everything
 //! that resolves a name to an id is pure and unit-tested at the bottom.
 
 use crate::commands::{fetch_state, post_action, validate_color};
@@ -269,6 +271,7 @@ pub fn cli_status_ls(project: Option<&str>, json_mode: bool) -> i32 {
             return print_json(&json!({
                 "enabled": board.enabled,
                 "columns": board.columns.iter().map(column_json).collect::<Vec<_>>(),
+                "no_status_color": color_name(board.no_status_color),
                 "projects": rows.iter().map(row_json).collect::<Vec<_>>(),
             }));
         }
@@ -339,21 +342,31 @@ pub fn cli_status_clear(project: Option<&str>) -> i32 {
     })
 }
 
-/// `okena status lanes <on|off> [project] [--window]`
-pub fn cli_status_lanes(state_arg: OnOffArg, project: Option<&str>, window: Option<&str>) -> i32 {
+/// `okena status lanes <on|off> [project | --overview] [--window]`
+pub fn cli_status_lanes(
+    state_arg: OnOffArg,
+    project: Option<&str>,
+    overview: bool,
+    window: Option<&str>,
+) -> i32 {
     run(|token| {
         let state = fetch_state(token)?;
-        let terminal = own_terminal_id();
-        let project = target_project(&state, project, terminal.as_deref())?;
         let window = window
             .map(|w| resolve::resolve_window(&state, w))
             .transpose()?;
-        let body = serde_json::to_value(okena_core::api::ActionRequest::SetStatusLanes {
-            project_id: project.id.clone(),
-            on: state_arg == OnOffArg::On,
-            window,
-        })
-        .map_err(|e| e.to_string())?;
+        let on = state_arg == OnOffArg::On;
+        let action = if overview {
+            okena_core::api::ActionRequest::SetOverviewStatusLanes { on, window }
+        } else {
+            let terminal = own_terminal_id();
+            let project = target_project(&state, project, terminal.as_deref())?;
+            okena_core::api::ActionRequest::SetStatusLanes {
+                project_id: project.id.clone(),
+                on,
+                window,
+            }
+        };
+        let body = serde_json::to_value(action).map_err(|e| e.to_string())?;
         posted(post_action(token, &body))?;
         if fetch_board(token).is_ok_and(|board| !board.enabled) {
             eprintln!("{BOARD_OFF_NOTE}");
@@ -459,6 +472,21 @@ pub fn cli_status_column_rm(column: &str) -> i32 {
     })
 }
 
+/// `okena status column no-status [color]`: print the No status colour, or
+/// set it.
+pub fn cli_status_column_no_status(color: Option<&str>) -> i32 {
+    run(|token| match color {
+        None => {
+            println!("{}", color_name(fetch_board(token)?.no_status_color));
+            Ok(())
+        }
+        Some(color) => {
+            let color = parse_color(color)?;
+            save_board_patch(token, json!({ "no_status_color": color_name(color) }))
+        }
+    })
+}
+
 /// Fetch the board, resolve `column`, apply `edit` and save the columns.
 fn edit_columns(
     column: &str,
@@ -528,6 +556,13 @@ mod tests {
         .unwrap();
         assert!(board.enabled);
         assert_eq!(board.columns[0].color, FolderColor::Red);
+        assert_eq!(board.no_status_color, FolderColor::Default);
+
+        let board = board_from_settings(&json!({
+            "status_board": { "no_status_color": "teal" }
+        }))
+        .unwrap();
+        assert_eq!(board.no_status_color, FolderColor::Teal);
         assert!(board_from_settings(&json!({ "status_board": { "columns": 3 } })).is_err());
     }
 
