@@ -1023,7 +1023,7 @@ mod repaint_tests {
     use gpui::{AppContext as _, TestAppContext};
 
     #[gpui::test]
-    fn repaints_on_what_it_renders_from_and_nothing_else(cx: &mut TestAppContext) {
+    fn repaints_on_theme_settings_and_focus_but_not_on_hover(cx: &mut TestAppContext) {
         init_appearance_globals(cx);
         let (status_bar, focus_manager, hover) = cx.update(|cx| {
             let workspace = cx.new(|_| Workspace::new(WorkspaceData::empty()));
