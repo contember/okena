@@ -84,7 +84,8 @@ covers accounts added later.
   quota that would expire is used before quota that lasts; an account without
   a known weekly reset goes last. Ties go to the lower weekly utilization, then
   to the account that served fewer requests. A window whose reset time has
-  passed counts as empty until new usage arrives.
+  passed counts as empty until new usage arrives; its weekly reset counts as
+  unknown.
 - **429**: the account cools down until the provider's reset time
   (`anthropic-ratelimit-unified-reset`), else `retry-after`, else one minute,
   and the request moves to the next permitted account. Each permitted account

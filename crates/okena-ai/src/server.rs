@@ -1194,6 +1194,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn usage_poll_without_a_session_window_drops_the_stored_one() {
+        let dir = tempfile::tempdir().unwrap();
+        okena_core::ai_proxy::write_private(
+            &dir.path().join("accounts.json"),
+            &serde_json::to_vec(&serde_json::json!({
+                "accounts": [account("a", "token-a", "uuid-a")]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let fake = Arc::new(Fake::default());
+        let api = fake_upstream(fake.clone()).await;
+        let upstream = Upstream {
+            token_url: format!("{api}/v1/oauth/token"),
+            api,
+            ..Upstream::default()
+        };
+        let accounts =
+            Arc::new(Accounts::open(dir.path(), reqwest::Client::new(), upstream).unwrap());
+        let reset = "2099-01-01T00:00:00Z";
+        let poll = |usage: serde_json::Value| {
+            fake.usage.lock().insert("Bearer token-a".into(), usage);
+            accounts.poll_usage()
+        };
+        let account = || {
+            accounts
+                .status(0, okena_core::ai_proxy::AiActivity::default())
+                .accounts
+                .remove(0)
+        };
+
+        poll(serde_json::json!({
+            "five_hour": {"utilization": 95.0, "resets_at": reset},
+            "seven_day": {"utilization": 20.0, "resets_at": reset},
+        }))
+        .await;
+        assert_eq!(account().five_hour.unwrap().utilization, 95.0);
+
+        poll(serde_json::json!({
+            "seven_day": {"utilization": 30.0, "resets_at": reset},
+        }))
+        .await;
+        let account = account();
+        assert_eq!(account.five_hour, None);
+        assert_eq!(account.seven_day.unwrap().utilization, 30.0);
+    }
+
+    #[tokio::test]
     async fn usage_history_is_persisted_per_account_and_loaded_on_demand() {
         let h = harness(vec![
             account("a", "token-a", "uuid-a"),

@@ -1134,7 +1134,7 @@ mod tests {
             "soon",
             None,
             Some(Window("0.95", Some(-60_000))),
-            Window("0.2", Some(DAY_MS)),
+            Window("0.95", Some(DAY_MS)),
         );
         assert_eq!(selected(&accounts, None).await, "soon");
     }
