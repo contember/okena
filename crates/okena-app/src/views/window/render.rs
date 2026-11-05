@@ -477,13 +477,6 @@ impl WindowView {
 
         let mut elements: Vec<AnyElement> = Vec::new();
         if mode.is_grid() {
-            // The tile grid never has lanes; a column that just left one
-            // gets its header pill back.
-            for project_id in &visible_projects {
-                if let Some(col) = self.project_columns.get(project_id).cloned() {
-                    col.update(cx, |col, cx| col.set_in_status_lane(false, cx));
-                }
-            }
             elements.push(self.render_tile_grid(
                 &visible_projects,
                 container_bounds.borrow().size,
@@ -537,8 +530,6 @@ impl WindowView {
                     let pixel_size = pixel_widths.get(i).copied().unwrap_or(200.0);
 
                     if let Some(col) = self.project_columns.get(project_id).cloned() {
-                        let in_lane = caption.is_some();
-                        col.update(cx, |col, cx| col.set_in_status_lane(in_lane, cx));
                         let is_hovered = hovered_project.as_deref() == Some(project_id.as_str());
                         let col_element = div()
                             // Fixed size along the grid axis, stretch on the cross axis.

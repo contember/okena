@@ -14,8 +14,9 @@ as it did before.
 ## What you see (with the board enabled)
 
 - **Status pill** in a project column's header, after the name: the
-  column's name in its colour (inside a lane only while hovered). A project without a status shows a muted
-  *Status* affordance while the header is hovered. Click opens the picker:
+  column's name in its colour, always shown while a status is set (in a
+  lane too). A project without a status shows a muted *Status*
+  affordance while the header is hovered. Click opens the picker:
   the columns, *No status*, and *Edit columns…* (opens settings).
 - **Project menu → Status** (right-click a project or worktree row in the
   sidebar): the same choices as a flyout; the current one is ticked.
@@ -29,9 +30,8 @@ as it did before.
   colour, see below; grey when uncoloured), the number of columns in the
   lane, and the name spelled letter by letter downwards (GPUI cannot
   rotate text). In a columns grid the spine is the whole gap between two
-  lanes; in a rows grid a hairline separates the lanes. Inside a lane the
-  header's status pill hides, since the spine already names the status,
-  and comes back while the header is hovered. Project colours stay where
+  lanes; in a rows grid a hairline separates the lanes. Project colours
+  stay where
   they always are (header line and dot). Columns stay live terminals and
   resize as before; the divider between two columns only exists inside a
   lane. With no status
