@@ -54,7 +54,8 @@ The two reactor trait families are what make the logic crates reactor-agnostic:
 | `reactor.rs` | `DaemonReactor` shared state + `spawn_observers`. |
 | `observers.rs` | The observer tasks: autosave, state snapshot, service sync. Re-entrancy guards live here. |
 | `pty_loop.rs` | PTY event loop — drains `PtyEvent::Data`, hook-terminal exits, OSC hook-exit titles, activity bumps. |
-| `git_poll.rs` | Background git-status poller. |
+| `git_poll.rs` | Background git-status poller: HEAD + index stat poll (250 ms visible, 2 s hidden) and the full-status loop (5 s cycles), plus the visible-only GitHub PR/CI fan-out. |
+| `git_poll_schedule.rs` | Which projects get a full status walk per cycle: visible and active (change signal in the last 60 s) every cycle, visible and idle every 30 s, hidden only after a change signal (terminal output, index, HEAD; at most every 30 s) or every 5 min. Forced triggers bypass it. |
 | `workspace_cx.rs` / `service_cx.rs` | Tokio impls of the reactor traits. |
 | `daemon_config.rs` | Gpui-free settings/theme handlers. |
 | `soft_close.rs` | Soft-close deadline poll (grace window before killing a session). |

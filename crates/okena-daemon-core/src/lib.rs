@@ -36,6 +36,7 @@ pub mod command_loop;
 pub mod daemon;
 pub mod daemon_config;
 pub mod git_poll;
+mod git_poll_schedule;
 pub mod observers;
 pub mod pty_loop;
 pub mod reactor;

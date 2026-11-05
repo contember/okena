@@ -1,15 +1,19 @@
 //! GPUI-free git-status polling for the headless daemon.
 //!
 //! Projects in a client's declared viewport (`SetVisibleProjects`), or owning a
-//! terminal streamed by a client that never declared one, stay on the
-//! responsive tier: HEAD every 250ms and full status every 5s. A declared
-//! viewport is the whole truth for that client — the desktop subscribes to
-//! every terminal it mirrors, so its subscriptions say nothing about what is
-//! on screen — and any declared viewport supersedes the workspace's own window
-//! state: visibility is client-owned (`window-layout.json`), so the daemon's
-//! copy is a stale legacy set, consulted only while nobody has declared one.
-//! Everything else uses bounded fallback cadences (2s HEAD, 30s full status).
-//! Explicit actions and detected HEAD changes still trigger an immediate
+//! terminal streamed by a client that never declared one, are *visible*: HEAD
+//! and index every 250ms. A declared viewport is the whole truth for that
+//! client — the desktop subscribes to every terminal it mirrors, so its
+//! subscriptions say nothing about what is on screen — and any declared
+//! viewport supersedes the workspace's own window state: visibility is
+//! client-owned (`window-layout.json`), so the daemon's copy is a stale legacy
+//! set, consulted only while nobody has declared one. Everything else has its
+//! HEAD and index read every 2s.
+//!
+//! A full status walk stats the whole worktree, so it runs only where a status
+//! can have moved: see [`crate::git_poll_schedule`] (5s while a visible project
+//! is active, 30s while it is idle, hidden projects on a change signal or every
+//! 5 min). Explicit actions and detected HEAD changes still trigger an immediate
 //! targeted refresh. Cached statuses for projects not selected in a cycle
 //! remain published, so tiering changes freshness rather than visibility.
 //!
@@ -20,6 +24,7 @@
 //! GitHub reports the API rate limit as exhausted.
 
 use std::collections::{HashMap, HashSet};
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::Path;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
@@ -28,15 +33,16 @@ use okena_core::api::ApiGitStatus;
 use okena_core::git_poll::{GitPollTrigger, GithubPollSchedule};
 use okena_core::process::{Lane, with_lane};
 use okena_git::repository::{CiFetch, PrFetch};
-use okena_git::{self as git, GitStatus, HeadSnapshot};
+use okena_git::{self as git, GitStatus, HeadSnapshot, IndexStamp};
+use okena_terminal::TerminalsRegistry;
 use okena_workspace::state::Workspace;
 use parking_lot::Mutex;
 use tokio::sync::{Semaphore, mpsc, watch};
 
-/// Responsive full-status cadence for projects on the responsive tier.
+use crate::git_poll_schedule::{LocalWalkSchedule, OutputFingerprints};
+
+/// Full-status cycle length; [`crate::git_poll_schedule`] counts in cycles.
 const GIT_POLL_INTERVAL: Duration = Duration::from_secs(5);
-/// Hidden projects receive a full fallback scan every 6 responsive cycles (30s).
-const HIDDEN_GIT_POLL_EVERY_N_CYCLES: u64 = 6;
 /// Responsive HEAD cadence for projects on the responsive tier.
 const HEAD_POLL_INTERVAL: Duration = Duration::from_millis(250);
 /// Hidden projects receive a cheap HEAD fallback scan every 8 ticks (2s).
@@ -184,28 +190,6 @@ fn streaming_project_ids(
     relevant
 }
 
-fn select_status_poll_ids(
-    active_ids: &HashSet<String>,
-    relevant_ids: &HashSet<String>,
-    forced_ids: &HashSet<String>,
-    newly_relevant_ids: &HashSet<String>,
-    cadence_due: bool,
-    poll_hidden: bool,
-) -> HashSet<String> {
-    if poll_hidden {
-        return active_ids.clone();
-    }
-
-    let mut selected = HashSet::new();
-    if cadence_due {
-        selected.extend(relevant_ids.iter().cloned());
-    }
-    selected.extend(forced_ids.iter().cloned());
-    selected.extend(newly_relevant_ids.iter().cloned());
-    selected.retain(|id| active_ids.contains(id));
-    selected
-}
-
 fn merge_status_results(
     previous: &HashMap<String, GitStatus>,
     active_ids: &HashSet<String>,
@@ -226,15 +210,19 @@ fn merge_status_results(
     merged
 }
 
-/// Poll only each repository's symbolic HEAD and commit id, waking the full
-/// status loop when either changes. This never reads the index or worktree.
+/// Poll only each repository's symbolic HEAD, commit id and index stat, never
+/// the worktree. A moved HEAD wakes the full status loop for an immediate
+/// refresh; a rewritten index is reported on `index_change_tx` as a change
+/// signal for the walk schedule.
 pub async fn run_git_head_poll(
     workspace: Arc<Mutex<Workspace>>,
     remote_subscribed_terminals: Arc<RwLock<HashMap<u64, HashSet<String>>>>,
     remote_visible_projects: Arc<RwLock<HashMap<u64, HashSet<String>>>>,
     trigger_tx: mpsc::UnboundedSender<GitPollTrigger>,
+    index_change_tx: mpsc::UnboundedSender<String>,
 ) {
     let mut previous = HashMap::<String, HeadSnapshot>::new();
+    let mut previous_index = HashMap::<String, Option<IndexStamp>>::new();
     let mut tick = 0u64;
     let mut interval = tokio::time::interval(HEAD_POLL_INTERVAL);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -270,20 +258,31 @@ pub async fn run_git_head_poll(
             projects
                 .into_iter()
                 .filter_map(|(id, path)| {
-                    with_lane(Lane::Poll, || git::get_head_snapshot(Path::new(&path)))
+                    with_lane(Lane::Poll, || git::get_repo_poll_snapshot(Path::new(&path)))
                         .map(|snapshot| (id, snapshot))
                 })
-                .collect()
+                .collect::<Vec<_>>()
         })
         .await;
         let Ok(snapshots) = snapshots else {
             log::warn!("git HEAD poll task panicked");
             continue;
         };
+        let mut heads = HashMap::with_capacity(snapshots.len());
+        let mut indexes = HashMap::with_capacity(snapshots.len());
+        for (id, snapshot) in snapshots {
+            indexes.insert(id.clone(), snapshot.index);
+            heads.insert(id, snapshot.head);
+        }
 
         // `active_ids` deliberately includes unsampled hidden projects so their
         // prior snapshots survive fast-tier ticks and later changes are detected.
-        for id in update_head_snapshots(&mut previous, &active_ids, snapshots) {
+        for id in update_head_snapshots(&mut previous_index, &active_ids, indexes) {
+            if index_change_tx.send(id).is_err() {
+                return;
+            }
+        }
+        for id in update_head_snapshots(&mut previous, &active_ids, heads) {
             if trigger_tx.send(GitPollTrigger::head_change(id)).is_err() {
                 return;
             }
@@ -566,14 +565,22 @@ fn apply_github_result(
     publish(last, &enriched, git_status_tx, state_version);
 }
 
+/// Change signals for the walk schedule besides HEAD triggers.
+pub struct GitChangeSignals {
+    /// Read for terminal output: each terminal's content generation.
+    pub terminals: TerminalsRegistry,
+    /// Index rewrites reported by [`run_git_head_poll`].
+    pub index_change_rx: mpsc::UnboundedReceiver<String>,
+}
+
 /// Run the daemon git-status poll loop until the `watch` channel is closed (all
 /// receivers dropped → the server is gone).
 ///
 /// Each cycle snapshots all local projects and their current relevance, selects
 /// only due or explicitly triggered repositories, and runs their gix work on the
 /// blocking pool. Results merge into the prior cache so skipped hidden projects
-/// remain published. The independent wall-clock interval keeps 5s/30s deadlines
-/// stable even when targeted triggers wake the loop between cadence ticks.
+/// remain published. The independent wall-clock interval keeps the schedule's
+/// cycles stable even when targeted triggers wake the loop between cadence ticks.
 /// PR/CI lookups retain their existing visible-project adaptive cadence.
 ///
 /// Bumps `state_version` on a real change so a snapshot/broadcast observer can
@@ -585,7 +592,12 @@ pub async fn run_git_poll(
     remote_subscribed_terminals: Arc<RwLock<HashMap<u64, HashSet<String>>>>,
     remote_visible_projects: Arc<RwLock<HashMap<u64, HashSet<String>>>>,
     mut trigger_rx: mpsc::UnboundedReceiver<GitPollTrigger>,
+    signals: GitChangeSignals,
 ) {
+    let GitChangeSignals {
+        terminals,
+        mut index_change_rx,
+    } = signals;
     // Last-published per-project statuses, kept across cycles so we only
     // re-broadcast + bump on real change. Keyed by the richer `GitStatus`
     // (which derives `PartialEq`) — the GUI's `commit_statuses` compares the
@@ -614,6 +626,8 @@ pub async fn run_git_poll(
     let mut known_streaming_ids: HashSet<String> = HashSet::new();
     let mut trigger_rx_closed = false;
     let mut head_generations: HashMap<String, u64> = HashMap::new();
+    let mut walk_schedule = LocalWalkSchedule::default();
+    let mut output_fingerprints = OutputFingerprints::default();
     let (github_result_tx, mut github_result_rx) = mpsc::unbounded_channel();
     // Consume `interval`'s immediate first tick. Subsequent ticks stay anchored
     // to wall time, so targeted wakes cannot postpone periodic refreshes.
@@ -639,7 +653,7 @@ pub async fn run_git_poll(
         );
 
         // ── 1. Snapshot relevance and choose this cycle's local work ─────────
-        let (projects, visible_ids, streaming_ids) = {
+        let (projects, visible_ids, streaming_ids, project_terminals) = {
             let workspace = workspace.lock();
             let visible = visible_project_ids(&workspace, &remote_visible_projects);
             let streaming = streaming_project_ids(
@@ -652,7 +666,16 @@ pub async fn run_git_poll(
                 .iter()
                 .map(|project| (project.id.clone(), project.path.clone()))
                 .collect();
-            (projects, visible, streaming)
+            // Only read on cadence ticks: that is when the schedule decides.
+            let project_terminals: Vec<(String, Vec<String>)> = if cadence_due {
+                projects
+                    .iter()
+                    .map(|(id, _)| (id.clone(), workspace.all_terminal_ids_for_project(id)))
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            (projects, visible, streaming, project_terminals)
         };
         let active_ids: HashSet<String> = projects.iter().map(|(id, _)| id.clone()).collect();
         pr_infos.retain(|id, _| active_ids.contains(id));
@@ -660,22 +683,35 @@ pub async fn run_git_poll(
         head_generations.retain(|id, _| active_ids.contains(id));
         known_streaming_ids.retain(|id| active_ids.contains(id));
         schedule.retain(&active_ids);
+        walk_schedule.retain(&active_ids);
+
+        // Change signals: a moved HEAD, a rewritten index, terminal output.
+        for id in &trigger_acc.head_change_ids {
+            walk_schedule.note_signal(id, cycle);
+        }
+        while let Ok(id) = index_change_rx.try_recv() {
+            walk_schedule.note_signal(&id, cycle);
+        }
+        if cadence_due {
+            let fingerprints = output_fingerprints_by_project(&terminals, project_terminals);
+            for id in output_fingerprints.changed(fingerprints) {
+                walk_schedule.note_signal(&id, cycle);
+            }
+        }
 
         let newly_relevant_ids: HashSet<String> = streaming_ids
             .difference(&known_streaming_ids)
             .cloned()
             .collect();
         known_streaming_ids = streaming_ids.clone();
-        let forced_local_ids = trigger_acc.local_status_ids();
-        let poll_hidden =
-            cycle == 0 || (cadence_due && cycle.is_multiple_of(HIDDEN_GIT_POLL_EVERY_N_CYCLES));
-        let status_poll_ids = select_status_poll_ids(
+        let mut forced_local_ids = trigger_acc.local_status_ids();
+        forced_local_ids.extend(newly_relevant_ids);
+        let status_poll_ids = walk_schedule.select(
             &active_ids,
             &streaming_ids,
             &forced_local_ids,
-            &newly_relevant_ids,
+            cycle,
             cadence_due,
-            poll_hidden,
         );
 
         // Explicit actions steer the GitHub schedule: a branch switch invalidates
@@ -703,6 +739,7 @@ pub async fn run_git_poll(
             .await;
             match status {
                 Ok(Some(mut status)) => {
+                    walk_schedule.note_walked(&id, cycle);
                     // Inject whatever PR/CI we already have cached so a still-fresh
                     // badge doesn't blank between GitHub cadence cycles.
                     status.pr_info = pr_infos.get(&id).cloned().flatten();
@@ -710,6 +747,7 @@ pub async fn run_git_poll(
                     attempted.insert(id, Some(status));
                 }
                 Ok(None) => {
+                    walk_schedule.note_walked(&id, cycle);
                     attempted.insert(id, None);
                 }
                 Err(error) => {
@@ -868,6 +906,27 @@ pub async fn run_git_poll(
     }
 }
 
+/// Hash each project's `(terminal id, content generation)` pairs. Any output,
+/// resize or terminal opening/closing changes the hash.
+fn output_fingerprints_by_project(
+    terminals: &TerminalsRegistry,
+    project_terminals: Vec<(String, Vec<String>)>,
+) -> HashMap<String, u64> {
+    let terminals = terminals.lock();
+    project_terminals
+        .into_iter()
+        .map(|(id, terminal_ids)| {
+            let mut hasher = DefaultHasher::new();
+            for terminal_id in &terminal_ids {
+                if let Some(terminal) = terminals.get(terminal_id) {
+                    (terminal_id, terminal.content_generation()).hash(&mut hasher);
+                }
+            }
+            (id, hasher.finish())
+        })
+        .collect()
+}
+
 fn drain_git_poll_triggers(
     trigger_rx: &mut mpsc::UnboundedReceiver<GitPollTrigger>,
     trigger_acc: &mut TriggerAccumulator,
@@ -951,6 +1010,7 @@ mod tests {
         let subscribed = Arc::new(RwLock::new(HashMap::new()));
         let client_visible = Arc::new(RwLock::new(HashMap::new()));
         let (_trigger_tx, trigger_rx) = mpsc::unbounded_channel();
+        let (_index_change_tx, index_change_rx) = mpsc::unbounded_channel();
 
         tokio::select! {
             _ = run_git_poll(
@@ -960,6 +1020,10 @@ mod tests {
                 subscribed,
                 client_visible,
                 trigger_rx,
+                GitChangeSignals {
+                    terminals: Arc::new(Mutex::new(HashMap::new())),
+                    index_change_rx,
+                },
             ) => panic!("git poll loop exited while no client was subscribed"),
             _ = tokio::time::sleep(GIT_POLL_INTERVAL * 3) => {}
         }
@@ -1048,35 +1112,6 @@ mod tests {
                 "visible".to_string(),
                 "switched".to_string(),
             ])
-        );
-    }
-
-    #[test]
-    fn status_poll_selection_respects_tiers_and_targeted_wakes() {
-        let active = HashSet::from(["visible".to_string(), "hidden".to_string()]);
-        let relevant = HashSet::from(["visible".to_string()]);
-        let hidden = HashSet::from(["hidden".to_string()]);
-        let empty = HashSet::new();
-
-        assert_eq!(
-            select_status_poll_ids(&active, &relevant, &empty, &empty, true, true),
-            active,
-            "startup and hidden fallback cycles scan every active project"
-        );
-        assert_eq!(
-            select_status_poll_ids(&active, &relevant, &empty, &empty, true, false),
-            relevant,
-            "ordinary cadence scans only relevant projects"
-        );
-        assert_eq!(
-            select_status_poll_ids(&active, &relevant, &hidden, &empty, false, false),
-            hidden,
-            "targeted hidden refreshes do not wait for fallback cadence"
-        );
-        assert_eq!(
-            select_status_poll_ids(&active, &empty, &empty, &hidden, false, false),
-            hidden,
-            "promotion to the relevant tier refreshes immediately"
         );
     }
 
@@ -1381,11 +1416,192 @@ mod tests {
             .insert(1, HashSet::from(["shown".to_string()]));
         let relevant = streaming_project_ids(&workspace, &subscribed, &declared);
         let newly_relevant: HashSet<String> = relevant.difference(&known).cloned().collect();
-        let empty = HashSet::new();
+        let mut walk_schedule = LocalWalkSchedule::default();
+        walk_schedule.note_walked("shown", 0);
         assert_eq!(
-            select_status_poll_ids(&active, &relevant, &empty, &newly_relevant, false, false),
+            walk_schedule.select(&active, &relevant, &newly_relevant, 1, false),
             HashSet::from(["shown".to_string()])
         );
+    }
+
+    fn git(repo: &Path, args: &[&str]) {
+        let status = std::process::Command::new("git")
+            .args(["-c", "user.name=Test", "-c", "user.email=test@example.com"])
+            .args(["-c", "commit.gpgsign=false"])
+            .args(args)
+            .current_dir(repo)
+            .status()
+            .expect("run git");
+        assert!(status.success(), "git {args:?} failed");
+    }
+
+    fn committed_repo() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("create temp repo");
+        git(dir.path(), &["init", "-q", "-b", "main"]);
+        std::fs::write(dir.path().join("README"), "hello\n").unwrap();
+        git(dir.path(), &["add", "README"]);
+        git(dir.path(), &["commit", "-q", "-m", "init"]);
+        dir
+    }
+
+    struct PollHarness {
+        status_rx: watch::Receiver<HashMap<String, ApiGitStatus>>,
+        terminal: Arc<okena_terminal::terminal::Terminal>,
+        index_change_tx: mpsc::UnboundedSender<String>,
+        _trigger_tx: mpsc::UnboundedSender<GitPollTrigger>,
+    }
+
+    /// Start `run_git_poll` over one hidden project "p" at `repo` owning terminal "t".
+    fn start_hidden_poll(repo: &Path) -> PollHarness {
+        let mut data = workspace_data_with_projects(&[("p", "t")]);
+        data.projects[0].path = repo.to_string_lossy().into_owned();
+        data.main_window.hidden_project_ids.insert("p".to_string());
+        let workspace = Arc::new(Mutex::new(Workspace::new(data)));
+        let terminal = Arc::new(okena_terminal::terminal::Terminal::new(
+            "t".into(),
+            okena_terminal::terminal::TerminalSize {
+                cols: 80,
+                rows: 24,
+                cell_width: 8.0,
+                cell_height: 16.0,
+            },
+            Arc::new(crate::test_support::StubTransport),
+            repo.to_string_lossy().into_owned(),
+        ));
+        let terminals: TerminalsRegistry = Arc::new(Mutex::new(HashMap::new()));
+        terminals.lock().insert("t".into(), terminal.clone());
+        let (status_tx, status_rx) = watch::channel(HashMap::new());
+        let (state_version, _) = watch::channel(0u64);
+        let (trigger_tx, trigger_rx) = mpsc::unbounded_channel();
+        let (index_change_tx, index_change_rx) = mpsc::unbounded_channel();
+        tokio::task::spawn_local(run_git_poll(
+            workspace,
+            Arc::new(status_tx),
+            state_version,
+            Arc::new(RwLock::new(HashMap::new())),
+            Arc::new(RwLock::new(HashMap::new())),
+            trigger_rx,
+            GitChangeSignals {
+                terminals,
+                index_change_rx,
+            },
+        ));
+        PollHarness {
+            status_rx,
+            terminal,
+            index_change_tx,
+            _trigger_tx: trigger_tx,
+        }
+    }
+
+    impl PollHarness {
+        /// Wait for "p"'s published line count to reach `lines_added`; returns
+        /// how much (virtual) time that took.
+        async fn wait_for_lines(&mut self, lines_added: usize) -> Duration {
+            let started = tokio::time::Instant::now();
+            loop {
+                let current = self
+                    .status_rx
+                    .borrow_and_update()
+                    .get("p")
+                    .map(|status| status.lines_added);
+                if current == Some(lines_added) {
+                    return started.elapsed();
+                }
+                self.status_rx.changed().await.expect("poll loop ended");
+            }
+        }
+
+        fn lines(&self) -> Option<usize> {
+            self.status_rx
+                .borrow()
+                .get("p")
+                .map(|status| status.lines_added)
+        }
+    }
+
+    /// The edit is made with no change signal, so only the fallback finds it.
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn a_quiet_hidden_project_is_walked_only_by_the_fallback() {
+        let repo = committed_repo();
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let mut poll = start_hidden_poll(repo.path());
+                poll.wait_for_lines(0).await;
+                std::fs::write(repo.path().join("new.txt"), "a\nb\nc\n").unwrap();
+
+                tokio::time::sleep(Duration::from_secs(4 * 60)).await;
+                assert_eq!(poll.lines(), Some(0), "walked before the fallback");
+
+                let waited = poll.wait_for_lines(3).await;
+                assert!(
+                    waited <= Duration::from_secs(70),
+                    "fallback took {waited:?}"
+                );
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn terminal_output_gets_a_hidden_project_walked() {
+        let repo = committed_repo();
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let mut poll = start_hidden_poll(repo.path());
+                poll.wait_for_lines(0).await;
+                // One cycle so the output fingerprint has its baseline.
+                tokio::time::sleep(GIT_POLL_INTERVAL * 2).await;
+
+                std::fs::write(repo.path().join("new.txt"), "a\nb\nc\n").unwrap();
+                poll.terminal.process_output(b"$ ");
+                let waited = poll.wait_for_lines(3).await;
+                assert!(waited <= Duration::from_secs(40), "took {waited:?}");
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn an_index_change_gets_a_hidden_project_walked() {
+        let repo = committed_repo();
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let mut poll = start_hidden_poll(repo.path());
+                poll.wait_for_lines(0).await;
+
+                std::fs::write(repo.path().join("new.txt"), "a\nb\n").unwrap();
+                poll.index_change_tx.send("p".to_string()).unwrap();
+                let waited = poll.wait_for_lines(2).await;
+                assert!(waited <= Duration::from_secs(40), "took {waited:?}");
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn the_head_poll_reports_a_rewritten_index() {
+        let repo = committed_repo();
+        let mut data = workspace_data_with_projects(&[("p", "t")]);
+        data.projects[0].path = repo.path().to_string_lossy().into_owned();
+        let workspace = Arc::new(Mutex::new(Workspace::new(data)));
+        let (trigger_tx, mut trigger_rx) = mpsc::unbounded_channel();
+        let (index_change_tx, mut index_change_rx) = mpsc::unbounded_channel();
+        let poll = tokio::spawn(run_git_head_poll(
+            workspace,
+            Arc::new(RwLock::new(HashMap::new())),
+            Arc::new(RwLock::new(HashMap::new())),
+            trigger_tx,
+            index_change_tx,
+        ));
+        // Two ticks so the first snapshot is the baseline.
+        tokio::time::sleep(HEAD_POLL_INTERVAL * 3).await;
+
+        std::fs::write(repo.path().join("new.txt"), "a\n").unwrap();
+        git(repo.path(), &["add", "new.txt"]);
+        let changed = tokio::time::timeout(Duration::from_secs(10), index_change_rx.recv())
+            .await
+            .expect("index change reported");
+        assert_eq!(changed.as_deref(), Some("p"));
+        assert!(trigger_rx.try_recv().is_err(), "staging does not move HEAD");
+        poll.abort();
     }
 
     /// Build an `apply_github_result` fixture: one project, one CI outcome.

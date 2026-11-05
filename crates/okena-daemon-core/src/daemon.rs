@@ -597,6 +597,7 @@ impl DaemonCore {
                 },
                 reactor.state_version.clone(),
             ));
+            let (git_index_change_tx, git_index_change_rx) = mpsc::unbounded_channel();
             tokio::task::spawn_local(crate::git_poll::run_git_poll(
                 reactor.workspace.clone(),
                 git_status_tx.clone(),
@@ -604,6 +605,10 @@ impl DaemonCore {
                 remote_subscribed_terminals.clone(),
                 remote_visible_projects.clone(),
                 git_poll_trigger_rx,
+                crate::git_poll::GitChangeSignals {
+                    terminals: terminals.clone(),
+                    index_change_rx: git_index_change_rx,
+                },
             ));
             let ai_proxy_poll = claude_pane_env.ai_proxy().clone();
             tokio::task::spawn_local(crate::ai_proxy::run_accounts_poll(
@@ -616,6 +621,7 @@ impl DaemonCore {
                 remote_subscribed_terminals,
                 remote_visible_projects,
                 git_poll_trigger_tx.clone(),
+                git_index_change_tx,
             ));
             tokio::task::spawn_local(crate::claude_remote::run_preload_refresh(
                 claude_pane_env.clone(),
