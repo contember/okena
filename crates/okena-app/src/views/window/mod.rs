@@ -594,14 +594,7 @@ impl WindowView {
         &self.terminals
     }
 
-    /// Identifies which window-scoped slot on the shared `Workspace` this
-    /// view addresses. Always `WindowId::Main` today (single-window runtime);
-    /// slice 05 spawns extras that mint distinct `WindowId::Extra(uuid)`s.
-    /// Field is read directly within the impl via `self.window_id`; this
-    /// public getter exists for external callers (e.g. the slice 05 spawn
-    /// flow on `Okena`) that need to address window-scoped state on
-    /// `Workspace` in the same window this view inhabits.
-    #[allow(dead_code)]
+    /// The window-scoped slot on the shared `Workspace` this view addresses.
     pub fn window_id(&self) -> WindowId {
         self.window_id
     }
