@@ -108,6 +108,9 @@ struct TypedPrompt {
 struct OpenDialog {
     id: String,
     session_id: Option<String>,
+    /// The subagent whose call raised the dialog; `None` for the main agent.
+    /// A subagent shares its parent's `session_id`.
+    agent_id: Option<String>,
     tool_name: String,
     tool_input: serde_json::Value,
     permission_suggestions: Vec<serde_json::Value>,
@@ -274,6 +277,7 @@ impl TerminalState {
     fn take_matching_dialog(&mut self, input: &HookInput) -> Option<OpenDialog> {
         let candidate = |dialog: &OpenDialog| {
             dialog.session_id == input.session_id
+                && dialog.agent_id == input.agent_id
                 && Some(&dialog.tool_name) == input.tool_name.as_ref()
         };
         let index = self
@@ -282,7 +286,8 @@ impl TerminalState {
             .position(|dialog| candidate(dialog) && dialog.tool_input == input.tool_input)
             .or_else(|| {
                 self.dialogs.iter().position(|dialog| {
-                    candidate(dialog) && same_call(&dialog.tool_input, &input.tool_input)
+                    candidate(dialog)
+                        && same_call(&dialog.tool_name, &dialog.tool_input, &input.tool_input)
                 })
             })?;
         Some(self.dialogs.remove(index))
@@ -448,6 +453,7 @@ impl ClaudeRemoteHub {
             terminal.dialogs.push(OpenDialog {
                 id: dialog_id.clone(),
                 session_id: input.session_id,
+                agent_id: input.agent_id,
                 tool_name,
                 tool_input: input.tool_input,
                 permission_suggestions: input.permission_suggestions,
@@ -1204,27 +1210,34 @@ fn runs_claude(info: &ClaudeTerminalInfo) -> bool {
     info.foreground_command.as_deref() == Some(CLAUDE_COMMAND)
 }
 
-/// `value` with every string longer than [`MAX_DIALOG_STRING_BYTES`] cut and
-/// marked.
-/// Whether the input a `PostToolUse` reports is the call a dialog asked about.
-/// Claude Code does not always report the input it asked permission for:
-/// an answered `AskUserQuestion` carries its `answers` (and `annotations`)
-/// beside the `questions`, and `ExitPlanMode` runs with an empty input. So the
-/// reported input matches when it equals the requested one, holds every
-/// requested field unchanged, or is empty.
-fn same_call(requested: &serde_json::Value, ran: &serde_json::Value) -> bool {
+/// Whether the input a `PostToolUse` of `tool_name` reports is the call a
+/// dialog asked about. Claude Code reports two tools with an input other than
+/// the one it asked permission for: an answered `AskUserQuestion` carries its
+/// `answers` (and `annotations`) beside the `questions`, and `ExitPlanMode`
+/// runs with an empty input. Those two match on that shape; every other tool
+/// matches only on an equal input.
+///
+/// Remaining gap: a call answered remotely loses its dialog before it runs
+/// (`decide`), so its `PostToolUse` finds no exact dialog and may release
+/// another open dialog of the same agent and tool that matches this way (two
+/// pending `ExitPlanMode`s, or `AskUserQuestion`s with the same questions).
+/// Pairing by `tool_use_id` would close it, but `PermissionRequest` does not
+/// carry one.
+fn same_call(tool_name: &str, requested: &serde_json::Value, ran: &serde_json::Value) -> bool {
     if requested == ran {
         return true;
     }
-    match (requested.as_object(), ran.as_object()) {
-        (_, Some(ran)) if ran.is_empty() => true,
-        (Some(requested), Some(ran)) => requested
+    match (tool_name, requested.as_object(), ran.as_object()) {
+        ("ExitPlanMode", _, Some(ran)) => ran.is_empty(),
+        ("AskUserQuestion", Some(requested), Some(ran)) => requested
             .iter()
             .all(|(key, value)| ran.get(key) == Some(value)),
         _ => false,
     }
 }
 
+/// `value` with every string longer than [`MAX_DIALOG_STRING_BYTES`] cut and
+/// marked.
 fn truncate_long_strings(value: &serde_json::Value) -> serde_json::Value {
     match value {
         serde_json::Value::String(text) if text.len() > MAX_DIALOG_STRING_BYTES => {
@@ -1630,6 +1643,66 @@ mod tests {
         assert_eq!(answer_of(background).await, json!({}));
         assert_eq!(hub.dialog_counts(), HashMap::from([("t1".to_string(), 1)]));
         plain.abort();
+    }
+
+    #[tokio::test]
+    async fn post_tool_use_matches_loosely_only_for_the_tools_that_need_it() {
+        let (hub, _version, _pty) = hub_with_daemon(claude_in_pane());
+        let (_, mcp) = open_dialog(
+            &hub,
+            "t1",
+            permission("mcp__db__query", json!({"sql": "select 1"})),
+        )
+        .await;
+        let (_, bash) = open_dialog(&hub, "t1", permission("Bash", json!({"command": "ls"}))).await;
+
+        // A call that ran without a dialog (allowed earlier) with an empty
+        // input, or with fields added, is another call.
+        hub.hook_event(hook(
+            "t1",
+            tool_event("PostToolUse", "mcp__db__query", json!({})),
+        ))
+        .expect("valid event");
+        hub.hook_event(hook(
+            "t1",
+            tool_event(
+                "PostToolUse",
+                "Bash",
+                json!({"command": "ls", "run_in_background": true}),
+            ),
+        ))
+        .expect("valid event");
+        assert_eq!(hub.dialog_counts(), HashMap::from([("t1".to_string(), 2)]));
+        mcp.abort();
+        bash.abort();
+    }
+
+    #[tokio::test]
+    async fn post_tool_use_of_another_agent_leaves_the_dialog() {
+        let (hub, _version, _pty) = hub_with_daemon(claude_in_pane());
+        let questions = json!([{"question": "Which?"}]);
+        let (_, main) = open_dialog(
+            &hub,
+            "t1",
+            permission("AskUserQuestion", json!({"questions": questions})),
+        )
+        .await;
+        let mut subagent_permission =
+            permission("AskUserQuestion", json!({"questions": questions}));
+        subagent_permission["agent_id"] = json!("a9eb272c70f1f2ec7");
+        let (_, sub) = open_dialog(&hub, "t1", subagent_permission).await;
+
+        // The subagent's answered call releases only the subagent's dialog.
+        let mut ran = tool_event(
+            "PostToolUse",
+            "AskUserQuestion",
+            json!({"questions": questions, "answers": {"Which?": "A"}}),
+        );
+        ran["agent_id"] = json!("a9eb272c70f1f2ec7");
+        hub.hook_event(hook("t1", ran)).expect("valid event");
+        assert_eq!(answer_of(sub).await, json!({}));
+        assert_eq!(hub.dialog_counts(), HashMap::from([("t1".to_string(), 1)]));
+        main.abort();
     }
 
     #[tokio::test]
