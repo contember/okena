@@ -45,7 +45,7 @@ pub type DispatchActionFn = Box<dyn Fn(&str, ActionRequest, &mut App)>;
 pub type GetSettingsFn = Box<dyn Fn(&App) -> SidebarSettings>;
 
 /// Settings needed by the sidebar.
-#[derive(Default, Clone)]
+#[derive(Clone)]
 pub struct SidebarSettings {
     pub worktree_path_template: String,
     pub hooks: okena_workspace::settings::HooksConfig,
@@ -59,6 +59,23 @@ pub struct SidebarSettings {
     pub worktree_guide: bool,
     /// Bell on a worktree row while one of its terminals needs attention.
     pub worktree_attention: bool,
+    /// Render the cross-project AGENTS section.
+    pub show_agents: bool,
+}
+
+impl Default for SidebarSettings {
+    fn default() -> Self {
+        Self {
+            worktree_path_template: String::new(),
+            hooks: Default::default(),
+            remote_layout: Default::default(),
+            host_stats: Default::default(),
+            worktree_marker: Default::default(),
+            worktree_guide: false,
+            worktree_attention: false,
+            show_agents: true,
+        }
+    }
 }
 
 /// Snapshot of a remote connection for rendering.

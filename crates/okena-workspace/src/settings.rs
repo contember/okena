@@ -299,6 +299,13 @@ pub struct SidebarSettings {
     /// bell or notification, so a finished agent shows without expanding it.
     #[serde(default)]
     pub worktree_attention: bool,
+    /// Show the cross-project AGENTS section in the sidebar. Default: true.
+    #[serde(default = "default_sidebar_show_agents")]
+    pub show_agents: bool,
+}
+
+fn default_sidebar_show_agents() -> bool {
+    true
 }
 
 impl Default for SidebarSettings {
@@ -312,6 +319,7 @@ impl Default for SidebarSettings {
             worktree_marker: WorktreeMarker::default(),
             worktree_guide: false,
             worktree_attention: false,
+            show_agents: default_sidebar_show_agents(),
         }
     }
 }
@@ -1474,6 +1482,19 @@ mod tests {
         let loaded: AppSettings =
             serde_json::from_str(r#"{"show_terminal_name_when_inactive":true}"#).unwrap();
         assert!(loaded.show_terminal_name_when_inactive);
+    }
+
+    #[test]
+    fn sidebar_agents_section_is_shown_by_default() {
+        assert!(AppSettings::default().sidebar.show_agents);
+
+        // Older settings files have no `show_agents` key.
+        let loaded: AppSettings = serde_json::from_str(r#"{"sidebar":{"is_open":true}}"#).unwrap();
+        assert!(loaded.sidebar.show_agents);
+
+        let loaded: AppSettings =
+            serde_json::from_str(r#"{"sidebar":{"show_agents":false}}"#).unwrap();
+        assert!(!loaded.sidebar.show_agents);
     }
 
     #[test]

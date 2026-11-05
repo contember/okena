@@ -40,7 +40,9 @@ shown verbatim.
   rows don't swap places while agents retitle their panes.
   Each row shows the lifecycle dot, the terminal name, its project, and the
   free-form text. Click a row to jump straight to that pane. The section hides
-  itself when no agent is active.
+  itself when no agent is active, and **Settings → General → Show Agents in
+  Sidebar** (`sidebar.show_agents`, default on) turns it off entirely — the tab
+  indicator and notifications are unaffected.
 
   The list is deliberately cross-project, so a row can point at a project the
   current window isn't showing (hidden set, folder filter). Clicking then zooms

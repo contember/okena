@@ -4,7 +4,8 @@
 //! This is the multi-agent "mission control": every active agent at a glance,
 //! sorted by attention (blocked → done → working → idle), regardless of which
 //! project it lives in. Clicking a row jumps straight to that pane. The section
-//! hides itself when no agent is active. Per-pane indicators still live on the
+//! hides itself when no agent is active, and can be turned off entirely with
+//! the `sidebar.show_agents` setting. Per-pane indicators still live on the
 //! tab itself (see `okena-views-terminal`).
 
 use gpui::*;
@@ -49,8 +50,12 @@ fn sort_agents_by_attention(agents: &mut [SidebarAgentInfo]) {
 
 impl Sidebar {
     /// Render the AGENTS section (header + one row per active agent), or an
-    /// empty element when no agent is reporting a status.
+    /// empty element when no agent is reporting a status or the user turned
+    /// the section off (`sidebar.show_agents`).
     pub fn render_agents_section(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        if !self.sidebar_settings(cx).show_agents {
+            return div().into_any_element();
+        }
         let agents = self.collect_agents(cx);
         if agents.is_empty() {
             return div().into_any_element();

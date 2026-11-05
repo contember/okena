@@ -192,6 +192,7 @@ If the file contains invalid JSON, Okena recovers as many fields as possible and
 | `sidebar.worktree_marker` | string | `"project"` | The ring before a worktree row: `"project"` (the project colour) or `"status"` (its status column's colour). Shown in settings while the status board is enabled |
 | `sidebar.worktree_guide` | bool | `false` | Thin guide in the parent's colour down an expanded family |
 | `sidebar.worktree_attention` | bool | `false` | Bell on a worktree row while any of its terminals has an unseen bell or notification. The terminal you are looking at does not count |
+| `sidebar.show_agents` | bool | `true` | Show the cross-project AGENTS section in the sidebar. Off hides it entirely; tab indicators and agent notifications still work |
 
 #### Status Bar
 
