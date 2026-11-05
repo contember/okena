@@ -14,7 +14,7 @@ as it did before.
 ## What you see (with the board enabled)
 
 - **Status pill** in a project column's header, after the name: the
-  column's name in its colour. A project without a status shows a muted
+  column's name in its colour (inside a lane only while hovered). A project without a status shows a muted
   *Status* affordance while the header is hovered. Click opens the picker:
   the columns, *No status*, and *Edit columns…* (opens settings).
 - **Project menu → Status** (right-click a project or worktree row in the
@@ -24,9 +24,17 @@ as it did before.
   remembered per window and project; with the board off the shortcut
   passes through to the terminal): while that family is focused, its
   columns stand in lanes, one per board column that has a member, *No
-  status* last, each under a thin caption (dot in the column's colour,
-  name, hairline). Columns stay live terminals and resize as before; the
-  divider between two columns only exists inside a lane. With no status
+  status* last. A narrow spine runs down the left of each lane: an edge
+  and a light tint in the column's colour (grey for *No status* or an
+  uncoloured column), the number of columns in the
+  lane, and the name spelled letter by letter downwards (GPUI cannot
+  rotate text). In a columns grid the spine is the whole gap between two
+  lanes; in a rows grid a hairline separates the lanes. Inside a lane the
+  header's status pill hides, since the spine already names the status,
+  and comes back while the header is hovered. Project colours stay where
+  they always are (header line and dot). Columns stay live terminals and
+  resize as before; the divider between two columns only exists inside a
+  lane. With no status
   among the visible columns, or a single focused column, the grid is flat,
   lanes or not.
 - **Overview lanes** (Overview row's view menu → *Status lanes*, or
@@ -55,7 +63,7 @@ Each column has a stable `id`, a display `name` and an optional colour. A
 fresh install starts with `todo`, `in-progress`, `review`, `done`.
 
 - A colour (the same palette as projects) marks the status, never the
-  project: it tints the pill, the lane caption, the sidebar caption and,
+  project: it tints the pill, the lane spine, the sidebar caption and,
   with "Color Tinted Background" on, the terminal background of a project
   that has the status. The project's own dot and ring keep the project
   colour, so a worktree still reads as its parent's.

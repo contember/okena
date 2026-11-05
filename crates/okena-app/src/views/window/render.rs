@@ -1,4 +1,4 @@
-use super::grid_layout::{GridLayout, GridSpan, LANE_CAPTION_HEIGHT, LANE_GAP};
+use super::grid_layout::{GridLayout, GridSpan, LANE_SEPARATOR, LANE_SPINE_WIDTH};
 use super::tile_grid::TileGrid;
 use crate::app_menu::AppMenuAction;
 use crate::keybindings::{
@@ -22,6 +22,7 @@ use crate::workspace::requests::{OverlayRequest, ProjectOverlay, ProjectOverlayK
 use crate::workspace::state::ProjectLayoutMode;
 use gpui::prelude::*;
 use gpui::*;
+use unicode_segmentation::UnicodeSegmentation;
 
 use super::WindowView;
 
@@ -97,7 +98,7 @@ impl WindowView {
     /// The grid's column order and spans: lanes by status while the current
     /// view has them on (the focused family's flag, or the overview's when
     /// nothing is focused), the flat grid otherwise. A single column needs no
-    /// caption either way, and the tile grid keeps the window's order.
+    /// lane either way, and the tile grid keeps the window's order.
     fn grid_layout(&self, visible: Vec<String>, cx: &App) -> GridLayout {
         if visible.len() <= 1 || !okena_ui::board::status_board_enabled(cx) {
             return GridLayout::flat(visible);
@@ -476,6 +477,13 @@ impl WindowView {
 
         let mut elements: Vec<AnyElement> = Vec::new();
         if mode.is_grid() {
+            // The tile grid never has lanes; a column that just left one
+            // gets its header pill back.
+            for project_id in &visible_projects {
+                if let Some(col) = self.project_columns.get(project_id).cloned() {
+                    col.update(cx, |col, cx| col.set_in_status_lane(false, cx));
+                }
+            }
             elements.push(self.render_tile_grid(
                 &visible_projects,
                 container_bounds.borrow().size,
@@ -520,14 +528,17 @@ impl WindowView {
 
             // Build interleaved columns and dividers
 
-            for GridSpan { caption, range } in spans {
+            for (span_index, GridSpan { caption, range }) in spans.into_iter().enumerate() {
                 let mut inner: Vec<AnyElement> = Vec::new();
                 let span_end = range.end;
+                let span_len = range.len();
                 for i in range {
                     let project_id = &visible_projects[i];
                     let pixel_size = pixel_widths.get(i).copied().unwrap_or(200.0);
 
                     if let Some(col) = self.project_columns.get(project_id).cloned() {
+                        let in_lane = caption.is_some();
+                        col.update(cx, |col, cx| col.set_in_status_lane(in_lane, cx));
                         let is_hovered = hovered_project.as_deref() == Some(project_id.as_str());
                         let col_element = div()
                             // Fixed size along the grid axis, stretch on the cross axis.
@@ -582,44 +593,92 @@ impl WindowView {
                             Some(okena_core::theme::FolderColor::Default) | None => None,
                             Some(color) => Some(lane_t.get_folder_color(color)),
                         };
+                        let edge = accent.unwrap_or(lane_t.text_muted);
                         let label =
                             okena_workspace::status_board::caption_label(&column).to_uppercase();
-                        let strip = div()
-                            .h(px(LANE_CAPTION_HEIGHT))
-                            .px(px(6.0))
-                            .flex()
-                            .items_center()
-                            .gap(px(8.0))
+                        // GPUI cannot rotate text, so the name stands letter
+                        // by letter down the spine; a space is a short gap.
+                        // Grapheme clusters keep accents and emoji whole.
+                        let letters = label.graphemes(true).map(|g| {
+                            if g.chars().all(char::is_whitespace) {
+                                div().h(px(4.0)).into_any_element()
+                            } else {
+                                // Full-width cell, centred text: every glyph
+                                // shares one axis instead of each box
+                                // centring on its own width.
+                                div().w_full().text_center().child(g.to_string()).into_any_element()
+                            }
+                        });
+                        // The label sits out of flow: in a rows grid the
+                        // lane's height must come from its rows alone (as
+                        // `GridLayout` counts it), never from a long name.
+                        let spine = div()
+                            .relative()
+                            .w(px(LANE_SPINE_WIDTH))
                             .flex_shrink_0()
-                            .children(accent.map(|hex| {
-                                div()
-                                    .size(px(7.0))
-                                    .rounded_full()
-                                    .bg(rgb(hex))
-                                    .flex_shrink_0()
-                            }))
+                            .flex()
+                            .justify_between()
+                            .overflow_hidden()
+                            .bg(rgb(crate::ui::tint_color(lane_t.bg_primary, edge, 0.12)))
+                            .child(div().w(px(2.0)).h_full().flex_shrink_0().bg(rgb(edge)))
                             .child(
                                 div()
+                                    .absolute()
+                                    .top_0()
+                                    .bottom_0()
+                                    .left(px(2.0))
+                                    .right(px(1.0))
+                                    .flex()
+                                    .flex_col()
+                                    .items_center()
+                                    .pt(px(8.0))
+                                    .gap(px(6.0))
+                                    .overflow_hidden()
                                     .text_size(ui_text_xs(cx))
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(rgb(accent.unwrap_or(lane_t.text_secondary)))
-                                    .whitespace_nowrap()
-                                    .child(label),
+                                    // Monospace: equal advances keep the
+                                    // stacked letters on one straight axis.
+                                    .font_family("JetBrains Mono")
+                                    .child(
+                                        div()
+                                            .w_full()
+                                            .text_center()
+                                            .text_color(rgb(lane_t.text_muted))
+                                            .child(span_len.to_string()),
+                                    )
+                                    .child(
+                                        div()
+                                            .w_full()
+                                            .flex()
+                                            .flex_col()
+                                            .items_center()
+                                            .line_height(relative(1.05))
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .text_color(rgb(
+                                                accent.unwrap_or(lane_t.text_secondary),
+                                            ))
+                                            .children(letters),
+                                    ),
                             )
                             .child(
-                                div()
-                                    .flex_1()
-                                    .h(px(1.0))
-                                    .bg(okena_ui::metrics::metric_track_color(&lane_t)),
+                                div().w(px(1.0)).h_full().flex_shrink_0().bg(rgb(lane_t.border)),
                             );
+                        if is_rows && span_index > 0 {
+                            elements.push(
+                                div()
+                                    .h(px(LANE_SEPARATOR))
+                                    .w_full()
+                                    .flex_shrink_0()
+                                    .bg(rgb(lane_t.border))
+                                    .into_any_element(),
+                            );
+                        }
                         elements.push(
                             div()
                                 .flex()
-                                .flex_col()
                                 .flex_shrink_0()
                                 .when(is_rows, |d| d.w_full())
-                                .when(!is_rows, |d| d.h_full().mr(px(LANE_GAP)))
-                                .child(strip)
+                                .when(!is_rows, |d| d.h_full())
+                                .child(spine)
                                 .child(
                                     div()
                                         .flex()

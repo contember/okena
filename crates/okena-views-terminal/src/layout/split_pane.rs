@@ -385,7 +385,7 @@ pub fn render_split_divider<D: ActionDispatch + Send + Sync>(
 /// (slice 05) each caller will pass its own `WindowView::window_id` so that a
 /// drag on column N starts from the same width the user sees in that window.
 /// `chrome` is the grid's size along the axis not taken by columns (dividers,
-/// lane captions and gaps), so the drag works from the same budget as the render.
+/// lane spines and separators), so the drag works from the same budget as the render.
 // Render helper: params are render inputs (geometry, theme, window slot, callbacks).
 #[allow(clippy::too_many_arguments)]
 pub fn render_project_divider(

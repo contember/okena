@@ -61,6 +61,8 @@ uuid = { version = "1.10", features = ["v4"] }
 dirs = "5.0"
 # Fuzzy matching for the project switcher (same matcher as file search).
 nucleo-matcher = "0.3"
+# Grapheme clusters for the stacked status-lane spine label.
+unicode-segmentation = "1"
 
 # Logging
 log = "0.4"
