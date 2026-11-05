@@ -26,3 +26,20 @@ pub fn popover_panel(id: impl Into<SharedString>, t: &ThemeColors) -> Stateful<D
             cx.stop_propagation();
         })
 }
+
+/// Stores a popover trigger's bounds, measured while the trigger is drawn.
+///
+/// The popover is placed from the bounds of the previous draw, so when the trigger of an
+/// open popover moves, this requests one more frame of the view that renders the popover.
+/// Call it from that view's elements.
+pub fn record_trigger_bounds(
+    slot: &mut Bounds<Pixels>,
+    bounds: Bounds<Pixels>,
+    popover_open: bool,
+    window: &Window,
+) {
+    if popover_open && *slot != bounds {
+        window.request_animation_frame();
+    }
+    *slot = bounds;
+}

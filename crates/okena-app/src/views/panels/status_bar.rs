@@ -921,18 +921,17 @@ impl Render for StatusBar {
                             .child(
                                 canvas(
                                     move |bounds, window, app| {
-                                        let moved = entity_for_bounds.update(
+                                        entity_for_bounds.update(
                                             app,
                                             |this: &mut StatusBar, _cx| {
-                                                let moved = this.remote_status_bounds != bounds;
-                                                this.remote_status_bounds = bounds;
-                                                moved && this.remote_popover_visible
+                                                okena_ui::popover::record_trigger_bounds(
+                                                    &mut this.remote_status_bounds,
+                                                    bounds,
+                                                    this.remote_popover_visible,
+                                                    window,
+                                                );
                                             },
                                         );
-                                        // The open popover was placed from the old bounds.
-                                        if moved {
-                                            window.request_animation_frame();
-                                        }
                                     },
                                     |_, _, _, _| {},
                                 )

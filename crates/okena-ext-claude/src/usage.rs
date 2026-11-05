@@ -552,17 +552,14 @@ impl ClaudeUsage {
             .child(
                 canvas(
                     move |bounds, window, app| {
-                        let moved = entity.update(app, |this, _cx| {
-                            let previous =
-                                this.trigger_bounds.insert(bounds_trigger.clone(), bounds);
-                            previous != Some(bounds)
-                                && this.popover_visible
-                                && this.active == bounds_trigger
+                        entity.update(app, |this, _cx| {
+                            let open = this.popover_visible && this.active == bounds_trigger;
+                            let slot = this
+                                .trigger_bounds
+                                .entry(bounds_trigger.clone())
+                                .or_default();
+                            okena_ui::popover::record_trigger_bounds(slot, bounds, open, window);
                         });
-                        // The open popover was placed from the old bounds.
-                        if moved {
-                            window.request_animation_frame();
-                        }
                     },
                     |_, _, _, _| {},
                 )
