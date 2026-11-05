@@ -59,7 +59,14 @@ pub(super) fn read_transcript(
         });
     }
 
-    let (entries, cursor) = read_first_page(&mut file, len)?;
+    let (entries, cursor) = match read_first_page(&mut file, len) {
+        // Shrunk since it was measured: rewritten, so read what it holds now.
+        Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => {
+            let len = file.metadata()?.len();
+            read_first_page(&mut file, len)?
+        }
+        result => result?,
+    };
     Ok(TranscriptChunk {
         entries,
         cursor,
@@ -95,7 +102,11 @@ fn read_first_page<R: Read + Seek>(
             None => tail
                 .iter()
                 .rposition(|&byte| byte == b'\n')
-                .map_or(start, |newline| start + newline as u64 + 1),
+                .map_or(Ok(start), |newline| {
+                    u64::try_from(newline + 1)
+                        .map(|after| start + after)
+                        .map_err(io::Error::other)
+                })?,
         };
         let region = &tail[..usize::try_from(region_end - start).map_err(io::Error::other)?];
         let begin = if start == 0 {
@@ -111,7 +122,8 @@ fn read_first_page<R: Read + Seek>(
             older.append(&mut entries);
             entries = older;
             let cursor = parsed.map_or(region_end, |(_, cursor)| cursor);
-            parsed = Some((start + begin as u64, cursor));
+            let begin = u64::try_from(begin).map_err(io::Error::other)?;
+            parsed = Some((start + begin, cursor));
         }
 
         if entries.len() >= FIRST_PAGE_ENTRIES || start == 0 || window >= PAGE_WINDOW {
@@ -1480,7 +1492,7 @@ mod tests {
     impl<R: Read> Read for CountingReader<R> {
         fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
             let n = self.inner.read(buf)?;
-            self.read += n as u64;
+            self.read += u64::try_from(n).expect("fits");
             Ok(n)
         }
     }
@@ -1506,13 +1518,14 @@ mod tests {
         let text: String = (0..50_000)
             .map(|n| assistant_text(&format!("a{n}"), "x"))
             .collect();
-        assert!(text.len() as u64 > PAGE_WINDOW);
+        let len = u64::try_from(text.len()).expect("fits");
+        assert!(len > PAGE_WINDOW);
 
         let (entries, cursor, read) = first_page_of(&text);
         assert_eq!(entries.len(), FIRST_PAGE_ENTRIES);
         assert_eq!(entries.last(), Some(&assistant("a49999", "x")));
         assert_eq!(entries[0], assistant("a49800", "x"));
-        assert_eq!(cursor, text.len() as u64);
+        assert_eq!(cursor, len);
         assert!(read <= 4 * FIRST_PAGE_INITIAL_WINDOW, "read {read} bytes");
     }
 
@@ -1532,7 +1545,7 @@ mod tests {
             entries.last(),
             Some(&assistant(&format!("a{}", FIRST_PAGE_ENTRIES + 49), &body))
         );
-        assert_eq!(cursor, text.len() as u64);
+        assert_eq!(cursor, u64::try_from(text.len()).expect("fits"));
     }
 
     #[test]
@@ -1551,7 +1564,7 @@ mod tests {
                 assistant("a2", "tail")
             ]
         );
-        assert_eq!(cursor, text.len() as u64);
+        assert_eq!(cursor, u64::try_from(text.len()).expect("fits"));
     }
 
     #[test]
