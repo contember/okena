@@ -41,6 +41,10 @@ impl SettingsPanel {
                 |state, val, cx| state.set_detached_overlays_by_default(val, cx), cx,
             ))
             .child(self.render_toggle(
+                "cap-unfocused-fps", "Limit Unfocused Windows to 10 FPS", s.cap_unfocused_window_fps, true,
+                |state, val, cx| state.set_cap_unfocused_window_fps(val, cx), cx,
+            ))
+            .child(self.render_toggle(
                 "whats-new-after-update", "Show What's New After an Update", s.show_whats_new_after_update, true,
                 |state, val, cx| state.set_show_whats_new_after_update(val, cx), cx,
             ))

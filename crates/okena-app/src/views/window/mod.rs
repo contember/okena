@@ -90,16 +90,24 @@ pub struct ContentPaneRepaintStats {
 
 /// Request activity repaints from concrete terminal-content panes. Calls are
 /// already limited by the app-wide presentation cadence, so every visible copy
-/// remains live without each stream driving an independent clock.
+/// remains live without each stream driving an independent clock. `admit`
+/// sees each pane's terminal and window; a pane it refuses is left as is and
+/// is not counted.
 pub fn request_registered_content_pane_repaints(
     registry: &mut HashMap<String, Vec<WeakEntity<super::layout::terminal_pane::TerminalContent>>>,
     terminal_ids: &[String],
     cx: &mut App,
+    mut admit: impl FnMut(&String, Option<WindowId>) -> bool,
 ) -> ContentPaneRepaintStats {
-    update_registered_panes_with_stats(registry, terminal_ids, cx, |weaks, cx| {
+    update_registered_panes_with_stats(registry, terminal_ids, cx, |terminal_id, weaks, cx| {
+        let mut repainted = 0;
         update_pane_weaks(weaks, cx, |pane, cx| {
-            pane.request_activity_repaint(cx);
-        })
+            if admit(terminal_id, pane.window_id()) {
+                pane.request_activity_repaint(cx);
+                repainted += 1;
+            }
+        });
+        repainted
     })
 }
 
@@ -107,24 +115,29 @@ fn update_registered_panes<T: 'static>(
     registry: &mut HashMap<String, Vec<WeakEntity<T>>>,
     terminal_ids: &[String],
     cx: &mut App,
-    update: impl FnMut(&mut Vec<WeakEntity<T>>, &mut App) -> bool,
+    mut update: impl FnMut(&mut Vec<WeakEntity<T>>, &mut App) -> bool,
 ) -> usize {
-    update_registered_panes_with_stats(registry, terminal_ids, cx, update).terminals
+    update_registered_panes_with_stats(registry, terminal_ids, cx, |_, weaks, cx| {
+        if update(weaks, cx) { weaks.len() } else { 0 }
+    })
+    .terminals
 }
 
 fn update_registered_panes_with_stats<T: 'static>(
     registry: &mut HashMap<String, Vec<WeakEntity<T>>>,
     terminal_ids: &[String],
     cx: &mut App,
-    mut update: impl FnMut(&mut Vec<WeakEntity<T>>, &mut App) -> bool,
+    // Returns the number of panes it updated.
+    mut update: impl FnMut(&String, &mut Vec<WeakEntity<T>>, &mut App) -> usize,
 ) -> ContentPaneRepaintStats {
     let mut stats = ContentPaneRepaintStats::default();
     let mut empty = Vec::new();
     for terminal_id in terminal_ids {
         if let Some(weaks) = registry.get_mut(terminal_id) {
-            if update(weaks, cx) {
+            let updated = update(terminal_id, weaks, cx);
+            if updated > 0 {
                 stats.terminals = stats.terminals.saturating_add(1);
-                stats.panes = stats.panes.saturating_add(weaks.len());
+                stats.panes = stats.panes.saturating_add(updated);
             }
             if weaks.is_empty() {
                 empty.push(terminal_id.clone());
@@ -159,8 +172,8 @@ pub enum WindowViewEvent {
     RebuildLocal,
     /// Restart the UI-owned daemon and app with the rebuilt release binary.
     RestartLocalBuild,
-    /// The OS window gained or lost focus.
-    ActivationChanged,
+    /// The OS window gained (`active`) or lost focus.
+    ActivationChanged { active: bool },
 }
 
 pub struct WindowView {
@@ -447,11 +460,13 @@ impl WindowView {
         // path coalesce. Conversion mirrors the inverse path in
         // `src/app/extras.rs::open_extra_window` (gpui `Bounds<Pixels>` ->
         // `PersistedWindowBounds` via four `f32::from(...)` calls).
-        cx.observe_window_activation(window, |_this, _window, cx| {
+        cx.observe_window_activation(window, |_this, window, cx| {
             // Refresh key-window chrome while activity-driven presentation stays
             // live in every visible window.
             cx.notify();
-            cx.emit(WindowViewEvent::ActivationChanged);
+            cx.emit(WindowViewEvent::ActivationChanged {
+                active: window.is_window_active(),
+            });
         })
         .detach();
 
@@ -579,14 +594,7 @@ impl WindowView {
         &self.terminals
     }
 
-    /// Identifies which window-scoped slot on the shared `Workspace` this
-    /// view addresses. Always `WindowId::Main` today (single-window runtime);
-    /// slice 05 spawns extras that mint distinct `WindowId::Extra(uuid)`s.
-    /// Field is read directly within the impl via `self.window_id`; this
-    /// public getter exists for external callers (e.g. the slice 05 spawn
-    /// flow on `Okena`) that need to address window-scoped state on
-    /// `Workspace` in the same window this view inhabits.
-    #[allow(dead_code)]
+    /// The window-scoped slot on the shared `Workspace` this view addresses.
     pub fn window_id(&self) -> WindowId {
         self.window_id
     }
@@ -1116,7 +1124,13 @@ mod tests {
                 &mut registry,
                 &["target".to_string()],
                 cx,
-                notify_pane_weaks,
+                |_, weaks, cx| {
+                    if notify_pane_weaks(weaks, cx) {
+                        weaks.len()
+                    } else {
+                        0
+                    }
+                },
             );
             assert_eq!(stats.terminals, 1);
             assert_eq!(stats.panes, 2);

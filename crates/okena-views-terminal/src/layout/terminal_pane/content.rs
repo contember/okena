@@ -109,6 +109,11 @@ impl TerminalContent {
         }
     }
 
+    /// The Okena window this pane renders in; `None` outside a window's layout.
+    pub fn window_id(&self) -> Option<WindowId> {
+        self.window_id
+    }
+
     /// Present the latest parsed terminal state. Calls are already coalesced by
     /// the app-wide activity frame, so visible non-key windows stay live without
     /// each terminal stream driving an independent repaint clock.

@@ -162,6 +162,7 @@ impl Okena {
                 });
             }
             self.extra_windows.remove(&window_id);
+            self.unfocused_window_pacer.forget(window_id);
         }
 
         let to_open = extras_to_open(&data, &opened);
@@ -222,7 +223,7 @@ impl Okena {
     /// Route a [`WindowViewEvent`] raised by any window to the right handler.
     pub(super) fn handle_window_view_event(
         &mut self,
-        _view: Entity<WindowView>,
+        view: Entity<WindowView>,
         event: &WindowViewEvent,
         cx: &mut Context<Self>,
     ) {
@@ -232,7 +233,12 @@ impl Okena {
             }
             WindowViewEvent::RebuildLocal => self.rebuild_local(cx),
             WindowViewEvent::RestartLocalBuild => self.restart_local_build(cx),
-            WindowViewEvent::ActivationChanged => self.publish_windows(cx),
+            WindowViewEvent::ActivationChanged { active } => {
+                self.publish_windows(cx);
+                // A window that gained focus shows its deferred frame at once.
+                let activated = active.then(|| view.read(cx).window_id());
+                self.flush_unfocused_repaints(activated, cx);
+            }
         }
     }
 

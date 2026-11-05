@@ -700,6 +700,12 @@ pub struct AppSettings {
     #[serde(default)]
     pub detached_overlays_by_default: bool,
 
+    /// When true, terminal output repaints main and extra windows without OS
+    /// focus at most 10 times a second. The focused window and detached
+    /// terminal windows keep their full frame rate.
+    #[serde(default)]
+    pub cap_unfocused_window_fps: bool,
+
     /// Last bounds used by a detached overlay window. Restored on next open
     /// so the window doesn't reset to a small default each time.
     #[serde(default)]
@@ -852,6 +858,7 @@ impl Default for AppSettings {
             diff_ignore_whitespace: false,
             blame_visible: false,
             detached_overlays_by_default: false,
+            cap_unfocused_window_fps: false,
             detached_overlay_bounds: None,
             auto_update_enabled: default_auto_update_enabled(),
             enabled_extensions: HashSet::new(),

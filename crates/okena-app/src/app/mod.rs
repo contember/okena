@@ -13,11 +13,13 @@ use crate::views::window::{
 };
 use crate::workspace::state::{GlobalWorkspace, WindowId, Workspace, WorkspaceData};
 use gpui::*;
-use okena_ui::activity_repaint::{ActivityRepaintBatch, ActivityRepaintThrottle};
+use okena_ui::activity_repaint::{
+    ActivityRepaintBatch, ActivityRepaintThrottle, PacedFrame, UnfocusedWindowPacer,
+};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Repaint-only terminal activity is limited to one app-wide presentation frame.
 /// A ~50 FPS terminal scene keeps interactive output responsive without allowing
@@ -27,6 +29,9 @@ const TERMINAL_ACTIVITY_REPAINT_INTERVAL: Duration = Duration::from_millis(20);
 /// Sidebar state does not need terminal-scene frame rates. Preserve the first
 /// activity edge, then coalesce sustained and trailing updates to ~4 FPS.
 const SIDEBAR_ACTIVITY_REPAINT_INTERVAL: Duration = Duration::from_millis(250);
+/// Terminal frame interval for windows without OS focus while
+/// `cap_unfocused_window_fps` is on (10 FPS).
+const UNFOCUSED_WINDOW_REPAINT_INTERVAL: Duration = Duration::from_millis(100);
 
 #[derive(Default)]
 struct WindowLayoutSaveTracker {
@@ -215,6 +220,9 @@ pub struct Okena {
     /// Independent, lower-frequency presentation stream for sidebar activity
     /// indicators and activity ordering. Terminal panes retain their 20 ms path.
     sidebar_activity_repaints: ActivityRepaintThrottle,
+    /// Paces terminal repaints of windows without OS focus while
+    /// `cap_unfocused_window_fps` is on, and holds the panes it deferred.
+    unfocused_window_pacer: UnfocusedWindowPacer<WindowId, String>,
     /// Sender handed to desktop-notification threads. When a user clicks an
     /// XDG notification, the thread sends a `NotificationJump` here and the
     /// click loop focuses the originating pane. See `app/notifications.rs`.
@@ -401,6 +409,7 @@ impl Okena {
             last_settings_sent: mirrored_settings(&crate::settings::settings(cx)),
             terminal_activity_repaints: ActivityRepaintBatch::default(),
             sidebar_activity_repaints: ActivityRepaintThrottle::default(),
+            unfocused_window_pacer: UnfocusedWindowPacer::new(UNFOCUSED_WINDOW_REPAINT_INTERVAL),
             notification_jump_tx,
             spawned_daemon,
             preserve_daemon_on_quit: false,
@@ -999,23 +1008,82 @@ impl Okena {
         terminal_ids: &[String],
         cx: &mut Context<Self>,
     ) {
+        let frame = self.unfocused_window_pacer.frame(Instant::now());
+        self.present_paced_repaints(terminal_ids, frame, None, cx);
+        self.queue_sidebar_activity_repaint(cx);
+    }
+
+    /// `activated` names a window that just gained focus.
+    fn present_paced_repaints(
+        &mut self,
+        terminal_ids: &[String],
+        mut frame: PacedFrame<WindowId, String>,
+        activated: Option<WindowId>,
+        cx: &mut Context<Self>,
+    ) {
         for terminal_id in terminal_ids {
             okena_core::latency_probe::client_repaint_dispatched(terminal_id);
         }
 
         // Terminal content keeps the ~50 FPS activity cadence for interactive
-        // output. Sidebar activity is queued independently below.
+        // output, except in unfocused windows while the 10 FPS cap is on.
+        let cap_unfocused = crate::settings::settings_entity(cx)
+            .read(cx)
+            .settings
+            .cap_unfocused_window_fps;
+        // On X11 `cx.active_window()` still names no window while the newly
+        // focused one reports its activation.
+        let active_window = if cap_unfocused {
+            activated.or_else(|| self.active_window_id(cx))
+        } else {
+            None
+        };
+        let pacer = &self.unfocused_window_pacer;
         let repaint_stats = {
             let mut registry = content_pane_registry().lock();
-            request_registered_content_pane_repaints(&mut registry, terminal_ids, cx)
+            request_registered_content_pane_repaints(
+                &mut registry,
+                terminal_ids,
+                cx,
+                |terminal_id, window| {
+                    let paced = cap_unfocused && window.is_some_and(|w| Some(w) != active_window);
+                    pacer.admit(&mut frame, terminal_id, window, paced)
+                },
+            )
         };
+        if let Some(deadline) = self.unfocused_window_pacer.finish_frame(frame) {
+            self.arm_unfocused_flush(deadline, cx);
+        }
         okena_core::render_probe::terminal_activity_frame(
             terminal_ids.len(),
             repaint_stats.terminals,
             repaint_stats.panes,
         );
+    }
 
-        self.queue_sidebar_activity_repaint(cx);
+    /// Present the deferred unfocused-window panes at `deadline`, unless a
+    /// timer with an earlier deadline or an activation flush took over.
+    fn arm_unfocused_flush(&mut self, deadline: Instant, cx: &mut Context<Self>) {
+        cx.spawn(async move |this: WeakEntity<Self>, cx| {
+            cx.background_executor()
+                .timer(deadline.saturating_duration_since(Instant::now()))
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if this.unfocused_window_pacer.is_flush_current(deadline) {
+                    this.flush_unfocused_repaints(None, cx);
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Present every deferred unfocused-window pane now; one whose window is
+    /// still not due is deferred again.
+    fn flush_unfocused_repaints(&mut self, activated: Option<WindowId>, cx: &mut Context<Self>) {
+        let (frame, terminal_ids) = self.unfocused_window_pacer.start_flush(Instant::now());
+        if !terminal_ids.is_empty() {
+            self.present_paced_repaints(&terminal_ids, frame, activated, cx);
+        }
     }
 
     fn queue_sidebar_activity_repaint(&mut self, cx: &mut Context<Self>) {
