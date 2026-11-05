@@ -646,6 +646,7 @@ impl WindowView {
                         worktree_marker: s.sidebar.worktree_marker,
                         worktree_guide: s.sidebar.worktree_guide,
                         worktree_attention: s.sidebar.worktree_attention,
+                        show_agents: s.sidebar.show_agents,
                     }
                 }));
 
@@ -687,6 +688,33 @@ impl WindowView {
                 sidebar_for_observe.update(cx, |_, cx| cx.notify());
                 status_bar_for_observe.update(cx, |_, cx| cx.notify());
             })
+            .detach();
+
+            // The sidebar is a `.cached()` view that reads its settings through
+            // the callback above, so it never hears about a settings change on
+            // its own. Repaint it when one of the values it renders from flips.
+            let sidebar_for_settings = self.sidebar.clone();
+            let sidebar_view_of = |s: &crate::workspace::persistence::AppSettings| {
+                (
+                    s.sidebar.show_agents,
+                    s.sidebar.remote_layout,
+                    s.sidebar.host_stats,
+                    s.sidebar.worktree_marker,
+                    s.sidebar.worktree_guide,
+                    s.sidebar.worktree_attention,
+                )
+            };
+            let mut last_sidebar_view = sidebar_view_of(&settings(cx));
+            cx.observe(
+                &crate::settings::settings_entity(cx),
+                move |_this, settings_state, cx| {
+                    let next = sidebar_view_of(&settings_state.read(cx).settings);
+                    if next != last_sidebar_view {
+                        last_sidebar_view = next;
+                        sidebar_for_settings.update(cx, |_, cx| cx.notify());
+                    }
+                },
+            )
             .detach();
         }
 

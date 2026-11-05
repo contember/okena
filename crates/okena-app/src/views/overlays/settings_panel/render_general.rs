@@ -47,6 +47,10 @@ impl SettingsPanel {
             .child(self.render_remote_sidebar_layout_row(s.sidebar.remote_layout, cx))
             .child(self.render_host_stats_row(s.sidebar.host_stats, cx))
             .child(self.render_toggle(
+                "sidebar-show-agents", "Show Agents in Sidebar", s.sidebar.show_agents, true,
+                |state, val, cx| state.set_sidebar_show_agents(val, cx), cx,
+            ))
+            .child(self.render_toggle(
                 "status-board", "Status Board", s.status_board.enabled, true,
                 |state, val, cx| state.set_status_board_enabled(val, cx), cx,
             ))

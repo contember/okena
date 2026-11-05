@@ -449,6 +449,12 @@ impl SettingsState {
         }
     }
 
+    /// Set whether the sidebar shows the cross-project AGENTS section.
+    pub fn set_sidebar_show_agents(&mut self, value: bool, cx: &mut Context<Self>) {
+        self.settings.sidebar.show_agents = value;
+        self.save_and_notify(cx);
+    }
+
     /// Set sidebar width (clamped to min/max bounds)
     pub fn set_sidebar_width(&mut self, value: f32, cx: &mut Context<Self>) {
         use crate::workspace::persistence::{MAX_SIDEBAR_WIDTH, MIN_SIDEBAR_WIDTH};
