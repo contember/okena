@@ -239,8 +239,9 @@ async fn run_usage_poll_inner(
     let mut clients = hub.clients();
     let mut refresh_open = true;
     let mut next_fetch_id: u64 = 0;
-    // Refresh requests applied since the last publish; acked after it.
-    let mut pending_acks: Vec<tokio::sync::oneshot::Sender<()>> = Vec::new();
+    // Refresh requests applied since the last publish; answered after it
+    // with the snapshot it published.
+    let mut pending_acks: Vec<tokio::sync::oneshot::Sender<ApiUsage>> = Vec::new();
 
     loop {
         let now = Instant::now();
@@ -317,14 +318,18 @@ async fn run_usage_poll_inner(
         }
 
         // 3. Publish (no-op for subscribers when nothing changed), then tell
-        //    refresh callers their request is reflected.
+        //    refresh callers their request is reflected, with this snapshot:
+        //    a fetch it started may land before they read the hub.
         hub.publish(okena_agent_usage::snapshot(
             slots.iter().map(|slot| &slot.tracker),
             days,
             now_epoch,
         ));
-        for ack in pending_acks.drain(..) {
-            let _ = ack.send(());
+        if !pending_acks.is_empty() {
+            let applied = hub.snapshot();
+            for ack in pending_acks.drain(..) {
+                let _ = ack.send(applied.clone());
+            }
         }
 
         // 4. Sleep until the next due fetch, a settings re-check, a refresh
