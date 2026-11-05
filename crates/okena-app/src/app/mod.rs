@@ -1010,6 +1010,7 @@ impl Okena {
     ) {
         let frame = self.unfocused_window_pacer.frame(Instant::now());
         self.present_paced_repaints(terminal_ids, frame, None, cx);
+        self.queue_sidebar_activity_repaint(cx);
     }
 
     /// `activated` names a window that just gained focus.
@@ -1026,7 +1027,6 @@ impl Okena {
 
         // Terminal content keeps the ~50 FPS activity cadence for interactive
         // output, except in unfocused windows while the 10 FPS cap is on.
-        // Sidebar activity is queued independently below.
         let cap_unfocused = crate::settings::settings_entity(cx)
             .read(cx)
             .settings
@@ -1059,8 +1059,6 @@ impl Okena {
             repaint_stats.terminals,
             repaint_stats.panes,
         );
-
-        self.queue_sidebar_activity_repaint(cx);
     }
 
     /// Present the deferred unfocused-window panes at `deadline`, unless a
