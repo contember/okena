@@ -700,8 +700,9 @@ pub struct AppSettings {
     #[serde(default)]
     pub detached_overlays_by_default: bool,
 
-    /// When true, terminal output repaints windows without OS focus at most
-    /// 10 times a second. The focused window keeps its full frame rate.
+    /// When true, terminal output repaints main and extra windows without OS
+    /// focus at most 10 times a second. The focused window and detached
+    /// terminal windows keep their full frame rate.
     #[serde(default)]
     pub cap_unfocused_window_fps: bool,
 

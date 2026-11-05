@@ -14,7 +14,7 @@ use crate::views::window::{
 use crate::workspace::state::{GlobalWorkspace, WindowId, Workspace, WorkspaceData};
 use gpui::*;
 use okena_ui::activity_repaint::{
-    ActivityRepaintBatch, ActivityRepaintThrottle, UnfocusedWindowPacer,
+    ActivityRepaintBatch, ActivityRepaintThrottle, PacedFrame, UnfocusedWindowPacer,
 };
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -221,14 +221,8 @@ pub struct Okena {
     /// indicators and activity ordering. Terminal panes retain their 20 ms path.
     sidebar_activity_repaints: ActivityRepaintThrottle,
     /// Paces terminal repaints of windows without OS focus while
-    /// `cap_unfocused_window_fps` is on.
-    unfocused_window_pacer: UnfocusedWindowPacer<WindowId>,
-    /// Terminals with a pane in an unfocused window that was not due yet, and
-    /// those windows. The timer due at `unfocused_flush_deadline` presents
-    /// them when the earliest window is due.
-    unfocused_deferred_terminals: HashSet<String>,
-    unfocused_deferred_windows: HashSet<WindowId>,
-    unfocused_flush_deadline: Option<Instant>,
+    /// `cap_unfocused_window_fps` is on, and holds the panes it deferred.
+    unfocused_window_pacer: UnfocusedWindowPacer<WindowId, String>,
     /// Sender handed to desktop-notification threads. When a user clicks an
     /// XDG notification, the thread sends a `NotificationJump` here and the
     /// click loop focuses the originating pane. See `app/notifications.rs`.
@@ -255,16 +249,6 @@ pub struct Okena {
 
 /// Serialize the settings this client mirrors to the daemon. On failure the
 /// baseline becomes `Null`, which makes the next delta the full settings.
-/// The window whose terminal repaints are paced: the pane's window, while the
-/// unfocused cap is on and that window does not have OS focus.
-fn paced_window(
-    pane_window: Option<WindowId>,
-    cap_unfocused: bool,
-    active_window: Option<WindowId>,
-) -> Option<WindowId> {
-    pane_window.filter(|window| cap_unfocused && Some(*window) != active_window)
-}
-
 fn mirrored_settings(settings: &crate::workspace::persistence::AppSettings) -> serde_json::Value {
     okena_app_core::remote_config::shared_settings_value(settings).unwrap_or_else(|error| {
         log::error!("Failed to encode settings update: {error}");
@@ -426,9 +410,6 @@ impl Okena {
             terminal_activity_repaints: ActivityRepaintBatch::default(),
             sidebar_activity_repaints: ActivityRepaintThrottle::default(),
             unfocused_window_pacer: UnfocusedWindowPacer::new(UNFOCUSED_WINDOW_REPAINT_INTERVAL),
-            unfocused_deferred_terminals: HashSet::new(),
-            unfocused_deferred_windows: HashSet::new(),
-            unfocused_flush_deadline: None,
             notification_jump_tx,
             spawned_daemon,
             preserve_daemon_on_quit: false,
@@ -1027,6 +1008,16 @@ impl Okena {
         terminal_ids: &[String],
         cx: &mut Context<Self>,
     ) {
+        let frame = self.unfocused_window_pacer.frame(Instant::now());
+        self.present_paced_repaints(terminal_ids, frame, cx);
+    }
+
+    fn present_paced_repaints(
+        &mut self,
+        terminal_ids: &[String],
+        mut frame: PacedFrame<WindowId, String>,
+        cx: &mut Context<Self>,
+    ) {
         for terminal_id in terminal_ids {
             okena_core::latency_probe::client_repaint_dispatched(terminal_id);
         }
@@ -1038,12 +1029,12 @@ impl Okena {
             .read(cx)
             .settings
             .cap_unfocused_window_fps;
-        let active_window = self.activated_window_id(cx);
-        let now = Instant::now();
+        let active_window = if cap_unfocused {
+            self.active_window_id(cx)
+        } else {
+            None
+        };
         let pacer = &self.unfocused_window_pacer;
-        let mut presented_windows = HashSet::new();
-        let mut deferred_terminals = HashSet::new();
-        let mut deferred_windows = HashSet::new();
         let repaint_stats = {
             let mut registry = content_pane_registry().lock();
             request_registered_content_pane_repaints(
@@ -1051,27 +1042,13 @@ impl Okena {
                 terminal_ids,
                 cx,
                 |terminal_id, window| {
-                    let Some(window) = paced_window(window, cap_unfocused, active_window) else {
-                        return true;
-                    };
-                    if pacer.is_due(window, now) {
-                        presented_windows.insert(window);
-                        true
-                    } else {
-                        deferred_terminals.insert(terminal_id.to_string());
-                        deferred_windows.insert(window);
-                        false
-                    }
+                    let paced = cap_unfocused && window.is_some_and(|w| Some(w) != active_window);
+                    pacer.admit(&mut frame, terminal_id, window, paced)
                 },
             )
         };
-        for window in presented_windows {
-            self.unfocused_window_pacer.mark_presented(window, now);
-        }
-        if !deferred_terminals.is_empty() {
-            self.unfocused_deferred_terminals.extend(deferred_terminals);
-            self.unfocused_deferred_windows.extend(deferred_windows);
-            self.schedule_unfocused_flush(now, cx);
+        if let Some(deadline) = self.unfocused_window_pacer.finish_frame(frame) {
+            self.arm_unfocused_flush(deadline, cx);
         }
         okena_core::render_probe::terminal_activity_frame(
             terminal_ids.len(),
@@ -1082,45 +1059,15 @@ impl Okena {
         self.queue_sidebar_activity_repaint(cx);
     }
 
-    /// The main or extra window the compositor shows as active. This is the
-    /// state `observe_window_activation` reports; `cx.active_window()` follows
-    /// keyboard focus on Wayland, which a window can be active without.
-    fn activated_window_id(&self, cx: &mut App) -> Option<WindowId> {
-        let is_active = |handle: AnyWindowHandle, cx: &mut App| {
-            handle
-                .update(cx, |_, window, _| window.is_window_active())
-                .unwrap_or(false)
-        };
-        if is_active(self.main_window_handle, cx) {
-            return Some(WindowId::Main);
-        }
-        self.extra_window_handles
-            .iter()
-            .find(|(_, handle)| is_active(**handle, cx))
-            .map(|(window_id, _)| *window_id)
-    }
-
-    /// Arm a timer that presents deferred unfocused-window repaints when the
-    /// earliest of their windows is due. A pending timer that fires no later
-    /// already covers it; only the timer whose deadline is current flushes.
-    fn schedule_unfocused_flush(&mut self, now: Instant, cx: &mut Context<Self>) {
-        let due = self
-            .unfocused_window_pacer
-            .next_due(self.unfocused_deferred_windows.iter().copied())
-            .unwrap_or(now);
-        if self
-            .unfocused_flush_deadline
-            .is_some_and(|deadline| deadline <= due)
-        {
-            return;
-        }
-        self.unfocused_flush_deadline = Some(due);
+    /// Present the deferred unfocused-window panes at `deadline`, unless a
+    /// timer with an earlier deadline or an activation flush took over.
+    fn arm_unfocused_flush(&mut self, deadline: Instant, cx: &mut Context<Self>) {
         cx.spawn(async move |this: WeakEntity<Self>, cx| {
             cx.background_executor()
-                .timer(due.saturating_duration_since(now))
+                .timer(deadline.saturating_duration_since(Instant::now()))
                 .await;
             let _ = this.update(cx, |this, cx| {
-                if this.unfocused_flush_deadline == Some(due) {
+                if this.unfocused_window_pacer.is_flush_current(deadline) {
                     this.flush_unfocused_repaints(cx);
                 }
             });
@@ -1128,14 +1075,12 @@ impl Okena {
         .detach();
     }
 
-    /// Present every deferred unfocused-window repaint now. Panes whose window
-    /// is still not due are deferred again.
+    /// Present every deferred unfocused-window pane now; one whose window is
+    /// still not due is deferred again.
     fn flush_unfocused_repaints(&mut self, cx: &mut Context<Self>) {
-        self.unfocused_flush_deadline = None;
-        self.unfocused_deferred_windows.clear();
-        let terminal_ids: Vec<_> = self.unfocused_deferred_terminals.drain().collect();
+        let (frame, terminal_ids) = self.unfocused_window_pacer.start_flush(Instant::now());
         if !terminal_ids.is_empty() {
-            self.present_terminal_activity_repaints(&terminal_ids, cx);
+            self.present_paced_repaints(&terminal_ids, frame, cx);
         }
     }
 
@@ -1557,42 +1502,11 @@ fn scrollback_depth_for(project_is_visible: bool, configured: u32) -> u32 {
 mod tests {
     use super::{
         RECOVERY_ESCALATE_AFTER_ATTEMPTS, RECOVERY_TOAST_AFTER_ATTEMPTS, WindowLayoutSaveTracker,
-        flush_window_layout_saves_before_final, is_okena_process, paced_window,
-        recovery_backoff_delay, scrollback_depth_for, should_escalate_recovery,
+        flush_window_layout_saves_before_final, is_okena_process, recovery_backoff_delay,
+        scrollback_depth_for, should_escalate_recovery,
     };
-    use crate::workspace::state::WindowId;
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
-
-    #[test]
-    fn only_unfocused_windows_are_paced_and_only_with_the_cap_on() {
-        let extra = WindowId::Extra(uuid::Uuid::new_v4());
-
-        assert_eq!(
-            paced_window(Some(extra), true, Some(WindowId::Main)),
-            Some(extra)
-        );
-        assert_eq!(
-            paced_window(Some(extra), true, None),
-            Some(extra),
-            "no Okena window has focus"
-        );
-        assert_eq!(
-            paced_window(Some(extra), true, Some(extra)),
-            None,
-            "the focused window keeps its rate"
-        );
-        assert_eq!(
-            paced_window(Some(extra), false, None),
-            None,
-            "the cap is off"
-        );
-        assert_eq!(
-            paced_window(None, true, None),
-            None,
-            "a pane outside a window layout"
-        );
-    }
 
     #[test]
     fn final_window_layout_save_waits_for_older_snapshot() {
