@@ -185,11 +185,45 @@ fn current_branch(repo: &gix::Repository) -> Option<String> {
 /// Read the symbolic HEAD target and resolved commit without walking the worktree.
 pub fn get_head_snapshot(path: &Path) -> Option<HeadSnapshot> {
     let repo = crate::gix_helpers::open(path)?;
+    head_snapshot(&repo)
+}
+
+fn head_snapshot(repo: &gix::Repository) -> Option<HeadSnapshot> {
     let head = repo.head().ok()?;
     Some(HeadSnapshot {
         reference: head.referent_name().map(ToString::to_string),
         commit_id: head.id().map(|id| id.detach()),
     })
+}
+
+/// Stat identity of a worktree's index file. Git replaces the file whenever it
+/// stages, commits, checks out or refreshes stat data, so a changed stamp means
+/// the next status walk may answer differently.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IndexStamp {
+    modified: Option<SystemTime>,
+    len: u64,
+}
+
+/// [`HeadSnapshot`] plus the index stamp, from one repository open.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RepoPollSnapshot {
+    pub head: HeadSnapshot,
+    /// `None` when the index does not exist (a fresh repository) or cannot be read.
+    pub index: Option<IndexStamp>,
+}
+
+/// Read HEAD and stat the index without walking the worktree.
+pub fn get_repo_poll_snapshot(path: &Path) -> Option<RepoPollSnapshot> {
+    let repo = crate::gix_helpers::open(path)?;
+    let head = head_snapshot(&repo)?;
+    let index = std::fs::metadata(repo.index_path())
+        .ok()
+        .map(|metadata| IndexStamp {
+            modified: metadata.modified().ok(),
+            len: metadata.len(),
+        });
+    Some(RepoPollSnapshot { head, index })
 }
 
 /// Get the full 40-character SHA of HEAD, or `None` if not a git repo or HEAD
@@ -955,6 +989,36 @@ mod tests {
         );
         assert_ne!(get_head_snapshot(&linked).as_ref(), Some(&feature));
         assert_eq!(get_head_snapshot(&repo).as_ref(), Some(&main));
+    }
+
+    #[test]
+    fn index_stamp_moves_on_staging_not_on_worktree_edits() {
+        let (_tmp, repo) = init_temp_repo();
+        let linked_parent = tempfile::tempdir().expect("create linked worktree parent");
+        let linked = linked_parent.path().join("feature");
+        git_in(
+            &repo,
+            &["worktree", "add", "-b", "feature", linked.to_str().unwrap()],
+        );
+        let index = |path: &Path| {
+            get_repo_poll_snapshot(path)
+                .expect("read poll snapshot")
+                .index
+                .expect("index exists")
+        };
+        let main_initial = index(&repo);
+        let linked_initial = index(&linked);
+
+        std::fs::write(repo.join("file.txt"), "modified").unwrap();
+        assert_eq!(index(&repo), main_initial);
+
+        git_in(&repo, &["add", "file.txt"]);
+        assert_ne!(index(&repo), main_initial);
+        assert_eq!(
+            index(&linked),
+            linked_initial,
+            "a linked worktree has its own index"
+        );
     }
 
     #[test]

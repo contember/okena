@@ -50,9 +50,10 @@ pub use paths::{
 };
 pub use pull_requests::list_pull_requests;
 pub use status::{
-    DirtyCheck, HeadSnapshot, StatusFetch, apply_pr_base, count_ahead_behind,
-    count_ahead_behind_vs, count_unpushed_commits, get_current_branch, get_head_sha,
-    get_head_snapshot, get_status, has_uncommitted_changes, uncommitted_changes,
+    DirtyCheck, HeadSnapshot, IndexStamp, RepoPollSnapshot, StatusFetch, apply_pr_base,
+    count_ahead_behind, count_ahead_behind_vs, count_unpushed_commits, get_current_branch,
+    get_head_sha, get_head_snapshot, get_repo_poll_snapshot, get_status, has_uncommitted_changes,
+    uncommitted_changes,
 };
 pub(crate) use status::{untracked_line_count, worktree_diff};
 pub use worktree::{
