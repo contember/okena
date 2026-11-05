@@ -19,9 +19,8 @@ use std::sync::Arc;
 const AFFINITY_TTL_MS: i64 = 6 * 60 * 60 * 1000;
 const LOGIN_TTL_MS: i64 = 30 * 60 * 1000;
 const DEFAULT_COOLDOWN_MS: i64 = 60 * 1000;
-const DAY_MS: i64 = 24 * 60 * 60 * 1000;
-/// Weekly quota one account can realistically burn per day (an even pace is ~14.3).
-const MAX_WEEKLY_PERCENT_PER_DAY: f64 = 20.0;
+/// 5-hour utilization below which an account still has room in that window.
+const SESSION_ROOM_PERCENT: f64 = 90.0;
 
 #[derive(Clone, Serialize, Deserialize)]
 struct StoredAccount {
@@ -67,19 +66,25 @@ impl Runtime {
             .max()
     }
 
-    /// Weekly quota (percentage points) that expires unused even when the account
-    /// is drawn at the maximum pace until its reset. Zero while the window is unknown.
-    fn weekly_quota_at_risk(&self, now: i64) -> f64 {
-        let Some(usage) = &self.seven_day else {
-            return 0.0;
-        };
-        let Some(reset) = usage.resets_at_ms.filter(|reset| *reset > now) else {
-            return 0.0;
-        };
-        let days_left = (reset - now) as f64 / DAY_MS as f64;
-        let remaining = 100.0 - usage.utilization;
-        (remaining - MAX_WEEKLY_PERCENT_PER_DAY * days_left).max(0.0)
+    /// Room in the 5-hour window; an unknown window or one that has reset has room.
+    fn has_session_room(&self, now: i64) -> bool {
+        current(self.five_hour.as_ref(), now)
+            .is_none_or(|usage| usage.utilization < SESSION_ROOM_PERCENT)
     }
+
+    /// The upcoming weekly reset, if known.
+    fn weekly_reset(&self, now: i64) -> Option<i64> {
+        current(self.seven_day.as_ref(), now).and_then(|usage| usage.resets_at_ms)
+    }
+
+    fn weekly_utilization(&self, now: i64) -> f64 {
+        current(self.seven_day.as_ref(), now).map_or(0.0, |usage| usage.utilization)
+    }
+}
+
+/// A window whose reset has passed says nothing about the current one.
+fn current(usage: Option<&AiUsage>, now: i64) -> Option<&AiUsage> {
+    usage.filter(|usage| usage.resets_at_ms.is_none_or(|reset| reset > now))
 }
 
 struct Account {
@@ -430,7 +435,8 @@ impl Accounts {
 
     /// Pick an account the project's policy permits: the conversation's previous
     /// account while it is usable, otherwise a preferred one before an allowed
-    /// one, the one losing the most weekly quota first, then the least-used.
+    /// one, then one with room in its 5-hour window, then the earliest weekly
+    /// reset (its unused quota expires first), then the least-used.
     pub async fn select(
         self: &Arc<Self>,
         project: Option<&str>,
@@ -447,7 +453,6 @@ impl Accounts {
                     |account: &&Account| policy.rule(&account.stored.id) != AiAccountRule::Forbid;
                 let preferred =
                     |account: &Account| policy.rule(&account.stored.id) == AiAccountRule::Prefer;
-                let at_risk = |account: &Account| account.runtime.weekly_quota_at_risk(now);
                 let usable = |account: &&Account| {
                     account.available(now)
                         && !excluded.contains(&account.stored.id)
@@ -464,29 +469,18 @@ impl Accounts {
                     });
                 let chosen = sticky.or_else(|| {
                     state.accounts.iter().filter(usable).min_by(|a, b| {
-                        let load = |account: &Account| {
-                            (
-                                account
-                                    .runtime
-                                    .five_hour
-                                    .as_ref()
-                                    .map_or(0.0, |u| u.utilization),
-                                account
-                                    .runtime
-                                    .seven_day
-                                    .as_ref()
-                                    .map_or(0.0, |u| u.utilization),
-                            )
-                        };
-                        preferred(b)
-                            .cmp(&preferred(a))
-                            .then_with(|| at_risk(b).total_cmp(&at_risk(a)))
+                        let preference = preferred(b).cmp(&preferred(a));
+                        let (a, b) = (&a.runtime, &b.runtime);
+                        let reset =
+                            |runtime: &Runtime| runtime.weekly_reset(now).unwrap_or(i64::MAX);
+                        preference
+                            .then_with(|| b.has_session_room(now).cmp(&a.has_session_room(now)))
+                            .then_with(|| reset(a).cmp(&reset(b)))
                             .then_with(|| {
-                                load(a)
-                                    .partial_cmp(&load(b))
-                                    .unwrap_or(std::cmp::Ordering::Equal)
+                                a.weekly_utilization(now)
+                                    .total_cmp(&b.weekly_utilization(now))
                             })
-                            .then(a.runtime.requests.cmp(&b.runtime.requests))
+                            .then(a.requests.cmp(&b.requests))
                     })
                 });
                 match chosen {
@@ -751,8 +745,9 @@ impl Accounts {
                     let sample = {
                         let mut state = self.state.lock();
                         if let Ok(account) = state.account(&id) {
-                            account.runtime.five_hour =
-                                usage.five_hour.or(account.runtime.five_hour.take());
+                            // The 5-hour window is being phased out: an omitted one is gone,
+                            // not unchanged.
+                            account.runtime.five_hour = usage.five_hour;
                             account.runtime.seven_day =
                                 usage.seven_day.or(account.runtime.seven_day.take());
                             Some(usage_sample(account))
@@ -1020,56 +1015,180 @@ mod tests {
         assert_eq!(retry_at_ms, Some(reset.parse::<i64>().unwrap() * 1000));
     }
 
-    #[test]
-    fn weekly_quota_at_risk_is_what_the_maximum_pace_cannot_use() {
-        let now = 1_000_000;
-        let weekly = |utilization: f64, resets_at_ms: Option<i64>| Runtime {
-            seven_day: Some(AiUsage {
-                utilization,
-                resets_at_ms,
-            }),
-            ..Runtime::default()
+    const HOUR_MS: i64 = 60 * 60 * 1000;
+    const DAY_MS: i64 = 24 * HOUR_MS;
+
+    /// One quota window as response headers: utilization (0–1) and, when given,
+    /// the reset `offset_ms` from now.
+    struct Window(&'static str, Option<i64>);
+
+    fn observe_windows(
+        accounts: &Accounts,
+        id: &str,
+        session: Option<&str>,
+        five_hour: Option<Window>,
+        seven_day: Window,
+    ) {
+        let now = now_ms();
+        let mut pairs: Vec<(&'static str, String)> = Vec::new();
+        let windows = [
+            (
+                "anthropic-ratelimit-unified-5h-utilization",
+                "anthropic-ratelimit-unified-5h-reset",
+                five_hour,
+            ),
+            (
+                "anthropic-ratelimit-unified-7d-utilization",
+                "anthropic-ratelimit-unified-7d-reset",
+                Some(seven_day),
+            ),
+        ];
+        for (utilization, reset, window) in windows {
+            let Some(Window(value, offset_ms)) = window else {
+                continue;
+            };
+            pairs.push((utilization, value.to_owned()));
+            if let Some(offset_ms) = offset_ms {
+                pairs.push((reset, ((now + offset_ms) / 1000).to_string()));
+            }
+        }
+        let pairs: Vec<(&'static str, &str)> = pairs
+            .iter()
+            .map(|(name, value)| (*name, value.as_str()))
+            .collect();
+        accounts.observe(id, session, 200, &headers(&pairs));
+    }
+
+    async fn selected(accounts: &Arc<Accounts>, session: Option<&str>) -> String {
+        let Selection::Selected(selected) = accounts.select(None, session, &[]).await else {
+            panic!("an account should be selected");
         };
-        let at_risk = weekly(40.0, Some(now + 2 * DAY_MS)).weekly_quota_at_risk(now);
-        assert!((at_risk - 20.0).abs() < 1e-9);
-        assert_eq!(
-            weekly(10.0, Some(now + 6 * DAY_MS)).weekly_quota_at_risk(now),
-            0.0
-        );
-        assert_eq!(weekly(40.0, None).weekly_quota_at_risk(now), 0.0);
-        assert_eq!(weekly(40.0, Some(now - 1)).weekly_quota_at_risk(now), 0.0);
-        assert_eq!(Runtime::default().weekly_quota_at_risk(now), 0.0);
+        selected.id
     }
 
     #[tokio::test]
-    async fn weekly_quota_at_risk_goes_before_lower_session_load() {
+    async fn earlier_weekly_reset_beats_lower_utilization() {
         let dir = tempfile::tempdir().unwrap();
-        let accounts = open_pool(dir.path(), &["a", "b"]);
-        let reset_in_days = |days: i64| ((now_ms() + days * DAY_MS) / 1000).to_string();
-        let observe = |id: &str, five_hour: &str, seven_day: &str, reset: &str| {
-            accounts.observe(
-                id,
-                None,
-                200,
-                &headers(&[
-                    ("anthropic-ratelimit-unified-5h-utilization", five_hour),
-                    ("anthropic-ratelimit-unified-7d-utilization", seven_day),
-                    ("anthropic-ratelimit-unified-7d-reset", reset),
-                ]),
-            )
-        };
-        observe("a", "0.5", "0.4", &reset_in_days(2));
-        observe("b", "0", "0.1", &reset_in_days(6));
-        let Selection::Selected(selected) = accounts.select(None, None, &[]).await else {
-            panic!("an account should be selected");
-        };
-        assert_eq!(selected.id, "a");
+        let accounts = open_pool(dir.path(), &["late", "soon"]);
+        observe_windows(
+            &accounts,
+            "late",
+            None,
+            None,
+            Window("0.1", Some(6 * DAY_MS)),
+        );
+        observe_windows(
+            &accounts,
+            "soon",
+            None,
+            None,
+            Window("0.8", Some(2 * DAY_MS)),
+        );
+        assert_eq!(selected(&accounts, None).await, "soon");
+    }
 
-        observe("a", "0.5", "0.9", &reset_in_days(2));
-        let Selection::Selected(selected) = accounts.select(None, None, &[]).await else {
-            panic!("an account should be selected");
-        };
-        assert_eq!(selected.id, "b");
+    #[tokio::test]
+    async fn account_without_room_in_the_session_window_ranks_lower() {
+        let dir = tempfile::tempdir().unwrap();
+        let accounts = open_pool(dir.path(), &["full", "late"]);
+        observe_windows(
+            &accounts,
+            "full",
+            None,
+            Some(Window("0.95", Some(HOUR_MS))),
+            Window("0.2", Some(DAY_MS)),
+        );
+        observe_windows(
+            &accounts,
+            "late",
+            None,
+            Some(Window("0.1", Some(HOUR_MS))),
+            Window("0.2", Some(5 * DAY_MS)),
+        );
+        assert_eq!(selected(&accounts, None).await, "late");
+
+        // Without room anywhere, the earliest weekly reset still goes first.
+        observe_windows(
+            &accounts,
+            "late",
+            None,
+            Some(Window("0.95", Some(HOUR_MS))),
+            Window("0.2", Some(5 * DAY_MS)),
+        );
+        assert_eq!(selected(&accounts, None).await, "full");
+    }
+
+    #[tokio::test]
+    async fn stale_session_window_is_ignored() {
+        let dir = tempfile::tempdir().unwrap();
+        let accounts = open_pool(dir.path(), &["late", "soon"]);
+        observe_windows(
+            &accounts,
+            "late",
+            None,
+            Some(Window("0", Some(HOUR_MS))),
+            Window("0.2", Some(5 * DAY_MS)),
+        );
+        observe_windows(
+            &accounts,
+            "soon",
+            None,
+            Some(Window("0.95", Some(-60_000))),
+            Window("0.2", Some(DAY_MS)),
+        );
+        assert_eq!(selected(&accounts, None).await, "soon");
+    }
+
+    #[tokio::test]
+    async fn exhausted_account_is_skipped_despite_the_earliest_reset() {
+        let dir = tempfile::tempdir().unwrap();
+        let accounts = open_pool(dir.path(), &["exhausted", "late"]);
+        observe_windows(
+            &accounts,
+            "exhausted",
+            None,
+            None,
+            Window("1", Some(DAY_MS)),
+        );
+        observe_windows(
+            &accounts,
+            "late",
+            None,
+            None,
+            Window("0.5", Some(6 * DAY_MS)),
+        );
+        assert_eq!(selected(&accounts, None).await, "late");
+    }
+
+    #[tokio::test]
+    async fn account_without_a_known_reset_goes_last() {
+        let dir = tempfile::tempdir().unwrap();
+        let accounts = open_pool(dir.path(), &["unknown", "late"]);
+        observe_windows(&accounts, "unknown", None, None, Window("0.1", None));
+        observe_windows(
+            &accounts,
+            "late",
+            None,
+            None,
+            Window("0.5", Some(6 * DAY_MS)),
+        );
+        assert_eq!(selected(&accounts, None).await, "late");
+    }
+
+    #[tokio::test]
+    async fn conversation_affinity_wins_over_the_earliest_reset() {
+        let dir = tempfile::tempdir().unwrap();
+        let accounts = open_pool(dir.path(), &["late", "soon"]);
+        observe_windows(
+            &accounts,
+            "late",
+            Some("conversation"),
+            None,
+            Window("0.1", Some(6 * DAY_MS)),
+        );
+        observe_windows(&accounts, "soon", None, None, Window("0.5", Some(DAY_MS)));
+        assert_eq!(selected(&accounts, Some("conversation")).await, "late");
+        assert_eq!(selected(&accounts, None).await, "soon");
     }
 
     #[test]
