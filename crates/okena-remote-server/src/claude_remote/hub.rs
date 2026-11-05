@@ -268,14 +268,23 @@ impl TerminalState {
         std::mem::take(&mut self.dialogs)
     }
 
-    /// The dialog a `PostToolUse` for this exact call answers: the terminal
-    /// resolved it before any remote client did.
+    /// The dialog a `PostToolUse` for this call answers: the terminal resolved
+    /// it before any remote client did. A dialog with the exact input wins over
+    /// one that only [`same_call`] matches.
     fn take_matching_dialog(&mut self, input: &HookInput) -> Option<OpenDialog> {
-        let index = self.dialogs.iter().position(|dialog| {
+        let candidate = |dialog: &OpenDialog| {
             dialog.session_id == input.session_id
                 && Some(&dialog.tool_name) == input.tool_name.as_ref()
-                && dialog.tool_input == input.tool_input
-        })?;
+        };
+        let index = self
+            .dialogs
+            .iter()
+            .position(|dialog| candidate(dialog) && dialog.tool_input == input.tool_input)
+            .or_else(|| {
+                self.dialogs.iter().position(|dialog| {
+                    candidate(dialog) && same_call(&dialog.tool_input, &input.tool_input)
+                })
+            })?;
         Some(self.dialogs.remove(index))
     }
 
@@ -1197,6 +1206,25 @@ fn runs_claude(info: &ClaudeTerminalInfo) -> bool {
 
 /// `value` with every string longer than [`MAX_DIALOG_STRING_BYTES`] cut and
 /// marked.
+/// Whether the input a `PostToolUse` reports is the call a dialog asked about.
+/// Claude Code does not always report the input it asked permission for:
+/// an answered `AskUserQuestion` carries its `answers` (and `annotations`)
+/// beside the `questions`, and `ExitPlanMode` runs with an empty input. So the
+/// reported input matches when it equals the requested one, holds every
+/// requested field unchanged, or is empty.
+fn same_call(requested: &serde_json::Value, ran: &serde_json::Value) -> bool {
+    if requested == ran {
+        return true;
+    }
+    match (requested.as_object(), ran.as_object()) {
+        (_, Some(ran)) if ran.is_empty() => true,
+        (Some(requested), Some(ran)) => requested
+            .iter()
+            .all(|(key, value)| ran.get(key) == Some(value)),
+        _ => false,
+    }
+}
+
 fn truncate_long_strings(value: &serde_json::Value) -> serde_json::Value {
     match value {
         serde_json::Value::String(text) if text.len() > MAX_DIALOG_STRING_BYTES => {
@@ -1512,6 +1540,96 @@ mod tests {
         .expect("valid event");
         assert_eq!(answer_of(ls).await, json!({}));
         assert_eq!(hub.dialog_counts(), HashMap::from([("t1".to_string(), 1)]));
+    }
+
+    #[tokio::test]
+    async fn post_tool_use_cancels_a_dialog_whose_input_claude_completed() {
+        let (hub, _version, _pty) = hub_with_daemon(claude_in_pane());
+        let questions =
+            json!([{"question": "Which?", "options": [{"label": "A"}, {"label": "B"}]}]);
+        let (_, asked) = open_dialog(
+            &hub,
+            "t1",
+            permission("AskUserQuestion", json!({"questions": questions})),
+        )
+        .await;
+        let (_, other) = open_dialog(
+            &hub,
+            "t1",
+            permission(
+                "AskUserQuestion",
+                json!({"questions": [{"question": "Other?"}]}),
+            ),
+        )
+        .await;
+        let (_, plan) = open_dialog(
+            &hub,
+            "t1",
+            permission("ExitPlanMode", json!({"plan": "1. Do it"})),
+        )
+        .await;
+        assert_eq!(hub.dialog_counts(), HashMap::from([("t1".to_string(), 3)]));
+
+        // Answered in the terminal: Claude adds the answers to the input.
+        hub.hook_event(hook(
+            "t1",
+            tool_event(
+                "PostToolUse",
+                "AskUserQuestion",
+                json!({"questions": questions, "answers": {"Which?": "A"}, "annotations": {}}),
+            ),
+        ))
+        .expect("valid event");
+        assert_eq!(answer_of(asked).await, json!({}));
+        assert_eq!(hub.dialog_counts(), HashMap::from([("t1".to_string(), 2)]));
+
+        // A changed field is another call.
+        hub.hook_event(hook(
+            "t1",
+            tool_event(
+                "PostToolUse",
+                "ExitPlanMode",
+                json!({"plan": "2. Something else"}),
+            ),
+        ))
+        .expect("valid event");
+        assert_eq!(hub.dialog_counts(), HashMap::from([("t1".to_string(), 2)]));
+
+        // The plan approved in the terminal runs with an empty input.
+        hub.hook_event(hook(
+            "t1",
+            tool_event("PostToolUse", "ExitPlanMode", json!({})),
+        ))
+        .expect("valid event");
+        assert_eq!(answer_of(plan).await, json!({}));
+        assert_eq!(hub.dialog_counts(), HashMap::from([("t1".to_string(), 1)]));
+        other.abort();
+    }
+
+    #[tokio::test]
+    async fn post_tool_use_prefers_the_dialog_with_the_exact_input() {
+        let (hub, _version, _pty) = hub_with_daemon(claude_in_pane());
+        let (_, plain) =
+            open_dialog(&hub, "t1", permission("Bash", json!({"command": "ls"}))).await;
+        let (_, background) = open_dialog(
+            &hub,
+            "t1",
+            permission("Bash", json!({"command": "ls", "run_in_background": true})),
+        )
+        .await;
+
+        hub.hook_event(hook(
+            "t1",
+            tool_event(
+                "PostToolUse",
+                "Bash",
+                json!({"command": "ls", "run_in_background": true}),
+            ),
+        ))
+        .expect("valid event");
+        assert_eq!(answer_of(background).await, json!({}));
+        assert_eq!(hub.dialog_counts(), HashMap::from([("t1".to_string(), 1)]));
+        plain.abort();
     }
 
     #[tokio::test]
