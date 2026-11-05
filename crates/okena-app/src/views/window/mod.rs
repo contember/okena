@@ -538,7 +538,10 @@ impl WindowView {
             this.refresh_for_project_path_changes(cx);
             this.prune_project_inspector_cache(cx);
 
-            let overview_lanes = this.workspace.read(cx).status_lanes_overview(this.window_id);
+            let overview_lanes = this
+                .workspace
+                .read(cx)
+                .status_lanes_overview(this.window_id);
             if overview_lanes != this.last_overview_lanes {
                 this.last_overview_lanes = overview_lanes;
                 let fm = this.focus_manager.read(cx);
@@ -554,7 +557,10 @@ impl WindowView {
         })
         .detach();
 
-        view.last_overview_lanes = view.workspace.read(cx).status_lanes_overview(view.window_id);
+        view.last_overview_lanes = view
+            .workspace
+            .read(cx)
+            .status_lanes_overview(view.window_id);
 
         // Initialize project columns
         view.sync_project_columns(cx);

@@ -589,12 +589,11 @@ impl WindowView {
                     None => elements.extend(inner),
                     Some(column) => {
                         let lane_t = theme(cx);
-                        let accent = match okena_ui::board::status_board(cx)
-                            .group_color(column.as_ref())
-                        {
-                            okena_core::theme::FolderColor::Default => None,
-                            color => Some(lane_t.get_folder_color(color)),
-                        };
+                        let accent =
+                            match okena_ui::board::status_board(cx).group_color(column.as_ref()) {
+                                okena_core::theme::FolderColor::Default => None,
+                                color => Some(lane_t.get_folder_color(color)),
+                            };
                         let edge = accent.unwrap_or(lane_t.text_muted);
                         let label =
                             okena_workspace::status_board::caption_label(&column).to_uppercase();
@@ -608,7 +607,11 @@ impl WindowView {
                                 // Full-width cell, centred text: every glyph
                                 // shares one axis instead of each box
                                 // centring on its own width.
-                                div().w_full().text_center().child(g.to_string()).into_any_element()
+                                div()
+                                    .w_full()
+                                    .text_center()
+                                    .child(g.to_string())
+                                    .into_any_element()
                             }
                         });
                         // The label sits out of flow: in a rows grid the
@@ -655,14 +658,18 @@ impl WindowView {
                                             .items_center()
                                             .line_height(relative(1.05))
                                             .font_weight(FontWeight::SEMIBOLD)
-                                            .text_color(rgb(
-                                                accent.unwrap_or(lane_t.text_secondary),
-                                            ))
+                                            .text_color(
+                                                rgb(accent.unwrap_or(lane_t.text_secondary)),
+                                            )
                                             .children(letters),
                                     ),
                             )
                             .child(
-                                div().w(px(1.0)).h_full().flex_shrink_0().bg(rgb(lane_t.border)),
+                                div()
+                                    .w(px(1.0))
+                                    .h_full()
+                                    .flex_shrink_0()
+                                    .bg(rgb(lane_t.border)),
                             );
                         if is_rows && span_index > 0 {
                             elements.push(

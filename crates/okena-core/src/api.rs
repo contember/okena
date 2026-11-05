@@ -2543,7 +2543,10 @@ mod tests {
             serde_json::from_str(r#"{"action":"set_overview_status_lanes","on":true}"#).unwrap();
         assert!(matches!(
             action,
-            ActionRequest::SetOverviewStatusLanes { on: true, window: None }
+            ActionRequest::SetOverviewStatusLanes {
+                on: true,
+                window: None
+            }
         ));
         assert!(
             serde_json::from_str::<ActionRequest>(r#"{"action":"set_overview_status_lanes"}"#)
