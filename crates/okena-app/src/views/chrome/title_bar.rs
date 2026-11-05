@@ -10,6 +10,13 @@ use std::rc::Rc;
 
 type AppMenuHandler = Rc<dyn Fn(AppMenuAction, &mut Window, &mut App)>;
 
+/// Height of the title bar; on macOS it only leaves room for the traffic lights.
+pub const TITLE_BAR_HEIGHT: Pixels = if cfg!(target_os = "macos") {
+    px(28.0)
+} else {
+    px(32.0)
+};
+
 /// Window control button types
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WindowControlType {
@@ -34,7 +41,15 @@ impl TitleBar {
     pub fn new(
         title: impl Into<SharedString>,
         app_menu_handler: impl Fn(AppMenuAction, &mut Window, &mut App) + 'static,
+        window: &mut Window,
+        cx: &mut Context<Self>,
     ) -> Self {
+        super::repaint::repaint_on_theme_change(cx);
+        super::repaint::repaint_on_ui_font_size_change(cx);
+        // Window decorations change through the appearance callback, which
+        // does not refresh the window.
+        cx.observe_window_appearance(window, |_, _, cx| cx.notify())
+            .detach();
         Self {
             title: title.into(),
             app_menu_handler: Rc::new(app_menu_handler),
@@ -216,6 +231,7 @@ impl TitleBar {
 
 impl Render for TitleBar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        okena_core::render_probe::chrome_render(okena_core::render_probe::ChromeView::TitleBar);
         let t = theme(cx);
         let is_maximized = window.is_maximized();
         // On Windows, always show custom window controls since we use a custom titlebar
@@ -237,16 +253,9 @@ impl Render for TitleBar {
             px(8.0)
         };
 
-        // On macOS, the title bar only provides space for traffic lights (no content)
-        let title_bar_height = if cfg!(target_os = "macos") {
-            px(28.0)
-        } else {
-            px(32.0)
-        };
-
         div()
             .id("title-bar")
-            .h(title_bar_height)
+            .h(TITLE_BAR_HEIGHT)
             .w_full()
             .flex_shrink_0()
             .flex()
@@ -432,5 +441,37 @@ impl Render for TitleBar {
                     )
                 }),
             )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TitleBar;
+    use crate::theme::ThemeMode;
+    use crate::views::chrome::repaint::test_support::{
+        NotifyCount, init_appearance_globals, notify_theme_unchanged, set_theme_mode,
+        update_settings,
+    };
+    use gpui::TestAppContext;
+
+    #[gpui::test]
+    fn repaints_on_what_it_renders_from_and_nothing_else(cx: &mut TestAppContext) {
+        init_appearance_globals(cx);
+        let (title_bar, _window) =
+            cx.add_window_view(|window, cx| TitleBar::new("Okena", |_, _, _| {}, window, cx));
+        let notifies = NotifyCount::new(cx, &title_bar);
+
+        notify_theme_unchanged(cx);
+        update_settings(cx, |s, cx| s.set_sidebar_show_agents(false, cx));
+        assert_eq!(notifies.get(), 0, "unrelated changes leave it cached");
+
+        set_theme_mode(cx, ThemeMode::Light);
+        assert_eq!(notifies.get(), 1, "theme colors");
+
+        update_settings(cx, |s, cx| s.set_ui_font_size(16.0, cx));
+        assert_eq!(notifies.get(), 2, "ui font size");
+
+        title_bar.update(cx, |tb, cx| tb.set_sidebar_open(false, cx));
+        assert_eq!(notifies.get(), 3, "sidebar toggle state");
     }
 }

@@ -14,10 +14,12 @@ use crate::keybindings::{
 use crate::settings::{open_settings_file, settings_entity};
 use crate::theme::theme;
 use crate::ui::tokens::{ui_text_md, ui_text_xl, ui_text_xs};
+use crate::views::chrome::title_bar::TITLE_BAR_HEIGHT;
 use crate::views::layout::navigation::{get_pane_map, prune_pane_map};
 use crate::views::layout::split_pane::{
     DragState, compute_resize, project_pixel_widths, render_project_divider, render_sidebar_divider,
 };
+use crate::views::panels::status_bar::STATUS_BAR_HEIGHT;
 use crate::workspace::requests::{OverlayRequest, ProjectOverlay, ProjectOverlayKind};
 use crate::workspace::state::ProjectLayoutMode;
 use gpui::prelude::*;
@@ -925,6 +927,7 @@ impl WindowView {
 
 impl Render for WindowView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        okena_core::render_probe::chrome_render(okena_core::render_probe::ChromeView::Window);
         let t = theme(cx);
         let pane_move_source = self.pane_move.read(cx).source().cloned();
 
@@ -1718,7 +1721,14 @@ impl Render for WindowView {
             // On macOS non-fullscreen: show minimal title bar for traffic lights
             // On other platforms: show full title bar
             .when(!cfg!(target_os = "macos") || !window.is_fullscreen(), |d| {
-                d.child(self.title_bar.clone())
+                d.child(
+                    AnyView::from(self.title_bar.clone()).cached(
+                        StyleRefinement::default()
+                            .h(TITLE_BAR_HEIGHT)
+                            .w_full()
+                            .flex_shrink_0(),
+                    ),
+                )
             })
             // Main content area
             .child(
@@ -1804,7 +1814,10 @@ impl Render for WindowView {
                     ),
             )
             // Status bar at the bottom
-            .child(self.status_bar.clone())
+            .child(
+                AnyView::from(self.status_bar.clone())
+                    .cached(StyleRefinement::default().h(STATUS_BAR_HEIGHT).w_full()),
+            )
             // App menu dropdown (renders on top of everything, not on macOS where native menu is used)
             .when(
                 !cfg!(target_os = "macos") && self.title_bar.read(cx).is_menu_open(),
@@ -1888,7 +1901,10 @@ impl Render for WindowView {
                 )
             })
             // Toast notifications (bottom-right, on top of everything)
-            .child(self.toast_overlay.clone())
+            .child(
+                AnyView::from(self.toast_overlay.clone())
+                    .cached(StyleRefinement::default().absolute().inset_0()),
+            )
             // Pane switcher overlay (numbered pane badges)
             .when_some(self.pane_switcher_entity.clone(), |d, entity| {
                 d.child(entity)

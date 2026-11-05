@@ -473,9 +473,14 @@ impl Render for CodexUsage {
                     })
                     .child(
                         canvas(
-                            move |bounds, _window, app| {
+                            move |bounds, window, app| {
                                 entity_handle.update(app, |this, _cx| {
-                                    this.trigger_bounds = bounds;
+                                    okena_ui::popover::record_trigger_bounds(
+                                        &mut this.trigger_bounds,
+                                        bounds,
+                                        this.popover_visible,
+                                        window,
+                                    );
                                 });
                             },
                             |_, _, _, _| {},

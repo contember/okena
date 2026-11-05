@@ -141,3 +141,30 @@ core-text = ">=21.0, <21.1"
 
 [target.'cfg(target_os = "windows")'.build-dependencies]
 winresource = "0.1"
+
+# GPUI from a fork: a cached view that is dirty only as an ancestor of a
+# notified view no longer re-renders its other cached descendants. Every crate
+# from the zed repository is patched so they stay one build of one revision.
+[patch."https://github.com/zed-industries/zed"]
+collections = { git = "https://github.com/contember/zed", rev = "1a246d324d91312ff487a85daee1c25f6b35ac10", version = "=0.1.0" }
+derive_refineable = { git = "https://github.com/contember/zed", rev = "1a246d324d91312ff487a85daee1c25f6b35ac10", version = "=0.1.0" }
+gpui = { git = "https://github.com/contember/zed", rev = "1a246d324d91312ff487a85daee1c25f6b35ac10", version = "=0.2.2" }
+gpui_linux = { git = "https://github.com/contember/zed", rev = "1a246d324d91312ff487a85daee1c25f6b35ac10", version = "=0.1.0" }
+gpui_macos = { git = "https://github.com/contember/zed", rev = "1a246d324d91312ff487a85daee1c25f6b35ac10", version = "=0.1.0" }
+gpui_macros = { git = "https://github.com/contember/zed", rev = "1a246d324d91312ff487a85daee1c25f6b35ac10", version = "=0.1.0" }
+gpui_platform = { git = "https://github.com/contember/zed", rev = "1a246d324d91312ff487a85daee1c25f6b35ac10", version = "=0.1.0" }
+gpui_shared_string = { git = "https://github.com/contember/zed", rev = "1a246d324d91312ff487a85daee1c25f6b35ac10", version = "=0.1.0" }
+gpui_util = { git = "https://github.com/contember/zed", rev = "1a246d324d91312ff487a85daee1c25f6b35ac10", version = "=0.1.0" }
+gpui_web = { git = "https://github.com/contember/zed", rev = "1a246d324d91312ff487a85daee1c25f6b35ac10", version = "=0.1.0" }
+gpui_wgpu = { git = "https://github.com/contember/zed", rev = "1a246d324d91312ff487a85daee1c25f6b35ac10", version = "=0.1.0" }
+gpui_windows = { git = "https://github.com/contember/zed", rev = "1a246d324d91312ff487a85daee1c25f6b35ac10", version = "=0.1.0" }
+http_client = { git = "https://github.com/contember/zed", rev = "1a246d324d91312ff487a85daee1c25f6b35ac10", version = "=0.1.0" }
+media = { git = "https://github.com/contember/zed", rev = "1a246d324d91312ff487a85daee1c25f6b35ac10", version = "=0.1.0" }
+perf = { git = "https://github.com/contember/zed", rev = "1a246d324d91312ff487a85daee1c25f6b35ac10", version = "=0.1.0" }
+refineable = { git = "https://github.com/contember/zed", rev = "1a246d324d91312ff487a85daee1c25f6b35ac10", version = "=0.1.0" }
+scheduler = { git = "https://github.com/contember/zed", rev = "1a246d324d91312ff487a85daee1c25f6b35ac10", version = "=0.1.0" }
+sum_tree = { git = "https://github.com/contember/zed", rev = "1a246d324d91312ff487a85daee1c25f6b35ac10", version = "=0.1.0" }
+util_macros = { git = "https://github.com/contember/zed", rev = "1a246d324d91312ff487a85daee1c25f6b35ac10", version = "=0.1.0" }
+zlog = { git = "https://github.com/contember/zed", rev = "1a246d324d91312ff487a85daee1c25f6b35ac10", version = "=0.1.0" }
+ztracing = { git = "https://github.com/contember/zed", rev = "1a246d324d91312ff487a85daee1c25f6b35ac10", version = "=0.1.0" }
+ztracing_macro = { git = "https://github.com/contember/zed", rev = "1a246d324d91312ff487a85daee1c25f6b35ac10", version = "=0.1.0" }

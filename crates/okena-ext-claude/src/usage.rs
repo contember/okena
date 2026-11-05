@@ -551,9 +551,14 @@ impl ClaudeUsage {
             .children(content)
             .child(
                 canvas(
-                    move |bounds, _window, app| {
+                    move |bounds, window, app| {
                         entity.update(app, |this, _cx| {
-                            this.trigger_bounds.insert(bounds_trigger.clone(), bounds);
+                            let open = this.popover_visible && this.active == bounds_trigger;
+                            let slot = this
+                                .trigger_bounds
+                                .entry(bounds_trigger.clone())
+                                .or_default();
+                            okena_ui::popover::record_trigger_bounds(slot, bounds, open, window);
                         });
                     },
                     |_, _, _, _| {},
