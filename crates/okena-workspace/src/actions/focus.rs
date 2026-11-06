@@ -15,12 +15,15 @@ use crate::state::{WindowId, Workspace};
 impl Workspace {
     /// Set focused project (focus mode)
     ///
-    /// This zooms the main view to show only this project.
-    /// Also focuses the first terminal in the project if one exists.
+    /// This zooms `window_id`'s main view to show only this project and its
+    /// worktrees, then focuses the first terminal of the first column the zoom
+    /// shows — the project itself, or its first visible worktree when the
+    /// project is hidden in that window.
     /// If the project has no layout, drills into the first worktree child.
     pub fn set_focused_project(
         &mut self,
         focus_manager: &mut FocusManager,
+        window_id: WindowId,
         project_id: Option<String>,
         cx: &mut impl WorkspaceCx,
     ) {
@@ -30,9 +33,13 @@ impl Workspace {
         // Set the focused project via FocusManager (controls main view zoom)
         focus_manager.set_focused_project_id(project_id.clone());
 
-        // Focus the first terminal in the project
         if let Some(ref pid) = project_id {
-            self.focus_first_terminal_in(focus_manager, pid);
+            let first_shown = self
+                .visible_projects(window_id, Some(pid), false)
+                .first()
+                .map(|p| p.id.clone())
+                .unwrap_or_else(|| pid.clone());
+            self.focus_first_terminal_in(focus_manager, &first_shown);
         }
 
         cx.notify();
@@ -420,7 +427,7 @@ mod gpui_tests {
         fm.focus_terminal("p1".to_string(), Vec::new());
 
         workspace.update(cx, |ws: &mut Workspace, cx| {
-            ws.set_focused_project(&mut fm, Some("p2".to_string()), cx);
+            ws.set_focused_project(&mut fm, WindowId::Main, Some("p2".to_string()), cx);
         });
 
         let focused = fm.focused_terminal_state().expect("focus is anchored");
@@ -439,7 +446,7 @@ mod gpui_tests {
         fm.focus_terminal("p1".to_string(), Vec::new());
 
         workspace.update(cx, |ws: &mut Workspace, cx| {
-            ws.set_focused_project(&mut fm, Some("ghost".to_string()), cx);
+            ws.set_focused_project(&mut fm, WindowId::Main, Some("ghost".to_string()), cx);
         });
 
         assert_eq!(
@@ -798,6 +805,27 @@ mod jump_gpui_tests {
             fm.fullscreen_state(),
             Some(("p2", "t2")),
             "fullscreen follows the jump onto the target pane"
+        );
+    }
+    #[gpui::test]
+    fn focusing_a_hidden_parent_lands_on_its_first_visible_worktree(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        // The zoom leaves out the hidden parent, so focus must not stay on a
+        // pane the window no longer renders.
+        let mut data = workspace_with_worktree();
+        data.main_window.hidden_project_ids.insert("p1".to_string());
+        let workspace = cx.new(|_cx| Workspace::new(data));
+        let mut fm = FocusManager::new();
+
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.set_focused_project(&mut fm, WindowId::Main, Some("p1".to_string()), cx);
+        });
+
+        assert_eq!(fm.focused_project_id().map(String::as_str), Some("p1"));
+        assert_eq!(
+            fm.focused_terminal_state().map(|s| s.project_id).as_deref(),
+            Some("w1")
         );
     }
 }

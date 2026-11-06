@@ -98,6 +98,10 @@ pub struct WorktreeConfig {
     /// it; `*` stays within one path segment, `**` spans several.
     #[serde(default = "default_auto_track_ignore")]
     pub auto_track_ignore: Vec<String>,
+    /// Focusing a project also shows the worktrees hidden from the overview
+    /// (eye off). Default: false — the zoom lists only the visible ones.
+    #[serde(default)]
+    pub show_hidden_when_focused: bool,
 }
 
 impl Default for WorktreeConfig {
@@ -111,6 +115,7 @@ impl Default for WorktreeConfig {
             default_delete_branch: false,
             auto_track: false,
             auto_track_ignore: default_auto_track_ignore(),
+            show_hidden_when_focused: false,
         }
     }
 }
@@ -1654,6 +1659,15 @@ mod tests {
         let loaded: AppSettings =
             serde_json::from_str(r#"{"sidebar":{"show_agents":false}}"#).unwrap();
         assert!(!loaded.sidebar.show_agents);
+    }
+
+    #[test]
+    fn hidden_worktrees_in_focus_are_opt_in() {
+        assert!(!AppSettings::default().worktree.show_hidden_when_focused);
+
+        let loaded: AppSettings =
+            serde_json::from_str(r#"{"worktree":{"show_hidden_when_focused":true}}"#).unwrap();
+        assert!(loaded.worktree.show_hidden_when_focused);
     }
 
     #[test]

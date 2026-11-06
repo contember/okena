@@ -124,6 +124,7 @@ Worktree projects appear nested under their parent project in the sidebar:
 - **Worktree children** are rendered indented below the parent, visually grouped together
 - Worktrees **inherit the folder color** of their parent project
 - Focusing any worktree child also keeps its sibling worktrees and the parent visible in the sidebar
+- Clicking a parent project zooms to the project and the worktrees whose eye is on in this window; worktrees hidden with the eye stay out of the zoom. If every member is hidden, the project alone is shown. **Settings → Worktree → Project Focus → Show hidden worktrees** (`worktree.show_hidden_when_focused`) brings the hidden ones back into the zoom
 - Worktrees inside folders appear alongside their parent within that folder
 
 Each worktree project is fully independent: it has its own terminal sessions, layout, and hooks configuration. You can expand/collapse, rename, and interact with worktree projects the same way as regular projects.

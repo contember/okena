@@ -916,7 +916,7 @@ impl ProjectColumn {
                                     // Toggle: when already focused, clear
                                     // focus to return to the overview.
                                     let target = if is_focused_view { None } else { Some(pid) };
-                                    ws.set_focused_project(fm, target, cx);
+                                    ws.set_focused_project(fm, window_id_for_hide, target, cx);
                                 });
                                 cx.notify();
                             });

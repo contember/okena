@@ -383,7 +383,7 @@ impl Workspace {
         self.notify_data(cx);
         // A zoomed project renders even while hidden, so leave the zoom first.
         if focus_manager.focused_project_id().map(String::as_str) == Some(project_id) {
-            self.set_focused_project(focus_manager, None, cx);
+            self.set_focused_project(focus_manager, from, None, cx);
         }
         self.set_project_overview_visibility(focus_manager, from, project_id, false, cx);
     }
