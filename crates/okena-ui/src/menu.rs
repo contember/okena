@@ -145,7 +145,7 @@ pub fn context_menu_panel(id: impl Into<ElementId>, t: &ThemeColors) -> Stateful
         .on_mouse_down(MouseButton::Right, |_, _, cx| {
             cx.stop_propagation();
         })
-        .on_scroll_wheel(|_, _, cx| {
+        .on_scroll(|_, _, cx| {
             cx.stop_propagation();
         })
 }

@@ -2795,7 +2795,7 @@ mod markdown_selection_tests {
         let scroll_area_bounds = vcx
             .debug_bounds("test-markdown-table-container")
             .expect("table scroll area should be rendered");
-        vcx.simulate_event(gpui::ScrollWheelEvent {
+        vcx.simulate_event(gpui::ScrollEvent {
             position: scroll_area_bounds.center(),
             delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.0), px(-20.0))),
             ..Default::default()
@@ -2806,7 +2806,7 @@ mod markdown_selection_tests {
             "vertical wheel input must not move the horizontal scrollbar"
         );
 
-        vcx.simulate_event(gpui::ScrollWheelEvent {
+        vcx.simulate_event(gpui::ScrollEvent {
             position: scroll_area_bounds.center(),
             delta: gpui::ScrollDelta::Pixels(gpui::point(px(-20.0), px(0.0))),
             modifiers: gpui::Modifiers {

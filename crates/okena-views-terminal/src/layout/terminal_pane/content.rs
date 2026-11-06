@@ -54,7 +54,7 @@ pub struct TerminalContent {
     /// plain `TouchPhase::Moved` — so we reconstruct the gesture boundary here:
     /// set on `Ended`, cleared on the next `Started`. Used to reject Control-zoom
     /// during momentum so a fast scroll that coasts into an accidental Control
-    /// press can't resize the font (see the `on_scroll_wheel` handler).
+    /// press can't resize the font (see the `on_scroll` handler).
     in_scroll_inertia: bool,
     mouse_down_cell: Option<(usize, i32)>,
     forwarded_button: Option<(u8, u8)>,
@@ -860,7 +860,7 @@ impl Render for TerminalContent {
                     this.handle_mouse_up(event, cx);
                 }),
             )
-            .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _window, cx| {
+            .on_scroll(cx.listener(|this, event: &ScrollEvent, _window, cx| {
                 // Track the trackpad gesture boundary so we can tell an active,
                 // finger-on-the-pad scroll from its inertial momentum tail. GPUI
                 // collapses the macOS momentum phase into `TouchPhase::Moved`, so

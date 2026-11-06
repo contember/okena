@@ -143,7 +143,7 @@ impl DiffViewer {
     /// On Linux, Shift+scroll sends horizontal delta (delta.x) while delta.y
     /// is zero. We also handle the case where delta.y carries the scroll amount
     /// with shift held (some platforms/backends).
-    pub(super) fn handle_scroll_x(&mut self, event: &ScrollWheelEvent, cx: &mut Context<Self>) {
+    pub(super) fn handle_scroll_x(&mut self, event: &ScrollEvent, cx: &mut Context<Self>) {
         let delta = event.delta.pixel_delta(px(17.0));
         // Shift+scroll: use whichever axis has the delta
         let delta_x = if event.modifiers.shift && f32::from(delta.x).abs() < 0.5 {

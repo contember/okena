@@ -264,7 +264,7 @@ impl Render for ColorPickerPopover {
                     this.close(cx);
                 }),
             )
-            .on_scroll_wheel(|_, _, cx| {
+            .on_scroll(|_, _, cx| {
                 cx.stop_propagation();
             })
             .child(deferred(
