@@ -4,7 +4,7 @@ use crate::settings::settings_entity;
 use crate::theme::theme;
 use crate::ui::metrics::{SparklineStyle, StatusBarStyle, metric_bar, sparkline};
 use crate::ui::tokens::{ui_text_ms, ui_text_sm, ui_text_xl};
-use crate::workspace::state::Workspace;
+use crate::workspace::state::{WindowId, Workspace};
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::tooltip::Tooltip;
@@ -138,6 +138,8 @@ fn push_sample(history: &mut Vec<f32>, value: f32) {
 pub struct StatusBar {
     workspace: Entity<Workspace>,
     focus_manager: Entity<crate::workspace::focus::FocusManager>,
+    /// The window this bar belongs to — the one its focus chip unzooms.
+    window_id: WindowId,
     cache: Arc<Mutex<SystemInfoCache>>,
     /// Activate functions cloned from registry (keyed by extension ID).
     activate_fns: Vec<(String, okena_extensions::ActivateFn)>,
@@ -154,6 +156,7 @@ impl StatusBar {
     pub fn new(
         workspace: Entity<Workspace>,
         focus_manager: Entity<crate::workspace::focus::FocusManager>,
+        window_id: WindowId,
         cx: &mut Context<Self>,
     ) -> Self {
         let cache = Arc::new(Mutex::new(SystemInfoCache::new()));
@@ -221,6 +224,7 @@ impl StatusBar {
         Self {
             workspace,
             focus_manager,
+            window_id,
             cache,
             activate_fns,
             active_extensions,
@@ -953,6 +957,7 @@ impl Render for StatusBar {
                 };
 
                 if let Some(name) = focused_project {
+                    let window_id = self.window_id;
                     let workspace = self.workspace.clone();
                     let focus_manager = self.focus_manager.clone();
                     right = right.child(
@@ -985,7 +990,7 @@ impl Render for StatusBar {
                                     .on_click(move |_, _window, cx| {
                                         focus_manager.update(cx, |fm, cx| {
                                             workspace.update(cx, |ws, cx| {
-                                                ws.set_focused_project(fm, None, cx);
+                                                ws.set_focused_project(fm, window_id, None, cx);
                                             });
                                             cx.notify();
                                         });
@@ -1018,7 +1023,7 @@ mod repaint_tests {
     };
     use crate::views::project_hover::ProjectHoverState;
     use crate::workspace::focus::FocusManager;
-    use crate::workspace::state::{Workspace, WorkspaceData};
+    use crate::workspace::state::{WindowId, Workspace, WorkspaceData};
     use gpui::{AppContext as _, TestAppContext};
 
     #[gpui::test]
@@ -1027,8 +1032,9 @@ mod repaint_tests {
         let (status_bar, focus_manager, hover) = cx.update(|cx| {
             let workspace = cx.new(|_| Workspace::new(WorkspaceData::empty()));
             let focus_manager = cx.new(|_| FocusManager::new());
-            let status_bar =
-                cx.new(|cx| StatusBar::new(workspace.clone(), focus_manager.clone(), cx));
+            let status_bar = cx.new(|cx| {
+                StatusBar::new(workspace.clone(), focus_manager.clone(), WindowId::Main, cx)
+            });
             let hover = cx.new(|_| ProjectHoverState::new());
             (status_bar, focus_manager, hover)
         });

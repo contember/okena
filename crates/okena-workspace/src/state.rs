@@ -381,6 +381,10 @@ pub struct Workspace {
     sync_layout_preimage: Option<SyncLayoutPreimage>,
     /// The generation each window has already seen.
     window_sync_generation: HashMap<WindowId, u64>,
+    /// Mirror of the `worktree.show_hidden_when_focused` setting: whether a
+    /// focused parent project also brings along its hidden worktrees. Pushed
+    /// in by the app so every `visible_projects` caller agrees on it.
+    show_hidden_worktrees_when_focused: bool,
 }
 
 /// A terminal that was soft-closed and is waiting out its grace period.
@@ -596,7 +600,16 @@ impl Workspace {
             sync_generation: 0,
             sync_layout_preimage: None,
             window_sync_generation: HashMap::new(),
+            show_hidden_worktrees_when_focused: false,
         }
+    }
+
+    /// Mirror the `worktree.show_hidden_when_focused` setting. Returns whether
+    /// it changed, so the caller knows to re-render.
+    pub fn set_show_hidden_worktrees_when_focused(&mut self, show: bool) -> bool {
+        let changed = self.show_hidden_worktrees_when_focused != show;
+        self.show_hidden_worktrees_when_focused = show;
+        changed
     }
 
     /// Seed desktop-owned project presentation before the first daemon snapshot.
@@ -2360,6 +2373,7 @@ impl Workspace {
             &self.data,
             focused_project_id,
             focus_individual,
+            self.show_hidden_worktrees_when_focused,
             window_state,
         )
     }
@@ -2375,7 +2389,7 @@ impl Workspace {
         let mut ids = std::collections::HashSet::new();
         for window in std::iter::once(&self.data.main_window).chain(self.data.extra_windows.iter())
         {
-            for p in compute_visible_projects(&self.data, None, false, window) {
+            for p in compute_visible_projects(&self.data, None, false, false, window) {
                 ids.insert(p.id.clone());
             }
         }

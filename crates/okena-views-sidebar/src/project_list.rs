@@ -1027,10 +1027,11 @@ impl Sidebar {
             let project_id = project_id.clone();
             move |this, _, _window, cx| {
                 this.cursor_index = None;
+                let window_id = this.window_id;
                 let workspace = this.workspace.clone();
                 this.focus_manager.update(cx, |fm, cx| {
                     workspace.update(cx, |ws, cx| {
-                        ws.set_focused_project(fm, Some(project_id.clone()), cx);
+                        ws.set_focused_project(fm, window_id, Some(project_id.clone()), cx);
                     });
                     cx.notify();
                 });
@@ -1096,11 +1097,12 @@ impl Sidebar {
                         );
                     } else {
                         this.cursor_index = None;
+                        let window_id = this.window_id;
                         let workspace = this.workspace.clone();
                         let pid = project_id.clone();
                         this.focus_manager.update(cx, |fm, cx| {
                             workspace.update(cx, |ws, cx| {
-                                ws.set_focused_project(fm, Some(pid), cx);
+                                ws.set_focused_project(fm, window_id, Some(pid), cx);
                             });
                             cx.notify();
                         });
