@@ -717,35 +717,33 @@ impl WindowView {
             // Scroll the project grid along its axis. Columns scroll
             // horizontally (shift+wheel or native horizontal wheel); rows
             // scroll vertically with the natural wheel.
-            .on_scroll_wheel(
-                cx.listener(move |_this, event: &ScrollWheelEvent, _window, cx| {
-                    let delta = event.delta.pixel_delta(px(17.0));
-                    let max_offset = scroll_handle_for_wheel.max_offset();
-                    let current = scroll_handle_for_wheel.offset();
-                    if is_rows {
-                        let amount = if !delta.y.is_zero() { delta.y } else { delta.x };
-                        if amount.is_zero() || max_offset.y <= px(2.0) {
-                            return;
-                        }
-                        let new_y = (current.y + amount).clamp(-max_offset.y, px(0.0));
-                        scroll_handle_for_wheel.set_offset(point(current.x, new_y));
-                    } else {
-                        let amount = if event.modifiers.shift {
-                            if !delta.x.is_zero() { delta.x } else { delta.y }
-                        } else if !delta.x.is_zero() {
-                            delta.x
-                        } else {
-                            return;
-                        };
-                        if max_offset.x <= px(2.0) {
-                            return;
-                        }
-                        let new_x = (current.x + amount).clamp(-max_offset.x, px(0.0));
-                        scroll_handle_for_wheel.set_offset(point(new_x, current.y));
+            .on_scroll(cx.listener(move |_this, event: &ScrollEvent, _window, cx| {
+                let delta = event.delta.pixel_delta(px(17.0));
+                let max_offset = scroll_handle_for_wheel.max_offset();
+                let current = scroll_handle_for_wheel.offset();
+                if is_rows {
+                    let amount = if !delta.y.is_zero() { delta.y } else { delta.x };
+                    if amount.is_zero() || max_offset.y <= px(2.0) {
+                        return;
                     }
-                    cx.notify();
-                }),
-            )
+                    let new_y = (current.y + amount).clamp(-max_offset.y, px(0.0));
+                    scroll_handle_for_wheel.set_offset(point(current.x, new_y));
+                } else {
+                    let amount = if event.modifiers.shift {
+                        if !delta.x.is_zero() { delta.x } else { delta.y }
+                    } else if !delta.x.is_zero() {
+                        delta.x
+                    } else {
+                        return;
+                    };
+                    if max_offset.x <= px(2.0) {
+                        return;
+                    }
+                    let new_x = (current.x + amount).clamp(-max_offset.x, px(0.0));
+                    scroll_handle_for_wheel.set_offset(point(new_x, current.y));
+                }
+                cx.notify();
+            }))
             .child(
                 div()
                     .id("projects-grid")

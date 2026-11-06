@@ -574,7 +574,7 @@ impl GitHeader {
                     .on_mouse_down(MouseButton::Left, |_, _, cx| {
                         cx.stop_propagation();
                     })
-                    .on_scroll_wheel(|_, _, cx| {
+                    .on_scroll(|_, _, cx| {
                         cx.stop_propagation();
                     })
                     // Keyboard navigation. The focused filter/create input

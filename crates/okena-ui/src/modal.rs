@@ -193,7 +193,7 @@ pub fn modal_content(id: impl Into<SharedString>, t: &ThemeColors) -> Stateful<D
             cx.stop_propagation();
         })
         // Prevent scroll events from propagating to terminal underneath
-        .on_scroll_wheel(|_, _, cx| {
+        .on_scroll(|_, _, cx| {
             cx.stop_propagation();
         })
 }

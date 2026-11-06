@@ -147,7 +147,7 @@ impl Render for SendComposer {
                         .on_mouse_down(MouseButton::Left, |_, _, cx| {
                             cx.stop_propagation();
                         })
-                        .on_scroll_wheel(|_, _, cx| {
+                        .on_scroll(|_, _, cx| {
                             cx.stop_propagation();
                         })
                         // Quoted selection
