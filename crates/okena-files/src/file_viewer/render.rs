@@ -1328,11 +1328,6 @@ impl FileViewer {
 
 impl Render for FileViewer {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // Schedule a background freshness check for externally modified files
-        // (throttled to 1/sec). Cheap on the render thread — the stat and any
-        // reload/re-highlight run on the background executor.
-        self.check_active_tab_freshness(cx);
-
         let t = theme(cx);
         let focus_handle = self.focus_handle.clone();
         let tab = self.active_tab();
