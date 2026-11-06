@@ -80,6 +80,7 @@ impl TerminalContent {
         cx: &mut Context<Self>,
     ) -> Self {
         let scrollbar = cx.new(Scrollbar::new);
+        cx.observe(&scrollbar, |_, _, cx| cx.notify()).detach();
 
         Self {
             terminal: None,
@@ -302,8 +303,8 @@ impl TerminalContent {
     }
 
     pub fn mark_scroll_activity(&mut self, cx: &mut Context<Self>) {
-        self.scrollbar.update(cx, |scrollbar, _| {
-            scrollbar.mark_activity();
+        self.scrollbar.update(cx, |scrollbar, cx| {
+            scrollbar.mark_activity(cx);
         });
     }
 
@@ -1010,7 +1011,10 @@ impl Render for TerminalContent {
                         .with_cursor_style(render_settings.cursor_style),
                 ),
             )
-            .child(self.scrollbar.clone())
+            .child(
+                self.scrollbar
+                    .update(cx, |scrollbar, cx| scrollbar.element(cx)),
+            )
             .into_any_element()
     }
 }
