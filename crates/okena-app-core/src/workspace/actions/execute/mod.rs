@@ -754,23 +754,31 @@ pub fn ensure_terminal(
     }
     let (cwd, plan) = reconnect?;
 
-    // Spawn PTY via backend
+    // Registered before the PTY starts: output read before a model exists is lost.
+    let terminal = Arc::new(Terminal::new(
+        terminal_id.to_string(),
+        TerminalSize::default(),
+        backend.transport(),
+        cwd.clone(),
+    ));
+    terminals
+        .lock()
+        .insert(terminal_id.to_string(), terminal.clone());
+
     match backend.reconnect_terminal_with_plan(terminal_id, &cwd, &plan) {
         Ok(_id) => {
-            let terminal = Arc::new(Terminal::new(
-                terminal_id.to_string(),
-                TerminalSize::default(),
-                backend.transport(),
-                cwd,
-            ));
-            terminals
-                .lock()
-                .insert(terminal_id.to_string(), terminal.clone());
             log::info!("Auto-spawned terminal {} for remote client", terminal_id);
             Some(terminal)
         }
         Err(e) => {
             log::error!("Failed to auto-spawn terminal {}: {}", terminal_id, e);
+            let mut registry = terminals.lock();
+            if registry
+                .get(terminal_id)
+                .is_some_and(|registered| Arc::ptr_eq(registered, &terminal))
+            {
+                registry.remove(terminal_id);
+            }
             None
         }
     }
@@ -1281,6 +1289,9 @@ mod reconnect_shell_tests {
         reconnected_shells: Mutex<Vec<Option<ShellType>>>,
         pub(super) plans: Mutex<Vec<TerminalLaunchPlan>>,
         pub(super) fail_next_spawn: std::sync::atomic::AtomicBool,
+        observed_registry: Option<TerminalsRegistry>,
+        registered_at_reconnect: Mutex<Vec<bool>>,
+        fail_next_reconnect: std::sync::atomic::AtomicBool,
     }
 
     impl TerminalBackend for RecordingBackend {
@@ -1355,6 +1366,18 @@ mod reconnect_shell_tests {
                 .lock()
                 .expect("reconnected shell lock")
                 .push(Some(plan.route.clone()));
+            if let Some(registry) = &self.observed_registry {
+                self.registered_at_reconnect
+                    .lock()
+                    .expect("registered lock")
+                    .push(registry.lock().contains_key(terminal_id));
+            }
+            if self
+                .fail_next_reconnect
+                .swap(false, std::sync::atomic::Ordering::Relaxed)
+            {
+                anyhow::bail!("test reconnect failure");
+            }
             Ok(terminal_id.to_string())
         }
 
@@ -1441,6 +1464,42 @@ mod reconnect_shell_tests {
 
     fn workspace(shell_type: ShellType, default_shell: Option<ShellType>) -> Workspace {
         workspace_with_terminal(shell_type, default_shell, Some("terminal"), None)
+    }
+
+    #[test]
+    fn reconnect_registers_the_model_before_the_pty_starts() {
+        let ws = workspace(ShellType::Default, None);
+        let terminals: TerminalsRegistry = Arc::new(Default::default());
+        let backend = RecordingBackend {
+            observed_registry: Some(terminals.clone()),
+            ..RecordingBackend::default()
+        };
+        let settings = AppSettings::default();
+
+        assert!(ensure_terminal("terminal", &terminals, &backend, &ws, &settings).is_some());
+        assert_eq!(
+            backend
+                .registered_at_reconnect
+                .lock()
+                .expect("registered lock")
+                .as_slice(),
+            &[true],
+            "output read right after the PTY starts needs a model to land in"
+        );
+    }
+
+    #[test]
+    fn failed_reconnect_leaves_no_model_behind() {
+        let ws = workspace(ShellType::Default, None);
+        let terminals: TerminalsRegistry = Arc::new(Default::default());
+        let backend = RecordingBackend {
+            fail_next_reconnect: std::sync::atomic::AtomicBool::new(true),
+            ..RecordingBackend::default()
+        };
+        let settings = AppSettings::default();
+
+        assert!(ensure_terminal("terminal", &terminals, &backend, &ws, &settings).is_none());
+        assert!(!terminals.lock().contains_key("terminal"));
     }
 
     #[test]
