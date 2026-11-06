@@ -42,5 +42,5 @@ is in `okena-core::ai_proxy`; the daemon glue is `okena-daemon-core/src/ai_proxy
 
 ```bash
 cpu-lease run -n 2 -- cargo test -p okena-ai
-cargo tree -p okena-ai -i gpui   # must be empty
+cargo tree -p okena-ai -e no-dev --prefix none -f '{p}' | grep '^gpui'   # must print nothing
 ```
