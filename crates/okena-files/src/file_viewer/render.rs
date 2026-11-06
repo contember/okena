@@ -11,7 +11,7 @@ use crate::syntax::HighlightedSpan;
 use crate::theme::theme;
 use gpui::prelude::*;
 use gpui::*;
-use gpui_component::scroll::{ScrollableElement, Scrollbar, ScrollbarShow};
+use gpui_component::scroll::{ScrollableElement, Scrollbar, ScrollbarMode};
 use gpui_component::{h_flex, v_flex};
 use okena_core::theme::ThemeColors;
 use okena_markdown::{MarkdownTextRun, RenderedNode, RenderedTextUnit};
@@ -46,7 +46,7 @@ fn markdown_table_scrollbar(id: impl Into<ElementId>, scroll_handle: &ScrollHand
     div().absolute().inset_0().child(
         Scrollbar::horizontal(scroll_handle)
             .id(id)
-            .scrollbar_show(ScrollbarShow::Always),
+            .mode(ScrollbarMode::Always),
     )
 }
 
@@ -57,7 +57,7 @@ fn source_horizontal_scrollbar(
     div().absolute().inset_0().child(
         Scrollbar::horizontal(scroll_handle)
             .id(id)
-            .scrollbar_show(ScrollbarShow::Always),
+            .mode(ScrollbarMode::Always),
     )
 }
 

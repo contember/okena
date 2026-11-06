@@ -35,10 +35,10 @@ okena-ext-updater = { path = "../okena-ext-updater" }
 okena-usage = { path = "../okena-usage" }
 
 # UI Framework (from Zed repo)
-gpui = { git = "https://github.com/zed-industries/zed", package = "gpui" }
+gpui = { workspace = true }
 
 # UI Components
-gpui-component = { git = "https://github.com/longbridge/gpui-component", package = "gpui-component" }
+gpui-component = { workspace = true }
 
 # Async / concurrency
 smol = "2.0"
@@ -78,4 +78,4 @@ anyhow = "1.0"
 time = { version = "0.3", features = ["local-offset"] }
 
 [dev-dependencies]
-gpui = { git = "https://github.com/zed-industries/zed", package = "gpui", features = ["test-support"] }
+gpui = { workspace = true, features = ["test-support"] }

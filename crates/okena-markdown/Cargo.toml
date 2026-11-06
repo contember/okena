@@ -9,11 +9,11 @@ okena-core = { path = "../okena-core" }
 okena-highlight = { path = "../okena-highlight" }
 okena-ui = { path = "../okena-ui" }
 
-gpui = { git = "https://github.com/zed-industries/zed", package = "gpui" }
-gpui-component = { git = "https://github.com/longbridge/gpui-component", package = "gpui-component" }
+gpui = { workspace = true }
+gpui-component = { workspace = true }
 
 pulldown-cmark = "0.12"
 serde_yaml_ng = "0.10"
 
 [dev-dependencies]
-gpui = { git = "https://github.com/zed-industries/zed", package = "gpui", features = ["test-support"] }
+gpui = { workspace = true, features = ["test-support"] }

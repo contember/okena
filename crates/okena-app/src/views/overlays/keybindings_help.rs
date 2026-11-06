@@ -156,7 +156,7 @@ impl KeybindingsHelp {
             return;
         }
 
-        let config_str = keystroke_to_config_string(keystroke);
+        let config_str = keystroke_to_config_string(keystroke, cx.platform_info().os);
 
         if editing.waiting_for_chord {
             // This is the second keystroke of a chord
