@@ -277,9 +277,11 @@ impl TerminalContent {
         &mut self,
         matches: Arc<Vec<SearchMatch>>,
         current_index: Option<usize>,
+        cx: &mut Context<Self>,
     ) {
         self.search_matches = matches;
         self.search_current_index = current_index;
+        cx.notify();
     }
 
     pub fn mark_scroll_activity(&mut self, cx: &mut Context<Self>) {
@@ -1040,7 +1042,47 @@ fn autoscroll_lines(y: f32, top: f32, bottom: f32, cell_height: f32) -> i32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{autoscroll_lines, terminal_file_request_path};
+    use super::{TerminalContent, autoscroll_lines, terminal_file_request_path};
+    use gpui::{AppContext as _, TestAppContext};
+    use okena_workspace::request_broker::RequestBroker;
+    use okena_workspace::state::{Workspace, WorkspaceData};
+    use std::cell::Cell;
+    use std::rc::Rc;
+    use std::sync::Arc;
+
+    /// The content is drawn behind `.cached()`, so a pane notify alone does not
+    /// redraw it: new highlights must notify the content itself.
+    #[gpui::test]
+    fn new_search_highlights_redraw_the_content(cx: &mut TestAppContext) {
+        let content = cx.update(|cx| {
+            let workspace = cx.new(|_| Workspace::new(WorkspaceData::empty()));
+            let broker = cx.new(|_| RequestBroker::new());
+            cx.new(|cx| {
+                TerminalContent::new(
+                    cx.focus_handle(),
+                    None,
+                    "project".to_string(),
+                    Vec::new(),
+                    workspace,
+                    broker,
+                    cx,
+                )
+            })
+        });
+        let notifies = Rc::new(Cell::new(0));
+        cx.update(|cx| {
+            let notifies = notifies.clone();
+            cx.observe(&content, move |_, _| notifies.set(notifies.get() + 1))
+                .detach();
+        });
+
+        content.update(cx, |content, cx| {
+            content.set_search_highlights(Arc::new(Vec::new()), Some(0), cx);
+        });
+        cx.run_until_parked();
+
+        assert_eq!(notifies.get(), 1);
+    }
 
     const CELL: f32 = 16.0;
     const TOP: f32 = 100.0;
