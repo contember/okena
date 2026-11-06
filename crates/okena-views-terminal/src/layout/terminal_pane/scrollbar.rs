@@ -361,3 +361,34 @@ impl Scrollbar {
             .into_any_element()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{SHOW_AFTER_ACTIVITY, Scrollbar};
+    use gpui::{AppContext as _, TestAppContext};
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    #[gpui::test]
+    fn scroll_activity_redraws_again_once_the_scrollbar_should_fade(cx: &mut TestAppContext) {
+        let scrollbar = cx.new(Scrollbar::new);
+        let notifies = Rc::new(Cell::new(0));
+        cx.update(|cx| {
+            let notifies = notifies.clone();
+            cx.observe(&scrollbar, move |_, _| notifies.set(notifies.get() + 1))
+                .detach();
+        });
+
+        scrollbar.update(cx, |scrollbar, cx| scrollbar.mark_activity(cx));
+        cx.run_until_parked();
+        assert_eq!(notifies.get(), 1, "activity shows the scrollbar at once");
+
+        cx.executor().advance_clock(SHOW_AFTER_ACTIVITY);
+        cx.run_until_parked();
+        assert_eq!(
+            notifies.get(),
+            2,
+            "nothing else redraws an idle terminal, so the fade needs its own frame"
+        );
+    }
+}
