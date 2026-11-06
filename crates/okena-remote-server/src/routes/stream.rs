@@ -14,14 +14,17 @@ use axum::extract::{Extension, Query, State, WebSocketUpgrade};
 use axum::response::IntoResponse;
 use futures::{SinkExt, StreamExt};
 use okena_core::git_poll::GitPollTrigger;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 use sysinfo::System;
 use tokio::sync::{broadcast, mpsc};
 
 const SYSTEM_STATS_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
+/// How long a batch of snapshots waits for terminal models that stopped
+/// advancing to reach the last published output.
 const SNAPSHOT_CATCH_UP_DEADLINE: Duration = Duration::from_secs(2);
+const SNAPSHOT_CATCH_UP_POLL: Duration = Duration::from_millis(10);
 
 fn output_is_newer(watermarks: &HashMap<String, u64>, terminal_id: &str, sequence: u64) -> bool {
     sequence > watermarks.get(terminal_id).copied().unwrap_or(0)
@@ -139,6 +142,9 @@ async fn handle_ws(
     let mut pty_rx = state.broadcaster.subscribe();
     let mut subscribed_ids: HashMap<String, u32> = HashMap::new(); // terminal_id -> stream_id
     let mut output_watermarks: HashMap<String, u64> = HashMap::new();
+    // Subscribed terminals the daemon had no snapshot for; their next output
+    // triggers one instead of being forwarded onto a grid the client never got.
+    let mut unsnapshotted: HashSet<String> = HashSet::new();
     let mut reverse_stream_map: HashMap<u32, String> = HashMap::new();
     let mut next_stream_id: u32 = 1;
     let connection_id = state.next_connection_id.fetch_add(1, Ordering::Relaxed);
@@ -246,7 +252,7 @@ async fn handle_ws(
                                     break;
                                 }
 
-                                let watermarks = match send_snapshots_and_reconcile(
+                                let sent = match send_snapshots_and_reconcile(
                                     &out_tx,
                                     &state,
                                     &mut pty_rx,
@@ -256,10 +262,10 @@ async fn handle_ws(
                                 )
                                 .await
                                 {
-                                    Ok(watermarks) => watermarks,
+                                    Ok(sent) => sent,
                                     Err(()) => break,
                                 };
-                                output_watermarks.extend(watermarks);
+                                sent.record(&mut output_watermarks, &mut unsnapshotted);
                             }
                             Ok(WsInbound::Unsubscribe { terminal_ids }) => {
                                 for id in &terminal_ids {
@@ -267,6 +273,7 @@ async fn handle_ws(
                                         reverse_stream_map.remove(&sid);
                                     }
                                     output_watermarks.remove(id);
+                                    unsnapshotted.remove(id);
                                 }
                                 // Sync to shared state for git polling
                                 if let Ok(mut map) = state.remote_subscribed_terminals.write() {
@@ -409,10 +416,13 @@ async fn handle_ws(
                         // Start a batch with the first event
                         let mut batch: HashMap<u32, Vec<u8>> = HashMap::new();
                         let mut resize_msgs: Vec<WsOutbound> = Vec::new();
+                        let mut resnapshot: HashSet<String> = HashSet::new();
 
                         match &event {
                             crate::pty_broadcaster::PtyBroadcastEvent::Output { terminal_id, data, sequence } => {
-                                if output_is_newer(&output_watermarks, terminal_id, *sequence)
+                                if unsnapshotted.contains(terminal_id) {
+                                    resnapshot.insert(terminal_id.clone());
+                                } else if output_is_newer(&output_watermarks, terminal_id, *sequence)
                                     && let Some(&stream_id) = subscribed_ids.get(terminal_id)
                                 {
                                     okena_core::latency_probe::daemon_stream_queued(terminal_id);
@@ -445,7 +455,9 @@ async fn handle_ws(
                             match pty_rx.try_recv() {
                                 Ok(ev) => match &ev {
                                     crate::pty_broadcaster::PtyBroadcastEvent::Output { terminal_id, data, sequence } => {
-                                        if output_is_newer(&output_watermarks, terminal_id, *sequence)
+                                        if unsnapshotted.contains(terminal_id) {
+                                            resnapshot.insert(terminal_id.clone());
+                                        } else if output_is_newer(&output_watermarks, terminal_id, *sequence)
                                             && let Some(&sid) = subscribed_ids.get(terminal_id)
                                         {
                                             okena_core::latency_probe::daemon_stream_queued(terminal_id);
@@ -484,6 +496,7 @@ async fn handle_ws(
                                         channel_closed = true;
                                         break;
                                     }
+                                    resnapshot.clear();
                                     let ids: Vec<String> = subscribed_ids.keys().cloned().collect();
                                     match send_snapshots_and_reconcile(
                                         &out_tx,
@@ -495,7 +508,7 @@ async fn handle_ws(
                                     )
                                     .await
                                     {
-                                        Ok(watermarks) => output_watermarks.extend(watermarks),
+                                        Ok(sent) => sent.record(&mut output_watermarks, &mut unsnapshotted),
                                         Err(()) => {
                                             channel_closed = true;
                                             break;
@@ -536,6 +549,23 @@ async fn handle_ws(
                         if channel_closed {
                             break;
                         }
+
+                        if !resnapshot.is_empty() {
+                            let ids: Vec<String> = resnapshot.into_iter().collect();
+                            match send_snapshots_and_reconcile(
+                                &out_tx,
+                                &state,
+                                &mut pty_rx,
+                                &ids,
+                                &subscribed_ids,
+                                &connection_owner_id,
+                            )
+                            .await
+                            {
+                                Ok(sent) => sent.record(&mut output_watermarks, &mut unsnapshotted),
+                                Err(()) => break,
+                            }
+                        }
                     }
                     Err(broadcast::error::RecvError::Lagged(n)) => {
                         let resp = serde_json::to_string(&WsOutbound::Dropped { count: n }).expect("BUG: WsOutbound must serialize");
@@ -555,7 +585,7 @@ async fn handle_ws(
                         )
                         .await
                         {
-                            Ok(watermarks) => output_watermarks.extend(watermarks),
+                            Ok(sent) => sent.record(&mut output_watermarks, &mut unsnapshotted),
                             Err(()) => break,
                         }
                     }
@@ -826,7 +856,7 @@ async fn drain_post_snapshot(
     out_tx: &mpsc::Sender<Message>,
     pty_rx: &mut broadcast::Receiver<crate::pty_broadcaster::PtyBroadcastEvent>,
     subscribed_ids: &HashMap<String, u32>,
-    watermarks: &HashMap<String, u64>,
+    sent: &SnapshotBatch,
     connection_owner_id: &str,
 ) -> Result<PostSnapshotDrain, ()> {
     use crate::pty_broadcaster::PtyBroadcastEvent;
@@ -841,8 +871,10 @@ async fn drain_post_snapshot(
                 data,
                 sequence,
             }) => {
-                let watermark = watermarks.get(&terminal_id).copied().unwrap_or(0);
+                // A skipped terminal gets a snapshot on its next output instead.
+                let watermark = sent.watermarks.get(&terminal_id).copied().unwrap_or(0);
                 if sequence > watermark
+                    && !sent.skipped.contains(&terminal_id)
                     && let Some(&stream_id) = subscribed_ids.get(&terminal_id)
                 {
                     batch.entry(stream_id).or_default().extend_from_slice(&data);
@@ -892,6 +924,24 @@ async fn drain_post_snapshot(
     Ok(PostSnapshotDrain::Complete)
 }
 
+/// Snapshots sent for a batch of terminals, and the terminals the daemon had
+/// no snapshot for.
+#[derive(Debug, Default, PartialEq)]
+struct SnapshotBatch {
+    watermarks: HashMap<String, u64>,
+    skipped: Vec<String>,
+}
+
+impl SnapshotBatch {
+    fn record(self, watermarks: &mut HashMap<String, u64>, unsnapshotted: &mut HashSet<String>) {
+        for id in self.watermarks.keys() {
+            unsnapshotted.remove(id);
+        }
+        watermarks.extend(self.watermarks);
+        unsnapshotted.extend(self.skipped);
+    }
+}
+
 /// Send snapshot frames for the given terminal IDs via the mpsc channel.
 ///
 /// A terminal the daemon cannot snapshot is skipped on its own; only a closed
@@ -902,38 +952,43 @@ async fn send_snapshots(
     broadcaster: &PtyBroadcaster,
     terminal_ids: &[String],
     subscribed_ids: &HashMap<String, u32>,
-) -> Result<HashMap<String, u64>, ()> {
-    let mut watermarks = HashMap::new();
+) -> Result<SnapshotBatch, ()> {
+    let mut sent = SnapshotBatch::default();
+    // One deadline for the batch, so stuck terminals do not wait in series.
+    let mut deadline = tokio::time::Instant::now() + SNAPSHOT_CATCH_UP_DEADLINE;
     for id in terminal_ids {
         if let Some(&stream_id) = subscribed_ids.get(id) {
             let target_sequence = broadcaster.last_published_sequence(id);
             let Some((data, sequence)) =
-                render_snapshot_after(bridge_tx, id, target_sequence).await?
+                render_snapshot_after(bridge_tx, id, target_sequence, &mut deadline).await?
             else {
+                sent.skipped.push(id.clone());
                 continue;
             };
             let frame = build_binary_frame(FRAME_TYPE_SNAPSHOT, stream_id, &data);
             if out_tx.send(Message::Binary(frame.into())).await.is_err() {
                 return Err(());
             }
-            watermarks.insert(id.clone(), sequence);
+            sent.watermarks.insert(id.clone(), sequence);
         }
     }
-    Ok(watermarks)
+    Ok(sent)
 }
 
 /// Render a snapshot that includes output up to `target_sequence`.
 ///
-/// Returns `Ok(None)` when the daemon has no snapshot for the terminal. When
-/// the terminal model never reaches the target (its output was published but
-/// never applied), the latest snapshot is returned after a deadline: it is the
-/// daemon's whole knowledge of the terminal.
+/// Returns `Ok(None)` when the daemon has no snapshot for the terminal. A
+/// model that keeps advancing pushes `deadline` out; one that stopped short of
+/// the target (its output was published but never applied) gets its latest
+/// snapshot returned once `deadline` passes, as the daemon's whole knowledge
+/// of the terminal.
 async fn render_snapshot_after(
     bridge_tx: &BridgeSender,
     terminal_id: &str,
     target_sequence: u64,
+    deadline: &mut tokio::time::Instant,
 ) -> Result<Option<(Vec<u8>, u64)>, ()> {
-    let deadline = tokio::time::Instant::now() + SNAPSHOT_CATCH_UP_DEADLINE;
+    let mut last_sequence = None;
     loop {
         let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
         bridge_tx
@@ -955,13 +1010,18 @@ async fn render_snapshot_after(
         if sequence >= target_sequence {
             return Ok(Some((data, sequence)));
         }
-        if tokio::time::Instant::now() >= deadline {
+        let now = tokio::time::Instant::now();
+        if last_sequence.is_some_and(|last| sequence > last) {
+            *deadline = (*deadline).max(now + SNAPSHOT_CATCH_UP_DEADLINE);
+        }
+        last_sequence = Some(sequence);
+        if now >= *deadline {
             log::warn!(
                 "Terminal {terminal_id} snapshot stopped at sequence {sequence}, expected {target_sequence}; sending it as is"
             );
             return Ok(Some((data, sequence)));
         }
-        tokio::time::sleep(Duration::from_millis(1)).await;
+        tokio::time::sleep(SNAPSHOT_CATCH_UP_POLL).await;
     }
 }
 
@@ -972,9 +1032,9 @@ async fn send_snapshots_and_reconcile(
     terminal_ids: &[String],
     subscribed_ids: &HashMap<String, u32>,
     connection_owner_id: &str,
-) -> Result<HashMap<String, u64>, ()> {
+) -> Result<SnapshotBatch, ()> {
     loop {
-        let watermarks = send_snapshots(
+        let sent = send_snapshots(
             out_tx,
             &state.bridge_tx,
             &state.broadcaster,
@@ -982,16 +1042,10 @@ async fn send_snapshots_and_reconcile(
             subscribed_ids,
         )
         .await?;
-        match drain_post_snapshot(
-            out_tx,
-            pty_rx,
-            subscribed_ids,
-            &watermarks,
-            connection_owner_id,
-        )
-        .await?
+        match drain_post_snapshot(out_tx, pty_rx, subscribed_ids, &sent, connection_owner_id)
+            .await?
         {
-            PostSnapshotDrain::Complete => return Ok(watermarks),
+            PostSnapshotDrain::Complete => return Ok(sent),
             PostSnapshotDrain::Lagged(count) => {
                 let message = serde_json::to_string(&WsOutbound::Dropped { count })
                     .expect("BUG: WsOutbound must serialize");
@@ -1053,6 +1107,19 @@ mod tests {
         assert!(output_is_newer(&watermarks, "terminal", 43));
     }
 
+    fn drained_pty_payloads(out_rx: &mut mpsc::Receiver<Message>) -> Vec<(u32, Vec<u8>)> {
+        let mut payloads = Vec::new();
+        while let Ok(message) = out_rx.try_recv() {
+            let Message::Binary(frame) = message else {
+                panic!("expected PTY frame");
+            };
+            let (frame_type, stream_id, payload) = parse_binary_frame(&frame).unwrap();
+            assert_eq!(frame_type, okena_core::ws::FRAME_TYPE_PTY);
+            payloads.push((stream_id, payload.to_vec()));
+        }
+        payloads
+    }
+
     #[tokio::test]
     async fn post_snapshot_drain_forwards_only_output_after_watermark() {
         let broadcaster = crate::pty_broadcaster::PtyBroadcaster::new();
@@ -1062,45 +1129,94 @@ mod tests {
 
         let (out_tx, mut out_rx) = mpsc::channel(4);
         let subscribed = HashMap::from([("terminal".to_string(), 7)]);
-        let watermarks = HashMap::from([("terminal".to_string(), covered)]);
-        let outcome =
-            drain_post_snapshot(&out_tx, &mut pty_rx, &subscribed, &watermarks, "connection")
-                .await
-                .unwrap();
+        let sent = SnapshotBatch {
+            watermarks: HashMap::from([("terminal".to_string(), covered)]),
+            skipped: Vec::new(),
+        };
+        let outcome = drain_post_snapshot(&out_tx, &mut pty_rx, &subscribed, &sent, "connection")
+            .await
+            .unwrap();
         assert!(matches!(outcome, PostSnapshotDrain::Complete));
 
-        let message = out_rx.recv().await.unwrap();
-        let Message::Binary(frame) = message else {
-            panic!("expected PTY frame");
-        };
-        let (frame_type, stream_id, payload) = parse_binary_frame(&frame).unwrap();
-        assert_eq!(frame_type, okena_core::ws::FRAME_TYPE_PTY);
-        assert_eq!(stream_id, 7);
-        assert_eq!(payload, b"new");
+        assert_eq!(
+            drained_pty_payloads(&mut out_rx),
+            vec![(7, b"new".to_vec())]
+        );
     }
 
-    /// Answers `RenderSnapshot` like the daemon: a snapshot at the given
-    /// sequence for known terminals, an error for unknown ones.
-    fn spawn_snapshot_bridge(terminals: HashMap<&'static str, u64>) -> BridgeSender {
+    #[tokio::test]
+    async fn post_snapshot_drain_holds_back_output_of_a_skipped_terminal() {
+        let broadcaster = crate::pty_broadcaster::PtyBroadcaster::new();
+        let mut pty_rx = broadcaster.subscribe();
+        broadcaster.publish("skipped".to_string(), b"orphan".to_vec());
+        broadcaster.publish("other".to_string(), b"live".to_vec());
+
+        let (out_tx, mut out_rx) = mpsc::channel(4);
+        let subscribed = HashMap::from([("skipped".to_string(), 1), ("other".to_string(), 2)]);
+        let sent = SnapshotBatch {
+            watermarks: HashMap::new(),
+            skipped: vec!["skipped".to_string()],
+        };
+        drain_post_snapshot(&out_tx, &mut pty_rx, &subscribed, &sent, "connection")
+            .await
+            .unwrap();
+
+        assert_eq!(
+            drained_pty_payloads(&mut out_rx),
+            vec![(2, b"live".to_vec())]
+        );
+    }
+
+    #[test]
+    fn a_later_snapshot_clears_a_skipped_terminal() {
+        let mut watermarks = HashMap::new();
+        let mut unsnapshotted = HashSet::new();
+        SnapshotBatch {
+            watermarks: HashMap::new(),
+            skipped: vec!["t".to_string()],
+        }
+        .record(&mut watermarks, &mut unsnapshotted);
+        assert!(unsnapshotted.contains("t"));
+
+        SnapshotBatch {
+            watermarks: HashMap::from([("t".to_string(), 5)]),
+            skipped: Vec::new(),
+        }
+        .record(&mut watermarks, &mut unsnapshotted);
+        assert!(unsnapshotted.is_empty());
+        assert_eq!(watermarks, HashMap::from([("t".to_string(), 5)]));
+    }
+
+    /// Answers `RenderSnapshot` like the daemon, with `snapshot` deciding
+    /// each terminal's reply.
+    fn spawn_bridge(
+        mut snapshot: impl FnMut(&str) -> CommandResult + Send + 'static,
+    ) -> BridgeSender {
         let (bridge_tx, bridge_rx) = crate::bridge::bridge_channel();
         tokio::spawn(async move {
             while let Ok(message) = bridge_rx.recv().await {
                 let RemoteCommand::RenderSnapshot { terminal_id } = message.command else {
                     continue;
                 };
-                let result = match terminals.get(terminal_id.as_str()) {
-                    Some(&sequence) => CommandResult::OkSnapshot {
-                        data: terminal_id.clone().into_bytes(),
-                        sequence,
-                    },
-                    None => CommandResult::Err(format!("terminal not found: {terminal_id}")),
-                };
+                let result = snapshot(&terminal_id);
                 if let Some(reply) = message.reply {
                     let _ = reply.send(result);
                 }
             }
         });
         bridge_tx
+    }
+
+    /// A snapshot at a fixed sequence for known terminals, an error for
+    /// unknown ones.
+    fn spawn_snapshot_bridge(terminals: HashMap<&'static str, u64>) -> BridgeSender {
+        spawn_bridge(move |terminal_id| match terminals.get(terminal_id) {
+            Some(&sequence) => CommandResult::OkSnapshot {
+                data: terminal_id.as_bytes().to_vec(),
+                sequence,
+            },
+            None => CommandResult::Err(format!("terminal not found: {terminal_id}")),
+        })
     }
 
     fn snapshot_payloads(out_rx: &mut mpsc::Receiver<Message>) -> Vec<(u32, Vec<u8>)> {
@@ -1128,7 +1244,7 @@ mod tests {
             ("c".to_string(), 3),
         ]);
 
-        let watermarks = send_snapshots(&out_tx, &bridge_tx, &broadcaster, &ids, &subscribed)
+        let sent = send_snapshots(&out_tx, &bridge_tx, &broadcaster, &ids, &subscribed)
             .await
             .expect("one terminal's failure must not end the connection");
 
@@ -1137,28 +1253,72 @@ mod tests {
             vec![(1, b"a".to_vec()), (3, b"c".to_vec())]
         );
         assert_eq!(
-            watermarks,
-            HashMap::from([("a".to_string(), 0), ("c".to_string(), 0)])
+            sent,
+            SnapshotBatch {
+                watermarks: HashMap::from([("a".to_string(), 0), ("c".to_string(), 0)]),
+                skipped: vec!["missing".to_string()],
+            }
         );
     }
 
     #[tokio::test(start_paused = true)]
-    async fn a_snapshot_that_never_catches_up_is_sent_as_is_after_the_deadline() {
-        // The broadcaster published output the terminal model never applied.
+    async fn stuck_terminals_share_one_deadline() {
+        // The broadcaster published output the terminal models never applied.
         let broadcaster = PtyBroadcaster::new();
-        let published = broadcaster.publish("stuck".to_string(), b"lost".to_vec());
-        let bridge_tx = spawn_snapshot_bridge(HashMap::from([("stuck", 0)]));
+        let published = broadcaster.publish("stuck-a".to_string(), b"lost".to_vec());
+        broadcaster.publish("stuck-b".to_string(), b"lost".to_vec());
+        let bridge_tx = spawn_snapshot_bridge(HashMap::from([("stuck-a", 0), ("stuck-b", 0)]));
         let (out_tx, mut out_rx) = mpsc::channel(8);
-        let ids = ["stuck".to_string()];
-        let subscribed = HashMap::from([("stuck".to_string(), 4)]);
+        let ids = ["stuck-a", "stuck-b"].map(String::from);
+        let subscribed = HashMap::from([("stuck-a".to_string(), 4), ("stuck-b".to_string(), 5)]);
+        let start = tokio::time::Instant::now();
 
-        let watermarks = send_snapshots(&out_tx, &bridge_tx, &broadcaster, &ids, &subscribed)
+        let sent = send_snapshots(&out_tx, &bridge_tx, &broadcaster, &ids, &subscribed)
             .await
             .expect("a lagging terminal must not end the connection");
 
         assert!(published > 0);
-        assert_eq!(snapshot_payloads(&mut out_rx), vec![(4, b"stuck".to_vec())]);
-        assert_eq!(watermarks, HashMap::from([("stuck".to_string(), 0)]));
+        assert!(start.elapsed() < SNAPSHOT_CATCH_UP_DEADLINE + SNAPSHOT_CATCH_UP_POLL * 2);
+        assert_eq!(
+            snapshot_payloads(&mut out_rx),
+            vec![(4, b"stuck-a".to_vec()), (5, b"stuck-b".to_vec())]
+        );
+        assert_eq!(
+            sent.watermarks,
+            HashMap::from([("stuck-a".to_string(), 0), ("stuck-b".to_string(), 0)])
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_model_that_keeps_advancing_is_waited_for_past_the_deadline() {
+        let broadcaster = PtyBroadcaster::new();
+        let mut target = 0;
+        for _ in 0..400 {
+            target = broadcaster.publish("slow".to_string(), b"x".to_vec());
+        }
+        // The model applies one more event per snapshot request.
+        let mut applied = 0;
+        let bridge_tx = spawn_bridge(move |terminal_id| {
+            applied += 1;
+            CommandResult::OkSnapshot {
+                data: terminal_id.as_bytes().to_vec(),
+                sequence: applied,
+            }
+        });
+        let (out_tx, _out_rx) = mpsc::channel(8);
+        let ids = ["slow".to_string()];
+        let subscribed = HashMap::from([("slow".to_string(), 1)]);
+        let start = tokio::time::Instant::now();
+
+        let sent = send_snapshots(&out_tx, &bridge_tx, &broadcaster, &ids, &subscribed)
+            .await
+            .unwrap();
+
+        assert!(start.elapsed() > SNAPSHOT_CATCH_UP_DEADLINE);
+        assert_eq!(
+            sent.watermarks,
+            HashMap::from([("slow".to_string(), target)])
+        );
     }
 
     #[tokio::test]
