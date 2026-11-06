@@ -170,9 +170,24 @@ impl StatusBar {
                 // Refresh system info
                 cache_for_task.lock().refresh();
 
-                // Notify to re-render
-                let result = this.update(cx, |_this, cx| {
+                // Notify to re-render, extension widgets included: GPUI Fast
+                // does not redraw them with the bar, and several show times
+                // relative to now.
+                let result = this.update(cx, |this, cx| {
                     cx.notify();
+                    let widgets: Vec<EntityId> = this
+                        .active_extensions
+                        .values()
+                        .flat_map(|inst| {
+                            inst.status_bar_widgets
+                                .iter()
+                                .chain(&inst.status_bar_right_widgets)
+                        })
+                        .map(AnyView::entity_id)
+                        .collect();
+                    for widget in widgets {
+                        App::notify(cx, widget);
+                    }
                 });
 
                 if result.is_err() {
