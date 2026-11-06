@@ -483,21 +483,6 @@ impl ServiceManager {
     }
 }
 
-/// Remove a launch's terminal model unless a newer launch replaced it.
-fn release_launch_terminal(
-    terminals: &TerminalsRegistry,
-    terminal_id: &str,
-    terminal: &Arc<Terminal>,
-) {
-    let mut registry = terminals.lock();
-    if registry
-        .get(terminal_id)
-        .is_some_and(|registered| Arc::ptr_eq(registered, terminal))
-    {
-        registry.remove(terminal_id);
-    }
-}
-
 impl ServiceManager {
     pub fn new(backend: Arc<dyn TerminalBackend>, terminals: TerminalsRegistry) -> Self {
         Self {

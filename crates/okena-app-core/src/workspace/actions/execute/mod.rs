@@ -772,13 +772,7 @@ pub fn ensure_terminal(
         }
         Err(e) => {
             log::error!("Failed to auto-spawn terminal {}: {}", terminal_id, e);
-            let mut registry = terminals.lock();
-            if registry
-                .get(terminal_id)
-                .is_some_and(|registered| Arc::ptr_eq(registered, &terminal))
-            {
-                registry.remove(terminal_id);
-            }
+            okena_terminal::release_terminal(terminals, terminal_id, &terminal);
             None
         }
     }

@@ -376,7 +376,7 @@ impl ServiceManager {
                 })
                 .unwrap_or((false, true));
             if !accepted {
-                super::release_launch_terminal(&terminals, &terminal_id, &terminal);
+                okena_terminal::release_terminal(&terminals, &terminal_id, &terminal);
                 let mut cleanup_ids: std::collections::HashSet<String> = actual_id
                     .into_iter()
                     .filter(|actual_id| actual_id != &terminal_id || cleanup_requested)
