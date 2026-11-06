@@ -11,7 +11,7 @@ use crate::syntax::HighlightedSpan;
 use crate::theme::theme;
 use gpui::prelude::*;
 use gpui::*;
-use gpui_component::scroll::{ScrollableElement, Scrollbar, ScrollbarShow};
+use gpui_component::scroll::{ScrollableElement, Scrollbar, ScrollbarMode};
 use gpui_component::{h_flex, v_flex};
 use okena_core::theme::ThemeColors;
 use okena_markdown::{MarkdownTextRun, RenderedNode, RenderedTextUnit};
@@ -46,7 +46,7 @@ fn markdown_table_scrollbar(id: impl Into<ElementId>, scroll_handle: &ScrollHand
     div().absolute().inset_0().child(
         Scrollbar::horizontal(scroll_handle)
             .id(id)
-            .scrollbar_show(ScrollbarShow::Always),
+            .mode(ScrollbarMode::Always),
     )
 }
 
@@ -57,7 +57,7 @@ fn source_horizontal_scrollbar(
     div().absolute().inset_0().child(
         Scrollbar::horizontal(scroll_handle)
             .id(id)
-            .scrollbar_show(ScrollbarShow::Always),
+            .mode(ScrollbarMode::Always),
     )
 }
 
@@ -1328,11 +1328,6 @@ impl FileViewer {
 
 impl Render for FileViewer {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // Schedule a background freshness check for externally modified files
-        // (throttled to 1/sec). Cheap on the render thread — the stat and any
-        // reload/re-highlight run on the background executor.
-        self.check_active_tab_freshness(cx);
-
         let t = theme(cx);
         let focus_handle = self.focus_handle.clone();
         let tab = self.active_tab();
@@ -2795,7 +2790,7 @@ mod markdown_selection_tests {
         let scroll_area_bounds = vcx
             .debug_bounds("test-markdown-table-container")
             .expect("table scroll area should be rendered");
-        vcx.simulate_event(gpui::ScrollWheelEvent {
+        vcx.simulate_event(gpui::ScrollEvent {
             position: scroll_area_bounds.center(),
             delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.0), px(-20.0))),
             ..Default::default()
@@ -2806,7 +2801,7 @@ mod markdown_selection_tests {
             "vertical wheel input must not move the horizontal scrollbar"
         );
 
-        vcx.simulate_event(gpui::ScrollWheelEvent {
+        vcx.simulate_event(gpui::ScrollEvent {
             position: scroll_area_bounds.center(),
             delta: gpui::ScrollDelta::Pixels(gpui::point(px(-20.0), px(0.0))),
             modifiers: gpui::Modifiers {

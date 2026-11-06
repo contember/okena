@@ -423,7 +423,7 @@ impl Okena {
                     height: px(300.0),
                 }),
                 app_id: Some("okena".to_string()),
-                ..Default::default()
+                ..crate::app::base_window_options()
             },
             |window, cx| {
                 let view = cx.new(|cx| {

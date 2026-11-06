@@ -74,7 +74,7 @@ where
                 width: px(400.0),
                 height: px(300.0),
             }),
-            ..Default::default()
+            ..crate::app::base_window_options()
         },
         move |window, cx| {
             let view =

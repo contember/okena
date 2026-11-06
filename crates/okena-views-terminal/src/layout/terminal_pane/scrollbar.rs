@@ -4,9 +4,11 @@ use gpui::*;
 use okena_files::theme::theme;
 use okena_terminal::terminal::Terminal;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 const BUTTON_ZONE_HEIGHT: f32 = 24.0;
+/// How long the scrollbar stays visible after scroll activity.
+const SHOW_AFTER_ACTIVITY: Duration = Duration::from_millis(1500);
 
 pub struct Scrollbar {
     terminal: Option<Arc<Terminal>>,
@@ -14,6 +16,8 @@ pub struct Scrollbar {
     drag_start_y: Option<f32>,
     drag_start_offset: Option<usize>,
     last_activity: Instant,
+    /// Redraws once the scrollbar should have faded out.
+    fade: Task<()>,
     element_bounds: Option<Bounds<Pixels>>,
     hovered: bool,
 }
@@ -26,6 +30,7 @@ impl Scrollbar {
             drag_start_y: None,
             drag_start_offset: None,
             last_activity: Instant::now(),
+            fade: Task::ready(()),
             element_bounds: None,
             hovered: false,
         }
@@ -39,15 +44,24 @@ impl Scrollbar {
         self.dragging
     }
 
-    pub fn mark_activity(&mut self) {
+    pub fn mark_activity(&mut self, cx: &mut Context<Self>) {
+        self.touch(cx);
+        cx.notify();
+    }
+
+    fn touch(&mut self, cx: &mut Context<Self>) {
         self.last_activity = Instant::now();
+        self.fade = cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(SHOW_AFTER_ACTIVITY).await;
+            this.update(cx, |_, cx| cx.notify()).ok();
+        });
     }
 
     fn should_show(&self) -> bool {
         if self.dragging || self.hovered {
             return true;
         }
-        self.last_activity.elapsed().as_millis() < 1500
+        self.last_activity.elapsed() < SHOW_AFTER_ACTIVITY
     }
 
     fn has_scroll_content(&self) -> bool {
@@ -83,7 +97,7 @@ impl Scrollbar {
             self.dragging = true;
             self.drag_start_y = Some(y);
             self.drag_start_offset = Some(terminal.display_offset());
-            self.last_activity = Instant::now();
+            self.touch(cx);
             cx.notify();
         }
     }
@@ -110,7 +124,7 @@ impl Scrollbar {
                 (start_offset as i32 + delta_lines).clamp(0, scrollable_lines as i32) as usize;
             terminal.scroll_to(new_offset);
 
-            self.last_activity = Instant::now();
+            self.touch(cx);
             cx.notify();
         }
     }
@@ -134,14 +148,14 @@ impl Scrollbar {
             let new_offset = (ratio * scrollable_lines as f32).round() as usize;
             terminal.scroll_to(new_offset);
 
-            self.last_activity = Instant::now();
+            self.touch(cx);
             cx.notify();
         }
     }
 
     fn handle_mouse_down(&mut self, event: &MouseDownEvent, cx: &mut Context<Self>) {
         cx.stop_propagation();
-        self.last_activity = Instant::now();
+        self.touch(cx);
 
         if let Some(bounds) = self.element_bounds {
             let relative_y = f32::from(event.position.y) - f32::from(bounds.origin.y);
@@ -176,14 +190,14 @@ impl Scrollbar {
                     if total_lines > visible_lines {
                         terminal.scroll_to(total_lines - visible_lines);
                     }
-                    self.last_activity = Instant::now();
+                    self.touch(cx);
                     cx.notify();
                 }
             } else if relative_y > content_height - zone
                 && let Some(ref terminal) = self.terminal
             {
                 terminal.scroll_to(0);
-                self.last_activity = Instant::now();
+                self.touch(cx);
                 cx.notify();
             }
         }
@@ -195,8 +209,10 @@ impl Scrollbar {
     }
 }
 
-impl Render for Scrollbar {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+impl Scrollbar {
+    /// Drawn inside the terminal content's element tree, which observes this
+    /// entity: the thumb follows output whenever the content redraws.
+    pub fn element(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let t = theme(cx);
 
         if !self.has_scroll_content() {
@@ -343,5 +359,36 @@ impl Render for Scrollbar {
                 .size_full(),
             )
             .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{SHOW_AFTER_ACTIVITY, Scrollbar};
+    use gpui::{AppContext as _, TestAppContext};
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    #[gpui::test]
+    fn scroll_activity_redraws_again_once_the_scrollbar_should_fade(cx: &mut TestAppContext) {
+        let scrollbar = cx.new(Scrollbar::new);
+        let notifies = Rc::new(Cell::new(0));
+        cx.update(|cx| {
+            let notifies = notifies.clone();
+            cx.observe(&scrollbar, move |_, _| notifies.set(notifies.get() + 1))
+                .detach();
+        });
+
+        scrollbar.update(cx, |scrollbar, cx| scrollbar.mark_activity(cx));
+        cx.run_until_parked();
+        assert_eq!(notifies.get(), 1, "activity shows the scrollbar at once");
+
+        cx.executor().advance_clock(SHOW_AFTER_ACTIVITY);
+        cx.run_until_parked();
+        assert_eq!(
+            notifies.get(),
+            2,
+            "nothing else redraws an idle terminal, so the fade needs its own frame"
+        );
     }
 }
