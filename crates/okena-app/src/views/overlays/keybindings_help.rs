@@ -173,7 +173,6 @@ impl KeybindingsHelp {
                 .title("Clean keybindings?")
                 .description("Remove default entries and reformat keybindings.json? Custom shortcuts are kept; unrecognized fields are omitted.")
                 .button_props(DialogButtonProps::default().ok_text("Clean keybindings").cancel_text("Cancel").show_cancel(true))
-                .overlay_closable(false)
                 .on_ok(move |_, _, cx| {
                     if let Some(this) = confirm.upgrade() {
                         this.update(cx, |this, cx| {
@@ -424,7 +423,7 @@ impl KeybindingsHelp {
             return;
         }
 
-        let config_str = keystroke_to_config_string(keystroke);
+        let config_str = keystroke_to_config_string(keystroke, cx.platform_info().os);
         if !KeybindingEntry::new(&config_str, None).is_supported_on(ShortcutPlatform::current()) {
             self._chord_timer = None;
             self.recording_generation += 1;
@@ -542,7 +541,8 @@ impl KeybindingsHelp {
         context: Option<String>,
         cx: &mut Context<Self>,
     ) {
-        if crate::keybindings::create_keybinding(action, "ctrl-f12", context.as_deref()).is_none()
+        if crate::keybindings::create_keybinding(action, "ctrl-f12", context.as_deref(), cx)
+            .is_none()
             || !self.can_save(cx)
         {
             return;
@@ -822,8 +822,7 @@ impl KeybindingsHelp {
                         // Determine context from first entry for "add" button
                         let entry_context = search::default_context(action, &get_config());
                         let can_bind =
-                            crate::keybindings::create_keybinding(action, "ctrl-f12", None)
-                                .is_some();
+                            crate::keybindings::action_for_name(action).is_some();
 
                         div()
                             .when(i > 0, |d| d.border_t_1().border_color(rgb(t.border)))
@@ -1262,7 +1261,10 @@ impl Render for KeybindingsHelp {
                     .when(self.capture.is_some(), |d| {
                         d.child(
                             div().px(px(16.0)).py(px(10.0)).child(
-                                self.capture.as_ref().map(|q| q.label()).unwrap_or_default(),
+                                self.capture
+                                    .as_ref()
+                                    .map(|q| q.label(cx.platform_info().os))
+                                    .unwrap_or_default(),
                             ),
                         )
                     })
@@ -1502,9 +1504,12 @@ mod capture_tests {
             window
                 .update(cx, |_, window, cx| {
                     if answer {
-                        window.dispatch_action(Box::new(gpui_component::dialog::ConfirmDialog), cx);
+                        window.dispatch_action(
+                            Box::new(gpui_component::dialog::Confirm { secondary: false }),
+                            cx,
+                        );
                     } else {
-                        window.dispatch_action(Box::new(gpui_component::dialog::CancelDialog), cx);
+                        window.dispatch_action(Box::new(gpui_component::dialog::Cancel), cx);
                     }
                 })
                 .unwrap();
@@ -1648,7 +1653,7 @@ mod capture_tests {
                         .capture
                         .as_ref()
                         .unwrap()
-                        .label()
+                        .label(gpui::OperatingSystem::Linux)
                         .contains("Waiting")
                 );
                 window.dispatch_event(
@@ -1664,7 +1669,7 @@ mod capture_tests {
                         .capture
                         .as_ref()
                         .unwrap()
-                        .label()
+                        .label(gpui::OperatingSystem::Linux)
                         .contains("Waiting")
                 );
                 assert_eq!(actions.get(), 0);

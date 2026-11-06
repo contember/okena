@@ -1,37 +1,19 @@
-//! Shared window root and component dialog layer for every desktop window.
+//! Shared window root for every desktop window; it hosts the component dialog layer.
 
-use gpui::{
-    AnyView, AppContext as _, Context, IntoElement, ParentElement, Render, Styled, Window, div,
-};
+#[cfg(target_os = "linux")]
+use gpui::AppContext as _;
+use gpui::{AnyView, Context, Window};
 use gpui_component::Root;
 
-struct WindowContent {
-    view: AnyView,
-}
-
-impl Render for WindowContent {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .relative()
-            .size_full()
-            .child(self.view.clone())
-            .children(Root::render_dialog_layer(window, cx))
-    }
-}
-
 /// Keep the component root outermost for `WindowExt` on all platforms.
-/// Linux retains its existing resize wrapper without enabling `window_border`.
+/// Linux retains its existing resize wrapper inside it.
 pub fn new_root(view: impl Into<AnyView>, window: &mut Window, cx: &mut Context<Root>) -> Root {
     let view = view.into();
     #[cfg(target_os = "linux")]
     let view: AnyView = cx
         .new(|cx| crate::simple_root::SimpleRoot::new(view, window, cx))
         .into();
-    let content = cx.new(|_| WindowContent { view });
-    let root = Root::new(content, window, cx);
-    #[cfg(target_os = "linux")]
-    let root = root.bordered(false);
-    root
+    Root::new(view, window, cx)
 }
 
 #[cfg(test)]

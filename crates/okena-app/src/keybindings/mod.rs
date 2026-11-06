@@ -4,6 +4,7 @@ mod types;
 
 use gpui::*;
 use parking_lot::RwLock;
+use std::rc::Rc;
 
 pub use config::{
     KeybindingConfig, get_keybindings_path, load_keybindings, parse_keybindings,
@@ -108,8 +109,8 @@ pub fn reset_to_defaults(expected: Option<&str>) -> anyhow::Result<String> {
 /// Convert a GPUI Keystroke to the config string format (e.g., "cmd-shift-d")
 /// GPUI's unparse() uses "super-" on Linux for the platform modifier,
 /// but our config format uses "cmd-" for cross-platform consistency.
-pub fn keystroke_to_config_string(keystroke: &gpui::Keystroke) -> String {
-    let unparsed = keystroke.unparse();
+pub fn keystroke_to_config_string(keystroke: &gpui::Keystroke, os: OperatingSystem) -> String {
+    let unparsed = keystroke.unparse(os);
     // Normalize platform modifier names to "cmd-" for config consistency
     unparsed.replace("super-", "cmd-").replace("win-", "cmd-")
 }
@@ -418,13 +419,15 @@ pub fn register_keybindings(cx: &mut App) {
 
 /// Register keybindings from a configuration
 fn register_bindings_from_config(cx: &mut App, config: &KeybindingConfig) {
-    bind_managed_keys(
-        cx,
-        bindings_for_platform(config, ShortcutPlatform::current()),
-    );
+    let bindings = bindings_for_platform(config, ShortcutPlatform::current(), cx);
+    bind_managed_keys(cx, bindings);
 }
 
-fn bindings_for_platform(config: &KeybindingConfig, platform: ShortcutPlatform) -> Vec<KeyBinding> {
+fn bindings_for_platform(
+    config: &KeybindingConfig,
+    platform: ShortcutPlatform,
+    cx: &App,
+) -> Vec<KeyBinding> {
     let mut bindings = Vec::new();
     for (action, entries) in &config.bindings {
         for entry in entries {
@@ -432,7 +435,7 @@ fn bindings_for_platform(config: &KeybindingConfig, platform: ShortcutPlatform) 
                 continue;
             }
             if let Some(binding) =
-                create_keybinding(action, &entry.keystroke, entry.context.as_deref())
+                create_keybinding(action, &entry.keystroke, entry.context.as_deref(), cx)
             {
                 bindings.push(binding);
             }
@@ -446,118 +449,113 @@ pub(crate) fn create_keybinding(
     action: &str,
     keystroke: &str,
     context: Option<&str>,
+    cx: &App,
 ) -> Option<KeyBinding> {
-    if keystroke.trim().is_empty()
-        || keystroke == "unset"
-        || keystroke
-            .split_whitespace()
-            .any(|key| Keystroke::parse(key).is_err())
-        || context.is_some_and(|context| KeyBindingContextPredicate::parse(context).is_err())
-    {
+    if keystroke.trim().is_empty() || keystroke == "unset" {
         log::warn!("Ignoring invalid keybinding for {action}");
         return None;
     }
+    let action_box = action_for_name(action)?;
+    let predicate = match context.map(KeyBindingContextPredicate::parse) {
+        None => None,
+        Some(Ok(predicate)) => Some(Rc::new(predicate)),
+        Some(Err(err)) => {
+            log::warn!("Invalid context in keybinding for {action}: {err}");
+            return None;
+        }
+    };
+    match KeyBinding::load(keystroke, action_box, predicate, false, None, cx) {
+        Ok(binding) => Some(binding),
+        Err(err) => {
+            log::warn!("Invalid keystroke in keybinding for {action}: {err}");
+            None
+        }
+    }
+}
 
-    // Map action names to actual actions
+/// The action a keybinding config entry names, or `None` for an unknown name.
+pub(crate) fn action_for_name(action: &str) -> Option<Box<dyn Action>> {
     match action {
-        "Quit" => Some(KeyBinding::new(keystroke, Quit, context)),
-        "Cancel" => Some(KeyBinding::new(keystroke, Cancel, context)),
-        "SendEscape" => Some(KeyBinding::new(keystroke, SendEscape, context)),
-        "ToggleSidebar" => Some(KeyBinding::new(keystroke, ToggleSidebar, context)),
-        "ToggleSidebarAutoHide" => Some(KeyBinding::new(keystroke, ToggleSidebarAutoHide, context)),
-        "ToggleFullscreen" => Some(KeyBinding::new(keystroke, ToggleFullscreen, context)),
-        "FullscreenNextTerminal" => {
-            Some(KeyBinding::new(keystroke, FullscreenNextTerminal, context))
-        }
-        "FullscreenPrevTerminal" => {
-            Some(KeyBinding::new(keystroke, FullscreenPrevTerminal, context))
-        }
-        "SplitVertical" => Some(KeyBinding::new(keystroke, SplitVertical, context)),
-        "SplitHorizontal" => Some(KeyBinding::new(keystroke, SplitHorizontal, context)),
-        "AddTab" => Some(KeyBinding::new(keystroke, AddTab, context)),
-        "CloseTerminal" => Some(KeyBinding::new(keystroke, CloseTerminal, context)),
-        "MinimizeTerminal" => Some(KeyBinding::new(keystroke, MinimizeTerminal, context)),
-        "ExportTerminalBuffer" => Some(KeyBinding::new(keystroke, ExportTerminalBuffer, context)),
-        "DetachTerminal" => Some(KeyBinding::new(keystroke, DetachTerminal, context)),
-        "ToggleUnread" => Some(KeyBinding::new(keystroke, ToggleUnread, context)),
-        "FocusNextTerminal" => Some(KeyBinding::new(keystroke, FocusNextTerminal, context)),
-        "FocusPrevTerminal" => Some(KeyBinding::new(keystroke, FocusPrevTerminal, context)),
-        "FocusLeft" => Some(KeyBinding::new(keystroke, FocusLeft, context)),
-        "FocusRight" => Some(KeyBinding::new(keystroke, FocusRight, context)),
-        "FocusUp" => Some(KeyBinding::new(keystroke, FocusUp, context)),
-        "FocusDown" => Some(KeyBinding::new(keystroke, FocusDown, context)),
-        "NewProject" => Some(KeyBinding::new(keystroke, NewProject, context)),
-        "CreateWorktree" => Some(KeyBinding::new(keystroke, CreateWorktree, context)),
-        "ClearFocus" => Some(KeyBinding::new(keystroke, ClearFocus, context)),
-        "FocusActiveProject" => Some(KeyBinding::new(keystroke, FocusActiveProject, context)),
-        "Copy" => Some(KeyBinding::new(keystroke, Copy, context)),
-        "AnnotateSelection" => Some(KeyBinding::new(
-            keystroke,
-            okena_views_terminal::actions::AnnotateSelection,
-            context,
-        )),
-        "Paste" => Some(KeyBinding::new(keystroke, Paste, context)),
-        "ScrollUp" => Some(KeyBinding::new(keystroke, ScrollUp, context)),
-        "ScrollDown" => Some(KeyBinding::new(keystroke, ScrollDown, context)),
-        "Search" => Some(KeyBinding::new(keystroke, Search, context)),
-        "SearchNext" => Some(KeyBinding::new(keystroke, SearchNext, context)),
-        "SearchPrev" => Some(KeyBinding::new(keystroke, SearchPrev, context)),
-        "JumpToPreviousPrompt" => Some(KeyBinding::new(keystroke, JumpToPreviousPrompt, context)),
-        "JumpToNextPrompt" => Some(KeyBinding::new(keystroke, JumpToNextPrompt, context)),
-        "JumpToPreviousFailedCommand" => Some(KeyBinding::new(
-            keystroke,
-            JumpToPreviousFailedCommand,
-            context,
-        )),
-        "JumpToNextFailedCommand" => {
-            Some(KeyBinding::new(keystroke, JumpToNextFailedCommand, context))
-        }
-        "CloseSearch" => Some(KeyBinding::new(keystroke, CloseSearch, context)),
-        "ShowKeybindings" => Some(KeyBinding::new(keystroke, ShowKeybindings, context)),
-        "ShowWhatsNew" => Some(KeyBinding::new(keystroke, ShowWhatsNew, context)),
-        "ShowSessionManager" => Some(KeyBinding::new(keystroke, ShowSessionManager, context)),
-        "ShowThemeSelector" => Some(KeyBinding::new(keystroke, ShowThemeSelector, context)),
-        "ShowCommandPalette" => Some(KeyBinding::new(keystroke, ShowCommandPalette, context)),
-        "ShowSettings" => Some(KeyBinding::new(keystroke, ShowSettings, context)),
-        "OpenSettingsFile" => Some(KeyBinding::new(keystroke, OpenSettingsFile, context)),
-        "ShowFileSearch" => Some(KeyBinding::new(keystroke, ShowFileSearch, context)),
-        "ShowContentSearch" => Some(KeyBinding::new(keystroke, ShowContentSearch, context)),
-        "ShowProjectSwitcher" => Some(KeyBinding::new(keystroke, ShowProjectSwitcher, context)),
-        "ShowDiffViewer" => Some(KeyBinding::new(keystroke, ShowDiffViewer, context)),
-        "ReviewChanges" => Some(KeyBinding::new(keystroke, ReviewChanges, context)),
-        "SendTab" => Some(KeyBinding::new(keystroke, SendTab, context)),
-        "ZoomIn" => Some(KeyBinding::new(keystroke, ZoomIn, context)),
-        "ZoomOut" => Some(KeyBinding::new(keystroke, ZoomOut, context)),
-        "ResetZoom" => Some(KeyBinding::new(keystroke, ResetZoom, context)),
-        "CheckForUpdates" => Some(KeyBinding::new(keystroke, CheckForUpdates, context)),
-        "InstallUpdate" => Some(KeyBinding::new(keystroke, InstallUpdate, context)),
-        "ExpandActiveProjects" => Some(KeyBinding::new(keystroke, ExpandActiveProjects, context)),
-        "CollapseActiveProjects" => {
-            Some(KeyBinding::new(keystroke, CollapseActiveProjects, context))
-        }
-        "FocusSidebar" => Some(KeyBinding::new(keystroke, FocusSidebar, context)),
-        "SidebarUp" => Some(KeyBinding::new(keystroke, SidebarUp, context)),
-        "SidebarDown" => Some(KeyBinding::new(keystroke, SidebarDown, context)),
-        "SidebarConfirm" => Some(KeyBinding::new(keystroke, SidebarConfirm, context)),
-        "SidebarToggleExpand" => Some(KeyBinding::new(keystroke, SidebarToggleExpand, context)),
-        "SidebarEscape" => Some(KeyBinding::new(keystroke, SidebarEscape, context)),
-        "ShowPairingDialog" => Some(KeyBinding::new(keystroke, ShowPairingDialog, context)),
-        "TogglePaneSwitcher" => Some(KeyBinding::new(keystroke, TogglePaneSwitcher, context)),
-        "StartAllServices" => Some(KeyBinding::new(keystroke, StartAllServices, context)),
-        "StopAllServices" => Some(KeyBinding::new(keystroke, StopAllServices, context)),
-        "EqualizeLayout" => Some(KeyBinding::new(keystroke, EqualizeLayout, context)),
-        "ToggleProjectLayout" => Some(KeyBinding::new(keystroke, ToggleProjectLayout, context)),
-        "ToggleProjectVisibility" => {
-            Some(KeyBinding::new(keystroke, ToggleProjectVisibility, context))
-        }
-        "ShowBranchSwitcher" => Some(KeyBinding::new(keystroke, ShowBranchSwitcher, context)),
-        "ShowProfileManager" => Some(KeyBinding::new(keystroke, ShowProfileManager, context)),
-        "ShowLogConsole" => Some(KeyBinding::new(keystroke, ShowLogConsole, context)),
-        "ShowAiProxyActivity" => Some(KeyBinding::new(keystroke, ShowAiProxyActivity, context)),
-        "ToggleStatusLanes" => Some(KeyBinding::new(keystroke, ToggleStatusLanes, context)),
-        "NewWindow" => Some(KeyBinding::new(keystroke, NewWindow, context)),
-        "ShowHookLog" => Some(KeyBinding::new(keystroke, ShowHookLog, context)),
-        "RestartDaemon" => Some(KeyBinding::new(keystroke, RestartDaemon, context)),
+        "Quit" => Some(Box::new(Quit)),
+        "Cancel" => Some(Box::new(Cancel)),
+        "SendEscape" => Some(Box::new(SendEscape)),
+        "ToggleSidebar" => Some(Box::new(ToggleSidebar)),
+        "ToggleSidebarAutoHide" => Some(Box::new(ToggleSidebarAutoHide)),
+        "ToggleFullscreen" => Some(Box::new(ToggleFullscreen)),
+        "FullscreenNextTerminal" => Some(Box::new(FullscreenNextTerminal)),
+        "FullscreenPrevTerminal" => Some(Box::new(FullscreenPrevTerminal)),
+        "SplitVertical" => Some(Box::new(SplitVertical)),
+        "SplitHorizontal" => Some(Box::new(SplitHorizontal)),
+        "AddTab" => Some(Box::new(AddTab)),
+        "CloseTerminal" => Some(Box::new(CloseTerminal)),
+        "MinimizeTerminal" => Some(Box::new(MinimizeTerminal)),
+        "ExportTerminalBuffer" => Some(Box::new(ExportTerminalBuffer)),
+        "DetachTerminal" => Some(Box::new(DetachTerminal)),
+        "ToggleUnread" => Some(Box::new(ToggleUnread)),
+        "FocusNextTerminal" => Some(Box::new(FocusNextTerminal)),
+        "FocusPrevTerminal" => Some(Box::new(FocusPrevTerminal)),
+        "FocusLeft" => Some(Box::new(FocusLeft)),
+        "FocusRight" => Some(Box::new(FocusRight)),
+        "FocusUp" => Some(Box::new(FocusUp)),
+        "FocusDown" => Some(Box::new(FocusDown)),
+        "NewProject" => Some(Box::new(NewProject)),
+        "CreateWorktree" => Some(Box::new(CreateWorktree)),
+        "ClearFocus" => Some(Box::new(ClearFocus)),
+        "FocusActiveProject" => Some(Box::new(FocusActiveProject)),
+        "Copy" => Some(Box::new(Copy)),
+        "AnnotateSelection" => Some(Box::new(okena_views_terminal::actions::AnnotateSelection)),
+        "Paste" => Some(Box::new(Paste)),
+        "ScrollUp" => Some(Box::new(ScrollUp)),
+        "ScrollDown" => Some(Box::new(ScrollDown)),
+        "Search" => Some(Box::new(Search)),
+        "SearchNext" => Some(Box::new(SearchNext)),
+        "SearchPrev" => Some(Box::new(SearchPrev)),
+        "JumpToPreviousPrompt" => Some(Box::new(JumpToPreviousPrompt)),
+        "JumpToNextPrompt" => Some(Box::new(JumpToNextPrompt)),
+        "JumpToPreviousFailedCommand" => Some(Box::new(JumpToPreviousFailedCommand)),
+        "JumpToNextFailedCommand" => Some(Box::new(JumpToNextFailedCommand)),
+        "CloseSearch" => Some(Box::new(CloseSearch)),
+        "ShowKeybindings" => Some(Box::new(ShowKeybindings)),
+        "ShowWhatsNew" => Some(Box::new(ShowWhatsNew)),
+        "ShowSessionManager" => Some(Box::new(ShowSessionManager)),
+        "ShowThemeSelector" => Some(Box::new(ShowThemeSelector)),
+        "ShowCommandPalette" => Some(Box::new(ShowCommandPalette)),
+        "ShowSettings" => Some(Box::new(ShowSettings)),
+        "OpenSettingsFile" => Some(Box::new(OpenSettingsFile)),
+        "ShowFileSearch" => Some(Box::new(ShowFileSearch)),
+        "ShowContentSearch" => Some(Box::new(ShowContentSearch)),
+        "ShowProjectSwitcher" => Some(Box::new(ShowProjectSwitcher)),
+        "ShowDiffViewer" => Some(Box::new(ShowDiffViewer)),
+        "ReviewChanges" => Some(Box::new(ReviewChanges)),
+        "SendTab" => Some(Box::new(SendTab)),
+        "ZoomIn" => Some(Box::new(ZoomIn)),
+        "ZoomOut" => Some(Box::new(ZoomOut)),
+        "ResetZoom" => Some(Box::new(ResetZoom)),
+        "CheckForUpdates" => Some(Box::new(CheckForUpdates)),
+        "InstallUpdate" => Some(Box::new(InstallUpdate)),
+        "ExpandActiveProjects" => Some(Box::new(ExpandActiveProjects)),
+        "CollapseActiveProjects" => Some(Box::new(CollapseActiveProjects)),
+        "FocusSidebar" => Some(Box::new(FocusSidebar)),
+        "SidebarUp" => Some(Box::new(SidebarUp)),
+        "SidebarDown" => Some(Box::new(SidebarDown)),
+        "SidebarConfirm" => Some(Box::new(SidebarConfirm)),
+        "SidebarToggleExpand" => Some(Box::new(SidebarToggleExpand)),
+        "SidebarEscape" => Some(Box::new(SidebarEscape)),
+        "ShowPairingDialog" => Some(Box::new(ShowPairingDialog)),
+        "TogglePaneSwitcher" => Some(Box::new(TogglePaneSwitcher)),
+        "StartAllServices" => Some(Box::new(StartAllServices)),
+        "StopAllServices" => Some(Box::new(StopAllServices)),
+        "EqualizeLayout" => Some(Box::new(EqualizeLayout)),
+        "ToggleProjectLayout" => Some(Box::new(ToggleProjectLayout)),
+        "ToggleProjectVisibility" => Some(Box::new(ToggleProjectVisibility)),
+        "ShowBranchSwitcher" => Some(Box::new(ShowBranchSwitcher)),
+        "ShowProfileManager" => Some(Box::new(ShowProfileManager)),
+        "ShowLogConsole" => Some(Box::new(ShowLogConsole)),
+        "ShowAiProxyActivity" => Some(Box::new(ShowAiProxyActivity)),
+        "ToggleStatusLanes" => Some(Box::new(ToggleStatusLanes)),
+        "NewWindow" => Some(Box::new(NewWindow)),
+        "ShowHookLog" => Some(Box::new(ShowHookLog)),
+        "RestartDaemon" => Some(Box::new(RestartDaemon)),
         _ => {
             log::warn!("Unknown action in keybinding config: {}", action);
             None
@@ -577,8 +575,8 @@ mod escape_binding_tests {
     use super::{KeybindingConfig, KeybindingEntry, ShortcutPlatform, bindings_for_platform};
     use gpui::AsKeystroke;
 
-    #[test]
-    fn registration_filters_platforms() {
+    #[gpui::test]
+    fn registration_filters_platforms(cx: &mut gpui::TestAppContext) {
         for platform in [
             ShortcutPlatform::Mac,
             ShortcutPlatform::Windows,
@@ -600,7 +598,7 @@ mod escape_binding_tests {
                     entries.clone(),
                 )]),
             };
-            let bindings = bindings_for_platform(&config, platform);
+            let bindings = cx.update(|cx| bindings_for_platform(&config, platform, cx));
             assert_eq!(bindings.len(), 1);
             let expected = if platform == ShortcutPlatform::Mac {
                 "cmd-d"
@@ -614,23 +612,25 @@ mod escape_binding_tests {
         }
     }
 
-    #[test]
-    fn custom_win_bindings_and_chords_never_register_on_windows() {
+    #[gpui::test]
+    fn custom_win_bindings_and_chords_never_register_on_windows(cx: &mut gpui::TestAppContext) {
         for source in ["cmd-alt-left", "win-x", "super-x", "ctrl-k cmd-s"] {
             let entry = KeybindingEntry::new(source, None);
             let config = KeybindingConfig {
                 version: 1,
                 bindings: std::collections::HashMap::from([("Quit".into(), vec![entry])]),
             };
-            assert!(bindings_for_platform(&config, ShortcutPlatform::Windows).is_empty());
-            assert_eq!(
-                bindings_for_platform(&config, ShortcutPlatform::Mac).len(),
-                1
-            );
-            assert_eq!(
-                bindings_for_platform(&config, ShortcutPlatform::Linux).len(),
-                1
-            );
+            cx.update(|cx| {
+                assert!(bindings_for_platform(&config, ShortcutPlatform::Windows, cx).is_empty());
+                assert_eq!(
+                    bindings_for_platform(&config, ShortcutPlatform::Mac, cx).len(),
+                    1
+                );
+                assert_eq!(
+                    bindings_for_platform(&config, ShortcutPlatform::Linux, cx).len(),
+                    1
+                );
+            });
         }
     }
 

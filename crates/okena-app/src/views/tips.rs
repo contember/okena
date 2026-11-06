@@ -365,7 +365,7 @@ mod tests {
     fn every_keyboard_tip_has_a_binding_in_its_documented_default_context(
         cx: &mut gpui::TestAppContext,
     ) {
-        use gpui::{DummyKeyboardMapper, KeyBinding, KeyBindingContextPredicate};
+        use gpui::{KeyBinding, KeyBindingContextPredicate};
         let defaults = crate::keybindings::KeybindingConfig::defaults();
         cx.update(|cx| {
             for tip in TIPS {
@@ -389,7 +389,7 @@ mod tests {
                         context,
                         false,
                         None,
-                        &DummyKeyboardMapper,
+                        cx,
                     )
                     .unwrap()]);
                 }

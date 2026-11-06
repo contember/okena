@@ -4,7 +4,7 @@
 
 # Okena
 
-A fast, native terminal multiplexer built in Rust with [GPUI](https://github.com/zed-industries/zed/tree/main/crates/gpui) (the UI framework from Zed editor).
+A fast, native terminal multiplexer built in Rust with [GPUI Fast](https://github.com/longbridge/gpui-fast), a retained-mode build of [GPUI](https://github.com/zed-industries/zed/tree/main/crates/gpui) (the UI framework from Zed editor).
 Tabs, splits, detachable windows, command palette, and automatic workspace restore.
 
 ## Installation
@@ -209,7 +209,7 @@ Settings are stored in the platform's config directory (macOS: `~/Library/Applic
 
 ## Dependencies
 
-- **GPUI** + **gpui-component** - UI framework
+- **GPUI Fast** + **GPUI Kit** - UI framework
 - **alacritty_terminal** - Terminal emulation
 - **portable-pty** - PTY management
 - **smol** - Async runtime
