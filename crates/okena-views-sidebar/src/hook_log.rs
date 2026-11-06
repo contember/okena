@@ -42,6 +42,13 @@ impl HookLog {
                             this.history = monitor.history();
                             this.last_version = current_version;
                             cx.notify();
+                        } else if this
+                            .history
+                            .iter()
+                            .any(|execution| matches!(execution.status, HookStatus::Running))
+                        {
+                            // A running hook shows its elapsed time.
+                            cx.notify();
                         }
                     }
                 });
