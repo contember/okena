@@ -17,6 +17,7 @@ pub use context::{ServiceAsyncCx, ServiceCx, ServiceHandle};
 use crate::config::ServiceDefinition;
 use okena_terminal::TerminalsRegistry;
 use okena_terminal::backend::TerminalBackend;
+use okena_terminal::terminal::{Terminal, TerminalSize};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -482,6 +483,21 @@ impl ServiceManager {
     }
 }
 
+/// Remove a launch's terminal model unless a newer launch replaced it.
+fn release_launch_terminal(
+    terminals: &TerminalsRegistry,
+    terminal_id: &str,
+    terminal: &Arc<Terminal>,
+) {
+    let mut registry = terminals.lock();
+    if registry
+        .get(terminal_id)
+        .is_some_and(|registered| Arc::ptr_eq(registered, terminal))
+    {
+        registry.remove(terminal_id);
+    }
+}
+
 impl ServiceManager {
     pub fn new(backend: Arc<dyn TerminalBackend>, terminals: TerminalsRegistry) -> Self {
         Self {
@@ -504,6 +520,22 @@ impl ServiceManager {
             port_detection_active: HashMap::new(),
             port_detection_running: false,
         }
+    }
+
+    /// Register a launching terminal's model before its PTY starts. The PTY
+    /// reader publishes output as soon as it reads it, and output for a
+    /// terminal without a model is lost.
+    fn register_launch_terminal(&self, terminal_id: &str, cwd: &str) -> Arc<Terminal> {
+        let terminal = Arc::new(Terminal::new(
+            terminal_id.to_string(),
+            TerminalSize::default(),
+            self.backend.transport(),
+            cwd.to_string(),
+        ));
+        self.terminals
+            .lock()
+            .insert(terminal_id.to_string(), terminal.clone());
+        terminal
     }
 
     /// Get the current mapping of service_name -> terminal_id for a project.
