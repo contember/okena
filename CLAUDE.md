@@ -88,7 +88,7 @@ Everything lives in `crates/`; `src/` is only the binary entry point.
 | `okena-app` | Desktop UI/app layer: GPUI views, app coordinator, keybindings, action dispatch. The `okena` binary is a thin shell over this. |
 | `okena-app-core` | Headless app-logic layer: global observable settings + action-execution glue over the workspace. No views. |
 | `okena-daemon-core` | GPUI-free daemon core: tokio reactor impls, observer reactor, PTY loop, git poller, command loop, `DaemonCore`. |
-| `okena-daemon` | Standalone GPUI-free daemon binary. Gate: `cargo tree -i gpui -p okena-daemon` must stay empty. |
+| `okena-daemon` | Standalone GPUI-free daemon binary. Gate: `cargo tree -p okena-daemon -e no-dev --prefix none -f '{p}' | grep '^gpui'` must print nothing. |
 | `okena-ai` | GPUI-free Claude account pool proxy, run as `okena --ai-proxy`; outlives the daemon. |
 | `okena-remote-server` | The HTTP/WS server itself: routes, auth/pairing, PTY broadcaster, daemon bridge, local-daemon discovery. |
 | `okena-cli` | `okena <subcommand>` — controls a running instance over the remote HTTP API. Gated before GUI startup in `main.rs`. |
