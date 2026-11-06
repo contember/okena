@@ -23,7 +23,7 @@ enum UpdateTone {
     Error,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct UpdatePresentation {
     title: String,
     detail: String,
@@ -99,14 +99,42 @@ fn update_presentation(status: &UpdateStatus, confirmed_current: bool) -> Update
 pub struct AboutModal {
     focus_handle: FocusHandle,
     confirmed_current: bool,
+    /// The update card as last drawn, to redraw when the shared update state
+    /// moves on.
+    shown_update: Option<UpdatePresentation>,
 }
 
 impl AboutModal {
     pub fn new(cx: &mut Context<Self>) -> Self {
+        // The status widget's poll writes the shared update state without
+        // notifying this modal; follow it at the poll's fastest cadence.
+        cx.spawn(async move |this: WeakEntity<Self>, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(500))
+                    .await;
+                let updated = this.update(cx, |this, cx| {
+                    if this.update_presentation(cx) != this.shown_update {
+                        cx.notify();
+                    }
+                });
+                if updated.is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
+
         Self {
             focus_handle: cx.focus_handle(),
             confirmed_current: false,
+            shown_update: None,
         }
+    }
+
+    fn update_presentation(&self, cx: &App) -> Option<UpdatePresentation> {
+        cx.try_global::<GlobalUpdateInfo>()
+            .map(|global| update_presentation(&global.0.status(), self.confirmed_current))
     }
 
     fn close(&self, cx: &mut Context<Self>) {
@@ -430,8 +458,10 @@ impl Render for AboutModal {
             )
             .into_any_element();
 
-        let update_card = update_info
-            .map(|info| update_presentation(&info.status(), self.confirmed_current))
+        self.shown_update = self.update_presentation(cx);
+        let update_card = self
+            .shown_update
+            .clone()
             .map(|update| self.render_update_card(update, &t, cx));
 
         let links = div()
