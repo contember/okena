@@ -27,6 +27,8 @@ pub struct DetachedTerminalView {
     should_close: bool,
     /// Terminal content view (handles selection, context menu, etc.)
     content: Entity<TerminalContent>,
+    /// The OSC title the header shows, to redraw it when output changes it.
+    shown_osc_title: Option<String>,
 }
 
 impl DetachedTerminalView {
@@ -80,6 +82,15 @@ impl DetachedTerminalView {
         );
         crate::register_content_pane(terminal_id.clone(), content.downgrade());
 
+        // Output that redraws the content does not redraw this view, which
+        // shows the terminal's OSC title in its header.
+        cx.observe(&content, |this, _, cx| {
+            if this.terminal.title() != this.shown_osc_title {
+                cx.notify();
+            }
+        })
+        .detach();
+
         // Observe workspace for changes (to detect when re-attached)
         let terminal_id_for_observer = terminal_id.clone();
         cx.observe(&workspace, move |this, workspace, cx| {
@@ -106,6 +117,7 @@ impl DetachedTerminalView {
             pending_focus: true,
             should_close: false,
             content,
+            shown_osc_title: None,
         }
     }
 
@@ -167,8 +179,10 @@ impl Render for DetachedTerminalView {
         let t = theme(cx);
         let focus_handle = self.focus_handle.clone();
 
+        self.shown_osc_title = self.terminal.title();
         let terminal_name = self.terminal_display_name(cx);
         self.sync_window_title(window, cx);
+
         let is_maximized = window.is_maximized();
         let needs_controls = okena_ui::modal::detached_needs_controls(window);
 
