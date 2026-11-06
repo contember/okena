@@ -757,14 +757,17 @@ impl WindowView {
                         canvas(
                             {
                                 let container_bounds = container_bounds.clone();
-                                let is_grid = mode.is_grid();
+                                let view = cx.entity().downgrade();
                                 move |bounds, window, _cx| {
                                     let resized = container_bounds.borrow().size != bounds.size;
                                     *container_bounds.borrow_mut() = bounds;
-                                    // Tile columns derive from this size: render
-                                    // once more so a resize reflows the grid.
-                                    if resized && is_grid {
-                                        window.on_next_frame(|window, _| window.refresh());
+                                    // Column widths and tile columns derive from
+                                    // this size: render once more so a resize
+                                    // reflows them.
+                                    if resized {
+                                        window.on_next_frame(move |_, cx| {
+                                            view.update(cx, |_, cx| cx.notify()).ok();
+                                        });
                                     }
                                 }
                             },
