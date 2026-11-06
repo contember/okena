@@ -21,6 +21,21 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+/// What every okena window is opened with before its own options.
+///
+/// Okena paces frames itself: terminal activity in `present_paced_repaints`,
+/// unfocused windows through `UnfocusedWindowPacer`. GPUI Fast's own caps for
+/// inactive windows, low-power mode and thermal pressure are turned off, so a
+/// focused window keeps the cadence terminal output arrives at.
+pub fn base_window_options() -> WindowOptions {
+    WindowOptions {
+        inactive_frame_interval: None,
+        low_power_frame_interval: None,
+        thermal_frame_interval: None,
+        ..Default::default()
+    }
+}
+
 /// Repaint-only terminal activity is limited to one app-wide presentation frame.
 /// A ~50 FPS terminal scene keeps interactive output responsive without allowing
 /// independent TUI animations to drive the same OS window at aggregate rates.
