@@ -407,11 +407,12 @@ impl Sidebar {
                     .read(cx)
                     .worktree_child_ids(&project_id)
                     .is_empty();
+                let window_id = self.window_id;
                 let workspace = self.workspace.clone();
                 if has_worktrees {
                     self.focus_manager.update(cx, |fm, cx| {
                         workspace.update(cx, |ws, cx| {
-                            ws.set_focused_project(fm, Some(project_id.clone()), cx);
+                            ws.set_focused_project(fm, window_id, Some(project_id.clone()), cx);
                         });
                         cx.notify();
                     });

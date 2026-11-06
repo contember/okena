@@ -75,5 +75,15 @@ impl SettingsPanel {
                         cx,
                     )),
             )
+            .child(section_header("Project Focus", &t, cx))
+            .child(section_container(&t).child(Self::render_toggle_with_desc(
+                "wt-show-hidden-when-focused",
+                "Show hidden worktrees",
+                "Focusing a project also shows its worktrees hidden with the eye toggle",
+                wt.show_hidden_when_focused,
+                false,
+                |state, val, cx| state.set_worktree_show_hidden_when_focused(val, cx),
+                cx,
+            )))
     }
 }

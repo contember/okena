@@ -624,6 +624,12 @@ impl SettingsState {
         self.save_and_notify(cx);
     }
 
+    /// Set whether focusing a project also shows its hidden worktrees
+    pub fn set_worktree_show_hidden_when_focused(&mut self, value: bool, cx: &mut Context<Self>) {
+        self.settings.worktree.show_hidden_when_focused = value;
+        self.save_and_notify(cx);
+    }
+
     /// Replace the local mirror without publishing the change back to the daemon.
     pub fn replace_from_daemon(&mut self, mut settings: AppSettings, cx: &mut Context<Self>) {
         settings.remote_connections = self.settings.remote_connections.clone();

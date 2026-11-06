@@ -307,9 +307,15 @@ impl Okena {
         // Create workspace entity. The GUI is always a thin daemon client: the
         // daemon owns persistence + the instance lock and is the single writer,
         // so the GUI's `Workspace` is a pure mirror with no autosave.
+        let show_hidden_worktrees_when_focused = crate::settings::settings_entity(cx)
+            .read(cx)
+            .settings
+            .worktree
+            .show_hidden_when_focused;
         let workspace = cx.new(|_cx| {
             let mut workspace = Workspace::new(workspace_data);
             workspace.seed_client_project_layouts(client_project_layouts);
+            workspace.set_show_hidden_worktrees_when_focused(show_hidden_worktrees_when_focused);
             workspace
         });
         cx.set_global(GlobalWorkspace(workspace.clone()));
@@ -436,6 +442,23 @@ impl Okena {
             }
         })
         .detach();
+
+        // Keep the workspace's copy of `worktree.show_hidden_when_focused` in
+        // step with settings — both local edits and ones the daemon pushes —
+        // so every window's visible-project set follows the toggle live.
+        {
+            let workspace = workspace.clone();
+            let settings = crate::settings::settings_entity(cx);
+            cx.observe(&settings, move |_this, settings, cx| {
+                let show = settings.read(cx).settings.worktree.show_hidden_when_focused;
+                workspace.update(cx, |ws, cx| {
+                    if ws.set_show_hidden_worktrees_when_focused(show) {
+                        cx.notify();
+                    }
+                });
+            })
+            .detach();
+        }
 
         // Fire OS notifications for remote (daemon-served) terminals. Their PTY
         // output never reaches the local PTY event loop above — it arrives over
