@@ -2,7 +2,8 @@
 // internal WsOutbound DTOs whose Serialize impls cannot fail in practice.
 #![allow(clippy::expect_used)]
 
-use crate::bridge::{BridgeMessage, CommandResult, RemoteCommand};
+use crate::bridge::{BridgeMessage, BridgeSender, CommandResult, RemoteCommand};
+use crate::pty_broadcaster::PtyBroadcaster;
 use crate::routes::{AppState, PeerInfo};
 use crate::types::{
     ActionRequest, ApiSystemStats, FRAME_TYPE_INPUT, FRAME_TYPE_SNAPSHOT, WsInbound, WsOutbound,
@@ -20,6 +21,7 @@ use sysinfo::System;
 use tokio::sync::{broadcast, mpsc};
 
 const SYSTEM_STATS_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
+const SNAPSHOT_CATCH_UP_DEADLINE: Duration = Duration::from_secs(2);
 
 fn output_is_newer(watermarks: &HashMap<String, u64>, terminal_id: &str, sequence: u64) -> bool {
     sequence > watermarks.get(terminal_id).copied().unwrap_or(0)
@@ -891,17 +893,25 @@ async fn drain_post_snapshot(
 }
 
 /// Send snapshot frames for the given terminal IDs via the mpsc channel.
+///
+/// A terminal the daemon cannot snapshot is skipped on its own; only a closed
+/// channel or bridge ends the connection.
 async fn send_snapshots(
     out_tx: &mpsc::Sender<Message>,
-    state: &AppState,
+    bridge_tx: &BridgeSender,
+    broadcaster: &PtyBroadcaster,
     terminal_ids: &[String],
     subscribed_ids: &HashMap<String, u32>,
 ) -> Result<HashMap<String, u64>, ()> {
     let mut watermarks = HashMap::new();
     for id in terminal_ids {
         if let Some(&stream_id) = subscribed_ids.get(id) {
-            let target_sequence = state.broadcaster.last_published_sequence(id);
-            let (data, sequence) = render_snapshot_after(state, id, target_sequence).await?;
+            let target_sequence = broadcaster.last_published_sequence(id);
+            let Some((data, sequence)) =
+                render_snapshot_after(bridge_tx, id, target_sequence).await?
+            else {
+                continue;
+            };
             let frame = build_binary_frame(FRAME_TYPE_SNAPSHOT, stream_id, &data);
             if out_tx.send(Message::Binary(frame.into())).await.is_err() {
                 return Err(());
@@ -912,16 +922,21 @@ async fn send_snapshots(
     Ok(watermarks)
 }
 
+/// Render a snapshot that includes output up to `target_sequence`.
+///
+/// Returns `Ok(None)` when the daemon has no snapshot for the terminal. When
+/// the terminal model never reaches the target (its output was published but
+/// never applied), the latest snapshot is returned after a deadline: it is the
+/// daemon's whole knowledge of the terminal.
 async fn render_snapshot_after(
-    state: &AppState,
+    bridge_tx: &BridgeSender,
     terminal_id: &str,
     target_sequence: u64,
-) -> Result<(Vec<u8>, u64), ()> {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+) -> Result<Option<(Vec<u8>, u64)>, ()> {
+    let deadline = tokio::time::Instant::now() + SNAPSHOT_CATCH_UP_DEADLINE;
     loop {
         let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-        state
-            .bridge_tx
+        bridge_tx
             .send(BridgeMessage {
                 command: RemoteCommand::RenderSnapshot {
                     terminal_id: terminal_id.to_string(),
@@ -930,17 +945,21 @@ async fn render_snapshot_after(
             })
             .await
             .map_err(|_| ())?;
-        let Ok(CommandResult::OkSnapshot { data, sequence }) = reply_rx.await else {
-            return Err(());
+        let (data, sequence) = match reply_rx.await.map_err(|_| ())? {
+            CommandResult::OkSnapshot { data, sequence } => (data, sequence),
+            other => {
+                log::warn!("Terminal {terminal_id} has no snapshot, skipping it: {other:?}");
+                return Ok(None);
+            }
         };
         if sequence >= target_sequence {
-            return Ok((data, sequence));
+            return Ok(Some((data, sequence)));
         }
         if tokio::time::Instant::now() >= deadline {
             log::warn!(
-                "Terminal {terminal_id} snapshot stopped at sequence {sequence}, expected {target_sequence}"
+                "Terminal {terminal_id} snapshot stopped at sequence {sequence}, expected {target_sequence}; sending it as is"
             );
-            return Err(());
+            return Ok(Some((data, sequence)));
         }
         tokio::time::sleep(Duration::from_millis(1)).await;
     }
@@ -955,7 +974,14 @@ async fn send_snapshots_and_reconcile(
     connection_owner_id: &str,
 ) -> Result<HashMap<String, u64>, ()> {
     loop {
-        let watermarks = send_snapshots(out_tx, state, terminal_ids, subscribed_ids).await?;
+        let watermarks = send_snapshots(
+            out_tx,
+            &state.bridge_tx,
+            &state.broadcaster,
+            terminal_ids,
+            subscribed_ids,
+        )
+        .await?;
         match drain_post_snapshot(
             out_tx,
             pty_rx,
@@ -1051,5 +1077,103 @@ mod tests {
         assert_eq!(frame_type, okena_core::ws::FRAME_TYPE_PTY);
         assert_eq!(stream_id, 7);
         assert_eq!(payload, b"new");
+    }
+
+    /// Answers `RenderSnapshot` like the daemon: a snapshot at the given
+    /// sequence for known terminals, an error for unknown ones.
+    fn spawn_snapshot_bridge(terminals: HashMap<&'static str, u64>) -> BridgeSender {
+        let (bridge_tx, bridge_rx) = crate::bridge::bridge_channel();
+        tokio::spawn(async move {
+            while let Ok(message) = bridge_rx.recv().await {
+                let RemoteCommand::RenderSnapshot { terminal_id } = message.command else {
+                    continue;
+                };
+                let result = match terminals.get(terminal_id.as_str()) {
+                    Some(&sequence) => CommandResult::OkSnapshot {
+                        data: terminal_id.clone().into_bytes(),
+                        sequence,
+                    },
+                    None => CommandResult::Err(format!("terminal not found: {terminal_id}")),
+                };
+                if let Some(reply) = message.reply {
+                    let _ = reply.send(result);
+                }
+            }
+        });
+        bridge_tx
+    }
+
+    fn snapshot_payloads(out_rx: &mut mpsc::Receiver<Message>) -> Vec<(u32, Vec<u8>)> {
+        let mut payloads = Vec::new();
+        while let Ok(message) = out_rx.try_recv() {
+            let Message::Binary(frame) = message else {
+                panic!("expected snapshot frame");
+            };
+            let (frame_type, stream_id, payload) = parse_binary_frame(&frame).unwrap();
+            assert_eq!(frame_type, FRAME_TYPE_SNAPSHOT);
+            payloads.push((stream_id, payload.to_vec()));
+        }
+        payloads
+    }
+
+    #[tokio::test]
+    async fn a_terminal_without_snapshot_is_skipped_and_the_others_still_get_theirs() {
+        let bridge_tx = spawn_snapshot_bridge(HashMap::from([("a", 0), ("c", 0)]));
+        let broadcaster = PtyBroadcaster::new();
+        let (out_tx, mut out_rx) = mpsc::channel(8);
+        let ids = ["a", "missing", "c"].map(String::from);
+        let subscribed = HashMap::from([
+            ("a".to_string(), 1),
+            ("missing".to_string(), 2),
+            ("c".to_string(), 3),
+        ]);
+
+        let watermarks = send_snapshots(&out_tx, &bridge_tx, &broadcaster, &ids, &subscribed)
+            .await
+            .expect("one terminal's failure must not end the connection");
+
+        assert_eq!(
+            snapshot_payloads(&mut out_rx),
+            vec![(1, b"a".to_vec()), (3, b"c".to_vec())]
+        );
+        assert_eq!(
+            watermarks,
+            HashMap::from([("a".to_string(), 0), ("c".to_string(), 0)])
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_snapshot_that_never_catches_up_is_sent_as_is_after_the_deadline() {
+        // The broadcaster published output the terminal model never applied.
+        let broadcaster = PtyBroadcaster::new();
+        let published = broadcaster.publish("stuck".to_string(), b"lost".to_vec());
+        let bridge_tx = spawn_snapshot_bridge(HashMap::from([("stuck", 0)]));
+        let (out_tx, mut out_rx) = mpsc::channel(8);
+        let ids = ["stuck".to_string()];
+        let subscribed = HashMap::from([("stuck".to_string(), 4)]);
+
+        let watermarks = send_snapshots(&out_tx, &bridge_tx, &broadcaster, &ids, &subscribed)
+            .await
+            .expect("a lagging terminal must not end the connection");
+
+        assert!(published > 0);
+        assert_eq!(snapshot_payloads(&mut out_rx), vec![(4, b"stuck".to_vec())]);
+        assert_eq!(watermarks, HashMap::from([("stuck".to_string(), 0)]));
+    }
+
+    #[tokio::test]
+    async fn a_closed_bridge_still_ends_the_connection() {
+        let (bridge_tx, bridge_rx) = crate::bridge::bridge_channel();
+        drop(bridge_rx);
+        let broadcaster = PtyBroadcaster::new();
+        let (out_tx, _out_rx) = mpsc::channel(8);
+        let ids = ["a".to_string()];
+        let subscribed = HashMap::from([("a".to_string(), 1)]);
+
+        assert!(
+            send_snapshots(&out_tx, &bridge_tx, &broadcaster, &ids, &subscribed)
+                .await
+                .is_err()
+        );
     }
 }
