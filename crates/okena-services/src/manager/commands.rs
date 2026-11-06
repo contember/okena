@@ -8,9 +8,7 @@ use crate::port_detect;
 use okena_core::process::is_process_alive;
 use okena_terminal::backend::TerminalLaunchPlan;
 use okena_terminal::shell_config::ShellType;
-use okena_terminal::terminal::{Terminal, TerminalSize};
 use std::path::Path;
-use std::sync::Arc;
 use std::time::Duration;
 
 /// Compose mutations may legitimately pull or build images, but must not own
@@ -135,7 +133,6 @@ impl ServiceManager {
         key: &(String, String),
         launch_token: &OkenaLaunchToken,
         terminal_id: &str,
-        cwd: &str,
         cx: &mut impl ServiceCx,
     ) -> bool {
         if !self.is_okena_launch_current(key, launch_token) {
@@ -154,15 +151,6 @@ impl ServiceManager {
             return false;
         }
 
-        let terminal = Arc::new(Terminal::new(
-            terminal_id.to_string(),
-            TerminalSize::default(),
-            self.backend.transport(),
-            cwd.to_string(),
-        ));
-        self.terminals
-            .lock()
-            .insert(terminal_id.to_string(), terminal);
         if running {
             if let Some(instance) = self.instances.get_mut(key) {
                 instance.status = ServiceStatus::Running;
@@ -332,9 +320,11 @@ impl ServiceManager {
         instance.terminal_id = Some(terminal_id.clone());
         self.terminal_to_service
             .insert(terminal_id.clone(), key.clone());
+        let terminal = self.register_launch_terminal(&terminal_id, &cwd);
         cx.notify();
 
         let backend = self.backend.clone();
+        let terminals = self.terminals.clone();
         let project_id = project_id.to_string();
         let service_name = service_name.to_string();
         let project_path = project_path.to_string();
@@ -363,7 +353,6 @@ impl ServiceManager {
                             &key,
                             &launch_token,
                             &terminal_id,
-                            &cwd,
                             cx,
                         )
                     {
@@ -407,6 +396,7 @@ impl ServiceManager {
                 .unwrap_or((false, true));
 
             if !accepted {
+                okena_terminal::release_terminal(&terminals, &terminal_id, &terminal);
                 let mut cleanup_ids: std::collections::HashSet<String> = actual_id
                     .into_iter()
                     .filter(|actual_id| actual_id != &terminal_id || cleanup_requested)

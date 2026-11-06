@@ -68,4 +68,5 @@ libc = "0.2"
 okena-transport = { path = "../okena-transport", features = ["blocking-http"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "blocking"] }
 tempfile = "3"
+tokio = { version = "1", features = ["test-util"] }
 tokio-tungstenite = "0.24"

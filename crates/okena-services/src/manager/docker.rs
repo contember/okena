@@ -7,7 +7,6 @@ use super::{
 use crate::config::ServiceDefinition;
 use crate::docker_compose;
 use okena_terminal::shell_config::ShellType;
-use okena_terminal::terminal::{Terminal, TerminalSize};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -331,6 +330,7 @@ impl ServiceManager {
         instance.terminal_id = Some(terminal_id.clone());
         self.terminal_to_service
             .insert(terminal_id.clone(), key.clone());
+        let terminal = self.register_launch_terminal(&terminal_id, &project_path);
         cx.notify();
 
         let backend = self.backend.clone();
@@ -363,17 +363,7 @@ impl ServiceManager {
                         );
                     }
                     match &result {
-                        Ok(returned_id) if returned_id == &terminal_id => {
-                            let terminal = Arc::new(Terminal::new(
-                                terminal_id.clone(),
-                                TerminalSize::default(),
-                                backend.transport(),
-                                project_path.clone(),
-                            ));
-                            terminals.lock().insert(terminal_id.clone(), terminal);
-                            cx.notify();
-                            (true, false)
-                        }
+                        Ok(returned_id) if returned_id == &terminal_id => (true, false),
                         _ => {
                             this.terminal_to_service.remove(&terminal_id);
                             if let Some(instance) = this.instances.get_mut(&key) {
@@ -386,6 +376,7 @@ impl ServiceManager {
                 })
                 .unwrap_or((false, true));
             if !accepted {
+                okena_terminal::release_terminal(&terminals, &terminal_id, &terminal);
                 let mut cleanup_ids: std::collections::HashSet<String> = actual_id
                     .into_iter()
                     .filter(|actual_id| actual_id != &terminal_id || cleanup_requested)

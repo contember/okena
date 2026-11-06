@@ -22,3 +22,19 @@ use std::sync::Arc;
 /// Shared terminals registry for PTY event routing.
 /// Maps terminal ID → Terminal instance.
 pub type TerminalsRegistry = Arc<Mutex<HashMap<String, Arc<terminal::Terminal>>>>;
+
+/// Remove `terminal` from the registry unless another model has replaced it
+/// under the same id since.
+pub fn release_terminal(
+    terminals: &TerminalsRegistry,
+    terminal_id: &str,
+    terminal: &Arc<terminal::Terminal>,
+) {
+    let mut registry = terminals.lock();
+    if registry
+        .get(terminal_id)
+        .is_some_and(|registered| Arc::ptr_eq(registered, terminal))
+    {
+        registry.remove(terminal_id);
+    }
+}

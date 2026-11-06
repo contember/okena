@@ -1561,13 +1561,7 @@ fn starting_launch_completes_after_same_project_reload() {
         manager.pending_okena_launches.get(&key),
         Some(&launch_token)
     );
-    assert!(manager.complete_okena_terminal_launch(
-        &key,
-        &launch_token,
-        &terminal_id,
-        path,
-        &mut cx,
-    ));
+    assert!(manager.complete_okena_terminal_launch(&key, &launch_token, &terminal_id, &mut cx,));
     assert_eq!(manager.instances[&key].status, ServiceStatus::Running);
     assert!(manager.terminals.lock().contains_key(&terminal_id));
     assert_eq!(manager.terminal_to_service.get(&terminal_id), Some(&key));
@@ -1713,14 +1707,12 @@ fn replacement_launch_rejects_completion_from_reused_terminal_id() {
         &key,
         &stale_token,
         "reused-terminal",
-        path,
         &mut cx,
     ));
     assert!(manager.complete_okena_terminal_launch(
         &key,
         &current_token,
         "reused-terminal",
-        path,
         &mut cx,
     ));
     assert_eq!(manager.instances[&key].status, ServiceStatus::Running);
@@ -1776,4 +1768,81 @@ fn project_path_update_retries_after_parse_failure() {
     project.write_config("services: []\n");
     assert!(manager.update_project_path("project", &new_path, &mut cx));
     assert_eq!(manager.project_path("project"), Some(&new_path));
+}
+
+#[test]
+fn a_launching_service_terminal_has_a_model_before_its_pty_starts() {
+    let path = "/project";
+    let mut manager = manager();
+    let mut cx = RecordingCx::default();
+    manager.project_paths.insert("project".into(), path.into());
+    manager.begin_project_incarnation("project", path);
+    let (key, mut instance) = make_instance("project", "web", false, 0, ServiceStatus::Stopped);
+    instance.terminal_id = None;
+    manager.instances.insert(key.clone(), instance);
+
+    // `RecordingCx` never runs the launch task, so the PTY is not started yet.
+    manager.begin_okena_terminal_launch(
+        "project",
+        "web",
+        path,
+        "persisted-terminal".into(),
+        OkenaLaunchFailure::Reconnect { auto_start: false },
+        &mut cx,
+    );
+
+    assert!(
+        manager.terminals.lock().contains_key("persisted-terminal"),
+        "output read right after the PTY starts needs a model to land in"
+    );
+}
+
+#[test]
+fn a_stale_launch_keeps_the_model_of_the_launch_that_replaced_it() {
+    let path = "/project";
+    let (mut manager, _plans_rx) = recording_manager();
+    manager.project_paths.insert("project".into(), path.into());
+    manager.begin_project_incarnation("project", path);
+    let (key, mut instance) = make_instance("project", "web", false, 0, ServiceStatus::Stopped);
+    instance.terminal_id = None;
+    manager.instances.insert(key.clone(), instance);
+
+    let executor = Rc::new(smol::LocalExecutor::new());
+    let service_manager = Rc::new(RefCell::new(manager));
+    let handle = ExecutingHandle {
+        manager: Rc::downgrade(&service_manager),
+        executor: executor.clone(),
+        notifications: Arc::new(AtomicUsize::new(0)),
+    };
+
+    smol::block_on(executor.run(async {
+        let mut cx = ExecutingCx { handle };
+        for _ in 0..2 {
+            service_manager.borrow_mut().begin_okena_terminal_launch(
+                "project",
+                "web",
+                path,
+                "reused-terminal".into(),
+                OkenaLaunchFailure::Crashed,
+                &mut cx,
+            );
+        }
+        let replacement = service_manager.borrow().terminals.lock()["reused-terminal"].clone();
+
+        while service_manager
+            .borrow()
+            .pending_okena_launches
+            .contains_key(&key)
+        {
+            smol::Timer::after(Duration::from_millis(1)).await;
+        }
+
+        let manager = service_manager.borrow();
+        assert_eq!(manager.instances[&key].status, ServiceStatus::Running);
+        let registered = manager.terminals.lock().get("reused-terminal").cloned();
+        assert!(
+            registered.is_some_and(|registered| Arc::ptr_eq(&registered, &replacement)),
+            "the stale launch must not release the replacement's model"
+        );
+    }));
 }
