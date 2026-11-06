@@ -121,7 +121,7 @@ impl Okena {
                     width: px(300.0),
                     height: px(200.0),
                 }),
-                ..Default::default()
+                ..crate::app::base_window_options()
             },
             move |window, cx| {
                 let detached_view = cx.new(|cx: &mut Context<DetachedTerminalView>| {
