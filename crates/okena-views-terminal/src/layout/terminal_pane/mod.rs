@@ -151,15 +151,15 @@ impl<D: ActionDispatch + Send + Sync> TerminalPane<D> {
     ) {
         match event {
             SearchBarEvent::Closed => {
-                self.content.update(cx, |content, _| {
-                    content.set_search_highlights(Arc::new(Vec::new()), None);
+                self.content.update(cx, |content, cx| {
+                    content.set_search_highlights(Arc::new(Vec::new()), None, cx);
                 });
                 self.pending_focus = true;
                 cx.notify();
             }
             SearchBarEvent::MatchesChanged(matches, idx) => {
-                self.content.update(cx, |content, _| {
-                    content.set_search_highlights(matches.clone(), *idx);
+                self.content.update(cx, |content, cx| {
+                    content.set_search_highlights(matches.clone(), *idx, cx);
                 });
                 cx.notify();
             }
