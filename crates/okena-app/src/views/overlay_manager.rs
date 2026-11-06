@@ -440,6 +440,11 @@ pub struct OverlayManager {
     /// TypeId of the active modal for toggle detection.
     modal_type_id: Option<std::any::TypeId>,
 
+    /// The entity whose events may close the active modal. A modal that was
+    /// replaced can still emit a close (its view outlives the slot until the
+    /// next frame), which must not close its successor.
+    modal_owner: Option<EntityId>,
+
     /// Detach closure for the active modal, if it supports detaching.
     detach_active_modal_fn: Option<DetachFn>,
 
@@ -478,6 +483,7 @@ impl OverlayManager {
             request_broker,
             active_modal: None,
             modal_type_id: None,
+            modal_owner: None,
             detach_active_modal_fn: None,
             active_project_inspector: None,
             cached_project_inspectors: std::collections::HashMap::new(),
@@ -517,6 +523,7 @@ impl OverlayManager {
         if self.active_modal.is_some() {
             self.active_modal = None;
             self.modal_type_id = None;
+            self.modal_owner = None;
             self.detach_active_modal_fn = None;
             self.active_project_inspector = None;
             // Clear any project-panel hover highlight published by the Switch
@@ -533,6 +540,14 @@ impl OverlayManager {
         }
     }
 
+    /// Close the active modal on an event from `emitter`, unless another
+    /// modal has replaced it since.
+    fn close_modal_from(&mut self, emitter: EntityId, cx: &mut Context<Self>) {
+        if self.modal_owner == Some(emitter) {
+            self.close_modal(cx);
+        }
+    }
+
     /// Check if the active modal is of a specific type.
     fn is_modal<T: 'static>(&self) -> bool {
         self.modal_type_id == Some(std::any::TypeId::of::<T>())
@@ -544,6 +559,7 @@ impl OverlayManager {
     fn open_modal<T: Render + 'static>(&mut self, entity: Entity<T>, cx: &mut Context<Self>) {
         self.hide_send_composer(cx);
         self.close_modal(cx);
+        self.modal_owner = Some(entity.entity_id());
         self.active_modal = Some(entity.into());
         self.modal_type_id = Some(std::any::TypeId::of::<T>());
         let workspace = self.workspace.clone();
@@ -589,6 +605,7 @@ impl OverlayManager {
         self.close_modal(cx);
         self.active_modal = Some(active_view);
         self.modal_type_id = Some(std::any::TypeId::of::<T>());
+        self.modal_owner = Some(entity.entity_id());
 
         let title = title.into();
         let entity_for_detach = entity.clone();
@@ -598,6 +615,7 @@ impl OverlayManager {
                 // Clear modal slot — entity stays alive via the new window.
                 this.active_modal = None;
                 this.modal_type_id = None;
+                this.modal_owner = None;
                 this.detach_active_modal_fn = None;
                 let workspace = this.workspace.clone();
                 this.focus_manager.update(cx, |fm, cx| {
@@ -693,10 +711,10 @@ impl OverlayManager {
         let entity = cx.new(AboutModal::new);
         cx.subscribe(
             &entity,
-            |this, _, event: &AboutModalEvent, cx| match event {
-                AboutModalEvent::Close => this.close_modal(cx),
+            |this, emitter, event: &AboutModalEvent, cx| match event {
+                AboutModalEvent::Close => this.close_modal_from(emitter.entity_id(), cx),
                 AboutModalEvent::ShowWhatsNew => {
-                    this.close_modal(cx);
+                    this.close_modal_from(emitter.entity_id(), cx);
                     this.open_whats_new(cx);
                 }
             },
@@ -735,9 +753,9 @@ impl OverlayManager {
             let entity = cx.new(KeybindingsHelp::new);
             cx.subscribe(
                 &entity,
-                |this, _, event: &KeybindingsHelpEvent, cx| match event {
+                |this, emitter, event: &KeybindingsHelpEvent, cx| match event {
                     KeybindingsHelpEvent::Close => {
-                        this.close_modal(cx);
+                        this.close_modal_from(emitter.entity_id(), cx);
                     }
                     KeybindingsHelpEvent::ReloadBindings => {
                         crate::keybindings::reload_keybindings(cx);
@@ -817,8 +835,8 @@ impl OverlayManager {
     fn subscribe_settings_panel(&mut self, entity: &Entity<SettingsPanel>, cx: &mut Context<Self>) {
         cx.subscribe(
             entity,
-            |this, _, event: &SettingsPanelEvent, cx| match event {
-                SettingsPanelEvent::Close => this.close_modal(cx),
+            |this, emitter, event: &SettingsPanelEvent, cx| match event {
+                SettingsPanelEvent::Close => this.close_modal_from(emitter.entity_id(), cx),
                 SettingsPanelEvent::ProjectHooksChanged { project_id, hooks } => {
                     cx.emit(OverlayManagerEvent::ProjectHooksChanged {
                         project_id: project_id.clone(),
@@ -861,9 +879,9 @@ impl OverlayManager {
             self.close_modal(cx);
         } else {
             let entity = cx.new(|cx| PairingDialog::new(endpoint, cx));
-            cx.subscribe(&entity, |this, _, event: &PairingDialogEvent, cx| {
+            cx.subscribe(&entity, |this, emitter, event: &PairingDialogEvent, cx| {
                 if event.is_close() {
-                    this.close_modal(cx);
+                    this.close_modal_from(emitter.entity_id(), cx);
                 }
             })
             .detach();
@@ -895,17 +913,17 @@ impl OverlayManager {
             let entity = cx.new(|cx| ProjectSwitcher::new(window_id, workspace, cx));
             cx.subscribe(
                 &entity,
-                |this, _, event: &ProjectSwitcherEvent, cx| match event {
+                |this, emitter, event: &ProjectSwitcherEvent, cx| match event {
                     ProjectSwitcherEvent::Close => {
-                        this.close_modal(cx);
+                        this.close_modal_from(emitter.entity_id(), cx);
                     }
                     ProjectSwitcherEvent::FocusProject(project_id) => {
                         cx.emit(OverlayManagerEvent::FocusProject(project_id.clone()));
-                        this.close_modal(cx);
+                        this.close_modal_from(emitter.entity_id(), cx);
                     }
                     ProjectSwitcherEvent::JumpToProject(project_id) => {
                         cx.emit(OverlayManagerEvent::JumpToProject(project_id.clone()));
-                        this.close_modal(cx);
+                        this.close_modal_from(emitter.entity_id(), cx);
                     }
                     ProjectSwitcherEvent::ToggleVisibility(project_id) => {
                         cx.emit(OverlayManagerEvent::ToggleProjectVisibility(
@@ -934,19 +952,22 @@ impl OverlayManager {
             self.close_modal(cx);
         } else {
             let manager = cx.new(|cx| SessionManager::new(client, cx));
-            cx.subscribe(&manager, |this, _, event: &SessionManagerEvent, cx| {
-                match event {
-                    SessionManagerEvent::Close => {
-                        this.close_modal(cx);
+            cx.subscribe(
+                &manager,
+                |this, emitter, event: &SessionManagerEvent, cx| {
+                    match event {
+                        SessionManagerEvent::Close => {
+                            this.close_modal_from(emitter.entity_id(), cx);
+                        }
+                        SessionManagerEvent::Action(action) => {
+                            cx.emit(OverlayManagerEvent::SessionAction(action.clone()));
+                            // Load/import close the manager (state swaps); save/export
+                            // are quick fire-and-forget — close in all cases.
+                            this.close_modal_from(emitter.entity_id(), cx);
+                        }
                     }
-                    SessionManagerEvent::Action(action) => {
-                        cx.emit(OverlayManagerEvent::SessionAction(action.clone()));
-                        // Load/import close the manager (state swaps); save/export
-                        // are quick fire-and-forget — close in all cases.
-                        this.close_modal(cx);
-                    }
-                }
-            })
+                },
+            )
             .detach();
             self.open_modal(manager, cx);
         }
@@ -964,13 +985,13 @@ impl OverlayManager {
             let manager = cx.new(ProfileManager::new);
             cx.subscribe(
                 &manager,
-                |this, _, event: &ProfileManagerEvent, cx| match event {
+                |this, emitter, event: &ProfileManagerEvent, cx| match event {
                     ProfileManagerEvent::Close => {
-                        this.close_modal(cx);
+                        this.close_modal_from(emitter.entity_id(), cx);
                     }
                     ProfileManagerEvent::SwitchProfile(id) => {
                         cx.emit(OverlayManagerEvent::SwitchProfile(id.clone()));
-                        this.close_modal(cx);
+                        this.close_modal_from(emitter.entity_id(), cx);
                     }
                 },
             )
@@ -995,9 +1016,9 @@ impl OverlayManager {
         let entity = cx.new(|cx| ShellSelectorOverlay::new(current_shell, context, cx));
         cx.subscribe(
             &entity,
-            move |this, _, event: &ShellSelectorOverlayEvent, cx| match event {
+            move |this, emitter, event: &ShellSelectorOverlayEvent, cx| match event {
                 ShellSelectorOverlayEvent::Close => {
-                    this.close_modal(cx);
+                    this.close_modal_from(emitter.entity_id(), cx);
                 }
                 ShellSelectorOverlayEvent::ShellSelected {
                     shell_type,
@@ -1010,7 +1031,7 @@ impl OverlayManager {
                             terminal_id: terminal_id.clone(),
                         });
                     }
-                    this.close_modal(cx);
+                    this.close_modal_from(emitter.entity_id(), cx);
                 }
             },
         )
@@ -1033,9 +1054,9 @@ impl OverlayManager {
         let dialog = cx.new(|cx| WorktreeDialog::new(client, daemon_project_id, project_id, cx));
         cx.subscribe(
             &dialog,
-            |this, _, event: &WorktreeDialogEvent, cx| match event {
+            |this, emitter, event: &WorktreeDialogEvent, cx| match event {
                 WorktreeDialogEvent::Close => {
-                    this.close_modal(cx);
+                    this.close_modal_from(emitter.entity_id(), cx);
                 }
                 WorktreeDialogEvent::RequestCreate {
                     project_id,
@@ -1047,7 +1068,7 @@ impl OverlayManager {
                         branch: branch.clone(),
                         create_branch: *create_branch,
                     });
-                    this.close_modal(cx);
+                    this.close_modal_from(emitter.entity_id(), cx);
                 }
             },
         )
@@ -1084,9 +1105,9 @@ impl OverlayManager {
         });
         cx.subscribe(
             &entity,
-            |this, _, event: &CloseWorktreeDialogEvent, cx| match event {
+            |this, emitter, event: &CloseWorktreeDialogEvent, cx| match event {
                 CloseWorktreeDialogEvent::Closed => {
-                    this.close_modal(cx);
+                    this.close_modal_from(emitter.entity_id(), cx);
                 }
             },
         )
@@ -1108,7 +1129,7 @@ impl OverlayManager {
         let entity = cx.new(|cx| RenameDirectoryDialog::new(project_id, project_path, cx));
         cx.subscribe(
             &entity,
-            |this, _, event: &RenameDirectoryDialogEvent, cx| {
+            |this, emitter, event: &RenameDirectoryDialogEvent, cx| {
                 if let RenameDirectoryDialogEvent::Confirmed {
                     project_id,
                     new_name,
@@ -1120,7 +1141,7 @@ impl OverlayManager {
                     });
                 }
                 if event.is_close() {
-                    this.close_modal(cx);
+                    this.close_modal_from(emitter.entity_id(), cx);
                 }
             },
         )
@@ -1142,21 +1163,24 @@ impl OverlayManager {
     ) {
         let entity = cx
             .new(|cx| ChangePathDialog::new(project_id, project_path, shares_local_filesystem, cx));
-        cx.subscribe(&entity, |this, _, event: &ChangePathDialogEvent, cx| {
-            if let ChangePathDialogEvent::Confirmed {
-                project_id,
-                new_path,
-            } = event
-            {
-                cx.emit(OverlayManagerEvent::ChangeProjectPathConfirmed {
-                    project_id: project_id.clone(),
-                    new_path: new_path.clone(),
-                });
-            }
-            if event.is_close() {
-                this.close_modal(cx);
-            }
-        })
+        cx.subscribe(
+            &entity,
+            |this, emitter, event: &ChangePathDialogEvent, cx| {
+                if let ChangePathDialogEvent::Confirmed {
+                    project_id,
+                    new_path,
+                } = event
+                {
+                    cx.emit(OverlayManagerEvent::ChangeProjectPathConfirmed {
+                        project_id: project_id.clone(),
+                        new_path: new_path.clone(),
+                    });
+                }
+                if event.is_close() {
+                    this.close_modal_from(emitter.entity_id(), cx);
+                }
+            },
+        )
         .detach();
         self.open_modal(entity, cx);
     }
@@ -1754,26 +1778,29 @@ impl OverlayManager {
     ) {
         let entity =
             cx.new(|cx| RenameTerminalDialog::new(project_id, terminal_id, current_name, cx));
-        cx.subscribe(&entity, |this, _, event: &RenameTerminalDialogEvent, cx| {
-            if let RenameTerminalDialogEvent::Confirmed {
-                project_id,
-                terminal_id,
-                new_name,
-            } = event
-            {
-                cx.emit(OverlayManagerEvent::ProjectAction {
-                    project_id: project_id.clone(),
-                    request: ActionRequest::RenameTerminal {
+        cx.subscribe(
+            &entity,
+            |this, emitter, event: &RenameTerminalDialogEvent, cx| {
+                if let RenameTerminalDialogEvent::Confirmed {
+                    project_id,
+                    terminal_id,
+                    new_name,
+                } = event
+                {
+                    cx.emit(OverlayManagerEvent::ProjectAction {
                         project_id: project_id.clone(),
-                        terminal_id: terminal_id.clone(),
-                        name: new_name.clone(),
-                    },
-                });
-            }
-            if event.is_close() {
-                this.close_modal(cx);
-            }
-        })
+                        request: ActionRequest::RenameTerminal {
+                            project_id: project_id.clone(),
+                            terminal_id: terminal_id.clone(),
+                            name: new_name.clone(),
+                        },
+                    });
+                }
+                if event.is_close() {
+                    this.close_modal_from(emitter.entity_id(), cx);
+                }
+            },
+        )
         .detach();
         self.open_modal(entity, cx);
     }
@@ -2140,13 +2167,13 @@ impl OverlayManager {
 
         cx.subscribe(
             &dialog,
-            move |this, _, event: &FileSearchDialogEvent, cx| match event {
+            move |this, emitter, event: &FileSearchDialogEvent, cx| match event {
                 FileSearchDialogEvent::Close => {
-                    this.close_modal(cx);
+                    this.close_modal_from(emitter.entity_id(), cx);
                 }
                 FileSearchDialogEvent::FileSelected(relative_path) => {
                     let relative_path = relative_path.clone();
-                    this.close_modal(cx);
+                    this.close_modal_from(emitter.entity_id(), cx);
                     this.show_file_viewer(context_for_viewer.clone(), relative_path, cx);
                 }
                 FileSearchDialogEvent::FiltersChanged { show_ignored } => {
@@ -2193,16 +2220,16 @@ impl OverlayManager {
 
         cx.subscribe(
             &dialog,
-            move |this, _, event: &ContentSearchDialogEvent, cx| match event {
+            move |this, emitter, event: &ContentSearchDialogEvent, cx| match event {
                 ContentSearchDialogEvent::Close => {
-                    this.close_modal(cx);
+                    this.close_modal_from(emitter.entity_id(), cx);
                 }
                 ContentSearchDialogEvent::FileSelected {
                     relative_path,
                     line: _,
                 } => {
                     let relative_path = relative_path.clone();
-                    this.close_modal(cx);
+                    this.close_modal_from(emitter.entity_id(), cx);
                     this.show_file_viewer(context_for_viewer.clone(), relative_path, cx);
                 }
             },
@@ -2331,8 +2358,10 @@ impl OverlayManager {
     fn subscribe_file_viewer(&mut self, viewer: &Entity<FileViewer>, cx: &mut Context<Self>) {
         cx.subscribe(
             viewer,
-            move |this, _, event: &FileViewerEvent, cx| match event {
-                FileViewerEvent::Close | FileViewerEvent::Back => this.close_modal(cx),
+            move |this, emitter, event: &FileViewerEvent, cx| match event {
+                FileViewerEvent::Close | FileViewerEvent::Back => {
+                    this.close_modal_from(emitter.entity_id(), cx)
+                }
                 FileViewerEvent::Detach => {
                     this.detach_active_modal(cx);
                 }
@@ -2410,7 +2439,7 @@ impl OverlayManager {
                 ProjectInspectorEvent::Close
                     if this.active_project_inspector.as_ref() == Some(&inspector) =>
                 {
-                    this.close_modal(cx)
+                    this.close_modal_from(inspector.entity_id(), cx)
                 }
                 ProjectInspectorEvent::Detach
                     if this.active_project_inspector.as_ref() == Some(&inspector) =>
@@ -2484,15 +2513,15 @@ impl OverlayManager {
             let entity = cx.new(|cx| RemoteConnectDialog::new(remote_manager, cx));
             cx.subscribe(
                 &entity,
-                |this, _, event: &RemoteConnectDialogEvent, cx| match event {
+                |this, emitter, event: &RemoteConnectDialogEvent, cx| match event {
                     RemoteConnectDialogEvent::Close => {
-                        this.close_modal(cx);
+                        this.close_modal_from(emitter.entity_id(), cx);
                     }
                     RemoteConnectDialogEvent::Connected { config } => {
                         cx.emit(OverlayManagerEvent::RemoteConnected {
                             config: config.clone(),
                         });
-                        this.close_modal(cx);
+                        this.close_modal_from(emitter.entity_id(), cx);
                     }
                 },
             )
@@ -2515,9 +2544,9 @@ impl OverlayManager {
         let entity = cx.new(|cx| RemotePairDialog::new(connection_id, connection_name, cx));
         cx.subscribe(
             &entity,
-            |this, _, event: &RemotePairDialogEvent, cx| match event {
+            |this, emitter, event: &RemotePairDialogEvent, cx| match event {
                 RemotePairDialogEvent::Close => {
-                    this.close_modal(cx);
+                    this.close_modal_from(emitter.entity_id(), cx);
                 }
                 RemotePairDialogEvent::Pair {
                     connection_id,
@@ -2527,7 +2556,7 @@ impl OverlayManager {
                         connection_id: connection_id.clone(),
                         code: code.clone(),
                     });
-                    this.close_modal(cx);
+                    this.close_modal_from(emitter.entity_id(), cx);
                 }
             },
         )
@@ -2727,5 +2756,130 @@ mod whats_new_tests {
 
         overlay.update(cx, |om, cx| om.toggle_whats_new(cx));
         assert!(!overlay.read_with(cx, |om, _| om.is_modal::<WhatsNewModal>()));
+    }
+}
+
+#[cfg(test)]
+mod stale_close_tests {
+    use super::OverlayManager;
+    use crate::keybindings::ShowAiProxyActivity;
+    use crate::views::chrome::repaint::test_support::init_appearance_globals;
+    use crate::views::overlays::ai_proxy_activity::AiProxyActivity;
+    use crate::workspace::focus::FocusManager;
+    use crate::workspace::request_broker::RequestBroker;
+    use crate::workspace::state::{WindowId, Workspace, WorkspaceData};
+    use gpui::{
+        AppContext as _, Context, Entity, EventEmitter, FocusHandle, InteractiveElement,
+        IntoElement, ParentElement, Render, Styled, TestAppContext, Window, div,
+    };
+    use okena_ui::overlay::CloseEvent as _;
+
+    /// Stands in for the command palette: a modal that dispatches an action
+    /// and then asks to be closed.
+    struct Palette;
+
+    enum PaletteEvent {
+        Close,
+    }
+
+    impl okena_ui::overlay::CloseEvent for PaletteEvent {
+        fn is_close(&self) -> bool {
+            matches!(self, Self::Close)
+        }
+    }
+
+    impl EventEmitter<PaletteEvent> for Palette {}
+
+    impl Render for Palette {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            div().size_full()
+        }
+    }
+
+    /// Renders the modal slot and opens the AI proxy overlay on its action,
+    /// like the window view.
+    struct Root {
+        overlays: Entity<OverlayManager>,
+        focus: FocusHandle,
+    }
+
+    impl Render for Root {
+        fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .size_full()
+                .track_focus(&self.focus)
+                .on_action(cx.listener(|this, _: &ShowAiProxyActivity, _, cx| {
+                    this.overlays
+                        .update(cx, |om, cx| om.toggle_ai_proxy_activity(None, cx));
+                }))
+                .children(self.overlays.read(cx).render_modal())
+        }
+    }
+
+    #[gpui::test]
+    fn a_modal_opened_from_the_palette_survives_the_palettes_close(cx: &mut TestAppContext) {
+        init_appearance_globals(cx);
+        let overlays = cx.update(|cx| {
+            let workspace = cx.new(|_| Workspace::new(WorkspaceData::empty()));
+            let focus = cx.new(|_| FocusManager::new());
+            let broker = cx.new(|_| RequestBroker::new());
+            cx.new(|_| OverlayManager::new(WindowId::Main, workspace, focus, broker))
+        });
+        let window = {
+            let overlays = overlays.clone();
+            cx.add_window(move |window, cx| {
+                let focus = cx.focus_handle();
+                window.focus(&focus, cx);
+                Root { overlays, focus }
+            })
+        };
+
+        overlays.update(cx, |om, cx| {
+            super::open_overlay!(om, cx, PaletteEvent, |_| Palette);
+        });
+        cx.run_until_parked();
+        let palette = overlays
+            .read_with(cx, |om, _| om.render_modal())
+            .and_then(|view| view.downcast::<Palette>().ok())
+            .expect("palette is open");
+
+        // What `CommandPalette::execute_command` does.
+        window
+            .update(cx, move |_, window, cx| {
+                palette.update(cx, |_, cx| {
+                    window.dispatch_action(Box::new(ShowAiProxyActivity), cx);
+                    cx.emit(PaletteEvent::Close);
+                });
+            })
+            .expect("window is open");
+        cx.run_until_parked();
+
+        assert!(
+            overlays.read_with(cx, |om, _| om.is_modal::<AiProxyActivity>()),
+            "the palette's close must not close the modal its action opened"
+        );
+    }
+
+    #[gpui::test]
+    fn the_active_modals_own_close_still_closes_it(cx: &mut TestAppContext) {
+        init_appearance_globals(cx);
+        let overlays = cx.update(|cx| {
+            let workspace = cx.new(|_| Workspace::new(WorkspaceData::empty()));
+            let focus = cx.new(|_| FocusManager::new());
+            let broker = cx.new(|_| RequestBroker::new());
+            cx.new(|_| OverlayManager::new(WindowId::Main, workspace, focus, broker))
+        });
+        overlays.update(cx, |om, cx| {
+            super::open_overlay!(om, cx, PaletteEvent, |_| Palette);
+        });
+        let palette = overlays
+            .read_with(cx, |om, _| om.render_modal())
+            .and_then(|view| view.downcast::<Palette>().ok())
+            .expect("palette is open");
+
+        palette.update(cx, |_, cx| cx.emit(PaletteEvent::Close));
+        cx.run_until_parked();
+
+        assert!(overlays.read_with(cx, |om, _| om.render_modal().is_none()));
     }
 }
