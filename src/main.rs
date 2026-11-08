@@ -523,6 +523,32 @@ fn main() {
         std::process::exit(1);
     }
 
+    // Started from inside an Okena pane (e.g. an agent running `okena`): a GUI
+    // that stayed a child of that pane would inherit its session, stdio and
+    // environment, and die with it. Start a detached instance instead.
+    if std::env::var_os("OKENA_TERMINAL_ID").is_some() {
+        let relaunched =
+            okena_remote_server::local::remember_current_executable().and_then(|exe| {
+                let args = okena_core::profiles::relaunch_args(
+                    std::env::args().skip(1),
+                    &profiles::current().id,
+                );
+                okena_core::process::spawn_detached(&mut okena_core::process::app_launch_command(
+                    &exe, &args,
+                ))
+            });
+        match relaunched {
+            Ok(pid) => {
+                log::info!("Started from an Okena pane; relaunched detached as pid {pid}");
+                return;
+            }
+            Err(error) => {
+                eprintln!("Failed to start Okena detached from this terminal: {error}");
+                std::process::exit(1);
+            }
+        }
+    }
+
     Application::with_platform(gpui_platform::current_platform(false)).with_assets(Assets).run(move |cx: &mut App| {
         // Quit the app when the last window is closed (default on macOS is to keep running)
         cx.set_quit_mode(QuitMode::LastWindowClosed);
