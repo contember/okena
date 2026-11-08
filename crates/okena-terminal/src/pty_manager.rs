@@ -1027,7 +1027,8 @@ impl PtyManager {
         // Through `launch_environment` for the same reason as the vars above:
         // a running tmux server may still carry the parent terminal's identity.
         // Profile and plan values win over these defaults.
-        for (key, value) in parent_terminal_environment(|name| std::env::var_os(name).is_some()) {
+        let inherited = std::env::vars_os().filter_map(|(name, _)| name.into_string().ok());
+        for (key, value) in parent_terminal_environment(inherited) {
             if !launch_environment
                 .iter()
                 .any(|(existing, _)| *existing == key)
@@ -2619,10 +2620,12 @@ fn slave_pty_path(master: &dyn MasterPty) -> Option<String> {
     Some(master.tty_name()?.to_string_lossy().into_owned())
 }
 
-/// Variables terminal emulators export to identify themselves. Okena inherits
-/// them from whatever terminal launched it, and a pane that keeps them is
-/// detected as that terminal: Claude Code skips OSC 52 under VTE.
+/// Variables terminal emulators and agent sessions export to identify
+/// themselves. Okena inherits them from whatever launched it, and a pane that
+/// keeps them is detected as that terminal (Claude Code skips OSC 52 under VTE)
+/// or as running inside that agent.
 const PARENT_TERMINAL_VARS: &[&str] = &[
+    "CLAUDECODE",
     "VTE_VERSION",
     "GNOME_TERMINAL_SCREEN",
     "GNOME_TERMINAL_SERVICE",
@@ -2662,16 +2665,25 @@ const PARENT_TERMINAL_VARS: &[&str] = &[
     "COLORFGBG",
 ];
 
+/// Name prefixes of [`PARENT_TERMINAL_VARS`] families.
+const PARENT_TERMINAL_VAR_PREFIXES: &[&str] = &["CLAUDE_CODE_"];
+
 /// Pane environment that replaces the parent terminal's identity with
-/// Okena's: removes each inherited [`PARENT_TERMINAL_VARS`] entry that
-/// `is_inherited` reports and names Okena as `TERM_PROGRAM`.
+/// Okena's: removes each of the `inherited` variable names that is a
+/// [`PARENT_TERMINAL_VARS`] entry or starts with a
+/// [`PARENT_TERMINAL_VAR_PREFIXES`] entry, and names Okena as `TERM_PROGRAM`.
 fn parent_terminal_environment(
-    is_inherited: impl Fn(&str) -> bool,
+    inherited: impl IntoIterator<Item = String>,
 ) -> Vec<(String, Option<String>)> {
-    let mut environment: Vec<(String, Option<String>)> = PARENT_TERMINAL_VARS
-        .iter()
-        .filter(|name| is_inherited(name))
-        .map(|name| (name.to_string(), None))
+    let mut environment: Vec<(String, Option<String>)> = inherited
+        .into_iter()
+        .filter(|name| {
+            PARENT_TERMINAL_VARS.contains(&name.as_str())
+                || PARENT_TERMINAL_VAR_PREFIXES
+                    .iter()
+                    .any(|prefix| name.starts_with(prefix))
+        })
+        .map(|name| (name, None))
         .collect();
     environment.push(("TERM_PROGRAM".to_string(), Some("okena".to_string())));
     environment
@@ -2751,13 +2763,23 @@ mod tests {
 
     #[test]
     fn parent_terminal_identity_is_removed_and_okena_named() {
-        let environment =
-            parent_terminal_environment(|name| matches!(name, "VTE_VERSION" | "WT_SESSION"));
+        let inherited = [
+            "VTE_VERSION",
+            "HOME",
+            "WT_SESSION",
+            "CLAUDECODE",
+            "CLAUDE_CODE_ENTRYPOINT",
+            "CLAUDE_CONFIG_DIR",
+        ]
+        .map(String::from);
+        let environment = parent_terminal_environment(inherited);
         assert_eq!(
             environment,
             [
                 ("VTE_VERSION".to_string(), None),
                 ("WT_SESSION".to_string(), None),
+                ("CLAUDECODE".to_string(), None),
+                ("CLAUDE_CODE_ENTRYPOINT".to_string(), None),
                 ("TERM_PROGRAM".to_string(), Some("okena".to_string())),
             ]
         );
