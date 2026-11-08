@@ -2125,7 +2125,19 @@ pub fn cli_update_install(restart: bool, json_mode: bool) -> i32 {
     let mut unreachable_for = std::time::Duration::ZERO;
     let version = loop {
         match &status {
-            UpdateStatus::ReadyToRestart { version, .. } => break version.clone(),
+            UpdateStatus::ReadyToRestart { version, .. } => {
+                let staged = okena_ext_updater::checker::parse_release_version(version);
+                let current = okena_ext_updater::checker::parse_release_version(&current_version);
+                if let (Some(staged), Some(current)) = (staged, current)
+                    && staged < current
+                {
+                    eprintln!(
+                        "A revert to v{version} is installed and waiting for a restart; `update install` does not restart into an older version."
+                    );
+                    return 1;
+                }
+                break version.clone();
+            }
             UpdateStatus::Ready { .. } if !install_requested => {
                 if let Err(error) = daemon_client::request_install() {
                     eprintln!("Failed to start the install: {error}");
@@ -2221,11 +2233,29 @@ pub fn cli_update_install(restart: bool, json_mode: bool) -> i32 {
             return 1;
         }
     };
+    // Report before the wait: this process may end with the old daemon's
+    // terminals. A desktop that reaches this daemon as a user-managed remote
+    // is listed too, but only relaunches for its own local daemon.
     if reply.desktops.is_empty() {
-        eprintln!("No desktop is attached; restarted the daemon only.");
+        eprintln!("No desktop is attached; restarting the daemon only.");
+    } else {
+        eprintln!(
+            "Asked {} desktop(s) on this host to relaunch.",
+            reply.desktops.len()
+        );
     }
-    if !json_mode {
-        // Before the wait: this process may end with the daemon's terminals.
+    if json_mode {
+        let output = serde_json::json!({
+            "status": "restarting",
+            "version": reply.version,
+            "daemon_pid": reply.daemon_pid,
+            "desktops": reply.desktops,
+        });
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&output).unwrap_or_else(|_| output.to_string())
+        );
+    } else {
         for desktop in &reply.desktops {
             println!("desktop\t{}\t{}", desktop.connection_id, desktop.windows);
         }
@@ -2234,17 +2264,7 @@ pub fn cli_update_install(restart: bool, json_mode: bool) -> i32 {
         eprintln!("Restart requested, but the new daemon did not come up: {error}");
         return 1;
     }
-    if json_mode {
-        let output = serde_json::json!({
-            "status": "restarted",
-            "version": reply.version,
-            "desktops": reply.desktops,
-        });
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&output).unwrap_or_else(|_| output.to_string())
-        );
-    } else {
+    if !json_mode {
         println!("restarted\t{}", reply.version);
     }
     0
