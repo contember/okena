@@ -1242,7 +1242,9 @@ impl WindowView {
         // profile's daemon owns its own persistence; the relaunch below starts
         // the new profile's daemon.
 
-        match std::env::current_exe() {
+        // The remembered path: after an in-place update, `current_exe()` names
+        // the replaced (deleted) binary on Linux.
+        match crate::remote::local::remember_current_executable() {
             Ok(exe) => {
                 let args = okena_core::profiles::relaunch_args(std::env::args().skip(1), &id);
                 let mut command = okena_core::process::app_launch_command(&exe, &args);
