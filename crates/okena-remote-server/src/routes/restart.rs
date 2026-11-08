@@ -49,8 +49,10 @@ pub async fn post_restart(
     // Spawn the replacement BEFORE acking: if we can't even launch it, fail the
     // request and stay alive rather than exit into a daemon-less state.
     match crate::local::spawn_replacement_daemon() {
-        Ok(_child) => {
-            log::info!("Daemon restart requested; spawned replacement, exiting shortly");
+        Ok(pid) => {
+            log::info!(
+                "Daemon restart requested; spawned replacement (pid {pid}), exiting shortly"
+            );
         }
         Err(e) => {
             log::error!("Daemon restart failed to spawn replacement: {e}");

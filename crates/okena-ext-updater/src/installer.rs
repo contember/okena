@@ -92,18 +92,19 @@ fn install_sibling_if_present(
 /// when the spawn fails.
 #[cfg(feature = "gpui-ui")]
 pub fn restart_app(cx: &mut gpui::App) -> Result<()> {
-    spawn_successor(&remember_launch_path()?)?;
+    let args = okena_core::profiles::relaunch_args(
+        std::env::args().skip(1),
+        &okena_core::profiles::current().id,
+    );
+    spawn_successor(&remember_launch_path()?, &args)?;
     log::info!("Restarting okena...");
     cx.quit();
     Ok(())
 }
 
 #[cfg(feature = "gpui-ui")]
-fn spawn_successor(exe: &Path) -> Result<()> {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    crate::process::command(&exe.to_string_lossy())
-        .args(&args)
-        .spawn()
+fn spawn_successor(exe: &Path, args: &[String]) -> Result<()> {
+    okena_core::process::spawn_detached(&mut okena_core::process::app_launch_command(exe, args))
         .with_context(|| format!("failed to restart from {}", exe.display()))?;
     Ok(())
 }
@@ -464,7 +465,7 @@ mod tests {
     fn a_failed_restart_spawn_is_reported() {
         let dir = temp_dir("restart");
         let missing = dir.join("okena.old");
-        let error = spawn_successor(&missing).expect_err("spawn must fail");
+        let error = spawn_successor(&missing, &[]).expect_err("spawn must fail");
         assert!(format!("{error:#}").contains("failed to restart from"));
         let _ = std::fs::remove_dir_all(dir);
     }

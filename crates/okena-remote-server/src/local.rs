@@ -321,8 +321,7 @@ pub fn remember_current_executable() -> std::io::Result<PathBuf> {
 /// spawning so the fresh daemon loads it at startup (no reload needed).
 pub fn spawn_daemon() -> std::io::Result<std::process::Child> {
     let exe = remember_current_executable()?;
-    std::process::Command::new(exe)
-        .args(["--headless", UI_OWNED_FLAG])
+    okena_core::process::detach(std::process::Command::new(exe).args(["--headless", UI_OWNED_FLAG]))
         .spawn()
 }
 
@@ -616,9 +615,8 @@ where
 /// `--await-pid` pair is stripped first so it isn't passed twice.
 ///
 /// Mirrors the updater's restart pattern (`installer::restart_app`): spawn the
-/// successor, then quit. The child is detached (its handle is dropped); on Unix
-/// it survives as an orphan, on Windows as an independent process.
-pub fn spawn_replacement_daemon() -> std::io::Result<std::process::Child> {
+/// successor detached, then quit. Returns the successor's pid.
+pub fn spawn_replacement_daemon() -> std::io::Result<u32> {
     let exe = remember_current_executable()?;
     let mut args: Vec<String> = std::env::args().skip(1).collect();
     strip_restart_handoff_args(&mut args);
@@ -627,14 +625,15 @@ pub fn spawn_replacement_daemon() -> std::io::Result<std::process::Child> {
     if paths.is_some_and(|paths| paths.pending_config_restore().is_file()) {
         let old_exe = old_binary_path(&exe);
         if old_exe.is_file() {
-            return std::process::Command::new(old_exe)
-                .args(&args)
-                .arg(AWAIT_PID_FLAG)
-                .arg(my_pid.to_string())
-                .arg(COMPLETE_CONFIG_RESTORE_FLAG)
-                .arg(REVERT_TARGET_EXE_FLAG)
-                .arg(exe)
-                .spawn();
+            return okena_core::process::spawn_detached(
+                std::process::Command::new(old_exe)
+                    .args(&args)
+                    .arg(AWAIT_PID_FLAG)
+                    .arg(my_pid.to_string())
+                    .arg(COMPLETE_CONFIG_RESTORE_FLAG)
+                    .arg(REVERT_TARGET_EXE_FLAG)
+                    .arg(exe),
+            );
         }
         // The helper was cleaned up before the restart landed. Drop the request
         // instead of wedging this and every later restart on a missing binary.
@@ -646,11 +645,12 @@ pub fn spawn_replacement_daemon() -> std::io::Result<std::process::Child> {
             okena_core::profiles::clear_pending_config_restore(paths);
         }
     }
-    std::process::Command::new(exe)
-        .args(&args)
-        .arg(AWAIT_PID_FLAG)
-        .arg(my_pid.to_string())
-        .spawn()
+    okena_core::process::spawn_detached(
+        std::process::Command::new(exe)
+            .args(&args)
+            .arg(AWAIT_PID_FLAG)
+            .arg(my_pid.to_string()),
+    )
 }
 
 fn old_binary_path(exe: &Path) -> PathBuf {
@@ -688,9 +688,7 @@ pub fn complete_config_restore_if_requested() -> anyhow::Result<bool> {
 
     let mut target_args = args;
     strip_restart_handoff_args(&mut target_args);
-    std::process::Command::new(&target)
-        .args(target_args)
-        .spawn()
+    okena_core::process::spawn_detached(std::process::Command::new(&target).args(target_args))
         .map_err(|error| {
             anyhow::anyhow!(
                 "failed to launch downgraded daemon {}: {error}",
