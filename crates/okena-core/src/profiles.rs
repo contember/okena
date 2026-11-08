@@ -164,6 +164,26 @@ pub fn cache_root() -> Option<PathBuf> {
     dirs::cache_dir().map(|dir| dir.join("okena"))
 }
 
+/// `args` with every `--profile`/`--new-profile` flag replaced by `--profile <id>`.
+///
+/// A relaunch pins the profile it runs in by id: the environment does not reach
+/// an app started through LaunchServices, and repeating `--new-profile` would
+/// try to create the profile again.
+pub fn relaunch_args(args: impl IntoIterator<Item = String>, profile_id: &str) -> Vec<String> {
+    let mut args = args.into_iter();
+    let mut kept = Vec::new();
+    while let Some(arg) = args.next() {
+        if arg == "--profile" || arg == "--new-profile" {
+            args.next();
+        } else if !(arg.starts_with("--profile=") || arg.starts_with("--new-profile=")) {
+            kept.push(arg);
+        }
+    }
+    kept.push("--profile".to_string());
+    kept.push(profile_id.to_string());
+    kept
+}
+
 // ─── Startup resolution ───────────────────────────────────────────────────────
 
 /// Resolve the active profile from the explicit flag, the `OKENA_PROFILE` env var,
@@ -1152,6 +1172,23 @@ mod tests {
 
     fn temp_root() -> TempDir {
         tempfile::tempdir().unwrap()
+    }
+
+    #[test]
+    fn relaunch_args_pin_the_profile_by_id() {
+        let args = [
+            "--new-profile",
+            "Work",
+            "--remote",
+            "--profile=old",
+            "--profile",
+            "older",
+        ]
+        .map(String::from);
+        assert_eq!(
+            relaunch_args(args, "work-id"),
+            ["--remote", "--profile", "work-id"].map(String::from)
+        );
     }
 
     #[test]

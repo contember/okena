@@ -55,6 +55,92 @@ pub fn spawn_and_reap(cmd: &mut std::process::Command) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Environment that ties a process to the Okena pane or agent session it was
+/// started from. A detached relaunch must not carry it: a new Okena would
+/// otherwise think it runs inside that pane, and pass it on to its own panes.
+fn is_launcher_variable(name: &str) -> bool {
+    matches!(name, "OKENA_TERMINAL_ID" | "CLAUDECODE")
+        || ["OKENA_TTY", "OKENA_AGENT", "CLAUDE_CODE_"]
+            .iter()
+            .any(|prefix| name.starts_with(prefix))
+}
+
+/// Configure `cmd` to run independently of the process that starts it: its own
+/// session (no controlling terminal, no job-control signals from the launching
+/// shell), stdio on `/dev/null`, and none of the launcher's pane or agent
+/// variables. Use it for a process that must outlive its launcher; the caller
+/// owns the returned child. [`spawn_detached`] also reaps it.
+pub fn detach(cmd: &mut std::process::Command) -> &mut std::process::Command {
+    let inherited = std::env::vars_os().map(|(name, _)| name);
+    let explicit: Vec<std::ffi::OsString> =
+        cmd.get_envs().map(|(name, _)| name.to_owned()).collect();
+    for name in inherited.chain(explicit) {
+        if name.to_str().is_some_and(is_launcher_variable) {
+            cmd.env_remove(name);
+        }
+    }
+    cmd.stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        // SAFETY: the closure runs in the forked child before exec and calls
+        // only the async-signal-safe `setsid`.
+        unsafe {
+            cmd.pre_exec(|| {
+                if libc::setsid() == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    }
+    cmd
+}
+
+/// Spawn `cmd` [`detach`]ed and reap it on a background thread. Returns its pid.
+pub fn spawn_detached(cmd: &mut std::process::Command) -> std::io::Result<u32> {
+    let mut child = detach(cmd).spawn()?;
+    let pid = child.id();
+    std::thread::spawn(move || {
+        if let Err(err) = child.wait() {
+            log::warn!("Failed to reap detached process: {}", err);
+        }
+    });
+    Ok(pid)
+}
+
+/// Command that starts the Okena app at `exe` with `args`.
+///
+/// On macOS an executable inside a `.app` bundle starts through LaunchServices
+/// (`open -n -a <bundle> --args …`), so it runs like one started from Finder.
+/// LaunchServices does not pass the caller's environment on, so `args` must
+/// carry everything the new instance needs (e.g. `--profile`).
+pub fn app_launch_command(exe: &std::path::Path, args: &[String]) -> std::process::Command {
+    #[cfg(target_os = "macos")]
+    if let Some(bundle) = app_bundle_of(exe) {
+        let mut cmd = command("open");
+        cmd.arg("-n").arg("-a").arg(bundle).arg("--args").args(args);
+        return cmd;
+    }
+    let mut cmd = command(&exe.to_string_lossy());
+    cmd.args(args);
+    cmd
+}
+
+/// The `.app` bundle an executable at `<bundle>/Contents/MacOS/<name>` lives in.
+#[cfg(any(target_os = "macos", test))]
+fn app_bundle_of(exe: &std::path::Path) -> Option<&std::path::Path> {
+    let macos = exe.parent()?;
+    let contents = macos.parent()?;
+    let bundle = contents.parent()?;
+    let is_bundle = macos.file_name()? == "MacOS"
+        && contents.file_name()? == "Contents"
+        && bundle.extension()? == "app";
+    is_bundle.then_some(bundle)
+}
+
 /// Wait for an opener without terminating the application it launches.
 /// The caller must run this off the UI thread: some openers stay alive until
 /// the application closes.
@@ -424,6 +510,71 @@ mod tests {
         let sid: i64 = fields.next().and_then(|f| f.parse().ok()).expect("sid");
         let pid: i64 = fields.next().and_then(|f| f.parse().ok()).expect("pid");
         assert_eq!(sid, pid, "child should be a session leader, got {text:?}");
+    }
+
+    /// A detached relaunch must not stay tied to the pane or agent that started
+    /// it: own session, stdin on `/dev/null`, no pane or agent variables.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_detached_child_leaves_its_launcher_behind() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let out = dir.path().join("report");
+        let script = r#"{
+            echo "pid=$$"
+            echo "sid=$(ps -o sid= -p $$ | tr -d ' ')"
+            echo "stdin=$(readlink /proc/$$/fd/0)"
+            env | grep -E '^(OKENA_|CLAUDE)' | sort
+        } > "$1.tmp" && mv "$1.tmp" "$1""#;
+        let mut cmd = std::process::Command::new("sh");
+        cmd.args(["-c", script, "sh"])
+            .arg(&out)
+            .env_clear()
+            .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+            .env("OKENA_TERMINAL_ID", "pane")
+            .env("OKENA_TTY", "/dev/pts/9")
+            .env("OKENA_TTY_FILE", "/tmp/tty")
+            .env("OKENA_AGENT", "claude-code")
+            .env("CLAUDECODE", "1")
+            .env("CLAUDE_CODE_ENTRYPOINT", "cli")
+            .env("OKENA_PROFILE", "work");
+        let pid = super::spawn_detached(&mut cmd).expect("spawn");
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let report = loop {
+            if let Ok(report) = std::fs::read_to_string(&out) {
+                break report;
+            }
+            assert!(std::time::Instant::now() < deadline, "no report from child");
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        let lines: Vec<&str> = report.lines().collect();
+        assert_eq!(
+            lines,
+            [
+                format!("pid={pid}").as_str(),
+                format!("sid={pid}").as_str(),
+                "stdin=/dev/null",
+                "OKENA_PROFILE=work",
+            ],
+            "{report}"
+        );
+    }
+
+    #[test]
+    fn only_bundled_executables_relaunch_through_their_bundle() {
+        use std::path::Path;
+        assert_eq!(
+            super::app_bundle_of(Path::new("/Applications/Okena.app/Contents/MacOS/okena")),
+            Some(Path::new("/Applications/Okena.app"))
+        );
+        assert_eq!(
+            super::app_bundle_of(Path::new("/usr/local/bin/okena")),
+            None
+        );
+        assert_eq!(
+            super::app_bundle_of(Path::new("/opt/Okena/Contents/MacOS/okena")),
+            None
+        );
     }
 
     use super::*;
