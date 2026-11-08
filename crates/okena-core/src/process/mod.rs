@@ -55,14 +55,31 @@ pub fn spawn_and_reap(cmd: &mut std::process::Command) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Variables Claude Code sets for the session it runs, which mark a child as
+/// running inside that agent. An exact list, not the `CLAUDE_CODE_` prefix:
+/// that prefix also names user configuration (`CLAUDE_CODE_USE_BEDROCK`,
+/// `CLAUDE_CODE_OAUTH_TOKEN`, …) that panes must keep.
+pub const AGENT_SESSION_VARS: &[&str] = &[
+    "CLAUDECODE",
+    "CLAUDE_CODE_ENTRYPOINT",
+    "CLAUDE_CODE_SSE_PORT",
+    "CLAUDE_CODE_SESSION_ID",
+    "CLAUDE_CODE_CHILD_SESSION",
+    "CLAUDE_CODE_SESSION_ATTENDED",
+    "CLAUDE_CODE_MESSAGING_SOCKET",
+    "CLAUDE_CODE_MESSAGING_TOKEN",
+    "CLAUDE_CODE_EXECPATH",
+    "CLAUDE_PID",
+];
+
 /// Environment that ties a process to the Okena pane or agent session it was
 /// started from. A detached relaunch must not carry it: a new Okena would
 /// otherwise think it runs inside that pane, and pass it on to its own panes.
 fn is_launcher_variable(name: &str) -> bool {
-    matches!(name, "OKENA_TERMINAL_ID" | "CLAUDECODE")
-        || ["OKENA_TTY", "OKENA_AGENT", "CLAUDE_CODE_"]
-            .iter()
-            .any(|prefix| name.starts_with(prefix))
+    name == "OKENA_TERMINAL_ID"
+        || name.starts_with("OKENA_TTY")
+        || name.starts_with("OKENA_AGENT")
+        || AGENT_SESSION_VARS.contains(&name)
 }
 
 /// Configure `cmd` to run independently of the process that starts it: its own
@@ -513,7 +530,8 @@ mod tests {
     }
 
     /// A detached relaunch must not stay tied to the pane or agent that started
-    /// it: own session, stdin on `/dev/null`, no pane or agent variables.
+    /// it: own session, stdin on `/dev/null`, no pane or agent session
+    /// variables — but the user's Claude Code configuration stays.
     #[cfg(target_os = "linux")]
     #[test]
     fn a_detached_child_leaves_its_launcher_behind() {
@@ -536,6 +554,8 @@ mod tests {
             .env("OKENA_AGENT", "claude-code")
             .env("CLAUDECODE", "1")
             .env("CLAUDE_CODE_ENTRYPOINT", "cli")
+            .env("CLAUDE_PID", "4242")
+            .env("CLAUDE_CODE_USE_BEDROCK", "1")
             .env("OKENA_PROFILE", "work");
         let pid = super::spawn_detached(&mut cmd).expect("spawn");
 
@@ -554,6 +574,7 @@ mod tests {
                 format!("pid={pid}").as_str(),
                 format!("sid={pid}").as_str(),
                 "stdin=/dev/null",
+                "CLAUDE_CODE_USE_BEDROCK=1",
                 "OKENA_PROFILE=work",
             ],
             "{report}"
