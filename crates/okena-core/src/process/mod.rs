@@ -120,10 +120,13 @@ pub fn detach(cmd: &mut std::process::Command) -> &mut std::process::Command {
 pub fn spawn_detached(cmd: &mut std::process::Command) -> std::io::Result<u32> {
     let mut child = detach(cmd).spawn()?;
     let pid = child.id();
-    std::thread::spawn(move || {
-        if let Err(err) = child.wait() {
-            log::warn!("Failed to reap detached process: {}", err);
+    std::thread::spawn(move || match child.wait() {
+        // A launcher like macOS `open` reports failure only through its status.
+        Ok(status) if !status.success() => {
+            log::warn!("Detached process {pid} exited with {status}");
         }
+        Ok(_) => {}
+        Err(err) => log::warn!("Failed to reap detached process {pid}: {err}"),
     });
     Ok(pid)
 }
