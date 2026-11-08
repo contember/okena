@@ -73,6 +73,12 @@ pub struct AppState {
     /// Per-connection window list each desktop declared via
     /// [`WsInbound::SetWindows`]; `GET /v1/state` lists these windows.
     pub remote_windows: Arc<RwLock<HashMap<u64, Vec<ApiWindow>>>>,
+    /// Live connections from this host (Unix socket or loopback). Their
+    /// `remote_windows` entries are the desktops `POST /v1/update/restart`
+    /// relaunches.
+    pub local_connections: Arc<RwLock<HashSet<u64>>>,
+    /// Relaunch requests for the connections each push names.
+    pub app_restart_tx: Arc<tokio::sync::broadcast::Sender<update::AppRestartPush>>,
     /// Optional wake-up path for the host git poller when a WS client starts
     /// viewing terminals.
     pub git_poll_trigger_tx: Option<tokio::sync::mpsc::UnboundedSender<GitPollTrigger>>,
@@ -171,6 +177,8 @@ pub fn build_router(
         remote_subscribed_terminals,
         remote_visible_projects,
         remote_windows: Arc::new(RwLock::new(HashMap::new())),
+        local_connections: Arc::new(RwLock::new(HashSet::new())),
+        app_restart_tx: Arc::new(tokio::sync::broadcast::channel(4).0),
         git_poll_trigger_tx,
         next_connection_id,
         active_connections,
@@ -306,6 +314,10 @@ pub fn build_router(
         .route(
             "/v1/update/dismiss",
             axum::routing::post(update::post_dismiss),
+        )
+        .route(
+            "/v1/update/restart",
+            axum::routing::post(update::post_restart),
         )
         .layer(middleware::from_fn_with_state(
             state.clone(),
@@ -776,6 +788,7 @@ mod tests {
             Call::post("/v1/update/check"),
             Call::post("/v1/update/install"),
             Call::post("/v1/update/dismiss"),
+            Call::post("/v1/update/restart"),
         ] {
             let uri = call.uri;
             assert_eq!(
@@ -805,6 +818,23 @@ mod tests {
                 .status(&mut router)
                 .await,
             StatusCode::OK
+        );
+    }
+
+    /// Restarting into an update needs one installed and waiting; otherwise
+    /// the daemon must neither restart nor push anything to the desktops.
+    #[tokio::test]
+    async fn update_restart_refuses_without_an_installed_update() {
+        let store = Arc::new(AuthStore::with_secret(vec![7u8; 32]));
+        let token = paired_token(&store);
+        let mut router = test_router(store);
+
+        assert_eq!(
+            Call::post("/v1/update/restart")
+                .with_token(&token)
+                .status(&mut router)
+                .await,
+            StatusCode::CONFLICT
         );
     }
 

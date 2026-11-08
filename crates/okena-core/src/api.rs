@@ -470,6 +470,33 @@ pub struct ApiOverviewStatusLanesRequest {
     pub window: Option<String>,
 }
 
+/// One-shot request for the desktops on the daemon's host to relaunch into an
+/// installed update. The daemon is already restarting when it is sent: each
+/// desktop waits for a daemon other than `daemon_pid`, then relaunches itself.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApiAppRestartRequest {
+    pub version: String,
+    pub daemon_pid: u32,
+}
+
+/// A desktop `POST /v1/update/restart` asked to relaunch.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApiRestartedDesktop {
+    /// The daemon's id for the desktop's WebSocket connection.
+    pub connection_id: u64,
+    /// How many windows the desktop declared.
+    pub windows: usize,
+}
+
+/// Reply of `POST /v1/update/restart`: the daemon `daemon_pid` is restarting
+/// into `version` and asked `desktops` to relaunch.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApiUpdateRestartResponse {
+    pub version: String,
+    pub daemon_pid: u32,
+    pub desktops: Vec<ApiRestartedDesktop>,
+}
+
 /// The terminals a new worktree starts with.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
