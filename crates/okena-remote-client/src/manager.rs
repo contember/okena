@@ -272,6 +272,12 @@ pub enum RemoteManagerEvent {
     /// window).
     OverviewStatusLanesRequested { on: bool, window: Option<WindowId> },
 
+    /// The local daemon is restarting into an installed update and asks this
+    /// desktop to relaunch once the replacement is up. Emitted ONLY for
+    /// `LOCAL_DAEMON_CONNECTION_ID`: a remote host's update does not replace
+    /// this desktop's binary.
+    AppRestartRequested(okena_core::api::ApiAppRestartRequest),
+
     /// The implicit local-daemon loopback connection reached a terminal failed
     /// state (its own connect/reconnect retries are exhausted against a dead
     /// endpoint). The manager stays generic — it only reports; the app decides
@@ -973,6 +979,7 @@ impl RemoteConnectionManager {
             ConnectionEvent::UsageChanged { .. } => "UsageChanged",
             ConnectionEvent::Toast { .. } => "Toast",
             ConnectionEvent::PresentationRequested { .. } => "PresentationRequested",
+            ConnectionEvent::AppRestartRequested { .. } => "AppRestartRequested",
             ConnectionEvent::ServerWarning { .. } => "ServerWarning",
             ConnectionEvent::TokenRefreshed { .. } => "TokenRefreshed",
         };
@@ -1151,6 +1158,16 @@ impl RemoteConnectionManager {
                     log::warn!("Ignoring presentation request for invalid window id: {window}");
                 }
             },
+            ConnectionEvent::AppRestartRequested {
+                connection_id,
+                request,
+            } => {
+                if connection_id == LOCAL_DAEMON_CONNECTION_ID {
+                    cx.emit(RemoteManagerEvent::AppRestartRequested(request));
+                } else {
+                    log::warn!("Ignoring app restart request from remote {connection_id}");
+                }
+            }
             ConnectionEvent::Toast {
                 connection_id,
                 mut toast,

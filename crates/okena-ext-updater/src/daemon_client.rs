@@ -159,7 +159,32 @@ pub fn restart_daemon_and_wait() -> Result<()> {
         Ok(response) => anyhow::bail!("daemon restart returned {}", response.status()),
         Err(error) => log::warn!("Restart response was interrupted: {error}"),
     }
+    wait_for_replacement_daemon(old_pid)
+}
 
+/// Restart the daemon into the installed update; it asks every desktop on this
+/// host to relaunch once the replacement is up.
+pub fn request_update_restart() -> Result<okena_core::api::ApiUpdateRestartResponse> {
+    let endpoint = local_update_endpoint("/v1/update/restart")?;
+    let response = endpoint
+        .client
+        .post(&endpoint.url)
+        .timeout(Duration::from_secs(10))
+        .send()
+        .context("failed to request the update restart")?;
+    let status = response.status();
+    if !status.is_success() {
+        let body = response.text().unwrap_or_default();
+        anyhow::bail!("update restart returned {status}: {body}");
+    }
+    response
+        .json()
+        .context("failed to decode the update restart reply")
+}
+
+/// Wait until a daemon other than `old_pid` advertises itself and answers.
+pub fn wait_for_replacement_daemon(old_pid: u32) -> Result<()> {
+    let remote_path = remote_json_path();
     let deadline = std::time::Instant::now() + Duration::from_secs(25);
     while std::time::Instant::now() < deadline {
         if let Ok(data) = std::fs::read(&remote_path)

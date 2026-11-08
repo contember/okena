@@ -4,6 +4,7 @@ mod extras;
 mod local_build;
 mod notifications;
 mod presentation_requests;
+mod update_restart;
 
 pub use detached_overlays::open_detached_overlay;
 
@@ -569,6 +570,9 @@ impl Okena {
             }
             RemoteManagerEvent::OverviewStatusLanesRequested { on, window } => {
                 this.apply_overview_status_lanes_request(*on, *window, cx);
+            }
+            RemoteManagerEvent::AppRestartRequested(request) => {
+                this.relaunch_for_update(request.clone(), cx);
             }
             // Local daemon connection dead-ended — re-run discovery/ensure so
             // the GUI recovers instead of staying wedged on a dead socket.
