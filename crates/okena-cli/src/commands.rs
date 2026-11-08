@@ -2096,6 +2096,160 @@ pub fn cli_update_list(json_mode: bool, quiet: bool) -> i32 {
     }
 }
 
+/// Bring the latest release to `ReadyToRestart` (check, download, install as
+/// needed), then restart into it when `restart` is set.
+pub fn cli_update_install(restart: bool, json_mode: bool) -> i32 {
+    use okena_ext_updater::UpdateStatus;
+    use okena_ext_updater::daemon_client;
+
+    let snapshot = match daemon_client::fetch_status() {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            eprintln!("Failed to fetch update status: {error}");
+            return 1;
+        }
+    };
+    if snapshot.is_homebrew {
+        eprintln!("This Okena installation is managed by Homebrew; update it with brew.");
+        return 1;
+    }
+    let current_version = snapshot.app_version.clone();
+
+    let mut checked_at = None;
+    let mut install_requested = false;
+    let mut status = snapshot.status;
+    // Download + install of a full release, so generous — but a wedged daemon
+    // must not pin the terminal for an hour.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15 * 60);
+    let poll_interval = std::time::Duration::from_millis(250);
+    let mut unreachable_for = std::time::Duration::ZERO;
+    let version = loop {
+        match &status {
+            UpdateStatus::ReadyToRestart { version, .. } => break version.clone(),
+            UpdateStatus::Ready { .. } if !install_requested => {
+                if let Err(error) = daemon_client::request_install() {
+                    eprintln!("Failed to start the install: {error}");
+                    return 1;
+                }
+                install_requested = true;
+            }
+            UpdateStatus::Ready { .. }
+            | UpdateStatus::Checking
+            | UpdateStatus::Downloading { .. }
+            | UpdateStatus::Installing { .. } => {}
+            UpdateStatus::Idle | UpdateStatus::Failed { .. } | UpdateStatus::Available { .. }
+                if checked_at.is_none() =>
+            {
+                if let Err(error) = daemon_client::request_check() {
+                    eprintln!("Failed to start the update check: {error}");
+                    return 1;
+                }
+                checked_at = Some(std::time::Instant::now());
+            }
+            // The check may not have started yet when the first poll lands, so
+            // `Idle` means "no update" only after a short grace.
+            UpdateStatus::Idle
+                if checked_at
+                    .is_some_and(|at| at.elapsed() >= std::time::Duration::from_secs(3)) =>
+            {
+                if json_mode {
+                    let output = serde_json::json!({
+                        "status": "up-to-date",
+                        "version": current_version,
+                    });
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&output)
+                            .unwrap_or_else(|_| output.to_string())
+                    );
+                } else {
+                    println!("up-to-date\t{current_version}");
+                }
+                return 0;
+            }
+            UpdateStatus::Idle | UpdateStatus::Available { .. } => {}
+            UpdateStatus::Failed { error } => {
+                eprintln!("Update failed: {error}");
+                return 1;
+            }
+            UpdateStatus::BrewUpdate { version } => {
+                eprintln!("v{version} is available through Homebrew; update it with brew.");
+                return 1;
+            }
+        }
+        if std::time::Instant::now() >= deadline {
+            eprintln!("Timed out waiting for the update to install.");
+            return 1;
+        }
+        std::thread::sleep(poll_interval);
+        match daemon_client::fetch_status() {
+            Ok(snapshot) => {
+                unreachable_for = std::time::Duration::ZERO;
+                status = snapshot.status;
+            }
+            Err(error) => {
+                unreachable_for += poll_interval;
+                if unreachable_for >= std::time::Duration::from_secs(15) {
+                    eprintln!("Lost contact with the daemon during the update: {error}");
+                    return 1;
+                }
+            }
+        }
+    };
+
+    if !restart {
+        if json_mode {
+            let output = serde_json::json!({ "status": "ready-to-restart", "version": version });
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&output).unwrap_or_else(|_| output.to_string())
+            );
+        } else {
+            println!("ready-to-restart\t{version}");
+            eprintln!(
+                "Run `okena update install --restart` to restart into v{version}; active terminal sessions will end."
+            );
+        }
+        return 0;
+    }
+
+    eprintln!("Restarting into v{version}; active terminal sessions will end.");
+    let reply = match daemon_client::request_update_restart() {
+        Ok(reply) => reply,
+        Err(error) => {
+            eprintln!("Update installed, but the restart failed: {error}");
+            return 1;
+        }
+    };
+    if reply.desktops.is_empty() {
+        eprintln!("No desktop is attached; restarted the daemon only.");
+    }
+    if !json_mode {
+        // Before the wait: this process may end with the daemon's terminals.
+        for desktop in &reply.desktops {
+            println!("desktop\t{}\t{}", desktop.connection_id, desktop.windows);
+        }
+    }
+    if let Err(error) = daemon_client::wait_for_replacement_daemon(reply.daemon_pid) {
+        eprintln!("Restart requested, but the new daemon did not come up: {error}");
+        return 1;
+    }
+    if json_mode {
+        let output = serde_json::json!({
+            "status": "restarted",
+            "version": reply.version,
+            "desktops": reply.desktops,
+        });
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&output).unwrap_or_else(|_| output.to_string())
+        );
+    } else {
+        println!("restarted\t{}", reply.version);
+    }
+    0
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn cli_update_revert(
     version: &str,

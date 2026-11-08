@@ -390,6 +390,7 @@ fn dispatch(cli: Cli) -> i32 {
         Command::Update { cmd } => match cmd {
             UpdateCmd::Status { json } => commands::cli_update_status(json),
             UpdateCmd::List { json, quiet } => commands::cli_update_list(json, quiet),
+            UpdateCmd::Install { restart, json } => commands::cli_update_install(restart, json),
             UpdateCmd::Revert {
                 version,
                 keep_config,
