@@ -232,6 +232,9 @@ pub struct Okena {
     spawned_daemon: Option<std::process::Child>,
     /// A rebuilt successor already owns the daemon; quitting must not shut it down.
     preserve_daemon_on_quit: bool,
+    /// Single-flight guard for the relaunch into an update: a repeated restart
+    /// push must not start a second successor.
+    relaunching_for_update: bool,
     /// Single-flight guard for the local-daemon recovery task: set while a
     /// recovery loop runs so repeat `LocalConnectionFailed` events don't stack
     /// up parallel recoveries (each would re-run `ensure_local_daemon`).
@@ -414,6 +417,7 @@ impl Okena {
             notification_jump_tx,
             spawned_daemon,
             preserve_daemon_on_quit: false,
+            relaunching_for_update: false,
             recovering: Arc::new(AtomicBool::new(false)),
             quitting: Arc::new(AtomicBool::new(false)),
             pending_extra_forgets: extras::PendingExtraForgets::default(),
