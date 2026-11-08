@@ -387,6 +387,34 @@ fn main() {
         std::process::exit(exit_code);
     }
 
+    // Started from inside an Okena pane (e.g. an agent running `okena`): a GUI
+    // that stayed a child of that pane would inherit its session, stdio and
+    // environment, and die with it. Start a detached instance instead, before
+    // this process rotates the log the new one is about to rotate again.
+    // `OKENA_ATTACH=1` keeps it attached (developing Okena inside Okena).
+    let has_display = std::env::var("DISPLAY").is_ok() || std::env::var("WAYLAND_DISPLAY").is_ok();
+    if !log_is_headless
+        && (has_display || !cfg!(target_os = "linux"))
+        && std::env::var_os("OKENA_TERMINAL_ID").is_some()
+        && std::env::var_os("OKENA_ATTACH").is_none_or(|value| value != "1")
+    {
+        let relaunched =
+            okena_remote_server::local::remember_current_executable().and_then(|exe| {
+                let args = okena_core::profiles::relaunch_args(
+                    std::env::args().skip(1),
+                    &profiles::current().id,
+                );
+                okena_core::process::spawn_detached(&mut okena_core::process::app_launch_command(
+                    &exe, &args,
+                ))
+            });
+        if let Err(error) = relaunched {
+            eprintln!("Failed to start Okena detached from this terminal: {error}");
+            std::process::exit(1);
+        }
+        return;
+    }
+
     // Set up file logging: rotate previous log, write to both stderr and file
     let log_target = (|| -> Option<env_logger::fmt::Target> {
         let root = &profiles::current().root;
@@ -476,7 +504,6 @@ fn main() {
     // 1. Explicit --headless flag
     // 2. Auto-detect on Linux: --listen provided but no DISPLAY/WAYLAND_DISPLAY
     let explicit_headless = args.iter().any(|a| a == "--headless");
-    let has_display = std::env::var("DISPLAY").is_ok() || std::env::var("WAYLAND_DISPLAY").is_ok();
     let headless =
         explicit_headless || (cfg!(target_os = "linux") && listen_addr.is_some() && !has_display);
 
@@ -521,32 +548,6 @@ fn main() {
         eprintln!("No display server found (DISPLAY/WAYLAND_DISPLAY not set).");
         eprintln!("Use --headless [--listen <addr>] to run without a GUI.");
         std::process::exit(1);
-    }
-
-    // Started from inside an Okena pane (e.g. an agent running `okena`): a GUI
-    // that stayed a child of that pane would inherit its session, stdio and
-    // environment, and die with it. Start a detached instance instead.
-    if std::env::var_os("OKENA_TERMINAL_ID").is_some() {
-        let relaunched =
-            okena_remote_server::local::remember_current_executable().and_then(|exe| {
-                let args = okena_core::profiles::relaunch_args(
-                    std::env::args().skip(1),
-                    &profiles::current().id,
-                );
-                okena_core::process::spawn_detached(&mut okena_core::process::app_launch_command(
-                    &exe, &args,
-                ))
-            });
-        match relaunched {
-            Ok(pid) => {
-                log::info!("Started from an Okena pane; relaunched detached as pid {pid}");
-                return;
-            }
-            Err(error) => {
-                eprintln!("Failed to start Okena detached from this terminal: {error}");
-                std::process::exit(1);
-            }
-        }
     }
 
     Application::with_platform(gpui_platform::current_platform(false)).with_assets(Assets).run(move |cx: &mut App| {

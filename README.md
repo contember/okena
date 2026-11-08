@@ -152,6 +152,14 @@ cargo build --release
 cargo run
 ```
 
+Started from inside an Okena pane, the GUI starts a detached copy of itself and
+exits, so it does not inherit that pane's session, stdio and environment. To keep
+it attached while developing Okena inside Okena (log on stderr, Ctrl-C stops it):
+
+```bash
+OKENA_ATTACH=1 cargo run
+```
+
 ## Keyboard Shortcuts
 
 | Action | macOS | Linux/Windows |
