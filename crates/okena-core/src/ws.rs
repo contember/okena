@@ -1,7 +1,7 @@
 use crate::api::{
-    ApiFullscreenRequest, ApiGitStatus, ApiOverviewStatusLanesRequest, ApiProjectLayoutRequest,
-    ApiProjectPlacementRequest, ApiProjectVisibilityRequest, ApiStatusLanesRequest, ApiSystemStats,
-    ApiTerminalFocusRequest, ApiToast, ApiUsage, ApiWindow,
+    ApiAppRestartRequest, ApiFullscreenRequest, ApiGitStatus, ApiOverviewStatusLanesRequest,
+    ApiProjectLayoutRequest, ApiProjectPlacementRequest, ApiProjectVisibilityRequest,
+    ApiStatusLanesRequest, ApiSystemStats, ApiTerminalFocusRequest, ApiToast, ApiUsage, ApiWindow,
 };
 use crate::keys::SpecialKey;
 use serde::{Deserialize, Serialize};
@@ -124,6 +124,10 @@ pub enum WsOutbound {
     /// status lanes of one of its windows' overview after an external API
     /// action succeeds.
     OverviewStatusLanesRequested(ApiOverviewStatusLanesRequest),
+    /// One-shot request for a desktop on the daemon's host to relaunch into an
+    /// installed update; sent only to the desktops `POST /v1/update/restart`
+    /// names in its reply.
+    AppRestartRequested(ApiAppRestartRequest),
     TerminalResized {
         terminal_id: String,
         cols: u16,
@@ -338,6 +342,22 @@ mod tests {
             let json = serde_json::to_string(&msg).unwrap();
             let _parsed: WsOutbound = serde_json::from_str(&json).unwrap();
         }
+    }
+
+    /// Desktops read the restart push by its `type` tag and deserialize the
+    /// payload from the same flat object, like the presentation requests.
+    #[test]
+    fn app_restart_request_is_a_tagged_flat_payload() {
+        let request = crate::api::ApiAppRestartRequest {
+            version: "0.30.0".into(),
+            daemon_pid: 4242,
+        };
+        let value = serde_json::to_value(WsOutbound::AppRestartRequested(request.clone())).unwrap();
+        assert_eq!(value["type"], "app_restart_requested");
+        assert_eq!(
+            serde_json::from_value::<crate::api::ApiAppRestartRequest>(value).unwrap(),
+            request
+        );
     }
 
     /// Clients read presentation requests by their `type` tag and deserialize

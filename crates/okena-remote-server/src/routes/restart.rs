@@ -49,8 +49,10 @@ pub async fn post_restart(
     // Spawn the replacement BEFORE acking: if we can't even launch it, fail the
     // request and stay alive rather than exit into a daemon-less state.
     match crate::local::spawn_replacement_daemon() {
-        Ok(_child) => {
-            log::info!("Daemon restart requested; spawned replacement, exiting shortly");
+        Ok(pid) => {
+            log::info!(
+                "Daemon restart requested; spawned replacement (pid {pid}), exiting shortly"
+            );
         }
         Err(e) => {
             log::error!("Daemon restart failed to spawn replacement: {e}");
@@ -58,17 +60,20 @@ pub async fn post_restart(
         }
     }
 
-    // Wake the graceful run loop after the response is flushed. The replacement
-    // is already waiting on this PID, so it cannot race the outgoing daemon's
-    // final persistence and lock release.
+    exit_after_ack(&state);
+    StatusCode::OK
+}
+
+/// Wake the graceful run loop once the response is flushed. The replacement is
+/// already waiting on this PID, so it cannot race the outgoing daemon's final
+/// persistence and lock release.
+pub(crate) fn exit_after_ack(state: &AppState) {
     let process_shutdown = state.process_shutdown.clone();
     tokio::spawn(async move {
         tokio::time::sleep(EXIT_DELAY).await;
         log::info!("Daemon exiting for restart");
         process_shutdown.notify_one();
     });
-
-    StatusCode::OK
 }
 
 #[cfg(test)]

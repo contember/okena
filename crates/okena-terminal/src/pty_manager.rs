@@ -2663,13 +2663,16 @@ const PARENT_TERMINAL_VARS: &[&str] = &[
 ];
 
 /// Pane environment that replaces the parent terminal's identity with
-/// Okena's: removes each inherited [`PARENT_TERMINAL_VARS`] entry that
-/// `is_inherited` reports and names Okena as `TERM_PROGRAM`.
+/// Okena's: removes each inherited [`PARENT_TERMINAL_VARS`] entry and agent
+/// session variable ([`okena_core::process::AGENT_SESSION_VARS`]: a daemon
+/// started from inside an agent would mark every pane as that agent's child)
+/// that `is_inherited` reports, and names Okena as `TERM_PROGRAM`.
 fn parent_terminal_environment(
     is_inherited: impl Fn(&str) -> bool,
 ) -> Vec<(String, Option<String>)> {
     let mut environment: Vec<(String, Option<String>)> = PARENT_TERMINAL_VARS
         .iter()
+        .chain(okena_core::process::AGENT_SESSION_VARS)
         .filter(|name| is_inherited(name))
         .map(|name| (name.to_string(), None))
         .collect();
@@ -2751,13 +2754,25 @@ mod tests {
 
     #[test]
     fn parent_terminal_identity_is_removed_and_okena_named() {
-        let environment =
-            parent_terminal_environment(|name| matches!(name, "VTE_VERSION" | "WT_SESSION"));
+        // A pane keeps the user's Claude Code configuration, only the
+        // launching agent's session identity goes.
+        let environment = parent_terminal_environment(|name| {
+            matches!(
+                name,
+                "VTE_VERSION"
+                    | "WT_SESSION"
+                    | "CLAUDECODE"
+                    | "CLAUDE_CODE_ENTRYPOINT"
+                    | "CLAUDE_CODE_USE_BEDROCK"
+            )
+        });
         assert_eq!(
             environment,
             [
                 ("VTE_VERSION".to_string(), None),
                 ("WT_SESSION".to_string(), None),
+                ("CLAUDECODE".to_string(), None),
+                ("CLAUDE_CODE_ENTRYPOINT".to_string(), None),
                 ("TERM_PROGRAM".to_string(), Some("okena".to_string())),
             ]
         );

@@ -500,7 +500,8 @@ fn handle_connection_event(
         }
         ConnectionEvent::SystemStatsChanged { .. }
         | ConnectionEvent::UsageChanged { .. }
-        | ConnectionEvent::PresentationRequested { .. } => {}
+        | ConnectionEvent::PresentationRequested { .. }
+        | ConnectionEvent::AppRestartRequested { .. } => {}
         ConnectionEvent::Toast { toast, .. } => {
             state.message = Some(format!("{}: {}", toast.level, toast.message));
         }

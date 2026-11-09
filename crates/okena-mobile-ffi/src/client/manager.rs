@@ -987,7 +987,8 @@ impl ConnectionManager {
                     conn.store_usage(Some(usage));
                 }
                 ConnectionEvent::SystemStatsChanged { .. }
-                | ConnectionEvent::PresentationRequested { .. } => {}
+                | ConnectionEvent::PresentationRequested { .. }
+                | ConnectionEvent::AppRestartRequested { .. } => {}
                 ConnectionEvent::ServerWarning { message, .. } => {
                     log::warn!("Server warning for {}: {}", conn_id, message);
                 }

@@ -12,6 +12,7 @@ The `Okena` entity coordinates desktop-only GPUI entities and synchronizes them 
 | `extras.rs` | Auxiliary `Okena` methods for desktop actions. |
 | `notifications.rs` | Desktop notification integration; `jump_to_terminal` (also used for pushed terminal-focus requests). |
 | `presentation_requests.rs` | Applies daemon-pushed show/hide, fullscreen, layout-mode and status-lanes (family and overview) requests to the target window. |
+| `update_restart.rs` | Relaunches into an installed update when the local daemon pushes `AppRestartRequested` (`POST /v1/update/restart`): waits for the replacement daemon, then `restart_app`. |
 
 ## Key Patterns
 

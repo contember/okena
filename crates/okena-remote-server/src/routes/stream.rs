@@ -155,6 +155,12 @@ async fn handle_ws(
     state.active_connections.fetch_add(1, Ordering::SeqCst);
     // Record that this daemon has served a client, arming the idle-exit monitor.
     state.had_client.store(true, Ordering::SeqCst);
+    // A desktop on this host is one `POST /v1/update/restart` can relaunch.
+    if peer.is_local_trusted()
+        && let Ok(mut set) = state.local_connections.write()
+    {
+        set.insert(connection_id);
+    }
 
     // Subscribe to state_version and git status changes
     let mut state_rx = state.state_version.subscribe();
@@ -162,6 +168,7 @@ async fn handle_ws(
     // Subscribe to daemon-originated toasts (fire-and-forget broadcast).
     let mut toast_rx = state.toast_tx.subscribe();
     let mut presentation_rx = state.presentation_tx.subscribe();
+    let mut app_restart_rx = state.app_restart_tx.subscribe();
     // Agent usage: push the current snapshot now, then every change. The
     // usage polls run while at least one client is registered.
     let _usage_client = state.usage.register_client();
@@ -179,6 +186,7 @@ async fn handle_ws(
     // resolve `Err(Closed)` instantly and busy-spin the loop.
     let mut toast_open = true;
     let mut presentation_open = true;
+    let mut app_restart_open = true;
     let mut auth_watch_open = session.is_some();
     let mut auth_deadline = session_deadline(session.as_ref());
     let mut system_stats = SystemStatsCache::new();
@@ -669,6 +677,26 @@ async fn handle_ws(
                 }
             }
 
+            // Relaunch request for the desktops `POST /v1/update/restart` named.
+            result = app_restart_rx.recv(), if app_restart_open => {
+                match result {
+                    Ok(push) if push.connections.contains(&connection_id) => {
+                        let resp = serde_json::to_string(&WsOutbound::AppRestartRequested(push.request))
+                            .expect("BUG: WsOutbound must serialize");
+                        if out_tx.send(Message::Text(resp.into())).await.is_err() {
+                            break;
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        log::warn!("app restart broadcast lagged, dropped {n} request(s) for a client");
+                    }
+                    Err(broadcast::error::RecvError::Closed) => {
+                        app_restart_open = false;
+                    }
+                }
+            }
+
             // Daemon-originated toast push (fire-and-forget broadcast).
             result = toast_rx.recv(), if toast_open => {
                 match result {
@@ -739,6 +767,9 @@ async fn handle_ws(
     }
     if let Ok(mut map) = state.remote_windows.write() {
         map.remove(&connection_id);
+    }
+    if let Ok(mut set) = state.local_connections.write() {
+        set.remove(&connection_id);
     }
 
     // Deregister the live connection (paired with the fetch_add above).

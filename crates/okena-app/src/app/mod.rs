@@ -4,6 +4,7 @@ mod extras;
 mod local_build;
 mod notifications;
 mod presentation_requests;
+mod update_restart;
 
 pub use detached_overlays::open_detached_overlay;
 
@@ -231,6 +232,9 @@ pub struct Okena {
     spawned_daemon: Option<std::process::Child>,
     /// A rebuilt successor already owns the daemon; quitting must not shut it down.
     preserve_daemon_on_quit: bool,
+    /// Single-flight guard for the relaunch into an update: a repeated restart
+    /// push must not start a second successor.
+    relaunching_for_update: bool,
     /// Single-flight guard for the local-daemon recovery task: set while a
     /// recovery loop runs so repeat `LocalConnectionFailed` events don't stack
     /// up parallel recoveries (each would re-run `ensure_local_daemon`).
@@ -413,6 +417,7 @@ impl Okena {
             notification_jump_tx,
             spawned_daemon,
             preserve_daemon_on_quit: false,
+            relaunching_for_update: false,
             recovering: Arc::new(AtomicBool::new(false)),
             quitting: Arc::new(AtomicBool::new(false)),
             pending_extra_forgets: extras::PendingExtraForgets::default(),
@@ -569,6 +574,9 @@ impl Okena {
             }
             RemoteManagerEvent::OverviewStatusLanesRequested { on, window } => {
                 this.apply_overview_status_lanes_request(*on, *window, cx);
+            }
+            RemoteManagerEvent::AppRestartRequested(request) => {
+                this.relaunch_for_update(request.clone(), cx);
             }
             // Local daemon connection dead-ended — re-run discovery/ensure so
             // the GUI recovers instead of staying wedged on a dead socket.

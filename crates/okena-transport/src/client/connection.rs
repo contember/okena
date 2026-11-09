@@ -2227,6 +2227,27 @@ impl<H: ConnectionHandler> RemoteClient<H> {
                                             .await;
                                     }
                                 }
+                                "app_restart_requested" => {
+                                    match serde_json::from_value::<
+                                        okena_core::api::ApiAppRestartRequest,
+                                    >(value.clone())
+                                    {
+                                        Ok(request) => {
+                                            let _ = event_tx_clone
+                                                .send(ConnectionEvent::AppRestartRequested {
+                                                    connection_id: config_id.clone(),
+                                                    request,
+                                                })
+                                                .await;
+                                        }
+                                        Err(e) => {
+                                            log::warn!(
+                                                "Failed to parse app restart request: {}",
+                                                e
+                                            );
+                                        }
+                                    }
+                                }
                                 "toast" => {
                                     // `WsOutbound::Toast` is internally tagged, so
                                     // the ApiToast fields sit at the top level of

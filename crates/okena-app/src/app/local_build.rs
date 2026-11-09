@@ -117,11 +117,11 @@ impl Okena {
                 state.set_status(okena_ext_updater::LocalBuildStatus::RestartingApp, cx);
             });
             let _ = this.update(cx, |this, cx| {
-                match Command::new(&release_executable)
-                    .args(&app_args)
-                    .env("OKENA_ACTIVATE", "1")
-                    .spawn()
-                {
+                match okena_core::process::spawn_detached(
+                    Command::new(&release_executable)
+                        .args(&app_args)
+                        .env("OKENA_ACTIVATE", "1"),
+                ) {
                     Ok(_) => {
                         this.preserve_daemon_on_quit = true;
                         this.quitting

@@ -1232,9 +1232,8 @@ impl WindowView {
         .detach();
     }
 
-    /// Spawn a new Okena process for `id`, then quit.
-    /// The spawned child is dropped immediately and survives as an orphan (Unix)
-    /// or independent process (Windows) — same pattern as the updater's restart_app.
+    /// Spawn a new, detached Okena process for `id`, then quit — same pattern
+    /// as the updater's restart_app.
     pub(super) fn handle_switch_profile(&self, id: String, cx: &mut Context<Self>) {
         // NOTE: do NOT flush workspace.json here. The GUI is a daemon client and
         // its Workspace is a read-only mirror (prefixed ids) — the daemon is the
@@ -1243,18 +1242,20 @@ impl WindowView {
         // profile's daemon owns its own persistence; the relaunch below starts
         // the new profile's daemon.
 
-        // Spawn current_exe with --profile <id>. Strip any existing --profile arg
-        // so we don't double-pass it.
-        match std::env::current_exe() {
+        // The remembered path: after an in-place update, `current_exe()` names
+        // the replaced (deleted) binary on Linux.
+        match crate::remote::local::remember_current_executable() {
             Ok(exe) => {
-                let mut args: Vec<String> = std::env::args().skip(1).collect();
-                strip_profile_args(&mut args);
-                let _ = std::process::Command::new(&exe)
-                    .args(&args)
-                    .arg("--profile")
-                    .arg(&id)
-                    .env("OKENA_ACTIVATE", "1")
-                    .spawn();
+                let args = okena_core::profiles::relaunch_args(std::env::args().skip(1), &id);
+                let mut command = okena_core::process::app_launch_command(&exe, &args);
+                if let Err(e) =
+                    okena_core::process::spawn_detached(command.env("OKENA_ACTIVATE", "1"))
+                {
+                    log::error!(
+                        "profile switch: relaunch from {} failed: {e}",
+                        exe.display()
+                    );
+                }
             }
             Err(e) => {
                 log::error!("profile switch: could not resolve current_exe, relaunch aborted: {e}");
@@ -1621,28 +1622,5 @@ fn collect_tab_terminal_ids(
         }
         LayoutNode::Terminal { terminal_id, .. } => terminal_id.iter().cloned().collect(),
         _ => Vec::new(),
-    }
-}
-
-/// Remove profile-selecting flags so the relaunched process picks them up fresh.
-///
-/// Strips both `--profile` and `--new-profile` (with their values, in either
-/// `--flag value` or `--flag=value` form). If `--new-profile` survived the
-/// relaunch it would re-trigger profile creation each time the user switches
-/// profiles via the GUI, and would also override the `--profile <id>` we
-/// append.
-fn strip_profile_args(args: &mut Vec<String>) {
-    let mut i = 0;
-    while i < args.len() {
-        if args[i] == "--profile" || args[i] == "--new-profile" {
-            args.remove(i);
-            if i < args.len() {
-                args.remove(i);
-            }
-        } else if args[i].starts_with("--profile=") || args[i].starts_with("--new-profile=") {
-            args.remove(i);
-        } else {
-            i += 1;
-        }
     }
 }

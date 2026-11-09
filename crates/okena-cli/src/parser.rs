@@ -430,6 +430,16 @@ pub enum UpdateCmd {
         #[arg(short, long, conflicts_with = "json")]
         quiet: bool,
     },
+    /// Download and install the latest release, optionally restarting into it
+    Install {
+        /// Restart the daemon and every desktop on this host into the update;
+        /// this ends terminal sessions
+        #[arg(long)]
+        restart: bool,
+        /// Output JSON instead of tab-separated text
+        #[arg(long)]
+        json: bool,
+    },
     /// Download and install an older stable release
     Revert {
         /// Exact release version, without the leading v
@@ -979,6 +989,7 @@ mod tests {
         assert!(Cli::try_parse_from(["okena", "run", "t1", "ls", "-la"]).is_ok());
         assert!(Cli::try_parse_from(["okena", "key", "t1", "ctrl-c"]).is_ok());
         assert!(Cli::try_parse_from(["okena", "update", "list", "--json"]).is_ok());
+        assert!(Cli::try_parse_from(["okena", "update", "install", "--restart", "--json"]).is_ok());
         assert!(
             Cli::try_parse_from([
                 "okena",

@@ -126,6 +126,12 @@ pub enum ConnectionEvent {
         connection_id: String,
         request: okena_core::ws::ClientPresentationRequest,
     },
+    /// The daemon is restarting into an installed update and asks this desktop
+    /// to relaunch once the replacement is up.
+    AppRestartRequested {
+        connection_id: String,
+        request: okena_core::api::ApiAppRestartRequest,
+    },
     /// Token was refreshed — save new token and update timestamp
     TokenRefreshed {
         connection_id: String,

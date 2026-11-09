@@ -112,7 +112,11 @@ For terminals running `claude` with Claude Remote on (Settings → Terminal).
   whole blob back via `theme save <id> -` (reads stdin) — it activates by default.
 - Command palette: `okena command list`, `okena command run <Name>` invokes a GUI
   action (e.g. `ToggleSidebar`, `NewWindow`, `ZoomIn`) — things with no dedicated CLI verb.
-- Versions: `okena update status | list | revert <version>`. Preview a revert with
+- Versions: `okena update status | list | install | revert <version>`.
+  `update install` downloads and installs the latest release (`up-to-date` when
+  there is none); `--restart` then restarts the daemon and relaunches every desktop
+  on this machine into it (lists them; ends active terminal sessions). Never run or
+  launch an Okena binary yourself to update or restart it. Preview a revert with
   `--dry-run`; apply with `--yes`. Add `--restart` only when ending active terminal
   sessions is acceptable. The matching config checkpoint is restored by default;
   `--keep-config` accepts the risk of an incompatible newer config.
