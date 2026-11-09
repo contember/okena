@@ -5,13 +5,13 @@
 /// (`CONFIG_PROC_CHILDREN`). A kernel built without them (the default kernel
 /// of Apple's `container` VMs, some minimal VM and embedded kernels) gets a
 /// scan of every `/proc/<n>/stat` for that parent instead. Which of the two
-/// applies is decided once, from this process's own task.
+/// applies is decided once, from this process's own thread.
 #[cfg(target_os = "linux")]
 pub(crate) fn linux_children(pid: u32) -> Option<Vec<u32>> {
     static CHILDREN_FILES: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    let children_files = *CHILDREN_FILES.get_or_init(|| {
-        std::path::Path::new(&format!("/proc/self/task/{}/children", std::process::id())).exists()
-    });
+    // `thread-self`, not our pid: `/proc` may come from another pid namespace.
+    let children_files =
+        *CHILDREN_FILES.get_or_init(|| std::path::Path::new("/proc/thread-self/children").exists());
     proc_children(std::path::Path::new("/proc"), pid, children_files)
 }
 
@@ -46,6 +46,9 @@ fn proc_children(proc_root: &std::path::Path, pid: u32, children_files: bool) ->
 }
 
 /// Every process whose parent is `parent`, oldest first, from `/proc/<n>/stat`.
+///
+/// Sees only the processes `/proc` shows: with `hidepid=1/2` another user's
+/// child (`sudo`, `su`) is missing, which the `children` files would list.
 #[cfg(any(target_os = "linux", test))]
 fn children_by_parent(proc_root: &std::path::Path, parent: u32) -> Vec<u32> {
     let Ok(entries) = std::fs::read_dir(proc_root) else {
@@ -55,7 +58,8 @@ fn children_by_parent(proc_root: &std::path::Path, parent: u32) -> Vec<u32> {
         .flatten()
         .filter_map(|entry| {
             let pid = entry.file_name().to_str()?.parse::<u32>().ok()?;
-            let stat = std::fs::read_to_string(entry.path().join("stat")).ok()?;
+            // Bytes: `comm` is raw and cut at 15 bytes, possibly mid-character.
+            let stat = std::fs::read(entry.path().join("stat")).ok()?;
             let (ppid, start) = parent_and_start(&stat)?;
             (ppid == parent).then_some((start, pid))
         })
@@ -68,8 +72,12 @@ fn children_by_parent(proc_root: &std::path::Path, parent: u32) -> Vec<u32> {
 /// `pid (comm) state ppid …`. `comm` may hold spaces and parentheses, so the
 /// fields are counted from its last `)`.
 #[cfg(any(target_os = "linux", test))]
-fn parent_and_start(stat: &str) -> Option<(u32, u64)> {
-    let fields: Vec<&str> = stat[stat.rfind(')')? + 1..].split_whitespace().collect();
+fn parent_and_start(stat: &[u8]) -> Option<(u32, u64)> {
+    let after_comm = &stat[stat.iter().rposition(|&b| b == b')')? + 1..];
+    let fields: Vec<&str> = std::str::from_utf8(after_comm)
+        .ok()?
+        .split_whitespace()
+        .collect();
     let ppid = fields.get(1)?.parse().ok()?;
     let start = fields
         .get(19)
@@ -477,12 +485,14 @@ mod proc_tests {
         // Fields 5..=21 sit between ppid (4) and starttime (22).
         let filler = vec!["0"; 17].join(" ");
         assert_eq!(
-            parent_and_start(&format!("7 (a) b) S 3 {filler} 42 0")),
+            parent_and_start(format!("7 (a) b) S 3 {filler} 42 0").as_bytes()),
             Some((3, 42))
         );
-        assert_eq!(parent_and_start("7 (sh) S 3"), Some((3, u64::MAX)));
-        assert_eq!(parent_and_start("7 sh S 3"), None);
-        assert_eq!(parent_and_start(""), None);
+        assert_eq!(parent_and_start(b"7 (sh) S 3"), Some((3, u64::MAX)));
+        // A `comm` cut inside a multi-byte character is not UTF-8.
+        assert_eq!(parent_and_start(b"7 (sk\xc3) S 3"), Some((3, u64::MAX)));
+        assert_eq!(parent_and_start(b"7 sh S 3"), None);
+        assert_eq!(parent_and_start(b""), None);
     }
 
     /// The real `/proc`, both ways: the scan must find what the kernel's own
@@ -509,13 +519,14 @@ mod proc_tests {
         assert_eq!(children(proc_root, first.id(), false), Some(vec![]));
         assert_eq!(foreground_command(first.id()), None);
 
-        let has_files = Path::new(&format!("/proc/self/task/{me}/children")).exists();
-        if has_files {
-            let mut listed = children(proc_root, me, true).unwrap();
-            let mut scanned = scanned.clone();
-            listed.sort_unstable();
-            scanned.sort_unstable();
-            assert_eq!(listed, scanned);
+        // Other tests spawn and reap children of this process meanwhile, so
+        // the two reads are compared on this test's own children only.
+        if Path::new("/proc/thread-self/children").exists() {
+            let listed = children(proc_root, me, true).unwrap();
+            assert!(
+                listed.contains(&first.id()) && listed.contains(&second.id()),
+                "{listed:?}"
+            );
         }
 
         for child in [&mut first, &mut second] {
