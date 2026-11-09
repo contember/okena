@@ -2570,16 +2570,11 @@ fn find_pids_for_unix_sockets_lsof(
     result
 }
 
-/// Return the first direct child pid of `pid` via `/proc/<pid>/task/<pid>/children`.
+/// Return the first direct child pid of `pid` (oldest first, see `linux_children`).
 /// Used to walk from a dtach daemon down to the actual shell process.
 #[cfg(target_os = "linux")]
 fn first_proc_child(pid: u32) -> Option<u32> {
-    let path = format!("/proc/{}/task/{}/children", pid, pid);
-    let contents = std::fs::read_to_string(path).ok()?;
-    contents
-        .split_whitespace()
-        .next()
-        .and_then(|s| s.parse().ok())
+    crate::terminal::linux_children(pid)?.into_iter().next()
 }
 
 #[cfg(target_os = "macos")]
