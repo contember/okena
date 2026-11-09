@@ -33,8 +33,14 @@ a rejected command writes nothing to it.
 `cargo build -p okena-cli --bin okena-cli` builds the same subcommands without GPUI, for a
 host that runs `okena-daemon` and no desktop app (a server, a container). Install it as
 `okena` next to `okena-daemon`: the daemon runs that sibling for Claude Remote's hooks and
-channel. It resolves the profile like `main.rs` (read-only for `claude-remote`) and exits 2
-where the desktop binary would open a window.
+channel (`okena_bin_for_exe`, read once at daemon start). It resolves the profile like
+`main.rs` (read-only for `claude-remote`), handles `--list-profiles` and `--new-profile`, and
+exits 2 without touching the profile where the desktop binary would open a window.
+
+There is no headless release asset yet, so the updater does not know this layout: `okena
+update install` on such a host replaces a sibling `okena` with the release's desktop binary
+(`install_sibling_if_present`), or aborts the update when that binary's validation fails
+for want of GUI libraries. Update a headless host by rebuilding both binaries.
 
 This crate takes `okena-workspace` and `okena-remote-server` with `default-features = false`
 so the bin stays GPUI-free; CI gates it with `cargo tree -p okena-cli`. The desktop is

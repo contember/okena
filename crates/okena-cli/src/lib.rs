@@ -60,6 +60,13 @@ pub fn reject_unparsable_args() -> Option<i32> {
         .map(|e| print_parse_error(&e))
 }
 
+/// Whether this process's arguments are a CLI invocation rather than a GUI
+/// launch (see [`cli_args`]). The headless `okena-cli` bin uses it to refuse a
+/// GUI launch before it touches the profile.
+pub fn is_cli_invocation() -> bool {
+    cli_args(&std::env::args().collect::<Vec<_>>()).is_some()
+}
+
 fn print_parse_error(e: &clap::Error) -> i32 {
     // clap formats help/usage and version into the error; print it and use
     // exit code 2 for genuine parse errors (0 for --help/--version).
