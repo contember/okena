@@ -13,6 +13,8 @@ use std::time::Instant;
 mod ansi_snapshot;
 mod app_version;
 mod child_processes;
+#[cfg(target_os = "linux")]
+pub(crate) use child_processes::linux_children;
 mod composition;
 mod event_listener;
 mod idle;
