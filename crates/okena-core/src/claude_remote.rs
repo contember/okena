@@ -246,6 +246,11 @@ pub struct ApiClaudeTranscriptPage {
     pub entries: Vec<ApiClaudeEntry>,
     /// Opaque cursor to pass back to get only newer entries.
     pub cursor: u64,
+    /// Opaque cursor to pass back as `before` to get the entries before this
+    /// page. 0 when the page reaches the start of the transcript (and from a
+    /// daemon that predates older pages).
+    #[serde(default)]
+    pub start: u64,
     /// True when the entries replace everything the client had (first page,
     /// another session, or a rewritten transcript).
     pub reset: bool,

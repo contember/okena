@@ -132,6 +132,9 @@ pub struct TranscriptQuery {
     /// Read this subagent's transcript instead of the session's.
     #[serde(default)]
     agent_id: Option<String>,
+    /// The entries before this offset (a page's `start`) instead of newer ones.
+    #[serde(default)]
+    before: Option<u64>,
 }
 
 pub async fn get_transcript(
@@ -141,7 +144,13 @@ pub async fn get_transcript(
 ) -> Result<impl IntoResponse, ClaudeRemoteError> {
     state
         .claude_hub
-        .transcript(&terminal_id, query.cursor, query.session_id, query.agent_id)
+        .transcript(
+            &terminal_id,
+            query.cursor,
+            query.session_id,
+            query.agent_id,
+            query.before,
+        )
         .await
         .map(Json)
 }

@@ -279,8 +279,11 @@ pub enum ClaudeCmd {
         /// Terminal address (id, project/name, or project:index)
         terminal: String,
         /// Cursor printed by the previous `log`; omit for the whole transcript
-        #[arg(long)]
+        #[arg(long, conflicts_with = "before")]
         cursor: Option<String>,
+        /// Older cursor printed by a `log` (`older`): the page before it
+        #[arg(long)]
+        before: Option<String>,
         /// Read this subagent's transcript instead of the session's
         #[arg(long)]
         agent: Option<String>,

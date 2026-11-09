@@ -35,7 +35,9 @@ channel attached; `claude_sessions` in `GET /v1/state`) or has an open dialog
 - **CLI**: `okena claude start | ls | show | find | subagents | log | prompt |
   answer | interrupt` uses the same endpoints, for people and for agents driving other
   sessions. `log` prints a cursor (`<session_id>:<offset>`) to pass back with
-  `--cursor` for only the newer entries. `start` runs `claude` in a pane, see
+  `--cursor` for only the newer entries, and an `older` cursor (`older_cursor`
+  in `--json`) to pass to `--before` for the page before it. `start` runs
+  `claude` in a pane, see
   [Starting a session](#starting-a-session). See `okena skill show`.
 
 ## How a session is connected
@@ -113,7 +115,7 @@ All take the bearer token. Errors have a plain-text body.
 |---|---|
 | `GET /v1/claude/terminals/{id}?probe_foreground=` | Session: `session_id`, `hooks_attached`, `busy`, open `dialogs`, `running_subagents`, `pr_links`, `startup_dialog`, `foreground_command` |
 | `GET /v1/claude/sessions/{session_id}` | The session of the pane that runs it, same shape as above (`terminal_id` names the pane); `404` when no pane does |
-| `GET /v1/claude/terminals/{id}/transcript?cursor=&session_id=&agent_id=` | Transcript page, see [Transcript](#transcript) |
+| `GET /v1/claude/terminals/{id}/transcript?cursor=&before=&session_id=&agent_id=` | Transcript page, see [Transcript](#transcript) |
 | `GET /v1/claude/terminals/{id}/subagents` | The session's subagents, see [Subagents](#subagents) |
 | `POST /v1/claude/terminals/{id}/prompt` | `{ "text", "expect_session_id"? }` → `{ "delivery" }`, see [Prompts](#prompts) |
 | `POST /v1/claude/terminals/{id}/dialogs/{dialog_id}` | `{ "decision": "allow" \| "deny" \| "answer", "always"?, "message"?, "answers"? }`; `404` once the dialog is answered or gone |
@@ -206,7 +208,15 @@ file; otherwise the plan is in the transcript.
 ## Transcript
 
 `GET /v1/claude/terminals/{id}/transcript?cursor=&session_id=` reads the
-session JSONL from `transcript_path` incrementally. Entries are `user`,
+session JSONL from `transcript_path` incrementally. Without a cursor it returns
+a first page: the last 200 entries, read from at most the last 4 MB.
+`?before=<start>&session_id=` returns the page before that offset instead (the
+same 200 entries and 4 MB); pass the `start` of the oldest page you hold to
+page back through a long session. `start` is 0 when the page reaches the
+transcript's beginning; a line bigger than the 4 MB window is skipped. A
+`before` of another session, or past the end of a rewritten file, gets a first
+page with `reset`. The `cursor` of an older page is its own end: keep reading
+newer entries with the cursor of your newest page. Entries are `user`,
 `assistant`, `tool_use` and `tool_result`. Each carries `timestamp`, when
 Claude recorded it (RFC 3339 as Claude wrote it on its JSONL line; `null` when
 the line has none or it does not parse); the entries of one line share it. User entries carry `origin`

@@ -63,11 +63,14 @@ For terminals running `claude` with Claude Remote on (Settings → Terminal).
 - `okena claude ls` — `term<TAB>project<TAB>name<TAB>session<TAB>busy|idle|-<TAB>dialogs<TAB>queued<TAB>subagents`.
 - `okena claude show <term>` — status lines (`startup_dialog trust|channels|-`:
   a start-up dialog `claude` waits on) plus `dialog<TAB>id<TAB>tool<TAB>tool_input-json` per open dialog.
-- `okena claude log <term> [--cursor <c>] [--agent <id>]` — one line per entry
-  (`user|assistant|tool_use|tool_result`, newlines escaped as `\n`), last line
-  `cursor<TAB><c>`. Pass `<c>` back to get only newer entries; a `reset` line
-  means drop what you had. `--json` prints the page instead: `entries[]` (each
-  with `timestamp`), `reset`, and `next_cursor` to pass back as `--cursor`.
+- `okena claude log <term> [--cursor <c> | --before <o>] [--agent <id>]` — one
+  line per entry (`user|assistant|tool_use|tool_result`, newlines escaped as
+  `\n`), last line `cursor<TAB><c>`. Pass `<c>` back to get only newer entries;
+  a `reset` line means drop what you had. Without a cursor you get the last 200
+  entries; an `older<TAB><o>` line means more precede them: `--before <o>`
+  prints that older page (with its own `older` line until the start). `--json`
+  prints the page instead: `entries[]` (each with `timestamp`), `reset`,
+  `next_cursor` to pass back as `--cursor`, and `older_cursor` for `--before`.
   `okena claude subagents <term>` lists `--agent` ids.
 - `okena claude find <session-id> [--json]` — the terminal that runs that
   session (exit 1 when none does; known once a hook reported it).
