@@ -26,6 +26,21 @@ a rejected command writes nothing to it.
 | `claude.rs` | `okena claude …`: follow and steer `claude` sessions over the Claude remote client routes (below). |
 | `status.rs` | `okena status …`: project / worktree statuses, the board's columns and switch, status lanes (below). Pure resolvers unit-tested in the file. |
 | `claude_remote.rs` | Hidden `claude-remote` subcommand run by `claude` itself (see below). |
+| `bin/okena-cli.rs` | GPUI-free CLI binary for headless hosts (see below). |
+
+## The headless binary
+
+`cargo build -p okena-cli --bin okena-cli` builds the same subcommands without GPUI, for a
+host that runs `okena-daemon` and no desktop app (a server, a container). Install it as
+`okena` next to `okena-daemon`: the daemon runs that sibling for Claude Remote's hooks and
+channel. It resolves the profile like `main.rs` (read-only for `claude-remote`) and exits 2
+where the desktop binary would open a window.
+
+This crate takes `okena-workspace` and `okena-remote-server` with `default-features = false`
+so the bin stays GPUI-free; CI gates it with `cargo tree -p okena-cli`. The desktop is
+unaffected: the root package depends on both crates with their defaults, and feature
+unification turns `gpui` back on in its build. Build the bin on its own (`-p okena-cli`),
+never in one invocation with `-p okena`, or it links GPUI too.
 
 ## Addressing (agent-friendly)
 

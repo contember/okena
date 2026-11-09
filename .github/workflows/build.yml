@@ -77,6 +77,12 @@ jobs:
             echo "okena-daemon must stay GPUI-free"
             exit 1
           fi
+          # The `okena-cli` bin is the CLI for headless hosts that run
+          # okena-daemon without the desktop app.
+          if cargo tree -p okena-cli --edges no-dev | grep -E 'gpui|gpui-component'; then
+            echo "okena-cli must stay GPUI-free"
+            exit 1
+          fi
 
       # `cargo test` builds another package's bin target as a test harness, never
       # as a plain binary, so the end-to-end tests that drive the TUI would skip
