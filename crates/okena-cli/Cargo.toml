@@ -13,8 +13,8 @@ okena-agent-usage = { path = "../okena-agent-usage" }
 # dependency graph via okena-workspace).
 okena-git = { path = "../okena-git" }
 okena-transport = { path = "../okena-transport", features = ["client", "blocking-http"] }
-okena-workspace = { path = "../okena-workspace" }
-okena-remote-server = { path = "../okena-remote-server" }
+okena-workspace = { path = "../okena-workspace", default-features = false }
+okena-remote-server = { path = "../okena-remote-server", default-features = false }
 okena-ext-updater = { path = "../okena-ext-updater", default-features = false }
 
 # CLI argument parsing (agent-friendly command surface)
