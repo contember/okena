@@ -16,13 +16,19 @@ use serde::Deserialize;
 
 use super::hook_input::is_valid_agent_id;
 
-/// The first page reads at most this much of the transcript's tail. A cursor
-/// further behind than this also gets a first page instead of a huge read.
+/// A page reads at most this much of the transcript. A cursor further behind
+/// the end than this also gets a first page instead of a huge read.
 const PAGE_WINDOW: u64 = 4 * 1024 * 1024;
-/// The first page starts from this much of the tail and grows it fourfold, up
-/// to [`PAGE_WINDOW`], only while it holds fewer than [`FIRST_PAGE_ENTRIES`].
+/// A page starts from this much before its end and grows it fourfold, up to
+/// [`PAGE_WINDOW`], only while it holds fewer than [`FIRST_PAGE_ENTRIES`].
 const FIRST_PAGE_INITIAL_WINDOW: u64 = 64 * 1024;
+/// Entries of a first or an older page (a few more when the oldest line kept
+/// holds several: a page starts at a line).
 const FIRST_PAGE_ENTRIES: usize = 200;
+/// An older page that found only lines bigger than [`PAGE_WINDOW`] (skipped)
+/// or lines without entries looks further back this many times before it
+/// returns empty, still with a `start` the client can page on from.
+const OLDER_PAGE_ATTEMPTS: usize = 8;
 const TOOL_RESULT_MAX_CHARS: usize = 2000;
 const SUMMARY_MAX_CHARS: usize = 200;
 /// The newest subagents listed for a session.
@@ -37,6 +43,9 @@ pub(super) struct TranscriptChunk {
     pub entries: Vec<ApiClaudeEntry>,
     /// Byte offset just past the last complete line consumed.
     pub cursor: u64,
+    /// Byte offset of the first line the page covers: read the entries before
+    /// it with [`read_transcript_before`]. 0 when nothing older is left.
+    pub start: u64,
     pub reset: bool,
 }
 
@@ -51,45 +60,88 @@ pub(super) fn read_transcript(
         resume_from.filter(|&cursor| cursor > 0 && cursor <= len && len - cursor <= PAGE_WINDOW);
 
     if let Some(cursor) = resume {
-        let (entries, cursor) = read_complete_lines(&mut file, cursor, len, false)?;
+        let (entries, end) = read_complete_lines(&mut file, cursor, len, false)?;
         return Ok(TranscriptChunk {
             entries,
-            cursor,
+            cursor: end,
+            start: cursor,
             reset: false,
         });
     }
+    first_page(&mut file, len)
+}
 
-    let (entries, cursor) = match read_first_page(&mut file, len) {
+/// The page of entries just before `before` (the `start` of a page the client
+/// holds), going back as far as a first page would. A `before` past the end
+/// means the transcript was rewritten: a first page with `reset`.
+pub(super) fn read_transcript_before(path: &Path, before: u64) -> io::Result<TranscriptChunk> {
+    let (mut file, len) = open_transcript(path)?;
+    if before > len {
+        return first_page(&mut file, len);
+    }
+    let mut page = match read_page(&mut file, before) {
+        // Shrunk since it was measured: rewritten.
+        Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => {
+            let len = file.metadata()?.len();
+            return first_page(&mut file, len);
+        }
+        result => result?,
+    };
+    for _ in 1..OLDER_PAGE_ATTEMPTS {
+        if !page.entries.is_empty() || page.start == 0 {
+            break;
+        }
+        page = read_page(&mut file, page.start)?;
+    }
+    Ok(TranscriptChunk {
+        entries: page.entries,
+        cursor: before,
+        start: page.start,
+        reset: false,
+    })
+}
+
+fn first_page(file: &mut File, len: u64) -> io::Result<TranscriptChunk> {
+    let page = match read_page(file, len) {
         // Shrunk since it was measured: rewritten, so read what it holds now.
         Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => {
             let len = file.metadata()?.len();
-            read_first_page(&mut file, len)?
+            read_page(file, len)?
         }
         result => result?,
     };
     Ok(TranscriptChunk {
-        entries,
-        cursor,
+        entries: page.entries,
+        cursor: page.cursor,
+        start: page.start,
         reset: true,
     })
 }
 
-/// The last [`FIRST_PAGE_ENTRIES`] entries of the first `len` bytes and the
-/// offset just past the last complete line, reading as little of the tail as
-/// that takes. A line the window cuts into is skipped, never half-parsed.
-fn read_first_page<R: Read + Seek>(
-    reader: &mut R,
-    len: u64,
-) -> io::Result<(Vec<ApiClaudeEntry>, u64)> {
-    // `tail` holds bytes `[start, len)`; `entries` come from the complete lines
+#[derive(Debug)]
+struct Page {
+    entries: Vec<ApiClaudeEntry>,
+    /// Just past the last complete line read.
+    cursor: u64,
+    /// Where the first line kept starts; where a line too big for the window
+    /// was cut when no line was kept, so the next older page skips it.
+    start: u64,
+}
+
+/// The last [`FIRST_PAGE_ENTRIES`] entries of the first `end` bytes, whole
+/// lines only, reading as little before `end` as that takes. A line the window
+/// cuts into is left for the next older page, never half-parsed.
+fn read_page<R: Read + Seek>(reader: &mut R, end: u64) -> io::Result<Page> {
+    // `tail` holds bytes `[start, end)`; `lines` come from the complete lines
     // in `[parsed_from, cursor)`, and each growth step parses only what it adds.
-    let mut start = len;
+    let mut start = end;
     let mut tail = Vec::new();
-    let mut entries = Vec::new();
+    let mut lines: Vec<(u64, Vec<ApiClaudeEntry>)> = Vec::new();
+    let mut count = 0;
     let mut parsed: Option<(u64, u64)> = None;
     let mut window = FIRST_PAGE_INITIAL_WINDOW;
     loop {
-        let new_start = len.saturating_sub(window);
+        let new_start = end.saturating_sub(window);
         let mut chunk = vec![0; usize::try_from(start - new_start).map_err(io::Error::other)?];
         reader.seek(SeekFrom::Start(new_start))?;
         reader.read_exact(&mut chunk)?;
@@ -118,22 +170,59 @@ fn read_first_page<R: Read + Seek>(
                 .map(|newline| newline + 1)
         };
         if let Some(begin) = begin {
-            let mut older = parse_lines(&String::from_utf8_lossy(&region[begin..]));
-            older.append(&mut entries);
-            entries = older;
+            let line_from = start + u64::try_from(begin).map_err(io::Error::other)?;
+            let mut older = parse_lines_at(&region[begin..], line_from);
+            count += older
+                .iter()
+                .map(|(_, entries)| entries.len())
+                .sum::<usize>();
+            older.append(&mut lines);
+            lines = older;
             let cursor = parsed.map_or(region_end, |(_, cursor)| cursor);
-            let begin = u64::try_from(begin).map_err(io::Error::other)?;
-            parsed = Some((start + begin, cursor));
+            parsed = Some((line_from, cursor));
         }
 
-        if entries.len() >= FIRST_PAGE_ENTRIES || start == 0 || window >= PAGE_WINDOW {
+        if count >= FIRST_PAGE_ENTRIES || start == 0 || window >= PAGE_WINDOW {
             break;
         }
         window = (window * 4).min(PAGE_WINDOW);
     }
-    let excess = entries.len().saturating_sub(FIRST_PAGE_ENTRIES);
-    entries.drain(..excess);
-    Ok((entries, parsed.map_or(start, |(_, cursor)| cursor)))
+    // Whole lines go from the front while the rest still holds a page.
+    let mut keep_from = 0;
+    while let Some((_, entries)) = lines.get(keep_from) {
+        if count - entries.len() < FIRST_PAGE_ENTRIES {
+            break;
+        }
+        count -= entries.len();
+        keep_from += 1;
+    }
+    // Nothing kept: either read back to the beginning (0), or a line too big
+    // for the window was cut at `start`, and the next older page skips it.
+    let page_start = lines.get(keep_from).map_or(start, |&(offset, _)| offset);
+    Ok(Page {
+        entries: lines
+            .drain(keep_from..)
+            .flat_map(|(_, entries)| entries)
+            .collect(),
+        cursor: parsed.map_or(start, |(_, cursor)| cursor),
+        start: page_start,
+    })
+}
+
+/// The entries of each complete line in `bytes`, with the line's offset
+/// (`bytes` starts at `offset`).
+fn parse_lines_at(bytes: &[u8], offset: u64) -> Vec<(u64, Vec<ApiClaudeEntry>)> {
+    let mut lines = Vec::new();
+    let mut at = 0;
+    while let Some(newline) = bytes[at..].iter().position(|&byte| byte == b'\n') {
+        let line = &bytes[at..at + newline];
+        let entries = parse_lines(&String::from_utf8_lossy(line));
+        if !entries.is_empty() {
+            lines.push((offset + u64::try_from(at).unwrap_or(u64::MAX), entries));
+        }
+        at += newline + 1;
+    }
+    lines
 }
 
 fn open_transcript(path: &Path) -> io::Result<(File, u64)> {
@@ -1509,8 +1598,8 @@ mod tests {
             read: 0,
         };
         let len = u64::try_from(text.len()).expect("fits");
-        let (entries, cursor) = read_first_page(&mut reader, len).expect("read");
-        (entries, cursor, reader.read)
+        let page = read_page(&mut reader, len).expect("read");
+        (page.entries, page.cursor, reader.read)
     }
 
     #[test]
@@ -1579,6 +1668,99 @@ mod tests {
             page.cursor,
             file.as_file().metadata().expect("metadata").len()
         );
+    }
+
+    /// Pages back from a first page until the start; oldest page first.
+    fn pages_back(path: &Path) -> Vec<TranscriptChunk> {
+        let mut pages = vec![read_transcript(path, None).expect("first page")];
+        while let Some(start) = pages
+            .first()
+            .map(|page| page.start)
+            .filter(|&start| start > 0)
+        {
+            let older = read_transcript_before(path, start).expect("older page");
+            assert!(!older.reset);
+            assert!(older.start < start, "no progress before {start}");
+            pages.insert(0, older);
+        }
+        pages
+    }
+
+    #[test]
+    fn older_pages_reach_the_start_without_gaps_or_repeats() {
+        let text: String = (0..450)
+            .map(|n| assistant_text(&format!("a{n}"), "x"))
+            .collect();
+        let file = write_file(&text);
+
+        let pages = pages_back(file.path());
+        let sizes: Vec<usize> = pages.iter().map(|page| page.entries.len()).collect();
+        assert_eq!(sizes, [50, FIRST_PAGE_ENTRIES, FIRST_PAGE_ENTRIES]);
+        let all: Vec<ApiClaudeEntry> = pages.into_iter().flat_map(|page| page.entries).collect();
+        let expected: Vec<ApiClaudeEntry> =
+            (0..450).map(|n| assistant(&format!("a{n}"), "x")).collect();
+        assert_eq!(all, expected);
+    }
+
+    #[test]
+    fn a_page_starts_at_a_line_so_its_entries_are_never_split() {
+        // Three entries per line: 200 is not a whole number of lines.
+        let record = |n: usize| {
+            line(json!({
+                "type": "assistant",
+                "uuid": format!("a{n}"),
+                "message": {"role": "assistant", "content": [
+                    {"type": "text", "text": "one"},
+                    {"type": "text", "text": "two"},
+                    {"type": "text", "text": "three"}
+                ]}
+            }))
+        };
+        let file = write_file(&(0..150).map(record).collect::<String>());
+
+        let pages = pages_back(file.path());
+        let newest = pages.last().expect("first page");
+        assert_eq!(newest.entries.len(), 201);
+        let all: Vec<ApiClaudeEntry> = pages.into_iter().flat_map(|page| page.entries).collect();
+        assert_eq!(all.len(), 450);
+        assert_eq!(all[0], assistant("a0", "one"));
+        assert_eq!(all[449], assistant("a149", "three"));
+    }
+
+    #[test]
+    fn an_older_page_skips_a_line_bigger_than_its_window() {
+        let huge = assistant_text("a1", &"x".repeat(5 * 1024 * 1024));
+        let file =
+            write_file(&(assistant_text("a0", "head") + &huge + &assistant_text("a2", "tail")));
+
+        let pages = pages_back(file.path());
+        let all: Vec<ApiClaudeEntry> = pages.into_iter().flat_map(|page| page.entries).collect();
+        assert_eq!(all, vec![assistant("a0", "head"), assistant("a2", "tail")]);
+    }
+
+    #[test]
+    fn an_older_page_of_a_rewritten_transcript_resets() {
+        let file = write_file(&assistant_text("a1", "one"));
+        let page = read_transcript_before(file.path(), 1_000_000).expect("read");
+        assert!(page.reset);
+        assert_eq!(page.entries, vec![assistant("a1", "one")]);
+        assert_eq!(page.start, 0);
+
+        let nothing_older = read_transcript_before(file.path(), 0).expect("read");
+        assert!(!nothing_older.reset);
+        assert!(nothing_older.entries.is_empty());
+        assert_eq!(nothing_older.start, 0);
+    }
+
+    #[test]
+    fn a_newer_page_starts_where_the_cursor_was() {
+        let first = assistant_text("a1", "one");
+        let mut file = write_file(&first);
+        let page = read_transcript(file.path(), None).expect("read");
+        file.write_all(assistant_text("a2", "two").as_bytes())
+            .expect("append");
+        let next = read_transcript(file.path(), Some(page.cursor)).expect("read");
+        assert_eq!(next.start, page.cursor);
     }
 
     fn pr_link_line(number: u64, timestamp: &str) -> String {

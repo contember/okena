@@ -20,8 +20,8 @@ use super::channel::{ChannelState, PollStart};
 use super::decision::{cancelled_output, decided_output};
 use super::hook_input::{HookEvent, HookInput, is_valid_agent_id};
 use super::transcript::{
-    TranscriptScan, has_transcript_extension, list_subagents, read_transcript, scan_transcript,
-    subagent_transcript_path,
+    TranscriptScan, has_transcript_extension, list_subagents, read_transcript,
+    read_transcript_before, scan_transcript, subagent_transcript_path,
 };
 use crate::bridge::{BridgeMessage, BridgeSender, CommandResult, RemoteCommand};
 use crate::types::ActionRequest;
@@ -796,13 +796,15 @@ impl ClaudeRemoteHub {
         Ok(session)
     }
 
-    /// Transcript entries after `cursor`, or a first page.
+    /// Transcript entries after `cursor`, the page before `before` (a page's
+    /// `start`), or a first page.
     pub(crate) async fn transcript(
         &self,
         terminal_id: &str,
         cursor: Option<u64>,
         session_id: Option<String>,
         agent_id: Option<String>,
+        before: Option<u64>,
     ) -> Result<ApiClaudeTranscriptPage, ClaudeRemoteError> {
         let source = self.transcript_source(terminal_id).await?;
         let Some(path) = source.path else {
@@ -818,19 +820,25 @@ impl ClaudeRemoteHub {
         // A cursor is only meaningful together with the session it came from.
         let same_session = session_id.is_some() && session_id == source.session_id;
         let resume_from = cursor.filter(|_| same_session);
+        // Of another session, `before` gets a first page that resets the client.
+        let before = before.filter(|_| same_session);
 
-        let chunk = tokio::task::spawn_blocking(move || read_transcript(&path, resume_from))
-            .await
-            .map_err(|error| ClaudeRemoteError::Io(std::io::Error::other(error)))?
-            .map_err(|error| match error.kind() {
-                std::io::ErrorKind::NotFound => ClaudeRemoteError::NoTranscript,
-                _ => ClaudeRemoteError::Io(error),
-            })?;
+        let chunk = tokio::task::spawn_blocking(move || match before {
+            Some(before) => read_transcript_before(&path, before),
+            None => read_transcript(&path, resume_from),
+        })
+        .await
+        .map_err(|error| ClaudeRemoteError::Io(std::io::Error::other(error)))?
+        .map_err(|error| match error.kind() {
+            std::io::ErrorKind::NotFound => ClaudeRemoteError::NoTranscript,
+            _ => ClaudeRemoteError::Io(error),
+        })?;
 
         Ok(ApiClaudeTranscriptPage {
             session_id: source.session_id,
             entries: chunk.entries,
             cursor: chunk.cursor,
+            start: chunk.start,
             reset: chunk.reset,
         })
     }
@@ -2082,31 +2090,51 @@ mod tests {
         start["transcript_path"] = json!(path.to_string_lossy());
         hub.hook_event(hook("t1", start)).expect("valid event");
 
-        let page = hub.transcript("t1", None, None, None).await.expect("page");
+        let page = hub
+            .transcript("t1", None, None, None, None)
+            .await
+            .expect("page");
         assert!(page.reset);
         assert_eq!(page.session_id.as_deref(), Some("s1"));
         assert_eq!(page.entries.len(), 1);
 
         let next = hub
-            .transcript("t1", Some(page.cursor), Some("s1".into()), None)
+            .transcript("t1", Some(page.cursor), Some("s1".into()), None, None)
             .await
             .expect("page");
         assert!(!next.reset);
         assert!(next.entries.is_empty());
 
         let without_session = hub
-            .transcript("t1", Some(page.cursor), None, None)
+            .transcript("t1", Some(page.cursor), None, None, None)
             .await
             .expect("page");
         assert!(without_session.reset);
         assert_eq!(without_session.entries.len(), 1);
 
         let other_session = hub
-            .transcript("t1", Some(page.cursor), Some("s0".into()), None)
+            .transcript("t1", Some(page.cursor), Some("s0".into()), None, None)
             .await
             .expect("page");
         assert!(other_session.reset);
         assert_eq!(other_session.entries.len(), 1);
+
+        // The page starts at the transcript's beginning: nothing older.
+        assert_eq!(page.start, 0);
+        let older = hub
+            .transcript("t1", None, Some("s1".into()), None, Some(page.start))
+            .await
+            .expect("page");
+        assert!(!older.reset);
+        assert!(older.entries.is_empty());
+        assert_eq!(older.start, 0);
+
+        let older_of_another_session = hub
+            .transcript("t1", None, Some("s0".into()), None, Some(page.start))
+            .await
+            .expect("page");
+        assert!(older_of_another_session.reset);
+        assert_eq!(older_of_another_session.entries.len(), 1);
 
         assert!(
             hub.session("t1", false)
@@ -2425,12 +2453,13 @@ mod tests {
             ]
         );
         let page = hub
-            .transcript("t1", None, None, Some("a1".into()))
+            .transcript("t1", None, None, Some("a1".into()), None)
             .await
             .expect("subagent page");
         assert_eq!(page.entries.len(), 1);
         assert!(matches!(
-            hub.transcript("t1", None, None, Some("../s1".into())).await,
+            hub.transcript("t1", None, None, Some("../s1".into()), None)
+                .await,
             Err(ClaudeRemoteError::NoTranscript)
         ));
 
@@ -2463,7 +2492,7 @@ mod tests {
     async fn transcript_without_a_source_is_not_found() {
         let (hub, _version, _pty) = hub_with_daemon(claude_in_pane());
         assert!(matches!(
-            hub.transcript("t1", None, None, None).await,
+            hub.transcript("t1", None, None, None, None).await,
             Err(ClaudeRemoteError::NoTranscript)
         ));
     }
@@ -2764,7 +2793,7 @@ mod tests {
             hub.hook_event(hook("t1", start)).expect("valid event");
 
             assert!(matches!(
-                hub.transcript("t1", None, None, None).await,
+                hub.transcript("t1", None, None, None, None).await,
                 Err(ClaudeRemoteError::NoTranscript)
             ));
             assert!(
@@ -2972,7 +3001,9 @@ mod tests {
         });
 
         hub.session("t1", false).await.expect("session");
-        hub.transcript("t1", None, None, None).await.expect("page");
+        hub.transcript("t1", None, None, None, None)
+            .await
+            .expect("page");
         assert_eq!(daemon.probes.load(Ordering::Relaxed), 0);
 
         let delivery = hub.send_prompt("t1", "hi".into(), None).await;

@@ -425,9 +425,16 @@ fn dispatch(cli: Cli) -> i32 {
             ClaudeCmd::Log {
                 terminal,
                 cursor,
+                before,
                 agent,
                 json,
-            } => claude::cli_log(&terminal, cursor.as_deref(), agent.as_deref(), json),
+            } => claude::cli_log(
+                &terminal,
+                cursor.as_deref(),
+                before.as_deref(),
+                agent.as_deref(),
+                json,
+            ),
             ClaudeCmd::Prompt {
                 terminal,
                 session,

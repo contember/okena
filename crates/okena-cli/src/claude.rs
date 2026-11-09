@@ -115,13 +115,23 @@ pub fn cli_subagents(terminal: &str, json_mode: bool) -> i32 {
     })())
 }
 
-/// `okena claude log <term> [--cursor <c>] [--agent <id>] [--json]`
-pub fn cli_log(terminal: &str, cursor: Option<&str>, agent: Option<&str>, json_mode: bool) -> i32 {
+/// `okena claude log <term> [--cursor <c> | --before <c>] [--agent <id>] [--json]`
+pub fn cli_log(
+    terminal: &str,
+    cursor: Option<&str>,
+    before: Option<&str>,
+    agent: Option<&str>,
+    json_mode: bool,
+) -> i32 {
     exit_code((|| {
         let cursor = cursor.map(LogCursor::parse).transpose()?;
+        let before = before.map(LogCursor::parse).transpose()?;
         let (token, state) = connect()?;
         let (_project_id, terminal_id) = resolve::resolve_terminal(&state, terminal)?;
-        let path = terminal_path(&terminal_id, &transcript_query(cursor.as_ref(), agent));
+        let path = terminal_path(
+            &terminal_id,
+            &transcript_query(cursor.as_ref(), before.as_ref(), agent),
+        );
         let body = api_get(&path, &token)?;
         let page: ApiClaudeTranscriptPage =
             serde_json::from_str(&body).map_err(|e| format!("Invalid transcript page: {e}"))?;
@@ -130,10 +140,14 @@ pub fn cli_log(terminal: &str, cursor: Option<&str>, agent: Option<&str>, json_m
             offset: page.cursor,
         }
         .to_string();
+        let older = older_cursor(&page);
         if json_mode {
             let mut value = to_json(&page)?;
             if let Some(object) = value.as_object_mut() {
                 object.insert("next_cursor".into(), next.into());
+                if let Some(older) = older {
+                    object.insert("older_cursor".into(), older.into());
+                }
             }
             print_json(&value)
         } else {
@@ -341,7 +355,7 @@ fn fetch_page(
     cursor: Option<&LogCursor>,
 ) -> Result<ApiClaudeTranscriptPage, String> {
     let body = api_get(
-        &terminal_path(terminal_id, &transcript_query(cursor, None)),
+        &terminal_path(terminal_id, &transcript_query(cursor, None, None)),
         token,
     )?;
     serde_json::from_str(&body).map_err(|e| format!("Invalid transcript page: {e}"))
@@ -757,13 +771,32 @@ fn encode(value: &str) -> String {
     utf8_percent_encode(value, NON_ALPHANUMERIC).to_string()
 }
 
-fn transcript_query(cursor: Option<&LogCursor>, agent: Option<&str>) -> String {
+/// The page's `start` as a cursor for `--before`; `None` when nothing older
+/// is left.
+fn older_cursor(page: &ApiClaudeTranscriptPage) -> Option<String> {
+    (page.start > 0).then(|| {
+        LogCursor {
+            session_id: page.session_id.clone(),
+            offset: page.start,
+        }
+        .to_string()
+    })
+}
+
+fn transcript_query(
+    cursor: Option<&LogCursor>,
+    before: Option<&LogCursor>,
+    agent: Option<&str>,
+) -> String {
     let mut params = Vec::new();
     if let Some(cursor) = cursor {
         params.push(format!("cursor={}", cursor.offset));
-        if let Some(session_id) = &cursor.session_id {
-            params.push(format!("session_id={}", encode(session_id)));
-        }
+    }
+    if let Some(before) = before {
+        params.push(format!("before={}", before.offset));
+    }
+    if let Some(session_id) = cursor.or(before).and_then(|c| c.session_id.as_ref()) {
+        params.push(format!("session_id={}", encode(session_id)));
     }
     if let Some(agent) = agent {
         params.push(format!("agent_id={}", encode(agent)));
@@ -973,7 +1006,8 @@ fn show_lines(labeled: &LabeledSession) -> Vec<String> {
 }
 
 /// `reset` (when the page replaces what the caller had), one line per entry,
-/// then `cursor<TAB><next>`.
+/// `older<TAB><cursor>` when there are entries before the page, then
+/// `cursor<TAB><next>`.
 fn log_lines(page: &ApiClaudeTranscriptPage, next_cursor: &str) -> Vec<String> {
     let mut lines = Vec::new();
     if page.reset {
@@ -983,6 +1017,9 @@ fn log_lines(page: &ApiClaudeTranscriptPage, next_cursor: &str) -> Vec<String> {
         ));
     }
     lines.extend(page.entries.iter().map(entry_line));
+    if let Some(older) = older_cursor(page) {
+        lines.push(format!("older\t{older}"));
+    }
     lines.push(format!("cursor\t{next_cursor}"));
     lines
 }
@@ -1607,6 +1644,7 @@ mod tests {
                 },
             ],
             cursor: 42,
+            start: 0,
             reset: true,
         };
         assert_eq!(
@@ -1618,6 +1656,23 @@ mod tests {
                 r"tool_result	tu1	error	C:\\dir",
                 "cursor\ts1:42",
             ]
+        );
+    }
+
+    #[test]
+    fn log_lines_name_the_older_cursor_when_entries_precede_the_page() {
+        let page = ApiClaudeTranscriptPage {
+            session_id: Some("s1".into()),
+            entries: Vec::new(),
+            cursor: 42,
+            start: 7,
+            reset: false,
+        };
+        assert_eq!(log_lines(&page, "s1:42"), ["older\ts1:7", "cursor\ts1:42"]);
+        assert_eq!(older_cursor(&page).as_deref(), Some("s1:7"));
+        assert_eq!(
+            older_cursor(&ApiClaudeTranscriptPage { start: 0, ..page }),
+            None
         );
     }
 
@@ -1647,10 +1702,14 @@ mod tests {
             session_id: Some("s 1".into()),
             offset: 9,
         };
-        assert_eq!(transcript_query(None, None), "/transcript");
+        assert_eq!(transcript_query(None, None, None), "/transcript");
         assert_eq!(
-            transcript_query(Some(&cursor), Some("a&b")),
+            transcript_query(Some(&cursor), None, Some("a&b")),
             "/transcript?cursor=9&session_id=s%201&agent_id=a%26b"
+        );
+        assert_eq!(
+            transcript_query(None, Some(&cursor), None),
+            "/transcript?before=9&session_id=s%201"
         );
     }
 
