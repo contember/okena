@@ -9,9 +9,14 @@
 #[cfg(target_os = "linux")]
 pub(crate) fn linux_children(pid: u32) -> Option<Vec<u32>> {
     static CHILDREN_FILES: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    // `thread-self`, not our pid: `/proc` may come from another pid namespace.
-    let children_files =
-        *CHILDREN_FILES.get_or_init(|| std::path::Path::new("/proc/thread-self/children").exists());
+    let children_files = *CHILDREN_FILES.get_or_init(|| {
+        // `thread-self` does not depend on our pid matching the pid namespace
+        // of `/proc`, but only exists since Linux 3.17; the `children` files
+        // since 3.5.
+        std::path::Path::new("/proc/thread-self/children").exists()
+            || std::path::Path::new(&format!("/proc/self/task/{}/children", std::process::id()))
+                .exists()
+    });
     proc_children(std::path::Path::new("/proc"), pid, children_files)
 }
 
