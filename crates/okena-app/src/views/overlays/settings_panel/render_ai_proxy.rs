@@ -30,6 +30,9 @@ pub(super) enum AiProxyLoad {
 pub(super) struct AiProxyPanel {
     pub(super) load: AiProxyLoad,
     pub(super) busy: bool,
+    /// The account whose "Log In Again" started the pending login, so its
+    /// finish row shows under that account rather than under Add Account.
+    relogin_account: Option<String>,
     label_input: Entity<SimpleInputState>,
     code_input: Entity<SimpleInputState>,
 }
@@ -39,6 +42,7 @@ impl AiProxyPanel {
         Self {
             load: AiProxyLoad::NotLoaded,
             busy: false,
+            relogin_account: None,
             label_input: cx.new(|cx| SimpleInputState::new(cx).placeholder("e.g. Work Max")),
             code_input: cx.new(|cx| {
                 SimpleInputState::new(cx).placeholder("Paste the code shown after authorizing")
@@ -57,6 +61,11 @@ impl SettingsPanel {
             }));
             return;
         };
+        // A login the user just started opens in the browser right away.
+        let opens_login = match &request {
+            AiProxyCommand::StartLogin { label } => Some(label.trim().to_owned()),
+            _ => None,
+        };
         self.ai_proxy.busy = true;
         if matches!(self.ai_proxy.load, AiProxyLoad::NotLoaded) {
             self.ai_proxy.load = AiProxyLoad::Loading;
@@ -67,6 +76,14 @@ impl SettingsPanel {
                 .background_executor()
                 .spawn(async move { send_ai_proxy_command(&endpoint, request) })
                 .await;
+            if let Some(label) = opens_login
+                && let Some(login) = state
+                    .status
+                    .as_ref()
+                    .and_then(|status| status.logins.iter().rfind(|login| login.label == label))
+            {
+                okena_core::process::open_url(&login.authorize_url);
+            }
             let _ = this.update(cx, |this, cx| {
                 this.ai_proxy.busy = false;
                 this.ai_proxy.load = AiProxyLoad::Loaded(Box::new(state));
@@ -131,6 +148,22 @@ impl SettingsPanel {
         };
 
         let busy = self.ai_proxy.busy;
+        // One login at a time: logging an account in again shows under that
+        // account, a new account's login under Add Account.
+        let login = state
+            .status
+            .as_ref()
+            .and_then(|status| status.logins.last().cloned());
+        let relogin_of = login.as_ref().and_then(|login| {
+            let account_id = self.ai_proxy.relogin_account.as_ref()?;
+            state
+                .status
+                .as_ref()?
+                .accounts
+                .iter()
+                .find(|account| &account.id == account_id && account.label == login.label)
+                .map(|account| account.id.clone())
+        });
         let mut accounts = section_container(&t);
         match &state.status {
             Some(status) if status.accounts.is_empty() => {
@@ -146,12 +179,20 @@ impl SettingsPanel {
             Some(status) => {
                 let count = status.accounts.len();
                 for (index, account) in status.accounts.iter().enumerate() {
+                    let has_border = index + 1 < count;
+                    let relogin = login
+                        .clone()
+                        .filter(|_| relogin_of.as_deref() == Some(account.id.as_str()));
                     accounts = accounts.child(self.render_ai_account(
                         account,
-                        index + 1 < count,
+                        has_border && relogin.is_none(),
                         busy,
                         cx,
                     ));
+                    if let Some(login) = relogin {
+                        accounts = accounts
+                            .child(self.render_ai_login_finish(login, has_border, busy, cx));
+                    }
                 }
             }
             None => {}
@@ -207,15 +248,11 @@ impl SettingsPanel {
                 .child(self.render_project_policies(status, busy, cx));
         }
 
-        let login = state
-            .status
-            .as_ref()
-            .and_then(|status| status.logins.last().cloned());
         content.child(section_header("Add Account", &t, cx)).child(
-            section_container(&t).child(match login {
+            section_container(&t).child(match login.filter(|_| relogin_of.is_none()) {
                 None => self.render_ai_login_start(busy, cx).into_any_element(),
                 Some(login) => self
-                    .render_ai_login_finish(login, busy, cx)
+                    .render_ai_login_finish(login, false, busy, cx)
                     .into_any_element(),
             }),
         )
@@ -577,6 +614,7 @@ impl SettingsPanel {
         let enabled = account.enabled;
         let toggle_id = id.clone();
         let relogin_label = account.label.clone();
+        let relogin_id = id.clone();
         settings_row_with_desc(
             format!("ai-account-{id}"),
             &title,
@@ -593,6 +631,10 @@ impl SettingsPanel {
                     row.child(
                         button(format!("ai-account-relogin-{id}"), "Log In Again", &t).on_click(
                             cx.listener(move |this, _, _, cx| {
+                                if busy {
+                                    return;
+                                }
+                                this.ai_proxy.relogin_account = Some(relogin_id.clone());
                                 this.ai_proxy_command(
                                     AiProxyCommand::StartLogin {
                                         label: relogin_label.clone(),
@@ -661,6 +703,7 @@ impl SettingsPanel {
                             if label.is_empty() || busy {
                                 return;
                             }
+                            this.ai_proxy.relogin_account = None;
                             this.ai_proxy_command(AiProxyCommand::StartLogin { label }, cx);
                         },
                     )),
@@ -671,6 +714,7 @@ impl SettingsPanel {
     fn render_ai_login_finish(
         &self,
         login: okena_core::ai_proxy::AiPendingLogin,
+        has_border: bool,
         busy: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
@@ -683,10 +727,10 @@ impl SettingsPanel {
         settings_input_row(
             "ai-login-finish",
             &format!("Log in \u{201c}{}\u{201d}", login.label),
-            "Open the link, sign in with the account you want to add, then paste the code it shows.",
+            "Sign in on the page that opened (or open it again below), then paste the code it shows.",
             &t,
             cx,
-            false,
+            has_border,
         )
         .child(
             div()
@@ -719,7 +763,12 @@ impl SettingsPanel {
                             return;
                         }
                         this.ai_proxy.code_input.update(cx, |input, cx| input.set_value("", cx));
-                        this.ai_proxy.label_input.update(cx, |input, cx| input.set_value("", cx));
+                        // A re-login leaves a name typed under Add Account alone.
+                        if this.ai_proxy.relogin_account.is_none() {
+                            this.ai_proxy
+                                .label_input
+                                .update(cx, |input, cx| input.set_value("", cx));
+                        }
                         this.ai_proxy_command(
                             AiProxyCommand::FinishLogin {
                                 login_id: finish_id.clone(),
