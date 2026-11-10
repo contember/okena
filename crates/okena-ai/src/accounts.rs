@@ -667,6 +667,10 @@ impl Accounts {
         let mut state = self.state.lock();
         if let Ok(account) = state.account(account_id) {
             account.stored.needs_login = true;
+            log::warn!(
+                "[ai-proxy] token rejected after refresh account={account_id:?} login_age_days={:?}; the account needs a new login",
+                account.stored.login_age_days(now_ms())
+            );
             if let Err(error) = self.persist(&state) {
                 log::error!("[ai-proxy] failed to persist account state: {error}");
             }

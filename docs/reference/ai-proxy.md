@@ -215,19 +215,23 @@ proxy records when each account was logged in (`logged_in_ms` in
 `accounts.json`): set by **Log In** / **Log In Again**, kept by token
 refreshes, reset by the next login. It also records the last successful
 refresh (`refreshed_ms`, cleared by a new login). Accounts logged in before the
-proxy recorded this have no login time until their next login.
+proxy recorded this have no login time until their next login; so do accounts
+after a downgrade to such a proxy, which rewrites `accounts.json` without it.
 
 Settings → AI Proxy shows the age under each account (*Logged in 12 days ago*).
 From day 25 the account reads *Logged in 25 days ago, log in again soon*, the
 activity view shows the age in warning colour, and **Log In Again** appears
 next to the account. A rejected login reads *Login rejected, log in again*.
 
-`proxy.log` records every refresh with the account id and login age, never a
-token value: `token_refresh ok account="…" login_age_days=Some(3)` (info) and
-`token_refresh rejected account="…" login_age_days=Some(30); the account needs
-a new login` (warning). Logins log `login account="…"`. Once per proxy process
-and grant type, `token_reply_fields grant=refresh_token fields=…` lists the
-names (never values) of the fields the token endpoint returned.
+`proxy.log` records every successful and every rejected refresh with the
+account id and login age, never a token value: `token_refresh ok account="…"
+login_age_days=Some(3)` (info) and `token_refresh rejected account="…"
+login_age_days=Some(30); the account needs a new login` (warning). A token the
+provider refuses right after a refresh logs `token rejected after refresh
+account="…"` (warning). Logins log `login account="…"`. Transient refresh
+failures appear as `refresh_error` or `account … unusable`. Once per proxy
+process and grant type, `token_reply_fields grant=refresh_token fields=…` lists
+the top-level field names (never values) of the token endpoint's reply.
 
 `okena ai accounts` prints the same without credentials, for other local
 tools: one tab-separated line per account with id, label, email, login time,

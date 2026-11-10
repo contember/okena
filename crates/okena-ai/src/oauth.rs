@@ -113,35 +113,30 @@ fn token_reply(
     grant: &str,
     fields_logged: &AtomicBool,
 ) -> anyhow::Result<TokenReply> {
-    if !fields_logged.swap(true, Ordering::Relaxed) {
-        log::info!(
-            "[ai-proxy] token_reply_fields grant={grant} fields={}",
-            field_names(&body)
-        );
+    if let Some(fields) = fields_to_log(&body, fields_logged) {
+        log::info!("[ai-proxy] token_reply_fields grant={grant} fields={fields}");
     }
     Ok(serde_json::from_value(body)?)
 }
 
-/// Top-level field names and those of nested objects (`account.uuid`).
-fn field_names(body: &serde_json::Value) -> String {
-    fn name(key: &str) -> String {
-        key.chars()
-            .filter(|c| c.is_ascii_alphanumeric() || *c == '_')
-            .take(64)
-            .collect()
+/// The reply's top-level field names, the first time only. Nested objects are
+/// skipped: one keyed by ids would put the ids into the log.
+fn fields_to_log(body: &serde_json::Value, fields_logged: &AtomicBool) -> Option<String> {
+    if fields_logged.swap(true, Ordering::Relaxed) {
+        return None;
     }
-    let mut names = Vec::new();
-    for (key, value) in body.as_object().into_iter().flatten() {
-        names.push(name(key));
-        for nested in value
-            .as_object()
-            .into_iter()
-            .flat_map(|object| object.keys())
-        {
-            names.push(format!("{}.{}", name(key), name(nested)));
-        }
-    }
-    names.join(",")
+    let names: Vec<String> = body
+        .as_object()
+        .into_iter()
+        .flat_map(|object| object.keys())
+        .map(|key| {
+            key.chars()
+                .filter(|c| c.is_ascii_alphanumeric() || *c == '_')
+                .take(64)
+                .collect()
+        })
+        .collect();
+    Some(names.join(","))
 }
 
 pub struct LoginResult {
@@ -447,18 +442,18 @@ mod tests {
     }
 
     #[test]
-    fn reply_fields_are_logged_by_name_only() {
-        let names = field_names(&serde_json::json!({
+    fn reply_fields_are_logged_by_name_only_and_once() {
+        let logged = AtomicBool::new(false);
+        let reply = serde_json::json!({
             "access_token": "secret-access",
             "expires_in": 3600,
             "account": {"uuid": "secret-uuid", "email_address": "someone@example.com"},
             "bad\nkey": 1
-        }));
-        assert_eq!(
-            names,
-            "access_token,account,account.email_address,account.uuid,badkey,expires_in"
-        );
+        });
+        let names = fields_to_log(&reply, &logged).unwrap();
+        assert_eq!(names, "access_token,account,badkey,expires_in");
         assert!(!names.contains("secret") && !names.contains('@'));
+        assert_eq!(fields_to_log(&reply, &logged), None);
     }
 
     #[test]

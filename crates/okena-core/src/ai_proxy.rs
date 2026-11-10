@@ -388,8 +388,7 @@ pub fn login_age_days(logged_in_ms: i64, now_ms: i64) -> i64 {
 }
 
 /// Whether the provider still accepts an account's login.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AiLoginState {
     Ok,
     /// At least [`AI_LOGIN_EXPIRING_DAYS`] old: log in again before it is rejected.

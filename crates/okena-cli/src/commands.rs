@@ -246,7 +246,7 @@ fn ai_account_json(account: &okena_core::ai_proxy::AiAccount, now_ms: i64) -> se
         "logged_in_ms": account.logged_in_ms,
         "refreshed_ms": account.refreshed_ms,
         "login_age_days": account.login_age_days(now_ms),
-        "state": account.login_state(now_ms),
+        "state": account.login_state(now_ms).as_str(),
     })
 }
 
