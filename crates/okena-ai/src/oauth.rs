@@ -125,7 +125,8 @@ fn fields_to_log(body: &serde_json::Value, fields_logged: &AtomicBool) -> Option
     if fields_logged.swap(true, Ordering::Relaxed) {
         return None;
     }
-    let names: Vec<String> = body
+    // Sorted: serde_json keeps insertion order when a crate enables `preserve_order`.
+    let names: std::collections::BTreeSet<String> = body
         .as_object()
         .into_iter()
         .flat_map(|object| object.keys())
@@ -136,7 +137,7 @@ fn fields_to_log(body: &serde_json::Value, fields_logged: &AtomicBool) -> Option
                 .collect()
         })
         .collect();
-    Some(names.join(","))
+    Some(names.into_iter().collect::<Vec<_>>().join(","))
 }
 
 pub struct LoginResult {
