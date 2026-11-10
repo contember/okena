@@ -9,7 +9,8 @@ use crate::views::components::simple_input::{SimpleInput, SimpleInputState};
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use okena_core::ai_proxy::{
-    AiAccount, AiAccountRule, AiProxyCommand, AiProxyState, AiProxyStatus, AiRoutingPolicy, AiUsage,
+    AiAccount, AiAccountRule, AiLoginState, AiProxyCommand, AiProxyState, AiProxyStatus,
+    AiRoutingPolicy, AiUsage,
 };
 use okena_core::api::ActionRequest;
 use okena_transport::client::LOCAL_DAEMON_CONNECTION_ID;
@@ -549,8 +550,9 @@ impl SettingsPanel {
             usage_text("5h", account.five_hour.as_ref(), now),
             usage_text("7d", account.seven_day.as_ref(), now),
         ];
-        if account.needs_login {
-            details.insert(0, "Needs login".into());
+        let login_state = account.login_state(now);
+        if login_state == AiLoginState::Rejected {
+            details.insert(0, "Login rejected, log in again".into());
         } else if !account.enabled {
             details.insert(0, "Disabled".into());
         } else if let Some(period) = account.exhausted_period(now) {
@@ -562,6 +564,14 @@ impl SettingsPanel {
             );
         }
         details.push(format!("{} requests", account.requests));
+        if let Some(days) = account.login_age_days(now) {
+            let age = login_age_text(days);
+            if login_state == AiLoginState::Expiring {
+                details.insert(0, format!("{age}, log in again soon"));
+            } else {
+                details.push(age);
+            }
+        }
 
         let id = account.id.clone();
         let enabled = account.enabled;
@@ -579,7 +589,7 @@ impl SettingsPanel {
             div()
                 .flex()
                 .gap(px(6.0))
-                .when(account.needs_login, |row| {
+                .when(login_state != AiLoginState::Ok, |row| {
                     row.child(
                         button(format!("ai-account-relogin-{id}"), "Log In Again", &t).on_click(
                             cx.listener(move |this, _, _, cx| {
@@ -833,6 +843,15 @@ fn usage_text(window: &str, usage: Option<&AiUsage>, now: i64) -> String {
     }
 }
 
+/// How long ago an account was logged in, e.g. "Logged in 3 days ago".
+pub(crate) fn login_age_text(days: i64) -> String {
+    match days {
+        0 => "Logged in today".into(),
+        1 => "Logged in yesterday".into(),
+        days => format!("Logged in {days} days ago"),
+    }
+}
+
 pub(crate) fn format_remaining(ms: i64) -> String {
     let minutes = (ms / 60_000).max(1);
     if minutes < 60 {
@@ -846,7 +865,9 @@ pub(crate) fn format_remaining(ms: i64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{LOCAL_DAEMON_CONNECTION_ID, local_daemon_project_id, policy_summary};
+    use super::{
+        LOCAL_DAEMON_CONNECTION_ID, local_daemon_project_id, login_age_text, policy_summary,
+    };
     use okena_core::ai_proxy::{AiAccount, AiAccountRule, AiRoutingPolicy};
     use std::collections::BTreeMap;
 
@@ -864,6 +885,8 @@ mod tests {
             seven_day: None,
             requests: 0,
             last_used_ms: None,
+            logged_in_ms: None,
+            refreshed_ms: None,
         }
     }
 
@@ -875,6 +898,13 @@ mod tests {
                 .map(|(id, rule)| (id.to_string(), *rule))
                 .collect::<BTreeMap<_, _>>(),
         }
+    }
+
+    #[test]
+    fn login_age_reads_in_days() {
+        assert_eq!(login_age_text(0), "Logged in today");
+        assert_eq!(login_age_text(1), "Logged in yesterday");
+        assert_eq!(login_age_text(26), "Logged in 26 days ago");
     }
 
     #[test]
