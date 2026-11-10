@@ -80,6 +80,11 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// The AI proxy's Claude account pool
+    Ai {
+        #[command(subcommand)]
+        cmd: AiCmd,
+    },
     /// Identify the current terminal and project (uses $OKENA_TERMINAL_ID)
     Whoami {
         /// Output JSON instead of the default plain text
@@ -537,6 +542,21 @@ pub enum SkillCmd {
         /// Install into the current project: ./.claude/skills/okena
         #[arg(long, conflicts_with = "user")]
         project: bool,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum AiCmd {
+    /// Login state of each pool account, without credentials
+    ///
+    /// One tab-separated line per account: id, label, email, login time, last
+    /// successful token refresh (Unix epoch seconds; empty if unknown) and
+    /// state: `ok`, `expiring` (login at least 25 days old: log in again soon)
+    /// or `rejected` (the provider no longer accepts the login).
+    Accounts {
+        /// Output a JSON array instead
+        #[arg(long)]
+        json: bool,
     },
 }
 

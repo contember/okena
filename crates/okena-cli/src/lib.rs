@@ -11,9 +11,9 @@ use okena_core::process::is_process_alive;
 use okena_transport::client::{LocalEndpoint, RemoteConnectionConfig};
 use okena_workspace::persistence::config_dir;
 use parser::{
-    ClaudeCmd, ClaudeHookCmd, ClaudeRemoteCmd, Cli, Command, FolderCmd, PaletteCmd, ProjectCmd,
-    ServiceCmd, SettingsCmd, SkillCmd, StatusCmd, StatusColumnCmd, TermCmd, ThemeCmd, UpdateCmd,
-    WindowCmd, WorktreeCmd,
+    AiCmd, ClaudeCmd, ClaudeHookCmd, ClaudeRemoteCmd, Cli, Command, FolderCmd, PaletteCmd,
+    ProjectCmd, ServiceCmd, SettingsCmd, SkillCmd, StatusCmd, StatusColumnCmd, TermCmd, ThemeCmd,
+    UpdateCmd, WindowCmd, WorktreeCmd,
 };
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -237,6 +237,9 @@ fn dispatch(cli: Cli) -> i32 {
             } => commands::cli_service("restart", &name, project.as_deref(), json),
         },
         Command::Usage { json } => commands::cli_usage(json),
+        Command::Ai { cmd } => match cmd {
+            AiCmd::Accounts { json } => commands::cli_ai_accounts(json),
+        },
         Command::Whoami { json } => commands::cli_whoami(json),
         Command::Ls { json } => commands::cli_ls(json),
         Command::Window { cmd } => match cmd {

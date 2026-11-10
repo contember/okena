@@ -167,6 +167,89 @@ pub fn cli_usage(json_mode: bool) -> i32 {
     0
 }
 
+/// `okena ai accounts [--json]`
+pub fn cli_ai_accounts(json_mode: bool) -> i32 {
+    let token = match ensure_token() {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("{e}");
+            return 1;
+        }
+    };
+    let request = okena_core::api::ActionRequest::AiProxy {
+        request: okena_core::ai_proxy::AiProxyCommand::Status,
+    };
+    let body = match serde_json::to_string(&request) {
+        Ok(body) => body,
+        Err(e) => {
+            eprintln!("{e}");
+            return 1;
+        }
+    };
+    let reply = match api_action(&token, &body) {
+        Ok(reply) => reply,
+        Err(e) => {
+            eprintln!("{e}");
+            return action_error_exit_code(&e);
+        }
+    };
+    let state: okena_core::ai_proxy::AiProxyState = match serde_json::from_str(&reply) {
+        Ok(state) => state,
+        Err(e) => {
+            eprintln!("Invalid AI proxy response: {e}");
+            return 1;
+        }
+    };
+    let Some(status) = state.status else {
+        eprintln!(
+            "AI proxy unavailable: {}",
+            state.failure.as_deref().unwrap_or("no status")
+        );
+        return 1;
+    };
+    let now_ms = (okena_agent_usage::now_epoch() * 1000.0) as i64;
+    if json_mode {
+        let accounts: Vec<_> = status
+            .accounts
+            .iter()
+            .map(|account| ai_account_json(account, now_ms))
+            .collect();
+        println!("{}", serde_json::Value::Array(accounts));
+    } else {
+        for account in &status.accounts {
+            println!("{}", ai_account_line(account, now_ms));
+        }
+    }
+    0
+}
+
+fn ai_account_line(account: &okena_core::ai_proxy::AiAccount, now_ms: i64) -> String {
+    let seconds = |ms: Option<i64>| ms.map(|ms| (ms / 1000).to_string()).unwrap_or_default();
+    // Labels are free text: keep each account on one line with its columns.
+    let field = |text: &str| text.replace(['\t', '\n', '\r'], " ");
+    format!(
+        "{}\t{}\t{}\t{}\t{}\t{}",
+        account.id,
+        field(&account.label),
+        field(account.email.as_deref().unwrap_or("")),
+        seconds(account.logged_in_ms),
+        seconds(account.refreshed_ms),
+        account.login_state(now_ms).as_str()
+    )
+}
+
+fn ai_account_json(account: &okena_core::ai_proxy::AiAccount, now_ms: i64) -> serde_json::Value {
+    serde_json::json!({
+        "id": account.id,
+        "label": account.label,
+        "email": account.email,
+        "logged_in_ms": account.logged_in_ms,
+        "refreshed_ms": account.refreshed_ms,
+        "login_age_days": account.login_age_days(now_ms),
+        "state": account.login_state(now_ms),
+    })
+}
+
 fn usage_lines(usage: &okena_core::api::ApiUsage, now_ms: i64) -> Vec<String> {
     let status_name = |status| {
         serde_json::to_value(status)
@@ -2807,6 +2890,47 @@ mod tests {
         assert_eq!(
             super::action_error_exit_code("Server returned 400 Bad Request: project not found"),
             1
+        );
+    }
+
+    #[test]
+    fn ai_account_lines_carry_login_times_and_state() {
+        use super::{ai_account_json, ai_account_line};
+        let now_ms = 40 * 86_400_000;
+        let account = okena_core::ai_proxy::AiAccount {
+            id: "acc1".into(),
+            label: "Work\tMax".into(),
+            email: Some("someone@example.com".into()),
+            plan: Some("max".into()),
+            rate_limit_tier: None,
+            enabled: true,
+            needs_login: false,
+            cooldown_until_ms: None,
+            five_hour: None,
+            seven_day: None,
+            requests: 3,
+            last_used_ms: None,
+            logged_in_ms: Some(now_ms - 26 * 86_400_000),
+            refreshed_ms: Some(now_ms - 1_500),
+        };
+        assert_eq!(
+            ai_account_line(&account, now_ms),
+            "acc1\tWork Max\tsomeone@example.com\t1209600\t3455998\texpiring"
+        );
+        let json = ai_account_json(&account, now_ms);
+        assert_eq!(json["state"], "expiring");
+        assert_eq!(json["login_age_days"], 26);
+
+        let unknown = okena_core::ai_proxy::AiAccount {
+            email: None,
+            logged_in_ms: None,
+            refreshed_ms: None,
+            needs_login: true,
+            ..account
+        };
+        assert_eq!(
+            ai_account_line(&unknown, now_ms),
+            "acc1\tWork Max\t\t\t\trejected"
         );
     }
 

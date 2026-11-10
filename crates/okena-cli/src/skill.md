@@ -17,6 +17,8 @@ description: Drive a running Okena terminal multiplexer from the `okena` CLI —
 - `okena term ls [project]` — terminals as `id<TAB>name<TAB>project`.
 - `okena usage` — Claude Code / Codex rate-limit usage on the daemon's machine
   (`provider<TAB>status<TAB>window<TAB>percent<TAB>reset_epoch`; `--json` for raw).
+- `okena ai accounts` — AI proxy pool logins without credentials
+  (`id<TAB>label<TAB>email<TAB>login_epoch<TAB>refresh_epoch<TAB>ok|expiring|rejected`; `--json`).
 
 ## Addressing (how to name things)
 
