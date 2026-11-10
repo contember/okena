@@ -474,6 +474,8 @@ mod tests {
             seven_day: None,
             requests: 0,
             last_used_ms: None,
+            logged_in_ms: None,
+            refreshed_ms: None,
         }
     }
 

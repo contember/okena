@@ -353,6 +353,7 @@ mod tests {
     use okena_core::ai_proxy::AiActivityKind;
     use parking_lot::Mutex;
     use std::collections::HashMap;
+    use std::sync::atomic::AtomicBool;
 
     static LOG_MESSAGES: Mutex<Vec<String>> = Mutex::new(Vec::new());
     static TEST_LOGGER: TestLogger = TestLogger;
@@ -391,6 +392,8 @@ mod tests {
         error_bodies: Mutex<HashMap<String, axum::body::Bytes>>,
         error_headers: Mutex<HeaderMap>,
         token_delay: Mutex<Duration>,
+        /// Answer refreshes like a provider that ended the login.
+        reject_refresh: AtomicBool,
     }
 
     async fn fake_upstream(fake: Arc<Fake>) -> String {
@@ -446,6 +449,10 @@ mod tests {
             let delay = *fake.token_delay.lock();
             tokio::time::sleep(delay).await;
             fake.refreshes.fetch_add(1, Ordering::SeqCst);
+            if fake.reject_refresh.load(Ordering::SeqCst) {
+                let error = serde_json::json!({"error": "invalid_grant"});
+                return (StatusCode::BAD_REQUEST, axum::Json(error)).into_response();
+            }
             axum::Json(serde_json::json!({
                 "access_token": format!("{}-refreshed", body["refresh_token"].as_str().unwrap()),
                 "expires_in": 3600,
@@ -826,6 +833,72 @@ mod tests {
             "login-access"
         );
         assert_eq!(stored["accounts"].as_array().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn login_time_survives_refreshes_until_a_new_login() {
+        init_test_logger();
+        let h = harness(Vec::new()).await;
+        let login = || async {
+            let status = h
+                .client
+                .command(&AiProxyCommand::StartLogin { label: "a".into() })
+                .await
+                .unwrap();
+            let finish = AiProxyCommand::FinishLogin {
+                login_id: status.logins[0].id.clone(),
+                code: "code".into(),
+            };
+            h.client.command(&finish).await.unwrap().accounts[0].clone()
+        };
+        let account = login().await;
+        let logged_in = account.logged_in_ms.expect("the login time is recorded");
+        assert_eq!(account.refreshed_ms, None);
+
+        h.fake
+            .replies
+            .lock()
+            .insert("login-access".into(), vec![401]);
+        assert_eq!(h.message("conv").await.0, 200);
+        let status = h.client.command(&AiProxyCommand::Status).await.unwrap();
+        let account = &status.accounts[0];
+        assert_eq!(account.logged_in_ms, Some(logged_in), "a refresh keeps it");
+        assert!(account.refreshed_ms.is_some_and(|at| at >= logged_in));
+        let stored: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(proxy_dir(h._dir.path()).join("accounts.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(stored["accounts"][0]["logged_in_ms"], logged_in);
+
+        h.fake.reject_refresh.store(true, Ordering::SeqCst);
+        h.fake
+            .replies
+            .lock()
+            .insert("login-rt-refreshed".into(), vec![401]);
+        h.message("conv").await;
+        let status = h.client.command(&AiProxyCommand::Status).await.unwrap();
+        let account = &status.accounts[0];
+        assert_eq!(
+            account.login_state(crate::now_ms()),
+            okena_core::ai_proxy::AiLoginState::Rejected
+        );
+        let id = &account.id;
+        let logs = LOG_MESSAGES.lock().join("\n");
+        assert!(
+            logs.contains(&format!(
+                "token_refresh rejected account={id:?} login_age_days=Some(0)"
+            )),
+            "{logs}"
+        );
+        assert!(
+            !logs.contains("login-rt"),
+            "no token value in the log: {logs}"
+        );
+
+        let account = login().await;
+        assert!(!account.needs_login);
+        assert!(account.logged_in_ms.is_some_and(|at| at >= logged_in));
+        assert_eq!(account.refreshed_ms, None, "a new login starts over");
     }
 
     #[tokio::test]
