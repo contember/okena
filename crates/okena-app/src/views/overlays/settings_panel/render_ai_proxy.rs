@@ -44,8 +44,12 @@ impl AiProxyPanel {
             busy: false,
             relogin_account: None,
             label_input: cx.new(|cx| SimpleInputState::new(cx).placeholder("e.g. Work Max")),
+            // The code is longer than the row: wrap it rather than run out of the box.
             code_input: cx.new(|cx| {
-                SimpleInputState::new(cx).placeholder("Paste the code shown after authorizing")
+                SimpleInputState::new(cx)
+                    .multiline()
+                    .submit_on_enter()
+                    .placeholder("Paste the code shown after authorizing")
             }),
         }
     }
@@ -695,6 +699,7 @@ impl SettingsPanel {
                     input_box(&t)
                         .flex_1()
                         .min_w_0()
+                        .overflow_hidden()
                         .child(SimpleInput::new(&self.ai_proxy.label_input)),
                 )
                 .child(
@@ -751,10 +756,12 @@ impl SettingsPanel {
             div()
                 .flex()
                 .gap(px(6.0))
+                .items_start()
                 .child(
                     input_box(&t)
                         .flex_1()
                         .min_w_0()
+                        .overflow_hidden()
                         .child(SimpleInput::new(&self.ai_proxy.code_input)),
                 )
                 .child(
