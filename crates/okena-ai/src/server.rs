@@ -914,6 +914,20 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn starting_a_login_again_replaces_the_pending_one() {
+        let h = harness(vec![account("a", "token-a", "uuid-a")]).await;
+        let start = |label: &str| AiProxyCommand::StartLogin {
+            label: label.into(),
+        };
+        let first = h.client.command(&start("a")).await.unwrap();
+        h.client.command(&start("b")).await.unwrap();
+        let status = h.client.command(&start(" a ")).await.unwrap();
+        let labels: Vec<_> = status.logins.iter().map(|login| login.label.as_str()).collect();
+        assert_eq!(labels, ["b", "a"]);
+        assert_ne!(status.logins[1].id, first.logins[0].id);
+    }
+
+    #[tokio::test]
     async fn all_accounts_limited_returns_the_provider_429() {
         let h = harness(vec![account("a", "token-a", "uuid-a")]).await;
         h.fake.replies.lock().insert("token-a".into(), vec![429]);
