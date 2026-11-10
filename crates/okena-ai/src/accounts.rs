@@ -302,7 +302,10 @@ impl Accounts {
             error: None,
             created_ms: now_ms(),
         };
-        self.state.lock().logins.push(login);
+        let mut state = self.state.lock();
+        // Starting the same login again replaces the one left pending.
+        state.logins.retain(|pending| pending.label != login.label);
+        state.logins.push(login);
         Ok(())
     }
 
