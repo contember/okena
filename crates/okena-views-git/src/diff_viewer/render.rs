@@ -861,8 +861,8 @@ impl DiffViewer {
                                 list.style().restrict_scroll_to_axis = Some(true);
                                 list
                             })
-                            .on_scroll_wheel(cx.listener(
-                                move |this, event: &ScrollWheelEvent, _window, cx| {
+                            .on_scroll(cx.listener(
+                                move |this, event: &ScrollEvent, _window, cx| {
                                     this.handle_scroll_x(event, cx);
                                 },
                             ))

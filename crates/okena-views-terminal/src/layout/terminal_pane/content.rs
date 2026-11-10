@@ -54,7 +54,7 @@ pub struct TerminalContent {
     /// plain `TouchPhase::Moved` — so we reconstruct the gesture boundary here:
     /// set on `Ended`, cleared on the next `Started`. Used to reject Control-zoom
     /// during momentum so a fast scroll that coasts into an accidental Control
-    /// press can't resize the font (see the `on_scroll_wheel` handler).
+    /// press can't resize the font (see the `on_scroll` handler).
     in_scroll_inertia: bool,
     mouse_down_cell: Option<(usize, i32)>,
     forwarded_button: Option<(u8, u8)>,
@@ -79,6 +79,7 @@ impl TerminalContent {
         cx: &mut Context<Self>,
     ) -> Self {
         let scrollbar = cx.new(Scrollbar::new);
+        cx.observe(&scrollbar, |_, _, cx| cx.notify()).detach();
 
         Self {
             terminal: None,
@@ -276,14 +277,16 @@ impl TerminalContent {
         &mut self,
         matches: Arc<Vec<SearchMatch>>,
         current_index: Option<usize>,
+        cx: &mut Context<Self>,
     ) {
         self.search_matches = matches;
         self.search_current_index = current_index;
+        cx.notify();
     }
 
     pub fn mark_scroll_activity(&mut self, cx: &mut Context<Self>) {
-        self.scrollbar.update(cx, |scrollbar, _| {
-            scrollbar.mark_activity();
+        self.scrollbar.update(cx, |scrollbar, cx| {
+            scrollbar.mark_activity(cx);
         });
     }
 
@@ -860,7 +863,7 @@ impl Render for TerminalContent {
                     this.handle_mouse_up(event, cx);
                 }),
             )
-            .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _window, cx| {
+            .on_scroll(cx.listener(|this, event: &ScrollEvent, _window, cx| {
                 // Track the trackpad gesture boundary so we can tell an active,
                 // finger-on-the-pad scroll from its inertial momentum tail. GPUI
                 // collapses the macOS momentum phase into `TouchPhase::Moved`, so
@@ -990,7 +993,10 @@ impl Render for TerminalContent {
                         .with_cursor_style(render_settings.cursor_style),
                 ),
             )
-            .child(self.scrollbar.clone())
+            .child(
+                self.scrollbar
+                    .update(cx, |scrollbar, cx| scrollbar.element(cx)),
+            )
             .into_any_element()
     }
 }
@@ -1036,7 +1042,47 @@ fn autoscroll_lines(y: f32, top: f32, bottom: f32, cell_height: f32) -> i32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{autoscroll_lines, terminal_file_request_path};
+    use super::{TerminalContent, autoscroll_lines, terminal_file_request_path};
+    use gpui::{AppContext as _, TestAppContext};
+    use okena_workspace::request_broker::RequestBroker;
+    use okena_workspace::state::{Workspace, WorkspaceData};
+    use std::cell::Cell;
+    use std::rc::Rc;
+    use std::sync::Arc;
+
+    /// The content is drawn behind `.cached()`, so a pane notify alone does not
+    /// redraw it: new highlights must notify the content itself.
+    #[gpui::test]
+    fn new_search_highlights_redraw_the_content(cx: &mut TestAppContext) {
+        let content = cx.update(|cx| {
+            let workspace = cx.new(|_| Workspace::new(WorkspaceData::empty()));
+            let broker = cx.new(|_| RequestBroker::new());
+            cx.new(|cx| {
+                TerminalContent::new(
+                    cx.focus_handle(),
+                    None,
+                    "project".to_string(),
+                    Vec::new(),
+                    workspace,
+                    broker,
+                    cx,
+                )
+            })
+        });
+        let notifies = Rc::new(Cell::new(0));
+        cx.update(|cx| {
+            let notifies = notifies.clone();
+            cx.observe(&content, move |_, _| notifies.set(notifies.get() + 1))
+                .detach();
+        });
+
+        content.update(cx, |content, cx| {
+            content.set_search_highlights(Arc::new(Vec::new()), Some(0), cx);
+        });
+        cx.run_until_parked();
+
+        assert_eq!(notifies.get(), 1);
+    }
 
     const CELL: f32 = 16.0;
     const TOP: f32 = 100.0;

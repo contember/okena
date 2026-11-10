@@ -18,7 +18,7 @@ okena-hooks = { path = "../okena-hooks", default-features = false }
 okena-files = { path = "../okena-files", default-features = false }
 okena-theme = { path = "../okena-theme", default-features = false }
 
-gpui = { git = "https://github.com/zed-industries/zed", package = "gpui", optional = true }
+gpui = { workspace = true, optional = true }
 
 # Terminal emulation (grid/index types used by action execution)
 alacritty_terminal = "0.25"
@@ -44,5 +44,5 @@ percent-encoding = "2"
 # gpui (verified: zero `Compiling gpui`); the dependency only appears in the
 # `cargo tree` metadata graph, not in any compiled artifact.
 [dev-dependencies]
-gpui = { git = "https://github.com/zed-industries/zed", package = "gpui", features = ["test-support"] }
+gpui = { workspace = true, features = ["test-support"] }
 anyhow = "1.0"

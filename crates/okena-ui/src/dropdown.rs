@@ -74,7 +74,7 @@ pub fn dropdown_overlay(id: impl Into<SharedString>, t: &ThemeColors) -> Statefu
         .shadow_xl()
         .py(px(4.0))
         // Prevent scroll events from propagating to terminal underneath
-        .on_scroll_wheel(|_, _, cx| {
+        .on_scroll(|_, _, cx| {
             cx.stop_propagation();
         })
         .on_mouse_down(MouseButton::Left, |_, _, cx| {

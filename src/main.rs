@@ -859,7 +859,7 @@ fn main() {
                     height: px(300.0),
                 }),
                 app_id: Some("okena".to_string()),
-                ..Default::default()
+                ..okena_app::app::base_window_options()
             },
             |window, cx| {
                 // Detect initial system appearance

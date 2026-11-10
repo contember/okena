@@ -7,10 +7,10 @@ license = "MIT"
 [dependencies]
 okena-core = { path = "../okena-core" }
 okena-theme = { path = "../okena-theme" }
-gpui = { git = "https://github.com/zed-industries/zed", package = "gpui" }
-gpui-component = { git = "https://github.com/longbridge/gpui-component", package = "gpui-component" }
+gpui = { workspace = true }
+gpui-component = { workspace = true }
 alacritty_terminal = "0.25"
 smol = "2.0"
 
 [dev-dependencies]
-gpui = { git = "https://github.com/zed-industries/zed", package = "gpui", features = ["test-support"] }
+gpui = { workspace = true, features = ["test-support"] }

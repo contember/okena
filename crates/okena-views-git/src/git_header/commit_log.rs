@@ -310,7 +310,7 @@ impl GitHeader {
                         .on_mouse_down(MouseButton::Left, |_, _, cx| {
                             cx.stop_propagation();
                         })
-                        .on_scroll_wheel(|_, _, cx| {
+                        .on_scroll(|_, _, cx| {
                             cx.stop_propagation();
                         })
                         // Header
@@ -620,7 +620,7 @@ impl GitHeader {
                                 .min_h_0()
                                 .overflow_y_scroll()
                                 .track_scroll(&self.commit_log_scroll)
-                                .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _window, cx| {
+                                .on_scroll(cx.listener(|this, event: &ScrollEvent, _window, cx| {
                                     let delta_y = f32::from(event.delta.pixel_delta(px(1.0)).y);
                                     if delta_y >= 0.0 {
                                         return;

@@ -518,7 +518,7 @@ impl FileRenderer {
             );
         }
         container
-            .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _, cx| {
+            .on_scroll(cx.listener(|this, event: &ScrollEvent, _, cx| {
                 let delta = event.delta.pixel_delta(px(17.0));
                 let dx = f32::from(delta.x);
                 let dy = f32::from(delta.y);
