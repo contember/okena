@@ -694,6 +694,7 @@ impl SettingsPanel {
                 .child(
                     input_box(&t)
                         .flex_1()
+                        .min_w_0()
                         .child(SimpleInput::new(&self.ai_proxy.label_input)),
                 )
                 .child(
@@ -750,7 +751,12 @@ impl SettingsPanel {
             div()
                 .flex()
                 .gap(px(6.0))
-                .child(input_box(&t).flex_1().child(SimpleInput::new(&self.ai_proxy.code_input)))
+                .child(
+                    input_box(&t)
+                        .flex_1()
+                        .min_w_0()
+                        .child(SimpleInput::new(&self.ai_proxy.code_input)),
+                )
                 .child(
                     button_primary(
                         "ai-login-finish-button",
