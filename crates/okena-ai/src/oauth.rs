@@ -5,6 +5,7 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use okena_core::ai_proxy::AiUsage;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 pub const CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
@@ -101,6 +102,44 @@ struct TokenAccount {
     email_address: Option<String>,
 }
 
+/// The token reply states only the access token's lifetime. Once per process
+/// and grant, log which fields it carries (names, never values), to learn
+/// whether the provider ever states how long the login itself lasts.
+static CODE_REPLY_FIELDS_LOGGED: AtomicBool = AtomicBool::new(false);
+static REFRESH_REPLY_FIELDS_LOGGED: AtomicBool = AtomicBool::new(false);
+
+fn token_reply(
+    body: serde_json::Value,
+    grant: &str,
+    fields_logged: &AtomicBool,
+) -> anyhow::Result<TokenReply> {
+    if let Some(fields) = fields_to_log(&body, fields_logged) {
+        log::info!("[ai-proxy] token_reply_fields grant={grant} fields={fields}");
+    }
+    Ok(serde_json::from_value(body)?)
+}
+
+/// The reply's top-level field names, the first time only. Nested objects are
+/// skipped: one keyed by ids would put the ids into the log.
+fn fields_to_log(body: &serde_json::Value, fields_logged: &AtomicBool) -> Option<String> {
+    if fields_logged.swap(true, Ordering::Relaxed) {
+        return None;
+    }
+    // Sorted: serde_json keeps insertion order when a crate enables `preserve_order`.
+    let names: std::collections::BTreeSet<String> = body
+        .as_object()
+        .into_iter()
+        .flat_map(|object| object.keys())
+        .map(|key| {
+            key.chars()
+                .filter(|c| c.is_ascii_alphanumeric() || *c == '_')
+                .take(64)
+                .collect()
+        })
+        .collect();
+    Some(names.into_iter().collect::<Vec<_>>().join(","))
+}
+
 pub struct LoginResult {
     pub tokens: Tokens,
     pub account_uuid: Option<String>,
@@ -137,7 +176,11 @@ pub async fn exchange_code(
         status.is_success(),
         "Token exchange failed ({status}); the code may be expired or already used"
     );
-    let reply: TokenReply = response.json().await?;
+    let reply = token_reply(
+        response.json().await?,
+        "authorization_code",
+        &CODE_REPLY_FIELDS_LOGGED,
+    )?;
     let account = reply.account.as_ref();
     Ok(LoginResult {
         account_uuid: account.and_then(|account| account.uuid.clone()),
@@ -183,10 +226,12 @@ pub async fn refresh(
             "token refresh returned {status}"
         )));
     }
-    let reply: TokenReply = response
+    let body = response
         .json()
         .await
         .map_err(|error| RefreshError::Transient(error.into()))?;
+    let reply = token_reply(body, "refresh_token", &REFRESH_REPLY_FIELDS_LOGGED)
+        .map_err(RefreshError::Transient)?;
     tokens_from(
         reply.access_token,
         reply.refresh_token,
@@ -395,6 +440,21 @@ mod tests {
         }));
         assert_eq!(limits.five_hour.unwrap().utilization, 100.0);
         assert_eq!(limits.seven_day.unwrap().utilization, 3.0);
+    }
+
+    #[test]
+    fn reply_fields_are_logged_by_name_only_and_once() {
+        let logged = AtomicBool::new(false);
+        let reply = serde_json::json!({
+            "access_token": "secret-access",
+            "expires_in": 3600,
+            "account": {"uuid": "secret-uuid", "email_address": "someone@example.com"},
+            "bad\nkey": 1
+        });
+        let names = fields_to_log(&reply, &logged).unwrap();
+        assert_eq!(names, "access_token,account,badkey,expires_in");
+        assert!(!names.contains("secret") && !names.contains('@'));
+        assert_eq!(fields_to_log(&reply, &logged), None);
     }
 
     #[test]

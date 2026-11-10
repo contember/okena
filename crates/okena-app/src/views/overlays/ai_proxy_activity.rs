@@ -7,14 +7,16 @@ use crate::remote::local::DaemonEndpoint;
 use crate::settings::settings_entity;
 use crate::theme::theme;
 use crate::ui::tokens::{ui_text, ui_text_ms, ui_text_sm};
-use crate::views::overlays::settings_panel::{format_remaining, send_ai_proxy_command};
+use crate::views::overlays::settings_panel::{
+    format_remaining, login_age_text, send_ai_proxy_command,
+};
 use crate::workspace::state::Workspace;
 use gpui::prelude::*;
 use gpui::*;
 use gpui_component::{h_flex, v_flex};
 use okena_core::ai_proxy::{
-    AI_ACTIVITY_MINUTES, AiAccount, AiActivity, AiActivityEvent, AiActivityKind, AiProxyCommand,
-    AiProxyState, AiProxyStatus, AiRouteActivity,
+    AI_ACTIVITY_MINUTES, AiAccount, AiActivity, AiActivityEvent, AiActivityKind, AiLoginState,
+    AiProxyCommand, AiProxyState, AiProxyStatus, AiRouteActivity,
 };
 use okena_core::theme::ThemeColors;
 use okena_transport::client::{LOCAL_DAEMON_CONNECTION_ID, make_prefixed_id};
@@ -407,7 +409,7 @@ fn route_rows(status: &AiProxyStatus) -> Vec<RouteRow<'_>> {
 
 fn account_state(account: &AiAccount, now: i64, t: &ThemeColors) -> (String, u32) {
     if account.needs_login {
-        return ("Needs login".to_owned(), t.error);
+        return ("Login rejected".to_owned(), t.error);
     }
     if !account.enabled {
         return ("Disabled".to_owned(), t.text_muted);
@@ -420,6 +422,11 @@ fn account_state(account: &AiAccount, now: i64, t: &ThemeColors) -> (String, u32
             format!("429 cooldown {}", format_remaining(until - now)),
             t.warning,
         );
+    }
+    if account.login_state(now) == AiLoginState::Expiring
+        && let Some(days) = account.login_age_days(now)
+    {
+        return (login_age_text(days), t.warning);
     }
     ("Ready".to_owned(), t.success)
 }
@@ -573,6 +580,8 @@ mod tests {
             seven_day: None,
             requests: 0,
             last_used_ms: None,
+            logged_in_ms: None,
+            refreshed_ms: None,
         }
     }
 

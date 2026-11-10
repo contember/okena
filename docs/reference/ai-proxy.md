@@ -108,7 +108,8 @@ covers accounts added later.
   falls back to the terminal's own login either; it gets a 400 instead.
 - **401**: the access token is refreshed once and the request retried; if the
   token endpoint answers `invalid_grant` (or an error without a code) the
-  account is marked *Needs login*. Other token endpoint errors are temporary.
+  account needs a new login (*Login rejected* in the UI, `rejected` in
+  `okena ai accounts`). Other token endpoint errors are temporary.
   A refresh runs to completion and is saved even when the request that started
   it is cancelled, because the provider rotates the refresh token.
 - A request is never retried after its response started streaming.
@@ -205,6 +206,45 @@ sample types live in `okena-core::usage_history` because the proxy's wire
 schema carries them; storage, pruning and chart data live in
 `okena-agent-usage::history`, and `okena-usage` renders them without owning
 proxy persistence.
+
+## Login age
+
+A subscription login lasts about a month; then the provider rejects its
+refresh token. The token reply states only the access token's lifetime, so the
+proxy records when each account was logged in (`logged_in_ms` in
+`accounts.json`): set by **Log In** / **Log In Again**, kept by token
+refreshes, reset by the next login. It also records the last successful
+refresh (`refreshed_ms`, cleared by a new login). Accounts logged in before the
+proxy recorded this have no login time until their next login; so do accounts
+after a downgrade to such a proxy, which rewrites `accounts.json` without it.
+
+Settings → AI Proxy shows the age under each account (*Logged in 12 days ago*).
+From day 25 the account reads *Logged in 25 days ago, log in again soon*, the
+activity view shows the age in warning colour, and **Log In Again** appears
+next to the account. A rejected login reads *Login rejected, log in again*.
+
+`proxy.log` records every successful and every rejected refresh with the
+account id and login age, never a token value: `token_refresh ok account="…"
+login_age_days=Some(3)` (info) and `token_refresh rejected account="…"
+login_age_days=Some(30); the account needs a new login` (warning). A token the
+provider refuses right after a refresh logs `token rejected after refresh
+account="…"` (warning). Logins log `login account="…"`. Transient refresh
+failures appear as `refresh_error` or `account … unusable`. Once per proxy
+process and grant type, `token_reply_fields grant=refresh_token fields=…` lists
+the top-level field names (never values) of the token endpoint's reply.
+
+`okena ai accounts` prints the same without credentials, for other local
+tools: one tab-separated line per account with id, label, email, login time,
+last successful refresh (Unix epoch seconds, empty if unknown) and state
+(`ok`, `expiring` from day 25, `rejected`):
+
+```
+a1b2…	Work Max	someone@example.com	1762000000	1762700000	ok
+```
+
+`--json` prints an array of `{id, label, email, logged_in_ms, refreshed_ms,
+login_age_days, state}`. The command goes through the daemon like the settings
+panel, so it starts the proxy when it is not running.
 
 ## Activity
 

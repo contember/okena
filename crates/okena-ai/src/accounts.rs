@@ -6,7 +6,7 @@ use crate::oauth::{self, Pkce, RefreshError, Tokens, Upstream};
 use okena_agent_usage::history::{self as usage_history, LimitSample, Provider, UsageSample};
 use okena_core::ai_proxy::{
     AiAccount, AiAccountHistory, AiAccountRule, AiActivity, AiPendingLogin, AiProxyStatus,
-    AiRouting, AiRoutingPolicy, AiUsage, is_routable_project_id, write_private,
+    AiRouting, AiRoutingPolicy, AiUsage, is_routable_project_id, login_age_days, write_private,
 };
 use parking_lot::Mutex;
 use reqwest::header::HeaderMap;
@@ -34,6 +34,18 @@ struct StoredAccount {
     enabled: bool,
     needs_login: bool,
     tokens: Tokens,
+    /// The interactive login; a refresh keeps it, a new login resets it.
+    #[serde(default)]
+    logged_in_ms: Option<i64>,
+    #[serde(default)]
+    refreshed_ms: Option<i64>,
+}
+
+impl StoredAccount {
+    fn login_age_days(&self, now: i64) -> Option<i64> {
+        self.logged_in_ms
+            .map(|logged_in| login_age_days(logged_in, now))
+    }
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -253,6 +265,8 @@ impl Accounts {
                     seven_day: account.runtime.seven_day.clone(),
                     requests: account.runtime.requests,
                     last_used_ms: account.runtime.last_used_ms,
+                    logged_in_ms: account.stored.logged_in_ms,
+                    refreshed_ms: account.stored.refreshed_ms,
                 })
                 .collect(),
             logins: state
@@ -346,6 +360,7 @@ impl Accounts {
             None => None,
         };
         let mut state = self.state.lock();
+        let now = now_ms();
         state.logins.retain(|login| login.id != login_id);
         // Logging the same provider account in again replaces its credentials.
         let existing = result.account_uuid.as_ref().and_then(|uuid| {
@@ -357,6 +372,12 @@ impl Accounts {
         if let Some(account) = existing {
             account.stored.tokens = result.tokens;
             account.stored.needs_login = false;
+            account.stored.logged_in_ms = Some(now);
+            account.stored.refreshed_ms = None;
+            log::info!(
+                "[ai-proxy] login account={:?} (logged in again)",
+                account.stored.id
+            );
             account.stored.email = result.email.or(account.stored.email.take());
             if let Some(plan) = plan {
                 account.stored.plan = Some(plan.kind);
@@ -365,9 +386,11 @@ impl Accounts {
             account.runtime.plan_checked = true;
             account.runtime.cooldown_until_ms = None;
         } else {
+            let id = okena_core::ai_proxy::random_token()?;
+            log::info!("[ai-proxy] login account={id:?} (new account)");
             state.accounts.push(Account {
                 stored: StoredAccount {
-                    id: okena_core::ai_proxy::random_token()?,
+                    id,
                     label,
                     email: result.email,
                     account_uuid: result.account_uuid,
@@ -376,6 +399,8 @@ impl Accounts {
                     enabled: true,
                     needs_login: false,
                     tokens: result.tokens,
+                    logged_in_ms: Some(now),
+                    refreshed_ms: None,
                 },
                 runtime: Runtime {
                     plan_checked: true,
@@ -588,8 +613,14 @@ impl Accounts {
         match oauth::refresh(&self.http, &self.upstream, tokens).await {
             Ok(refreshed) => {
                 let mut state = self.state.lock();
+                let now = now_ms();
                 let account = state.account(account_id)?;
                 account.stored.tokens = refreshed.clone();
+                account.stored.refreshed_ms = Some(now);
+                log::info!(
+                    "[ai-proxy] token_refresh ok account={account_id:?} login_age_days={:?}",
+                    account.stored.login_age_days(now)
+                );
                 // Keep serving from memory even if the write fails; the error is logged.
                 if let Err(error) = self.persist(&state) {
                     log::error!("[ai-proxy] failed to persist refreshed credentials: {error}");
@@ -602,7 +633,12 @@ impl Accounts {
             }
             Err(RefreshError::Rejected) => {
                 let mut state = self.state.lock();
-                state.account(account_id)?.stored.needs_login = true;
+                let account = state.account(account_id)?;
+                account.stored.needs_login = true;
+                log::warn!(
+                    "[ai-proxy] token_refresh rejected account={account_id:?} login_age_days={:?}; the account needs a new login",
+                    account.stored.login_age_days(now_ms())
+                );
                 if let Err(error) = self.persist(&state) {
                     log::error!("[ai-proxy] failed to persist account state: {error}");
                 }
@@ -631,6 +667,10 @@ impl Accounts {
         let mut state = self.state.lock();
         if let Ok(account) = state.account(account_id) {
             account.stored.needs_login = true;
+            log::warn!(
+                "[ai-proxy] token rejected after refresh account={account_id:?} login_age_days={:?}; the account needs a new login",
+                account.stored.login_age_days(now_ms())
+            );
             if let Err(error) = self.persist(&state) {
                 log::error!("[ai-proxy] failed to persist account state: {error}");
             }
@@ -958,6 +998,8 @@ mod tests {
                         refresh_token: format!("refresh-{id}"),
                         expires_at_ms: i64::MAX / 2,
                     },
+                    logged_in_ms: None,
+                    refreshed_ms: None,
                 })
                 .collect(),
         };

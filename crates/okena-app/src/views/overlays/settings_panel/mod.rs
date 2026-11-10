@@ -22,7 +22,7 @@ mod board_columns;
 
 use categories::SettingsCategory;
 use components::opt_string;
-pub(crate) use render_ai_proxy::{format_remaining, send_ai_proxy_command};
+pub(crate) use render_ai_proxy::{format_remaining, login_age_text, send_ai_proxy_command};
 
 use crate::keybindings::Cancel;
 use crate::remote::auth::TokenInfo;

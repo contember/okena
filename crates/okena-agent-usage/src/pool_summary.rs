@@ -190,7 +190,7 @@ fn blocked(account: &AiAccount, now_ms: i64) -> Option<Blocked> {
         })
     };
     if account.needs_login {
-        return untimed("Needs login");
+        return untimed("Login rejected");
     }
     if !account.enabled {
         return untimed("Disabled");
@@ -330,6 +330,8 @@ mod tests {
             seven_day: None,
             requests: 0,
             last_used_ms: None,
+            logged_in_ms: None,
+            refreshed_ms: None,
         }
     }
 
@@ -407,7 +409,7 @@ mod tests {
             [
                 ("a", None),
                 ("b", Some("Disabled")),
-                ("c", Some("Needs login"))
+                ("c", Some("Login rejected"))
             ]
         );
         assert_eq!(summary.accounts[0].tier.as_deref(), Some("Max 5x"));

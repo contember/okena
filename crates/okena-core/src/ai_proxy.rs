@@ -366,6 +366,45 @@ pub struct AiAccount {
     pub seven_day: Option<AiUsage>,
     pub requests: u64,
     pub last_used_ms: Option<i64>,
+    /// When the account was last logged in interactively; kept across token
+    /// refreshes. `None` for a login made before the proxy recorded it.
+    #[serde(default)]
+    pub logged_in_ms: Option<i64>,
+    /// The last successful token refresh since that login.
+    #[serde(default)]
+    pub refreshed_ms: Option<i64>,
+}
+
+/// Login age from which the UI warns that the login will soon stop working.
+/// The provider ends a subscription login after about a month and says nothing
+/// about it in the token reply.
+pub const AI_LOGIN_EXPIRING_DAYS: i64 = 25;
+
+const DAY_MS: i64 = 24 * 60 * 60 * 1000;
+
+/// Whole days between an interactive login and `now_ms`.
+pub fn login_age_days(logged_in_ms: i64, now_ms: i64) -> i64 {
+    (now_ms - logged_in_ms).max(0) / DAY_MS
+}
+
+/// Whether the provider still accepts an account's login.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AiLoginState {
+    Ok,
+    /// At least [`AI_LOGIN_EXPIRING_DAYS`] old: log in again before it is rejected.
+    Expiring,
+    /// The provider no longer accepts the login; only a new login helps.
+    Rejected,
+}
+
+impl AiLoginState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Ok => "ok",
+            Self::Expiring => "expiring",
+            Self::Rejected => "rejected",
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -395,6 +434,25 @@ impl AiAccount {
                 .filter(|usage| usage.is_exhausted(now_ms))
                 .map(|_| period)
         })
+    }
+
+    /// Whole days since the interactive login, if it is known.
+    pub fn login_age_days(&self, now_ms: i64) -> Option<i64> {
+        self.logged_in_ms
+            .map(|logged_in| login_age_days(logged_in, now_ms))
+    }
+
+    pub fn login_state(&self, now_ms: i64) -> AiLoginState {
+        if self.needs_login {
+            AiLoginState::Rejected
+        } else if self
+            .login_age_days(now_ms)
+            .is_some_and(|days| days >= AI_LOGIN_EXPIRING_DAYS)
+        {
+            AiLoginState::Expiring
+        } else {
+            AiLoginState::Ok
+        }
     }
 }
 
@@ -542,5 +600,49 @@ mod tests {
             json,
             serde_json::json!({"command": "set_account_enabled", "account_id": "a", "enabled": false})
         );
+    }
+
+    #[test]
+    fn login_state_warns_from_day_25_and_reports_a_rejected_login() {
+        let now = 100 * DAY_MS;
+        let account = |logged_in_days_ago: Option<i64>, needs_login: bool| AiAccount {
+            id: "a".into(),
+            label: "A".into(),
+            email: None,
+            plan: None,
+            rate_limit_tier: None,
+            enabled: true,
+            needs_login,
+            cooldown_until_ms: None,
+            five_hour: None,
+            seven_day: None,
+            requests: 0,
+            last_used_ms: None,
+            logged_in_ms: logged_in_days_ago.map(|days| now - days * DAY_MS - 1),
+            refreshed_ms: None,
+        };
+        assert_eq!(account(Some(24), false).login_age_days(now), Some(24));
+        assert_eq!(account(Some(24), false).login_state(now), AiLoginState::Ok);
+        assert_eq!(
+            account(Some(25), false).login_state(now),
+            AiLoginState::Expiring
+        );
+        assert_eq!(
+            account(Some(3), true).login_state(now),
+            AiLoginState::Rejected
+        );
+        assert_eq!(account(None, false).login_state(now), AiLoginState::Ok);
+        assert_eq!(account(None, false).login_age_days(now), None);
+    }
+
+    #[test]
+    fn an_account_from_an_older_proxy_has_no_login_time() {
+        let account: AiAccount = serde_json::from_value(serde_json::json!({
+            "id": "a", "label": "A", "email": null, "plan": null, "enabled": true,
+            "needs_login": false, "cooldown_until_ms": null, "five_hour": null,
+            "seven_day": null, "requests": 0, "last_used_ms": null
+        }))
+        .unwrap();
+        assert_eq!((account.logged_in_ms, account.refreshed_ms), (None, None));
     }
 }

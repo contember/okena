@@ -350,9 +350,10 @@ mod tests {
     use super::*;
     use axum::http::HeaderMap;
     use futures::StreamExt;
-    use okena_core::ai_proxy::AiActivityKind;
+    use okena_core::ai_proxy::{AiActivityKind, AiLoginState};
     use parking_lot::Mutex;
     use std::collections::HashMap;
+    use std::sync::atomic::AtomicBool;
 
     static LOG_MESSAGES: Mutex<Vec<String>> = Mutex::new(Vec::new());
     static TEST_LOGGER: TestLogger = TestLogger;
@@ -361,7 +362,7 @@ mod tests {
         static INIT: std::sync::Once = std::sync::Once::new();
         INIT.call_once(|| {
             log::set_logger(&TEST_LOGGER).unwrap();
-            log::set_max_level(log::LevelFilter::Warn);
+            log::set_max_level(log::LevelFilter::Info);
         });
     }
 
@@ -391,6 +392,8 @@ mod tests {
         error_bodies: Mutex<HashMap<String, axum::body::Bytes>>,
         error_headers: Mutex<HeaderMap>,
         token_delay: Mutex<Duration>,
+        /// Answer refreshes like a provider that ended the login.
+        reject_refresh: AtomicBool,
     }
 
     async fn fake_upstream(fake: Arc<Fake>) -> String {
@@ -446,6 +449,10 @@ mod tests {
             let delay = *fake.token_delay.lock();
             tokio::time::sleep(delay).await;
             fake.refreshes.fetch_add(1, Ordering::SeqCst);
+            if fake.reject_refresh.load(Ordering::SeqCst) {
+                let error = serde_json::json!({"error": "invalid_grant"});
+                return (StatusCode::BAD_REQUEST, axum::Json(error)).into_response();
+            }
             axum::Json(serde_json::json!({
                 "access_token": format!("{}-refreshed", body["refresh_token"].as_str().unwrap()),
                 "expires_in": 3600,
@@ -826,6 +833,84 @@ mod tests {
             "login-access"
         );
         assert_eq!(stored["accounts"].as_array().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn login_time_survives_refreshes_until_a_new_login() {
+        init_test_logger();
+        let mut logged_in_long_ago = account("old", "token-old", "uuid-a");
+        logged_in_long_ago["logged_in_ms"] = 1_000.into();
+        let h = harness(vec![logged_in_long_ago]).await;
+        let status = h.client.command(&AiProxyCommand::Status).await.unwrap();
+        let account = &status.accounts[0];
+        assert_eq!(account.logged_in_ms, Some(1_000));
+        assert_eq!(account.login_state(crate::now_ms()), AiLoginState::Expiring);
+
+        h.fake.replies.lock().insert("token-old".into(), vec![401]);
+        assert_eq!(h.message("conv").await.0, 200);
+        let status = h.client.command(&AiProxyCommand::Status).await.unwrap();
+        let account = &status.accounts[0];
+        assert_eq!(account.logged_in_ms, Some(1_000), "a refresh keeps it");
+        let refreshed = account.refreshed_ms.expect("the refresh is recorded");
+        let stored: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(proxy_dir(h._dir.path()).join("accounts.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(stored["accounts"][0]["logged_in_ms"], 1_000);
+        assert_eq!(stored["accounts"][0]["refreshed_ms"], refreshed);
+
+        h.fake.reject_refresh.store(true, Ordering::SeqCst);
+        h.fake
+            .replies
+            .lock()
+            .insert("old-rt-refreshed".into(), vec![401]);
+        h.message("conv").await;
+        let status = h.client.command(&AiProxyCommand::Status).await.unwrap();
+        assert_eq!(
+            status.accounts[0].login_state(crate::now_ms()),
+            AiLoginState::Rejected
+        );
+
+        let started = h
+            .client
+            .command(&AiProxyCommand::StartLogin {
+                label: "old".into(),
+            })
+            .await
+            .unwrap();
+        let finish = AiProxyCommand::FinishLogin {
+            login_id: started.logins[0].id.clone(),
+            code: "code".into(),
+        };
+        let status = h.client.command(&finish).await.unwrap();
+        let account = &status.accounts[0];
+        assert!(!account.needs_login);
+        assert!(
+            account.logged_in_ms.is_some_and(|at| at > 1_000),
+            "a new login resets it"
+        );
+        assert_eq!(account.refreshed_ms, None, "a new login starts over");
+
+        let logs: Vec<String> = LOG_MESSAGES
+            .lock()
+            .iter()
+            .filter(|line| line.contains("account=\"old\""))
+            .cloned()
+            .collect();
+        let logs = logs.join("\n");
+        for expected in [
+            "token_refresh ok account=\"old\" login_age_days=Some(",
+            "token_refresh rejected account=\"old\" login_age_days=Some(",
+            "login account=\"old\" (logged in again)",
+        ] {
+            assert!(logs.contains(expected), "{expected} missing in {logs}");
+        }
+        for token in ["token-old", "old-rt", "login-access", "login-rt"] {
+            assert!(
+                !logs.contains(token),
+                "token value {token} in the log: {logs}"
+            );
+        }
     }
 
     #[tokio::test]
