@@ -130,6 +130,7 @@ impl GitHeader {
                                 format!("commit-log-btn-{}", project_id).into(),
                             ))
                             .relative()
+                            .flex_shrink_0()
                             .cursor_pointer()
                             .flex()
                             .items_center()
@@ -179,6 +180,7 @@ impl GitHeader {
                         let project_id_for_click = self.project_id.clone();
                         d.child(
                             project_header::render_diff_stats_badge(lines_added, lines_removed, t)
+                                .flex_shrink_0()
                                 .id(ElementId::Name(
                                     format!("git-diff-stats-{}", project_id).into(),
                                 ))
@@ -237,7 +239,7 @@ impl GitHeader {
                     // ↑N arrow. Standalone — not part of the review action.
                     .when_some(
                         project_header::render_unpushed_badge(status.unpushed, t),
-                        |d, badge| d.child(badge),
+                        |d, badge| d.child(div().flex_shrink_0().child(badge)),
                     )
                     // Flexible spacer: pushes the base-compare chip to the right
                     // edge of the header row.
@@ -268,6 +270,7 @@ impl GitHeader {
                                         format!("git-review-{}", project_id).into(),
                                     ))
                                     .cursor_pointer()
+                                    .flex_shrink_0()
                                     .items_center()
                                     .gap(px(3.0))
                                     .px(px(3.0))
