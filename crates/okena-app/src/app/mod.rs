@@ -360,7 +360,7 @@ impl Okena {
             },
         ));
         main_window.update(cx, |rv, cx| {
-            rv.set_remote_manager(remote_manager.clone(), cx);
+            rv.set_remote_manager(remote_manager.clone(), window, cx);
         });
 
         // Register the implicit, trusted loopback connection to our local

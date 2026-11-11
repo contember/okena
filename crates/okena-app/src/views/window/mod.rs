@@ -205,6 +205,7 @@ pub struct WindowView {
     project_columns: HashMap<String, Entity<ProjectColumn>>,
     /// Title bar entity
     title_bar: Entity<TitleBar>,
+    last_native_title: String,
     /// Status bar entity
     status_bar: Entity<StatusBar>,
     /// Centralized overlay manager
@@ -423,6 +424,7 @@ impl WindowView {
             sidebar_ctrl,
             project_columns: HashMap::new(),
             title_bar,
+            last_native_title: String::new(),
             status_bar,
             overlay_manager,
             toast_overlay,
@@ -582,6 +584,23 @@ impl WindowView {
             .read(cx)
             .status_lanes_overview(view.window_id);
 
+        cx.observe_in(
+            &crate::settings::settings_entity(cx),
+            window,
+            |this, _, window, cx| {
+                this.sync_native_window_title(window, cx);
+            },
+        )
+        .detach();
+        cx.observe_in(&view.focus_manager, window, |this, _, window, cx| {
+            this.sync_native_window_title(window, cx);
+        })
+        .detach();
+        cx.observe_in(&view.workspace, window, |this, _, window, cx| {
+            this.sync_native_window_title(window, cx);
+        })
+        .detach();
+
         // Initialize project columns
         view.sync_project_columns(cx);
 
@@ -625,8 +644,21 @@ impl WindowView {
     pub fn set_remote_manager(
         &mut self,
         manager: Entity<RemoteConnectionManager>,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Terminal output can change OSC titles without a workspace snapshot.
+        cx.subscribe_in(&manager, window, |this, _, event, window, cx| {
+            if let okena_remote_client::manager::RemoteManagerEvent::TerminalActivity(ids) = event
+                && settings(cx).show_active_terminal_title
+                && this
+                    .focused_terminal_id(cx)
+                    .is_some_and(|(_, id)| ids.contains(&id))
+            {
+                this.sync_native_window_title(window, cx);
+            }
+        })
+        .detach();
         // Observe remote manager and sync remote projects into workspace
         let workspace = self.workspace.clone();
         let focus_manager = self.focus_manager.clone();

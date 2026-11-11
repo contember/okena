@@ -81,6 +81,14 @@ impl SettingsPanel {
                     |state, val, cx| state.set_show_terminal_name_when_inactive(val, cx),
                     cx,
                 ))
+                .child(self.render_toggle(
+                    "show-active-terminal-title",
+                    "Show Active Terminal Title in Window Title",
+                    s.show_active_terminal_title,
+                    true,
+                    |state, val, cx| state.set_show_active_terminal_title(val, cx),
+                    cx,
+                ))
                 .child(self.render_cursor_style_row(s.cursor_style, cx))
                 .child(self.render_toggle(
                     "cursor-blink",

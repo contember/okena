@@ -15,6 +15,9 @@ use std::sync::Arc;
 
 /// Detached terminal window view
 pub struct DetachedTerminalView {
+    pub window_title_enabled: fn(&App) -> bool,
+    pub default_window_title: String,
+    last_window_title: String,
     workspace: Entity<Workspace>,
     terminal: Arc<Terminal>,
     terminal_id: String,
@@ -80,6 +83,7 @@ impl DetachedTerminalView {
         // Observe workspace for changes (to detect when re-attached)
         let terminal_id_for_observer = terminal_id.clone();
         cx.observe(&workspace, move |this, workspace, cx| {
+            cx.notify();
             let ws = workspace.read(cx);
             // Check if terminal is still detached
             let is_still_detached = ws.is_terminal_detached(&terminal_id_for_observer);
@@ -92,6 +96,9 @@ impl DetachedTerminalView {
         .detach();
 
         Self {
+            window_title_enabled: |_| false,
+            default_window_title: "Okena".into(),
+            last_window_title: String::new(),
             workspace,
             terminal,
             terminal_id,
@@ -99,6 +106,37 @@ impl DetachedTerminalView {
             pending_focus: true,
             should_close: false,
             content,
+        }
+    }
+
+    fn terminal_display_name(&self, cx: &App) -> String {
+        // Compute terminal name dynamically: user-set custom name > OSC title > directory fallback
+        {
+            let ws = self.workspace.read(cx);
+            let osc_title = self.terminal.title();
+            ws.projects()
+                .iter()
+                .find(|p| {
+                    p.layout
+                        .as_ref()
+                        .and_then(|l| l.find_terminal_path(&self.terminal_id))
+                        .is_some()
+                })
+                .map(|p| p.terminal_display_name(&self.terminal_id, osc_title.clone()))
+                .unwrap_or_else(|| osc_title.unwrap_or_else(|| "Terminal".to_string()))
+        }
+    }
+
+    pub fn sync_window_title(&mut self, window: &mut Window, cx: &App) {
+        let terminal_name = self.terminal_display_name(cx);
+        let title = if (self.window_title_enabled)(cx) {
+            format!("{} – Okena", terminal_name)
+        } else {
+            self.default_window_title.clone()
+        };
+        if title != self.last_window_title {
+            window.set_window_title(&title);
+            self.last_window_title = title;
         }
     }
 
@@ -129,22 +167,8 @@ impl Render for DetachedTerminalView {
         let t = theme(cx);
         let focus_handle = self.focus_handle.clone();
 
-        // Compute terminal name dynamically: user-set custom name > OSC title > directory fallback
-        let terminal_name = {
-            let ws = self.workspace.read(cx);
-            let osc_title = self.terminal.title();
-            ws.projects()
-                .iter()
-                .find(|p| {
-                    p.layout
-                        .as_ref()
-                        .and_then(|l| l.find_terminal_path(&self.terminal_id))
-                        .is_some()
-                })
-                .map(|p| p.terminal_display_name(&self.terminal_id, osc_title.clone()))
-                .unwrap_or_else(|| osc_title.unwrap_or_else(|| "Terminal".to_string()))
-        };
-
+        let terminal_name = self.terminal_display_name(cx);
+        self.sync_window_title(window, cx);
         let is_maximized = window.is_maximized();
         let needs_controls = okena_ui::modal::detached_needs_controls(window);
 
