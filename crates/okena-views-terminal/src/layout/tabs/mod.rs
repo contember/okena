@@ -17,7 +17,7 @@ use okena_terminal::terminal::TerminalProgressState;
 use okena_ui::header_buttons::{ButtonSize, HeaderAction, header_button_base};
 use okena_ui::theme::with_alpha;
 use okena_ui::tokens::{ui_text_md, ui_text_sm};
-use okena_ui::truncated_text::truncated_text;
+use okena_ui::truncated_text::{adaptive_label_container, truncated_text};
 use okena_workspace::state::{LayoutNode, SplitDirection};
 use std::collections::HashSet;
 
@@ -450,7 +450,7 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
                 })
                 .relative()
                 .flex_shrink_0()
-                .max_w(px(200.0))
+                .max_w(relative(1.0))
                 .overflow_hidden()
                 .px(px(8.0))
                 .pt(px(4.0))
@@ -526,17 +526,14 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
                         );
                         let icon_color = rgb(icon_color);
                         h_flex()
+                            .min_w_0()
                             .gap(px(6.0))
                             .overflow_hidden()
                             .child(svg().path(icon_path).size(px(12.0)).flex_shrink_0().text_color(icon_color))
                             // `min_w_0` lets the title shrink below its text width, so
                             // a long title ends in "…" instead of being cut by the tab.
                             .child(
-                                div()
-                                    .min_w_0()
-                                    .overflow_hidden()
-                                    .whitespace_nowrap()
-                                    .text_ellipsis()
+                                adaptive_label_container(ui_text_md(cx))
                                     // The hovered title's tooltip wins over the tab's,
                                     // so it carries the agent status along with it.
                                     .child(truncated_text(
@@ -546,7 +543,7 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
                                     )),
                             )
                             .children(idle_label.as_ref().map(|d| {
-                                div().text_size(ui_text_sm(cx)).text_color(rgb(t.border_idle)).child(d.clone())
+                                div().flex_shrink_0().text_size(ui_text_sm(cx)).text_color(rgb(t.border_idle)).child(d.clone())
                             }))
                             // Determinate OSC 9;4 progress also shows a percentage in
                             // the label, so it reads even when the bar is a thin sliver.

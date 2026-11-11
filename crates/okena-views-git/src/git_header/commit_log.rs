@@ -8,7 +8,7 @@ use okena_core::theme::ThemeColors;
 use okena_core::types::DiffMode;
 use okena_git::CommitLogEntry;
 use okena_ui::tokens::{ui_text_ms, ui_text_sm};
-use okena_ui::truncated_text::truncated_text;
+use okena_ui::truncated_text::{adaptive_label_container, truncated_text};
 use okena_workspace::requests::{OverlayRequest, ProjectOverlay, ProjectOverlayKind};
 
 use gpui::prelude::*;
@@ -341,6 +341,7 @@ impl GitHeader {
                                     let is_compare = self.commit_log_compare_mode;
                                     h_flex()
                                         .flex_1()
+                                        .min_w_0()
                                         .justify_end()
                                         .gap(px(4.0))
                                         .items_center()
@@ -348,6 +349,7 @@ impl GitHeader {
                                         .child(
                                             div()
                                                 .id("commit-log-compare-toggle")
+                                                .flex_shrink_0()
                                                 .cursor_pointer()
                                                 .px(px(6.0))
                                                 .py(px(2.0))
@@ -375,6 +377,7 @@ impl GitHeader {
                                                 d.child(
                                                     h_flex()
                                                         .id("commit-log-branch-btn")
+                                                        .min_w_0()
                                                         .gap(px(4.0))
                                                         .items_center()
                                                         .px(px(6.0))
@@ -390,10 +393,9 @@ impl GitHeader {
                                                             this.commit_log_branch_filter.clear();
                                                             cx.notify();
                                                         }))
-                                                        .child(svg().path("icons/git-branch.svg").size(px(10.0)).text_color(rgb(t.term_green)))
+                                                        .child(svg().path("icons/git-branch.svg").flex_shrink_0().size(px(10.0)).text_color(rgb(t.term_green)))
                                                         .child(
-                                                            div().text_size(ui_text_sm(cx)).text_color(rgb(t.text_secondary))
-                                                                .max_w(px(140.0)).overflow_hidden().whitespace_nowrap().text_ellipsis()
+                                                            adaptive_label_container(ui_text_sm(cx)).text_size(ui_text_sm(cx)).text_color(rgb(t.text_secondary))
                                                                 .child(truncated_text("branch-name", name, None)),
                                                         ),
                                                 )
@@ -420,6 +422,7 @@ impl GitHeader {
                                     .child(
                                         div()
                                             .id("compare-base-btn")
+                                            .min_w_0()
                                             .cursor_pointer()
                                             .px(px(6.0))
                                             .py(px(2.0))
@@ -435,21 +438,21 @@ impl GitHeader {
                                                 cx.notify();
                                             }))
                                             .child(
-                                                h_flex().gap(px(3.0)).items_center()
-                                                    .child(svg().path("icons/git-branch.svg").size(px(9.0)).text_color(rgb(t.term_green)))
+                                                h_flex().min_w_0().gap(px(3.0)).items_center()
+                                                    .child(svg().path("icons/git-branch.svg").flex_shrink_0().size(px(9.0)).text_color(rgb(t.term_green)))
                                                     .child(
-                                                        div().text_color(rgb(t.text_secondary))
-                                                            .max_w(px(120.0)).overflow_hidden().whitespace_nowrap().text_ellipsis()
+                                                        adaptive_label_container(ui_text_sm(cx)).text_size(ui_text_sm(cx)).text_color(rgb(t.text_secondary))
                                                             .child(truncated_text("branch-name", base.clone().unwrap_or_else(|| "base...".to_string()), None)),
                                                     ),
                                             ),
                                     )
                                     // Arrow
-                                    .child(div().text_size(ui_text_sm(cx)).text_color(rgb(t.text_muted)).child("\u{2192}"))
+                                    .child(div().flex_shrink_0().text_size(ui_text_sm(cx)).text_color(rgb(t.text_muted)).child("\u{2192}"))
                                     // Head branch pill
                                     .child(
                                         div()
                                             .id("compare-head-btn")
+                                            .min_w_0()
                                             .cursor_pointer()
                                             .px(px(6.0))
                                             .py(px(2.0))
@@ -465,11 +468,10 @@ impl GitHeader {
                                                 cx.notify();
                                             }))
                                             .child(
-                                                h_flex().gap(px(3.0)).items_center()
-                                                    .child(svg().path("icons/git-branch.svg").size(px(9.0)).text_color(rgb(t.term_cyan)))
+                                                h_flex().min_w_0().gap(px(3.0)).items_center()
+                                                    .child(svg().path("icons/git-branch.svg").flex_shrink_0().size(px(9.0)).text_color(rgb(t.term_cyan)))
                                                     .child(
-                                                        div().text_color(rgb(t.text_secondary))
-                                                            .max_w(px(120.0)).overflow_hidden().whitespace_nowrap().text_ellipsis()
+                                                        adaptive_label_container(ui_text_sm(cx)).text_size(ui_text_sm(cx)).text_color(rgb(t.text_secondary))
                                                             .child(truncated_text("branch-name", head.clone().unwrap_or_else(|| "head...".to_string()), None)),
                                                     ),
                                             ),
@@ -477,7 +479,8 @@ impl GitHeader {
                                     // View Diff button
                                     .child(
                                         div()
-                                            .flex_1()
+                                            .flex_grow(1.0)
+                                            .flex_shrink_0()
                                             .flex()
                                             .justify_end()
                                             .child(

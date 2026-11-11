@@ -15,8 +15,8 @@ use gpui::prelude::*;
 use gpui::*;
 use gpui_component::h_flex;
 use gpui_component::tooltip::Tooltip;
-use okena_ui::tokens::ui_text;
-use okena_ui::truncated_text::truncated_text;
+use okena_ui::tokens::{ui_text, ui_text_sm};
+use okena_ui::truncated_text::{adaptive_label_container, truncated_text};
 use std::sync::Arc;
 
 /// The shared `Arc<dyn Fn>` click handler, before being wrapped in `Option`.
@@ -79,6 +79,7 @@ pub fn render_branch_status(
     // Branch chip — icon + name + chevron (when interactive)
     let mut branch_chip = h_flex()
         .id("branch-chip")
+        .min_w_0()
         .relative()
         .gap(px(3.0))
         .px(px(2.0))
@@ -92,16 +93,13 @@ pub fn render_branch_status(
         .child(
             svg()
                 .path("icons/git-branch.svg")
+                .flex_shrink_0()
                 .size(px(10.0))
                 .text_color(rgb(t.text_muted)),
         )
         .child(
-            div()
+            adaptive_label_container(ui_text_sm(cx))
                 .text_color(rgb(t.text_secondary))
-                .max_w(px(100.0))
-                .overflow_hidden()
-                .whitespace_nowrap()
-                .text_ellipsis()
                 .child(truncated_text(
                     "branch-name",
                     status.branch.clone().unwrap_or_default(),
@@ -112,6 +110,7 @@ pub fn render_branch_status(
             d.child(
                 svg()
                     .path("icons/chevron-down.svg")
+                    .flex_shrink_0()
                     .size(px(8.0))
                     .text_color(rgb(t.text_muted)),
             )
@@ -263,9 +262,10 @@ pub fn render_branch_status(
     });
 
     h_flex()
+        .min_w_0()
         .gap(px(2.0))
         .child(branch_chip)
-        .when_some(pr_badge, |d, badge| d.child(badge))
-        .when_some(ci_pill, |d, pill| d.child(pill))
+        .when_some(pr_badge, |d, badge| d.child(badge.flex_shrink_0()))
+        .when_some(ci_pill, |d, pill| d.child(pill.flex_shrink_0()))
         .into_any_element()
 }
