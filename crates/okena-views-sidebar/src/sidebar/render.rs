@@ -231,21 +231,8 @@ impl Sidebar {
                 // mirror is authoritative (and heals on abort), the local flag
                 // gives instant feedback before the daemon acknowledges.
                 info.is_closing = project.is_closing || workspace.is_project_closing(&project.id);
-                let has_attention = info.terminal_ids.iter().any(|tid| {
-                    terminals
-                        .get(tid.as_str())
-                        .is_some_and(|t| t.has_bell() || t.has_notification())
-                });
-                // "Running" uses cached atomics only (no live /proc read per
-                // render): a terminal the user has driven that is not sitting at
-                // an idle prompt is treated as actively running a command. The
-                // `waiting_for_input` flag is the same background-computed signal
-                // the manual view's idle dot uses.
-                let is_running = info.terminal_ids.iter().any(|tid| {
-                    terminals
-                        .get(tid.as_str())
-                        .is_some_and(|t| t.had_user_input() && !t.is_waiting_for_input())
-                });
+                let (has_attention, is_running) =
+                    super::bulk::terminal_activity(&info.terminal_ids, &terminals);
                 e.push(ActivityEntry {
                     id: project.id.clone(),
                     pinned: project.pinned,
@@ -319,6 +306,7 @@ impl Sidebar {
                 scroll_indices.extend((first..cursor_items.len()).map(|i| i + headers_before));
             }
         }
+        self.restore_bulk_cursor(&cursor_items);
         self.validate_cursor(cursor_items.len());
         let cursor_index = self.cursor_index;
         self.activity_cursor_items = cursor_items;
@@ -716,6 +704,9 @@ impl Render for Sidebar {
         let pending = std::mem::take(&mut self.pending_sidebar_requests);
         for request in pending {
             match request {
+                SidebarRequest::SetActiveProjectsExpanded { expanded } => {
+                    self.set_active_projects_expanded(expanded, cx);
+                }
                 SidebarRequest::RenameProject {
                     project_id,
                     project_name,
@@ -757,6 +748,10 @@ impl Render for Sidebar {
         // Manual path: cursor nav uses `build_cursor_items` (manual order), so
         // drop the activity-view cursor list from a previous render.
         self.activity_cursor_items.clear();
+        if self.pending_bulk_cursor.is_some() {
+            let items = self.build_cursor_items(cx);
+            self.restore_bulk_cursor(&items);
+        }
 
         let workspace = self.workspace.read(cx);
 

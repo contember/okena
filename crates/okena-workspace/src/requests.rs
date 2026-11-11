@@ -175,6 +175,9 @@ pub enum OverlayRequest {
 /// Requests consumed by Sidebar::render()
 #[derive(Clone, Debug)]
 pub enum SidebarRequest {
+    SetActiveProjectsExpanded {
+        expanded: bool,
+    },
     RenameProject {
         project_id: String,
         project_name: String,

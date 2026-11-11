@@ -41,6 +41,8 @@ actions!(
         CheckForUpdates,
         InstallUpdate,
         FocusSidebar,
+        ExpandActiveProjects,
+        CollapseActiveProjects,
         ShowPairingDialog,
         TogglePaneSwitcher,
         StartAllServices,
@@ -467,6 +469,10 @@ fn create_keybinding(action: &str, keystroke: &str, context: Option<&str>) -> Op
         "ResetZoom" => Some(KeyBinding::new(keystroke, ResetZoom, context)),
         "CheckForUpdates" => Some(KeyBinding::new(keystroke, CheckForUpdates, context)),
         "InstallUpdate" => Some(KeyBinding::new(keystroke, InstallUpdate, context)),
+        "ExpandActiveProjects" => Some(KeyBinding::new(keystroke, ExpandActiveProjects, context)),
+        "CollapseActiveProjects" => {
+            Some(KeyBinding::new(keystroke, CollapseActiveProjects, context))
+        }
         "FocusSidebar" => Some(KeyBinding::new(keystroke, FocusSidebar, context)),
         "SidebarUp" => Some(KeyBinding::new(keystroke, SidebarUp, context)),
         "SidebarDown" => Some(KeyBinding::new(keystroke, SidebarDown, context)),

@@ -7,6 +7,7 @@
 //! - Folder color customization
 //! - Organizing projects into collapsible folders
 
+mod bulk;
 mod cursor;
 mod renames;
 mod render;
@@ -128,7 +129,7 @@ impl GroupKind {
 }
 
 /// Identifies each visible row in the sidebar for keyboard cursor navigation.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SidebarCursorItem {
     Folder {
         folder_id: String,
@@ -182,6 +183,7 @@ pub struct Sidebar {
     pub(crate) workspace: Entity<Workspace>,
     pub(crate) focus_manager: Entity<okena_workspace::focus::FocusManager>,
     pub request_broker: Entity<RequestBroker>,
+    pub(crate) pending_bulk_cursor: Option<SidebarCursorItem>,
     pub(crate) expanded_projects: HashSet<String>,
     /// Projects whose worktree children list is collapsed.
     /// Uses negative-sense (collapsed) because worktrees should be visible by default.
@@ -322,6 +324,7 @@ impl Sidebar {
             workspace,
             focus_manager,
             request_broker,
+            pending_bulk_cursor: None,
             expanded_projects: HashSet::new(),
             collapsed_worktrees: HashSet::new(),
             terminals,
@@ -654,6 +657,40 @@ impl Sidebar {
                             .flex()
                             .items_center()
                             .gap(px(4.0))
+                            .children([(true, "chevron-down"), (false, "chevron-up")].map(
+                                |(expand, icon)| {
+                                    div()
+                                        .id(if expand {
+                                            "expand-active-projects"
+                                        } else {
+                                            "collapse-active-projects"
+                                        })
+                                        .size(px(24.0))
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .cursor_pointer()
+                                        .hover(|s| s.bg(rgb(t.bg_hover)))
+                                        .child(
+                                            svg()
+                                                .path(format!("icons/{icon}.svg"))
+                                                .size(px(13.0))
+                                                .text_color(rgb(t.text_secondary)),
+                                        )
+                                        .tooltip(move |window, cx| {
+                                            Tooltip::new(if expand {
+                                                "Expand active projects (Terminals)"
+                                            } else {
+                                                "Collapse active projects (Terminals)"
+                                            })
+                                            .build(window, cx)
+                                        })
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            cx.stop_propagation();
+                                            this.set_active_projects_expanded(expand, cx);
+                                        }))
+                                },
+                            ))
                             .child(
                                 div()
                                     .id("project-view-menu-btn")
