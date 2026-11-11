@@ -141,7 +141,7 @@ impl WindowView {
     /// Resolve the focused terminal_id from this window's focus_manager and the
     /// project layout. Returns (project_id, terminal_id) or None if no terminal
     /// is focused or the path doesn't lead to a Terminal node with an assigned id.
-    fn focused_terminal_id(&self, cx: &Context<Self>) -> Option<(String, String)> {
+    pub(super) fn focused_terminal_id(&self, cx: &Context<Self>) -> Option<(String, String)> {
         let state = self.focus_manager.read(cx).focused_terminal_state()?;
         let ws = self.workspace.read(cx);
         let project = ws.project(&state.project_id)?;

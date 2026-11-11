@@ -93,6 +93,12 @@ impl SettingsState {
         &self.settings
     }
 
+    setting_setter!(
+        set_show_active_terminal_title,
+        show_active_terminal_title,
+        bool
+    );
+
     // Generate all setters using the macro
     setting_setter!(set_font_size, font_size, f32, 8.0, 48.0);
     setting_setter!(set_font_family, font_family, String);

@@ -611,6 +611,9 @@ pub struct AppSettings {
     /// (default: false).
     #[serde(default)]
     pub show_terminal_name_when_inactive: bool,
+    /// Reflect the active terminal name in the native desktop window title.
+    #[serde(default)]
+    pub show_active_terminal_title: bool,
 
     // Session persistence settings
     /// Session backend for terminal persistence (tmux/screen/none/auto)
@@ -837,6 +840,7 @@ impl Default for AppSettings {
             show_shell_selector: false,
             auto_hide_single_terminal_header: false,
             show_terminal_name_when_inactive: false,
+            show_active_terminal_title: false,
             session_backend: SessionBackend::default(),
             auto_resume_agent_sessions: false,
             claude_remote: false,
@@ -1738,5 +1742,20 @@ mod tests {
         let json = serde_json::to_value(&settings).unwrap();
         assert!(json.get("whats_new_seen_version").is_none());
         assert_eq!(json["show_whats_new_after_update"], true);
+    }
+}
+
+#[cfg(test)]
+mod window_title_setting_tests {
+    use super::AppSettings;
+
+    #[test]
+    fn older_settings_opt_out_and_enabled_preference_round_trips() {
+        let mut settings: AppSettings = serde_json::from_str("{}").unwrap();
+        assert!(!settings.show_active_terminal_title);
+        settings.show_active_terminal_title = true;
+        let loaded: AppSettings =
+            serde_json::from_str(&serde_json::to_string(&settings).unwrap()).unwrap();
+        assert!(loaded.show_active_terminal_title);
     }
 }

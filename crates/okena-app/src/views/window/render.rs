@@ -925,8 +925,47 @@ impl WindowView {
     }
 }
 
+fn format_native_title(enabled: bool, name: Option<String>) -> String {
+    match (enabled, name) {
+        (true, Some(name)) => format!("{name} – Okena"),
+        _ => "Okena".to_string(),
+    }
+}
+
+impl WindowView {
+    pub(super) fn sync_native_window_title(&mut self, window: &mut Window, cx: &Context<Self>) {
+        let title = self.native_window_title(cx);
+        if title != self.last_native_title {
+            window.set_window_title(&title);
+            self.last_native_title = title;
+        }
+    }
+
+    pub(super) fn native_window_title(&self, cx: &Context<Self>) -> String {
+        let enabled = settings_entity(cx)
+            .read(cx)
+            .settings
+            .show_active_terminal_title;
+        let name = enabled
+            .then(|| {
+                let (project_id, id) = self.focused_terminal_id(cx)?;
+                let ws = self.workspace.read(cx);
+                let project = ws.project(&project_id)?;
+                let title = self
+                    .terminals
+                    .lock()
+                    .get(&id)
+                    .and_then(|terminal| terminal.title());
+                Some(project.terminal_display_name(&id, title))
+            })
+            .flatten();
+        format_native_title(enabled, name)
+    }
+}
+
 impl Render for WindowView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.sync_native_window_title(window, cx);
         okena_core::render_probe::chrome_render(okena_core::render_probe::ChromeView::Window);
         let t = theme(cx);
         let pane_move_source = self.pane_move.read(cx).source().cloned();
@@ -1933,5 +1972,24 @@ impl Render for WindowView {
             .when_some(self.pane_switcher_entity.clone(), |d, entity| {
                 d.child(entity)
             })
+    }
+}
+
+#[cfg(test)]
+mod native_title_tests {
+    use super::format_native_title;
+
+    #[test]
+    fn native_title_tracks_selection_and_resets_when_disabled_or_closed() {
+        assert_eq!(
+            format_native_title(true, Some("Projekt Žluťoučký".into())),
+            "Projekt Žluťoučký – Okena"
+        );
+        assert_eq!(
+            format_native_title(true, Some("renamed".into())),
+            "renamed – Okena"
+        );
+        assert_eq!(format_native_title(false, Some("renamed".into())), "Okena");
+        assert_eq!(format_native_title(true, None), "Okena");
     }
 }

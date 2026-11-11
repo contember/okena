@@ -91,6 +91,12 @@ impl Okena {
             name
         };
 
+        let remote_manager = self.remote_manager.clone();
+        let default_title = if cfg!(target_os = "windows") {
+            "Okena".to_string()
+        } else {
+            format!("{} - Detached", terminal_name)
+        };
         cx.open_window(
             WindowOptions {
                 // On Windows the chrome is fully client-drawn (matches main window);
@@ -121,14 +127,42 @@ impl Okena {
                 ..Default::default()
             },
             move |window, cx| {
-                let detached_view = cx.new(|cx| {
-                    DetachedTerminalView::new(
+                let detached_view = cx.new(|cx: &mut Context<DetachedTerminalView>| {
+                    cx.observe_in(
+                        &crate::settings::settings_entity(cx),
+                        window,
+                        |this, _, window, cx| {
+                            this.sync_window_title(window, cx);
+                        },
+                    )
+                    .detach();
+                    let observed_id = terminal_id_owned.clone();
+                    cx.subscribe_in(&remote_manager, window, move |this, _, event, window, cx| {
+                        if let okena_remote_client::manager::RemoteManagerEvent::TerminalActivity(
+                            ids,
+                        ) = event
+                            && crate::settings::settings(cx).show_active_terminal_title
+                            && ids.contains(&observed_id)
+                        {
+                            this.sync_window_title(window, cx);
+                        }
+                    })
+                    .detach();
+                    cx.observe_in(&workspace, window, |this, _, window, cx| {
+                        this.sync_window_title(window, cx);
+                    })
+                    .detach();
+                    let mut view = DetachedTerminalView::new(
                         workspace.clone(),
                         terminal_id_owned.clone(),
                         transport.clone(),
                         terminals.clone(),
                         cx,
-                    )
+                    );
+                    view.window_title_enabled =
+                        |cx| crate::settings::settings(cx).show_active_terminal_title;
+                    view.default_window_title = default_title.clone();
+                    view
                 });
                 cx.new(|cx| Root::new(detached_view, window, cx))
             },

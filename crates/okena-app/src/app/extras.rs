@@ -475,8 +475,10 @@ impl Okena {
                     .detach();
 
                 let remote_manager = self.remote_manager.clone();
-                view.update(cx, |view, cx| {
-                    view.set_remote_manager(remote_manager, cx);
+                let _ = handle.update(cx, |_, window, cx| {
+                    view.update(cx, |view, cx| {
+                        view.set_remote_manager(remote_manager, window, cx);
+                    });
                 });
                 log::info!(
                     "Registered extra window {window_id:?} as GPUI window {}",
