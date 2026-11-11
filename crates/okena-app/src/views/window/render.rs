@@ -1328,6 +1328,30 @@ impl Render for WindowView {
                     }
                 }),
             )
+            .on_action(cx.listener(
+                |this, _: &crate::keybindings::ExpandActiveProjects, _, cx| {
+                    this.request_broker.update(cx, |broker, cx| {
+                        broker.push_sidebar_request(
+                            okena_workspace::requests::SidebarRequest::SetActiveProjectsExpanded {
+                                expanded: true,
+                            },
+                            cx,
+                        );
+                    });
+                },
+            ))
+            .on_action(cx.listener(
+                |this, _: &crate::keybindings::CollapseActiveProjects, _, cx| {
+                    this.request_broker.update(cx, |broker, cx| {
+                        broker.push_sidebar_request(
+                            okena_workspace::requests::SidebarRequest::SetActiveProjectsExpanded {
+                                expanded: false,
+                            },
+                            cx,
+                        );
+                    });
+                },
+            ))
             // Handle focus sidebar action (keyboard navigation)
             .on_action(cx.listener(|this, _: &FocusSidebar, window, cx| {
                 // Ensure sidebar is visible

@@ -321,7 +321,7 @@ impl Sidebar {
     /// dispatch `build_cursor_items` to the activity cursor list (built by the
     /// render path to match the tiered rows 1:1) instead of the manual
     /// `project_order`+folder walk.
-    fn is_activity_sort_mode(&self, cx: &App) -> bool {
+    pub(super) fn is_activity_sort_mode(&self, cx: &App) -> bool {
         self.workspace
             .read(cx)
             .data()

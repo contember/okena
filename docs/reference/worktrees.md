@@ -209,3 +209,18 @@ Worktree settings live in `settings.json` in your platform's config dir (macOS: 
 | `auto_track_ignore` | string[] | `[".claude/worktrees/agent-*"]` | Globs discovery leaves alone, over the checkout path relative to the repository root (or the absolute path for a checkout outside it). `*` stays within one path segment, `**` spans several. |
 
 You can also configure these defaults from **Settings > Worktree > Close Defaults** in the UI.
+
+## Expand and collapse active project details
+
+The sidebar Overview row provides expand and collapse buttons, also available
+in the command palette as **Expand Active Projects (Terminals)** and
+**Collapse Active Projects (Terminals)**. Active means pinned, needing attention,
+or running, using the same classification as Activity ordering; Recent projects
+are unchanged. The commands also work in Manual ordering.
+
+Both commands apply to the current window and folder filter, independently of
+project zoom, eye toggles, and scroll position. Expansion opens project details,
+the Terminals group, and any enclosing folder or worktree family. Collapse closes
+project details without closing their shared parents. Services and Hooks retain
+their internal expansion state. These commands do not start or stop anything and
+have no default keyboard shortcuts.

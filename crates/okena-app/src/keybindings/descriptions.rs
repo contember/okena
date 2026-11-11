@@ -2,8 +2,9 @@ use std::collections::HashMap;
 
 use super::types::ActionDescription;
 use super::{
-    AddTab, Cancel, CheckForUpdates, ClearFocus, CloseSearch, CloseTerminal, Copy, CreateWorktree,
-    DetachTerminal, EqualizeLayout, ExportTerminalBuffer, FocusActiveProject, FocusDown, FocusLeft,
+    AddTab, Cancel, CheckForUpdates, ClearFocus, CloseSearch, CloseTerminal,
+    CollapseActiveProjects, Copy, CreateWorktree, DetachTerminal, EqualizeLayout,
+    ExpandActiveProjects, ExportTerminalBuffer, FocusActiveProject, FocusDown, FocusLeft,
     FocusNextTerminal, FocusPrevTerminal, FocusRight, FocusSidebar, FocusUp,
     FullscreenNextTerminal, FullscreenPrevTerminal, InstallUpdate, JumpToNextFailedCommand,
     JumpToNextPrompt, JumpToPreviousFailedCommand, JumpToPreviousPrompt, MinimizeTerminal,
@@ -21,6 +22,24 @@ use super::{
 pub fn get_action_descriptions() -> HashMap<&'static str, ActionDescription> {
     let mut map = HashMap::new();
 
+    map.insert(
+        "ExpandActiveProjects",
+        ActionDescription {
+            name: "Expand Active Projects (Terminals)",
+            description: "Expand sidebar details for pinned, running and attention projects",
+            category: "Global",
+            factory: || Box::new(ExpandActiveProjects),
+        },
+    );
+    map.insert(
+        "CollapseActiveProjects",
+        ActionDescription {
+            name: "Collapse Active Projects (Terminals)",
+            description: "Collapse sidebar details for pinned, running and attention projects",
+            category: "Global",
+            factory: || Box::new(CollapseActiveProjects),
+        },
+    );
     // Global actions
     map.insert(
         "Quit",
