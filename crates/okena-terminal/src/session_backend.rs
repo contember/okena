@@ -1140,6 +1140,20 @@ fn orphaned_dtach_sockets<'a>(
     orphaned
 }
 
+/// An owner tag (`tm-*.owner`) with no socket beside it, old enough that it is
+/// not a tag written just before its dtach creates the socket.
+#[cfg(unix)]
+fn is_orphaned_owner_tag(path: &std::path::Path) -> bool {
+    let is_tag = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.starts_with(SESSION_NAME_PREFIX) && name.ends_with(".owner"));
+    is_tag
+        && std::fs::symlink_metadata(path.with_extension("sock"))
+            .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+        && socket_age(path).is_some_and(|age| !is_too_fresh_to_gc(age))
+}
+
 /// Whether a filename is a daemon control socket (`<16 hex>.sock`), the shape
 /// produced by `okena_remote_server::local::default_unix_socket_path`. Those
 /// live alongside `tm-*.sock` in the runtime dir and identify a daemon that
@@ -1212,27 +1226,34 @@ struct PoolReconcile {
     unprobed: Vec<String>,
 }
 
-/// Reconcile one pool directory. Pure apart from the filesystem reads; the
-/// other-daemon probe, the attachment probe and the kill are injected so tests
+/// Reconcile one pool directory. Pure apart from the filesystem, with the
+/// legacy-daemon probe, the attachment probe and the kill injected so tests
 /// never touch a real session.
 ///
-/// A session the workspace does not know is killed only when it is ours: its
-/// owner tag names `identity`, or it has no tag (it predates tags) and no other
-/// daemon is live on the pool. Even then a session with a live client attached
-/// is kept.
+/// First, every untagged session this daemon's own workspace holds is tagged
+/// as ours: the daemon spawns panes lazily, so a pane of a project nobody has
+/// opened since the upgrade would otherwise stay untagged, and fair game for
+/// any other daemon, indefinitely.
+///
+/// Then a session no workspace retains is killed only when it is ours: its
+/// owner tag is one `identity` claims, or it has no tag (it predates tags) and
+/// no other daemon is live. Even then a session with a live client attached is
+/// kept.
 #[cfg(unix)]
+#[allow(clippy::too_many_arguments)]
 fn reconcile_dtach_pool(
     dir: &std::path::Path,
     lease: &crate::dtach_pool::DtachPoolLease,
-    identity: Option<&str>,
+    identity: Option<&crate::dtach_pool::OwnerIdentity>,
+    own_session_names: &std::collections::HashSet<String>,
     retained_session_names: &std::collections::HashSet<String>,
-    control_socket_peer_live: impl FnOnce() -> bool,
+    legacy_daemon_live: impl FnOnce() -> bool,
     attached_sockets: impl FnOnce(
         &[std::path::PathBuf],
     ) -> Option<std::collections::HashSet<std::path::PathBuf>>,
     mut kill: impl FnMut(&str),
 ) -> PoolReconcile {
-    use crate::dtach_pool::{SessionOwner, session_owner};
+    use crate::dtach_pool::{SessionOwner, claim_session, session_owner};
     let mut report = PoolReconcile::default();
     let Ok(entries) = std::fs::read_dir(dir) else {
         return report;
@@ -1245,23 +1266,35 @@ fn reconcile_dtach_pool(
                 .and_then(|name| name.to_str())
                 .is_some_and(is_stale_gc_candidate)
         })
-        // A recently-created socket may belong to a terminal added after the
-        // caller's last disk snapshot. Reconciliation never destroys it.
-        .filter(|path| socket_age(path).is_some_and(|age| !is_too_fresh_to_gc(age)))
         .collect();
 
-    let mut control_socket_peer_live = Some(control_socket_peer_live);
+    if let Some(identity) = identity {
+        for path in &socket_paths {
+            let is_own = dtach_session_name_from_path(path)
+                .is_some_and(|name| own_session_names.contains(&name));
+            if is_own && session_owner(path, Some(identity)) == SessionOwner::Untagged {
+                claim_session(path, identity.tag());
+            }
+        }
+    }
+
+    // A recently-created socket may belong to a terminal added after the
+    // caller's last disk snapshot. Reconciliation never destroys it.
+    let aged = socket_paths
+        .iter()
+        .filter(|path| socket_age(path).is_some_and(|age| !is_too_fresh_to_gc(age)));
+
+    let mut legacy_daemon_live = Some(legacy_daemon_live);
     let mut other_daemon_live = None;
     let mut candidates = Vec::new();
-    for (session_name, path) in orphaned_dtach_sockets(socket_paths.iter(), retained_session_names)
-    {
+    for (session_name, path) in orphaned_dtach_sockets(aged, retained_session_names) {
         match session_owner(&path, identity) {
             SessionOwner::Us => candidates.push((session_name, path)),
             SessionOwner::Other => report.foreign.push(session_name),
             SessionOwner::Untagged => {
                 let live = *other_daemon_live.get_or_insert_with(|| {
                     !lease.live_peers().is_empty()
-                        || control_socket_peer_live.take().is_some_and(|probe| probe())
+                        || legacy_daemon_live.take().is_some_and(|probe| probe())
                 });
                 if live {
                     report.untagged_kept.push(session_name);
@@ -1301,35 +1334,46 @@ fn reconcile_dtach_pool(
 /// that daemon is not running right now. Only sessions this daemon owns are
 /// killed; see [`reconcile_dtach_pool`]. `lease` is this daemon's own, held
 /// for its lifetime.
+///
+/// `own_terminal_ids` are the terminals of this daemon's own workspace;
+/// `retained_terminal_ids` adds any other profile's whose sessions share this
+/// pool directory.
 #[cfg(unix)]
 pub fn reconcile_dtach_sessions(
     lease: &crate::dtach_pool::DtachPoolLease,
+    own_terminal_ids: &std::collections::HashSet<String>,
     retained_terminal_ids: &std::collections::HashSet<String>,
 ) {
     // Always reconcile dtach artifacts, even when the newly selected backend is
     // tmux/screen/none or Auto now resolves differently.
     let backend = ResolvedBackend::Dtach;
     let dir = get_dtach_socket_dir();
-    let identity = crate::dtach_pool::owner_identity();
-    let retained_session_names: std::collections::HashSet<String> = retained_terminal_ids
-        .iter()
-        .map(|terminal_id| backend.session_name(terminal_id))
-        .collect();
+    let identity = crate::dtach_pool::OwnerIdentity::current();
+    let session_names = |terminal_ids: &std::collections::HashSet<String>| {
+        terminal_ids
+            .iter()
+            .map(|terminal_id| backend.session_name(terminal_id))
+            .collect::<std::collections::HashSet<String>>()
+    };
     let report = reconcile_dtach_pool(
         &dir,
         lease,
-        identity.as_deref(),
-        &retained_session_names,
-        // A daemon from before pool leases is visible only by its control
-        // socket, and only where that lives in the pool dir (Linux).
-        || live_foreign_daemon().is_some(),
+        identity.as_ref(),
+        &session_names(own_terminal_ids),
+        &session_names(retained_terminal_ids),
+        // Daemons from before pool leases hold none: look for their control
+        // socket in the pool (Linux) and for their process (everywhere).
+        || live_foreign_daemon().is_some() || crate::dtach_pool::other_daemon_process_live(),
         crate::dtach_pool::attached_dtach_sockets,
         |session_name| {
             backend.kill_session(session_name);
         },
     );
     let kept = [
-        (&report.foreign, "they belong to another Okena daemon"),
+        (
+            &report.foreign,
+            "they belong to another Okena config dir or profile",
+        ),
         (
             &report.untagged_kept,
             "they predate owner tags and another Okena daemon is live on this pool",
@@ -1360,6 +1404,7 @@ pub fn reconcile_dtach_sessions(
 #[cfg(not(unix))]
 pub fn reconcile_dtach_sessions(
     _lease: &crate::dtach_pool::DtachPoolLease,
+    _own_terminal_ids: &std::collections::HashSet<String>,
     _retained_terminal_ids: &std::collections::HashSet<String>,
 ) {
 }
@@ -1374,11 +1419,23 @@ pub fn reap_dtach_profile_sessions(profile_id: &str) -> std::io::Result<usize> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
         Err(error) => return Err(error),
     };
+    // The pool dir of profile `work` is shared with any other config dir's
+    // `work`. Their sessions are left running, which makes the caller refuse
+    // the deletion instead of tearing down another config dir's panes.
+    let identity = crate::dtach_pool::OwnerIdentity::for_profile(profile_id);
     let mut reaped = 0;
     for path in entries.flatten().map(|entry| entry.path()) {
         let Some(session_name) = dtach_session_name_from_path(&path) else {
             continue;
         };
+        if crate::dtach_pool::session_owner(&path, identity.as_ref())
+            == crate::dtach_pool::SessionOwner::Other
+        {
+            log::warn!(
+                "Not reaping dtach session {session_name}: it belongs to another Okena config dir"
+            );
+            continue;
+        }
         if !terminate_dtach_process_tree(&path, &session_name) {
             return Err(std::io::Error::other(format!(
                 "persistent terminal session {session_name} did not terminate"
@@ -1437,6 +1494,16 @@ pub fn cleanup_stale_dtach_sockets() {
             let _ = std::fs::remove_file(dtach_mode_state_path(path));
             let _ = std::fs::remove_file(crate::dtach_pool::owner_tag_path(path));
             removed += 1;
+        }
+    }
+
+    // Owner tags whose session is gone without a daemon noticing (dtach
+    // exited on its own while nobody tracked it).
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        for path in entries.flatten().map(|entry| entry.path()) {
+            if is_orphaned_owner_tag(&path) {
+                let _ = std::fs::remove_file(path);
+            }
         }
     }
 
@@ -2022,8 +2089,8 @@ pub(crate) fn prepare_dtach_session(session_name: &str) {
     if !socket_path.exists() {
         let _ = std::fs::remove_file(dtach_mode_state_path(&socket_path));
     }
-    if let Some(identity) = crate::dtach_pool::owner_identity() {
-        crate::dtach_pool::record_session_owner(&socket_path, &identity);
+    if let Some(identity) = crate::dtach_pool::OwnerIdentity::current() {
+        crate::dtach_pool::claim_session(&socket_path, identity.tag());
     }
 }
 
@@ -2719,7 +2786,7 @@ mod tests {
                 .set_modified(old)
                 .unwrap();
             if let Some(owner) = owner {
-                crate::dtach_pool::record_session_owner(&socket, owner);
+                crate::dtach_pool::claim_session(&socket, owner);
             }
         }
         pool
@@ -2727,6 +2794,8 @@ mod tests {
 
     #[cfg(unix)]
     struct Probe<'a> {
+        /// Terminals of the reconciling daemon's own workspace (also retained).
+        own: &'a [&'a str],
         retained: &'a [&'a str],
         control_socket_peer: bool,
         /// `None`: the process table cannot be read.
@@ -2735,6 +2804,7 @@ mod tests {
 
     #[cfg(unix)]
     const NOTHING_LIVE: Probe<'static> = Probe {
+        own: &[],
         retained: &[],
         control_socket_peer: false,
         attached: Some(&[]),
@@ -2747,7 +2817,12 @@ mod tests {
         identity: &str,
         probe: Probe<'_>,
     ) -> PoolReconcile {
-        let retained = probe.retained.iter().map(|name| name.to_string()).collect();
+        let own: std::collections::HashSet<String> =
+            probe.own.iter().map(|name| name.to_string()).collect();
+        let mut retained: std::collections::HashSet<String> =
+            probe.retained.iter().map(|name| name.to_string()).collect();
+        retained.extend(own.iter().cloned());
+        let identity = crate::dtach_pool::OwnerIdentity::new(identity, None);
         let attached = probe.attached.map(|names| {
             names
                 .iter()
@@ -2758,7 +2833,8 @@ mod tests {
         let report = reconcile_dtach_pool(
             pool,
             lease,
-            Some(identity),
+            Some(&identity),
+            &own,
             &retained,
             || probe.control_socket_peer,
             |_| attached,
@@ -2801,6 +2877,72 @@ mod tests {
         let users_daemon = DtachPoolLease::acquire_in(&leases).unwrap();
         let report = reconcile_as(&pool, &users_daemon, user, NOTHING_LIVE);
         assert_eq!(report.killed, names(&["tm-aaaa1111", "tm-bbbb2222"]));
+        let _ = std::fs::remove_dir_all(&pool);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_pane_never_reattached_since_the_upgrade_is_claimed_by_its_own_daemon() {
+        use crate::dtach_pool::DtachPoolLease;
+        let user = "/home/u/.config/okena/profiles/default";
+        let sandbox = "/scratch/.config/okena/profiles/default";
+        // Panes of a project the user has not opened since upgrading: the
+        // daemon spawns lazily, so they were never reattached or tagged.
+        let pool = scratch_pool(&[("tm-unopened", None), ("tm-retainedx", None)]);
+        let leases = pool.join("leases");
+
+        // The user's daemon starts and reconciles; its workspace holds them.
+        let users_daemon = DtachPoolLease::acquire_in(&leases).unwrap();
+        let report = reconcile_as(
+            &pool,
+            &users_daemon,
+            user,
+            Probe {
+                own: &["tm-unopened", "tm-retainedx"],
+                ..NOTHING_LIVE
+            },
+        );
+        assert_eq!(report, PoolReconcile::default());
+
+        // The user quits Okena; a sandbox daemon with an empty workspace starts
+        // and no other daemon is live. The panes are tagged, so not its own.
+        drop(users_daemon);
+        let sandbox_daemon = DtachPoolLease::acquire_in(&leases).unwrap();
+        let report = reconcile_as(&pool, &sandbox_daemon, sandbox, NOTHING_LIVE);
+        assert_eq!(report.foreign, names(&["tm-retainedx", "tm-unopened"]));
+        assert!(report.killed.is_empty());
+        let _ = std::fs::remove_dir_all(&pool);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_owner_tag_without_its_socket_is_cleaned_up_once_old() {
+        let pool = scratch_pool(&[("tm-live", Some("/cfg/profiles/default"))]);
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(600);
+        let set_old = |path: &std::path::Path| {
+            std::fs::File::options()
+                .write(true)
+                .open(path)
+                .unwrap()
+                .set_modified(old)
+                .unwrap();
+        };
+        let live_tag = pool.join("tm-live.owner");
+        set_old(&live_tag);
+        let orphan_tag = pool.join("tm-gone.owner");
+        std::fs::write(&orphan_tag, b"/cfg/profiles/default").unwrap();
+        let fresh_tag = pool.join("tm-starting.owner");
+        std::fs::write(&fresh_tag, b"/cfg/profiles/default").unwrap();
+
+        assert!(!is_orphaned_owner_tag(&live_tag));
+        assert!(
+            !is_orphaned_owner_tag(&fresh_tag),
+            "its dtach may be starting"
+        );
+        assert!(!is_orphaned_owner_tag(&orphan_tag), "too fresh as well");
+        set_old(&orphan_tag);
+        assert!(is_orphaned_owner_tag(&orphan_tag));
+        assert!(!is_orphaned_owner_tag(&pool.join("tm-live.sock")));
         let _ = std::fs::remove_dir_all(&pool);
     }
 
@@ -2853,7 +2995,7 @@ mod tests {
             &lease,
             me,
             Probe {
-                retained: &["tm-retained"],
+                own: &["tm-retained"],
                 attached: Some(&["tm-attached"]),
                 ..NOTHING_LIVE
             },
@@ -2872,7 +3014,7 @@ mod tests {
             &lease,
             me,
             Probe {
-                retained: &["tm-retained"],
+                own: &["tm-retained"],
                 attached: None,
                 ..NOTHING_LIVE
             },
@@ -2896,7 +3038,7 @@ mod tests {
         let pool = scratch_pool(&[]);
         let socket = pool.join("tm-fresh.sock");
         std::fs::File::create(&socket).unwrap();
-        crate::dtach_pool::record_session_owner(&socket, me);
+        crate::dtach_pool::claim_session(&socket, me);
         let lease = crate::dtach_pool::DtachPoolLease::acquire_in(&pool.join("leases")).unwrap();
         assert_eq!(
             reconcile_as(&pool, &lease, me, NOTHING_LIVE),

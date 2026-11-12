@@ -352,7 +352,11 @@ impl DaemonCore {
             && let Some(lease) = dtach_pool_lease.as_ref()
             && let Some(retained_terminal_ids) = reconciliation_terminal_ids(&params.workspace_data)
         {
-            reconcile_dtach_sessions(lease, &retained_terminal_ids);
+            reconcile_dtach_sessions(
+                lease,
+                &workspace_terminal_ids(&params.workspace_data),
+                &retained_terminal_ids,
+            );
         }
 
         // ── 1. Multi-thread tokio runtime backing the reactor ────────────────

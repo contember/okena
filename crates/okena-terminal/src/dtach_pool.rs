@@ -7,24 +7,26 @@
 //! the pool of the daemon the user is working in. On start a daemon kills the
 //! pool sessions its own workspace does not know
 //! ([`reconcile_dtach_sessions`](crate::session_backend::reconcile_dtach_sessions)),
-//! so without a guard that second daemon kills every pane of the first one.
+//! so without a guard that second daemon kills every pane of the first one,
+//! whether the first one is running or the user simply closed Okena.
 //!
-//! Three guards, all independent of where a daemon keeps its control socket:
+//! The guards, all independent of where a daemon keeps its control socket:
 //!
-//! - **Owner tags.** Every spawn or reattach writes `tm-<id>.owner` next to the
-//!   socket, naming the profile directory (config dir + profile) of the daemon
-//!   that runs it ([`record_session_owner`]). A daemon never kills a session
-//!   tagged by another owner, whether that owner is running or not: the user's
-//!   Okena may simply be closed while its panes live on.
-//! - **Leases**, for sessions from before owner tags. Each daemon holds a [`DtachPoolLease`] for its lifetime: an
-//!   exclusively `flock`ed file in `<pool>/leases/`. The kernel drops the lock
-//!   when the process dies, however it dies, so a lock that cannot be taken
-//!   belongs to a live daemon and untagged sessions are left alone.
-//! - **Attached sessions.** A daemon that predates the leases holds none, but it
-//!   keeps a `dtach -A <socket>` client attached to each pane it shows, and that
-//!   client dies with the daemon's PTY. A session with a live client is in use
-//!   by someone, so reconciliation never kills it
-//!   ([`attached_dtach_sockets`]).
+//! - **Owner tags.** `tm-<id>.owner` next to the socket names the profile
+//!   directory (config dir + profile) of the daemon the session belongs to
+//!   ([`claim_session`]). It is written when a daemon spawns or reattaches the
+//!   session, and for every untagged session its workspace holds when it
+//!   reconciles. A live session's existing tag is never overwritten. A daemon
+//!   never kills a session tagged by another owner, running or not.
+//! - **No other daemon**, for untagged sessions (started before owner tags). A
+//!   daemon reclaims those only while no other daemon is live: none holds a
+//!   [`DtachPoolLease`] (an exclusively `flock`ed file in `<pool>/leases/`
+//!   that the kernel releases when its process dies), none has a control
+//!   socket in the pool, and no `okena --headless` / `okena-daemon` process of
+//!   this user runs ([`other_daemon_process_live`], which also sees daemons from
+//!   before leases).
+//! - **Attached sessions.** A session with a live `dtach -A` client is in use by
+//!   someone, so reconciliation never kills it ([`attached_dtach_sockets`]).
 
 #[cfg(unix)]
 use std::collections::{HashMap, HashSet};
@@ -142,11 +144,11 @@ impl Drop for DtachPoolLease {
     }
 }
 
-/// Who started a pool session, read from its owner tag.
+/// Who a pool session belongs to, read from its owner tag.
 #[cfg(unix)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum SessionOwner {
-    /// Tagged with this daemon's identity.
+    /// Tagged with an identity this daemon may reclaim.
     Us,
     /// Tagged by another daemon, or the tag exists but cannot be read.
     Other,
@@ -154,11 +156,56 @@ pub(crate) enum SessionOwner {
     Untagged,
 }
 
-/// Identity written into owner tags: the active profile's directory, which is
-/// unique per config dir and profile and stable across restarts.
+/// The identity a daemon writes into owner tags, and the tags it may reclaim.
 #[cfg(unix)]
-pub(crate) fn owner_identity() -> Option<String> {
-    okena_core::profiles::try_current().map(|profile| profile.root.to_string_lossy().into_owned())
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct OwnerIdentity {
+    /// The active profile's directory: unique per config dir and profile, and
+    /// stable across restarts.
+    tag: String,
+    /// For the default profile, `<config_root>/profiles/`: its pool directory
+    /// is the legacy root that named profiles of the same config dir still
+    /// share, and its reconciliation already retains their known terminals.
+    sibling_prefix: Option<String>,
+}
+
+#[cfg(unix)]
+impl OwnerIdentity {
+    pub(crate) fn current() -> Option<Self> {
+        let profile = okena_core::profiles::try_current()?;
+        let profiles_dir = profile.config_root.join("profiles");
+        Some(Self {
+            tag: profile.root.to_string_lossy().into_owned(),
+            sibling_prefix: (profile.id == "default")
+                .then(|| format!("{}/", profiles_dir.to_string_lossy())),
+        })
+    }
+
+    /// The identity of profile `profile_id` under the active config dir.
+    pub(crate) fn for_profile(profile_id: &str) -> Option<Self> {
+        let profile = okena_core::profiles::try_current()?;
+        let root = profile.config_root.join("profiles").join(profile_id);
+        Some(Self::new(&root.to_string_lossy(), None))
+    }
+
+    pub(crate) fn new(tag: &str, sibling_prefix: Option<&str>) -> Self {
+        Self {
+            tag: tag.to_owned(),
+            sibling_prefix: sibling_prefix.map(str::to_owned),
+        }
+    }
+
+    pub(crate) fn tag(&self) -> &str {
+        &self.tag
+    }
+
+    fn claims(&self, tag: &str) -> bool {
+        tag == self.tag
+            || self
+                .sibling_prefix
+                .as_deref()
+                .is_some_and(|prefix| tag.starts_with(prefix))
+    }
 }
 
 #[cfg(unix)]
@@ -166,25 +213,63 @@ pub(crate) fn owner_tag_path(socket_path: &Path) -> PathBuf {
     socket_path.with_extension("owner")
 }
 
-/// Tag the session at `socket_path` as ours. Called on every spawn and
-/// reattach, so sessions from before owner tags get tagged by the daemon that
-/// picks them up.
+/// Tag the session at `socket_path` as `tag`'s, unless a live session there
+/// already names an owner: first owner wins, so a daemon that reattaches
+/// someone else's session (a sandbox seeded with a copy of the user's config)
+/// does not take it over. A tag beside a dead or missing socket is stale and
+/// is replaced.
 #[cfg(unix)]
-pub(crate) fn record_session_owner(socket_path: &Path, identity: &str) {
+pub(crate) fn claim_session(socket_path: &Path, tag: &str) {
+    let tag_path = owner_tag_path(socket_path);
+    let live_tag_exists = std::fs::symlink_metadata(&tag_path).is_ok()
+        && std::fs::symlink_metadata(socket_path).is_ok();
+    if live_tag_exists {
+        return;
+    }
     if let Some(parent) = socket_path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    if let Err(error) = std::fs::write(owner_tag_path(socket_path), identity) {
+    if let Err(error) = write_tag(&tag_path, tag) {
         log::warn!("failed to record dtach session owner for {socket_path:?}: {error}");
     }
 }
 
+/// The pool can sit in shared `/tmp`, so tags are never written or read
+/// through a symlink, and are private to the user.
 #[cfg(unix)]
-pub(crate) fn session_owner(socket_path: &Path, identity: Option<&str>) -> SessionOwner {
-    match std::fs::read_to_string(owner_tag_path(socket_path)) {
-        Ok(tag) if identity.is_some_and(|identity| tag == identity) => SessionOwner::Us,
+fn write_tag(tag_path: &Path, tag: &str) -> std::io::Result<()> {
+    use std::io::Write as _;
+    use std::os::unix::fs::OpenOptionsExt as _;
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(tag_path)?
+        .write_all(tag.as_bytes())
+}
+
+#[cfg(unix)]
+fn read_tag(tag_path: &Path) -> std::io::Result<String> {
+    use std::io::Read as _;
+    use std::os::unix::fs::OpenOptionsExt as _;
+    let mut tag = String::new();
+    std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(tag_path)?
+        .read_to_string(&mut tag)?;
+    Ok(tag)
+}
+
+#[cfg(unix)]
+pub(crate) fn session_owner(socket_path: &Path, identity: Option<&OwnerIdentity>) -> SessionOwner {
+    match read_tag(&owner_tag_path(socket_path)) {
+        Ok(tag) if identity.is_some_and(|identity| identity.claims(&tag)) => SessionOwner::Us,
         Ok(_) => SessionOwner::Other,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => SessionOwner::Untagged,
+        // Includes a symlink planted in place of the tag (`ELOOP`).
         Err(_) => SessionOwner::Other,
     }
 }
@@ -259,8 +344,39 @@ fn same_path(a: &Path, b: &Path) -> bool {
 /// `(pid, argv)` of every `dtach` process of this user. `None` when one of
 /// them is still running but its argv cannot be read: that client could be
 /// attached to any session.
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 fn dtach_process_argvs() -> Option<Vec<(u32, Vec<OsString>)>> {
+    user_processes(|name| name == "dtach")
+}
+
+/// Whether another Okena daemon of this user runs: an `okena-daemon`, or an
+/// `okena` started with `--headless` (the desktop's own daemon is
+/// `okena --headless --ui-owned`). Version-independent, so it also sees
+/// daemons that predate pool leases. Unknown counts as live.
+#[cfg(unix)]
+pub(crate) fn other_daemon_process_live() -> bool {
+    let Some(processes) = user_processes(|name| name.starts_with("okena")) else {
+        return true;
+    };
+    processes
+        .iter()
+        .any(|(pid, argv)| *pid != std::process::id() && is_daemon_argv(argv))
+}
+
+#[cfg(unix)]
+fn is_daemon_argv(argv: &[OsString]) -> bool {
+    let program_is_daemon = argv
+        .first()
+        .and_then(|arg0| Path::new(arg0).file_name())
+        .is_some_and(|name| name == "okena-daemon");
+    program_is_daemon || argv.iter().skip(1).any(|arg| arg == "--headless")
+}
+
+/// `(pid, argv)` of every process of this user whose name matches. `None` when
+/// the process table cannot be listed, or a matching process is still running
+/// but its argv cannot be read.
+#[cfg(target_os = "linux")]
+fn user_processes(name_matches: impl Fn(&str) -> bool) -> Option<Vec<(u32, Vec<OsString>)>> {
     use std::os::unix::ffi::OsStrExt as _;
     use std::os::unix::fs::MetadataExt as _;
     // SAFETY: `getuid(2)` takes no arguments and never fails.
@@ -274,10 +390,10 @@ fn dtach_process_argvs() -> Option<Vec<(u32, Vec<OsString>)>> {
         else {
             continue;
         };
-        let is_ours_and_dtach = entry.metadata().is_ok_and(|meta| meta.uid() == my_uid)
+        let matches = entry.metadata().is_ok_and(|meta| meta.uid() == my_uid)
             && std::fs::read_to_string(entry.path().join("comm"))
-                .is_ok_and(|comm| comm.trim_end() == "dtach");
-        if !is_ours_and_dtach {
+                .is_ok_and(|comm| name_matches(comm.trim_end()));
+        if !matches {
             continue;
         }
         let cmdline = match std::fs::read(entry.path().join("cmdline")) {
@@ -297,13 +413,15 @@ fn dtach_process_argvs() -> Option<Vec<(u32, Vec<OsString>)>> {
 }
 
 #[cfg(target_os = "macos")]
-fn dtach_process_argvs() -> Option<Vec<(u32, Vec<OsString>)>> {
+fn user_processes(name_matches: impl Fn(&str) -> bool) -> Option<Vec<(u32, Vec<OsString>)>> {
     use crate::macos_proc::{all_pids, process_args, process_name, process_uid};
     // SAFETY: `getuid(2)` takes no arguments and never fails.
     let my_uid = unsafe { libc::getuid() };
     let mut found = Vec::new();
     for pid in all_pids()? {
-        if process_uid(pid) != Some(my_uid) || process_name(pid).as_deref() != Some("dtach") {
+        if process_uid(pid) != Some(my_uid)
+            || !process_name(pid).is_some_and(|name| name_matches(&name))
+        {
             continue;
         }
         match process_args(pid) {
@@ -319,7 +437,7 @@ fn dtach_process_argvs() -> Option<Vec<(u32, Vec<OsString>)>> {
 /// No process-table reader on other Unixes: report "unknown", which makes
 /// reconciliation keep every session.
 #[cfg(all(unix, not(target_os = "linux"), not(target_os = "macos")))]
-fn dtach_process_argvs() -> Option<Vec<(u32, Vec<OsString>)>> {
+fn user_processes(_name_matches: impl Fn(&str) -> bool) -> Option<Vec<(u32, Vec<OsString>)>> {
     None
 }
 
@@ -373,20 +491,81 @@ mod tests {
     #[test]
     fn owner_tags_tell_our_sessions_from_others_and_untagged_ones() {
         let dir = scratch_dir("owner");
-        let ours = dir.join("tm-ours.sock");
-        let theirs = dir.join("tm-theirs.sock");
-        let legacy = dir.join("tm-legacy.sock");
-        record_session_owner(&ours, "/me/profiles/default/");
-        record_session_owner(&theirs, "/sandbox/profiles/default/");
+        let socket = |name: &str| {
+            let path = dir.join(format!("{name}.sock"));
+            std::fs::write(&path, b"").unwrap();
+            path
+        };
+        let ours = socket("tm-ours");
+        let theirs = socket("tm-theirs");
+        let sibling = socket("tm-sibling");
+        let legacy = socket("tm-legacy");
+        claim_session(&ours, "/cfg/profiles/default");
+        claim_session(&theirs, "/sandbox/profiles/default");
+        claim_session(&sibling, "/cfg/profiles/work");
 
-        let me = Some("/me/profiles/default/");
-        assert_eq!(session_owner(&ours, me), SessionOwner::Us);
-        assert_eq!(session_owner(&theirs, me), SessionOwner::Other);
-        assert_eq!(session_owner(&legacy, me), SessionOwner::Untagged);
+        let me = OwnerIdentity::new("/cfg/profiles/default", None);
+        assert_eq!(session_owner(&ours, Some(&me)), SessionOwner::Us);
+        assert_eq!(session_owner(&theirs, Some(&me)), SessionOwner::Other);
+        assert_eq!(session_owner(&sibling, Some(&me)), SessionOwner::Other);
+        assert_eq!(session_owner(&legacy, Some(&me)), SessionOwner::Untagged);
         // Without an identity of our own, no tagged session is ours.
         assert_eq!(session_owner(&ours, None), SessionOwner::Other);
-        assert_eq!(owner_tag_path(&ours), dir.join("tm-ours.owner"));
+
+        // The default profile reclaims legacy sessions of its own config dir's
+        // named profiles, never another config dir's.
+        let default = OwnerIdentity::new("/cfg/profiles/default", Some("/cfg/profiles/"));
+        assert_eq!(session_owner(&sibling, Some(&default)), SessionOwner::Us);
+        assert_eq!(session_owner(&theirs, Some(&default)), SessionOwner::Other);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_live_sessions_owner_is_never_taken_over_but_a_stale_tag_is_replaced() {
+        let dir = scratch_dir("claim");
+        let socket = dir.join("tm-x.sock");
+        std::fs::write(&socket, b"").unwrap();
+        let user = OwnerIdentity::new("/cfg/profiles/default", None);
+
+        claim_session(&socket, user.tag());
+        // A sandbox seeded with a copy of the user's workspace reattaches it.
+        claim_session(&socket, "/sandbox/profiles/default");
+        assert_eq!(session_owner(&socket, Some(&user)), SessionOwner::Us);
+
+        // The session died and a new one reuses the name.
+        std::fs::remove_file(&socket).unwrap();
+        claim_session(&socket, "/sandbox/profiles/default");
+        assert_eq!(session_owner(&socket, Some(&user)), SessionOwner::Other);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_symlinked_tag_is_neither_followed_nor_trusted() {
+        let dir = scratch_dir("symlink");
+        let socket = dir.join("tm-x.sock");
+        let victim = dir.join("victim");
+        std::fs::write(&victim, b"precious").unwrap();
+        std::os::unix::fs::symlink(&victim, owner_tag_path(&socket)).unwrap();
+
+        // The socket is missing, so the tag counts as stale and is rewritten.
+        claim_session(&socket, "/cfg/profiles/default");
+        assert_eq!(std::fs::read(&victim).unwrap(), b"precious");
+        let me = OwnerIdentity::new("/cfg/profiles/default", None);
+        assert_eq!(session_owner(&socket, Some(&me)), SessionOwner::Other);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn daemon_processes_are_told_from_other_okena_processes() {
+        assert!(is_daemon_argv(&argv(&[
+            "/r/okena",
+            "--headless",
+            "--ui-owned"
+        ])));
+        assert!(is_daemon_argv(&argv(&["/usr/local/bin/okena-daemon"])));
+        assert!(!is_daemon_argv(&argv(&["/r/okena"])));
+        assert!(!is_daemon_argv(&argv(&["/r/okena", "--ai-proxy"])));
+        assert!(!is_daemon_argv(&argv(&["okena", "ls"])));
     }
 
     fn argv(args: &[&str]) -> Vec<OsString> {
