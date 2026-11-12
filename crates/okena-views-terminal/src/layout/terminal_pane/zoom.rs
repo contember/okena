@@ -167,7 +167,7 @@ impl<D: ActionDispatch + Send + Sync> TerminalPane<D> {
                                 size,
                                 &t,
                                 None,
-                                None,
+                                Some(Box::new(crate::actions::FullscreenPrevTerminal)),
                             )
                             .on_click({
                                 let workspace = workspace.clone();
@@ -211,7 +211,7 @@ impl<D: ActionDispatch + Send + Sync> TerminalPane<D> {
                                 size,
                                 &t,
                                 None,
-                                None,
+                                Some(Box::new(crate::actions::FullscreenNextTerminal)),
                             )
                             .on_click({
                                 let workspace = workspace.clone();
@@ -246,24 +246,31 @@ impl<D: ActionDispatch + Send + Sync> TerminalPane<D> {
                         )
                     })
                     .child(
-                        header_button_base(HeaderAction::ExitZoom, id_suffix, size, &t, None, None)
-                            .on_click({
-                                let project_id = self.project_id.clone();
-                                let dispatcher = dispatcher.clone();
-                                move |_, _window, cx| {
-                                    cx.stop_propagation();
-                                    if let Some(ref dispatcher) = dispatcher {
-                                        dispatcher.dispatch(
-                                            ActionRequest::SetFullscreen {
-                                                project_id: project_id.clone(),
-                                                terminal_id: None,
-                                                window: None,
-                                            },
-                                            cx,
-                                        );
-                                    }
+                        header_button_base(
+                            HeaderAction::ExitZoom,
+                            id_suffix,
+                            size,
+                            &t,
+                            None,
+                            Some(Box::new(crate::actions::ToggleFullscreen)),
+                        )
+                        .on_click({
+                            let project_id = self.project_id.clone();
+                            let dispatcher = dispatcher.clone();
+                            move |_, _window, cx| {
+                                cx.stop_propagation();
+                                if let Some(ref dispatcher) = dispatcher {
+                                    dispatcher.dispatch(
+                                        ActionRequest::SetFullscreen {
+                                            project_id: project_id.clone(),
+                                            terminal_id: None,
+                                            window: None,
+                                        },
+                                        cx,
+                                    );
                                 }
-                            }),
+                            }
+                        }),
                     ),
             )
     }

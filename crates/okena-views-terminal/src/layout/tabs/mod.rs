@@ -116,7 +116,7 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
                     ButtonSize::COMPACT,
                     &t,
                     None,
-                    None,
+                    Some(Box::new(crate::actions::SplitVertical)),
                 )
                 .on_click(move |_, _window, cx| {
                     if let Some(ref dispatcher) = ctx_split_v.action_dispatcher {
@@ -138,7 +138,7 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
                     ButtonSize::COMPACT,
                     &t,
                     None,
-                    None,
+                    Some(Box::new(crate::actions::SplitHorizontal)),
                 )
                 .on_click(move |_, _window, cx| {
                     if let Some(ref dispatcher) = ctx_split_h.action_dispatcher {
@@ -160,7 +160,7 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
                     ButtonSize::COMPACT,
                     &t,
                     None,
-                    None,
+                    Some(Box::new(crate::actions::AddTab)),
                 )
                 .on_click(move |_, _window, cx| {
                     if let Some(ref dispatcher) = ctx_add_tab.action_dispatcher {
@@ -181,7 +181,7 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
                     ButtonSize::COMPACT,
                     &t,
                     Some(if standalone { "Close" } else { "Close Tab" }),
-                    None,
+                    Some(Box::new(crate::actions::CloseTerminal)),
                 )
                 .on_click(move |_, _window, cx| {
                     if let Some(ref tid) = terminal_id_for_close
