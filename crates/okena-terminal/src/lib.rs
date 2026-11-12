@@ -1,6 +1,8 @@
 #![cfg_attr(not(test), warn(clippy::unwrap_used, clippy::expect_used))]
 
 pub mod backend;
+/// Ownership guards for the shared dtach session pool.
+pub mod dtach_pool;
 pub mod input;
 /// macOS process introspection via libproc (replaces `pgrep`/`lsof`/`ps`).
 #[cfg(target_os = "macos")]
