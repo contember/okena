@@ -15,8 +15,9 @@
 //! - **Owner tags.** `tm-<id>.owner` next to the socket names the profile
 //!   directory (config dir + profile) of the daemon the session belongs to
 //!   ([`claim_session`]). It is written when a daemon spawns or reattaches the
-//!   session, and for every untagged session its workspace holds when it
-//!   reconciles. A live session's existing tag is never overwritten. A daemon
+//!   session, and, while no other daemon is live, for every untagged session
+//!   its workspace holds when it reconciles. A live session's existing tag is
+//!   never overwritten. A daemon
 //!   never kills a session tagged by another owner, running or not.
 //! - **No other daemon**, for untagged sessions (started before owner tags). A
 //!   daemon reclaims those only while no other daemon is live: none holds a
@@ -216,14 +217,14 @@ pub(crate) fn owner_tag_path(socket_path: &Path) -> PathBuf {
 /// Tag the session at `socket_path` as `tag`'s, unless a live session there
 /// already names an owner: first owner wins, so a daemon that reattaches
 /// someone else's session (a sandbox seeded with a copy of the user's config)
-/// does not take it over. A tag beside a dead or missing socket is stale and
-/// is replaced.
+/// does not take it over. A tag beside a dead or missing socket is stale: the
+/// dtach about to start there is a new session, and it is ours.
 #[cfg(unix)]
 pub(crate) fn claim_session(socket_path: &Path, tag: &str) {
     let tag_path = owner_tag_path(socket_path);
-    let live_tag_exists = std::fs::symlink_metadata(&tag_path).is_ok()
-        && std::fs::symlink_metadata(socket_path).is_ok();
-    if live_tag_exists {
+    let live_session_is_tagged = std::fs::symlink_metadata(&tag_path).is_ok()
+        && std::os::unix::net::UnixStream::connect(socket_path).is_ok();
+    if live_session_is_tagged {
         return;
     }
     if let Some(parent) = socket_path.parent() {
@@ -522,20 +523,33 @@ mod tests {
 
     #[test]
     fn a_live_sessions_owner_is_never_taken_over_but_a_stale_tag_is_replaced() {
-        let dir = scratch_dir("claim");
+        // A short path: unix socket paths are limited to ~104 bytes on macOS.
+        let dir = std::env::temp_dir().join(format!(
+            "okp-{}",
+            &uuid::Uuid::new_v4().simple().to_string()[..8]
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
         let socket = dir.join("tm-x.sock");
-        std::fs::write(&socket, b"").unwrap();
         let user = OwnerIdentity::new("/cfg/profiles/default", None);
 
+        // A live session (a plain listener standing in for a dtach master).
+        let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
         claim_session(&socket, user.tag());
         // A sandbox seeded with a copy of the user's workspace reattaches it.
         claim_session(&socket, "/sandbox/profiles/default");
         assert_eq!(session_owner(&socket, Some(&user)), SessionOwner::Us);
 
-        // The session died and a new one reuses the name.
-        std::fs::remove_file(&socket).unwrap();
+        // The session died, leaving its socket file behind; a new dtach with the
+        // same name starts there.
+        drop(listener);
+        assert!(socket.exists());
         claim_session(&socket, "/sandbox/profiles/default");
         assert_eq!(session_owner(&socket, Some(&user)), SessionOwner::Other);
+
+        // And with the socket file gone too.
+        std::fs::remove_file(&socket).unwrap();
+        claim_session(&socket, user.tag());
+        assert_eq!(session_owner(&socket, Some(&user)), SessionOwner::Us);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

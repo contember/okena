@@ -95,17 +95,22 @@ fn workspace_terminal_ids(data: &WorkspaceData) -> HashSet<String> {
         .collect()
 }
 
-/// The default profile owns the pre-profile shared dtach directory. During the
-/// migration window, preserve terminals referenced by every profile before
-/// classifying a legacy socket as orphaned. Named profiles reconcile only their
-/// isolated directories, so they need no cross-profile state.
-fn reconciliation_terminal_ids(data: &WorkspaceData) -> Option<HashSet<String>> {
-    let mut retained = workspace_terminal_ids(data);
+/// The terminals each profile's workspace holds, keyed by profile id, for
+/// dtach reconciliation. The default profile owns the pre-profile shared dtach
+/// directory: during the migration window, every profile's terminals are
+/// included, so a legacy socket is not classified as orphaned and each is
+/// tagged with its own profile. Named profiles reconcile only their isolated
+/// directories, so they list only themselves.
+fn reconciliation_terminal_owners(
+    data: &WorkspaceData,
+) -> Option<HashMap<String, HashSet<String>>> {
+    let own = workspace_terminal_ids(data);
     let Some(active_profile) = okena_core::profiles::try_current() else {
-        return Some(retained);
+        return Some(HashMap::from([("default".to_string(), own)]));
     };
+    let mut owners = HashMap::from([(active_profile.id.clone(), own)]);
     if active_profile.id != "default" {
-        return Some(retained);
+        return Some(owners);
     }
 
     let index = match okena_core::profiles::ProfileIndex::load(&active_profile.config_root) {
@@ -146,9 +151,12 @@ fn reconciliation_terminal_ids(data: &WorkspaceData) -> Option<HashSet<String>> 
                 return None;
             }
         };
-        retained.extend(workspace_terminal_ids(&profile_workspace));
+        owners.insert(
+            profile.id.clone(),
+            workspace_terminal_ids(&profile_workspace),
+        );
     }
-    Some(retained)
+    Some(owners)
 }
 
 fn kill_stale_terminal_sessions(
@@ -350,13 +358,9 @@ impl DaemonCore {
         };
         if workspace_revalidated
             && let Some(lease) = dtach_pool_lease.as_ref()
-            && let Some(retained_terminal_ids) = reconciliation_terminal_ids(&params.workspace_data)
+            && let Some(terminal_owners) = reconciliation_terminal_owners(&params.workspace_data)
         {
-            reconcile_dtach_sessions(
-                lease,
-                &workspace_terminal_ids(&params.workspace_data),
-                &retained_terminal_ids,
-            );
+            reconcile_dtach_sessions(lease, &terminal_owners);
         }
 
         // ── 1. Multi-thread tokio runtime backing the reactor ────────────────
