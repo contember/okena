@@ -14,7 +14,9 @@ use gpui_component::tooltip::Tooltip;
 use gpui_component::{h_flex, v_flex};
 use okena_files::theme::theme;
 use okena_terminal::terminal::TerminalProgressState;
-use okena_ui::header_buttons::{ButtonSize, HeaderAction, header_button_base};
+use okena_ui::header_buttons::{
+    ButtonSize, HeaderAction, header_button_base, hover_action_container,
+};
 use okena_ui::theme::with_alpha;
 use okena_ui::tokens::{ui_text_md, ui_text_sm};
 use okena_ui::truncated_text::{adaptive_label_container, truncated_text};
@@ -895,10 +897,7 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
                     .child(end_drop_zone),
             )
             .child(
-                h_flex()
-                    .flex_shrink_0()
-                    .opacity(0.0)
-                    .group_hover("tab-bar-row", |s| s.opacity(1.0))
+                hover_action_container("tab-bar-row")
                     .when(show_shell, |el| {
                         el.child(self.render_shell_indicator(active_tab, cx))
                     })

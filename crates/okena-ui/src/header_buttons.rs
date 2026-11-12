@@ -7,6 +7,22 @@ use crate::theme::ThemeColors;
 use gpui::*;
 use gpui_component::tooltip::Tooltip;
 
+/// Header actions that use row space only while their header is hovered.
+/// Keep the element in the tree so GPUI can observe group-hover transitions;
+/// the zero-width clip also prevents hidden controls from receiving pointer input.
+pub fn hover_action_container(group: &'static str) -> Stateful<Div> {
+    div()
+        .id(format!("{group}-actions"))
+        .flex()
+        .items_center()
+        .flex_shrink_0()
+        .min_w_0()
+        .max_w(px(0.0))
+        .overflow_hidden()
+        .opacity(0.0)
+        .group_hover(group, |s| s.max_w_auto().opacity(1.0))
+}
+
 /// All available header actions for terminal panes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HeaderAction {
@@ -140,5 +156,115 @@ pub fn header_button_base(
         base.hover(|s| s.bg(rgba(0xf14c4c99)))
     } else {
         base.hover(move |s| s.bg(rgb(bg_hover)))
+    }
+}
+
+#[cfg(test)]
+mod hover_tests {
+    use super::hover_action_container;
+    use gpui::{
+        AppContext as _, Bounds, Context, InteractiveElement, IntoElement, ParentElement, Pixels,
+        Render, Styled, TestAppContext, Window, canvas, div, point, px, size,
+    };
+    use std::{cell::RefCell, rc::Rc};
+
+    #[derive(Clone, Default)]
+    struct Measurements {
+        title: Rc<RefCell<Bounds<Pixels>>>,
+        actions: Rc<RefCell<Bounds<Pixels>>>,
+    }
+
+    fn measure(bounds: Rc<RefCell<Bounds<Pixels>>>) -> impl IntoElement {
+        canvas(
+            move |value, _, _| *bounds.borrow_mut() = value,
+            |_, _, _, _| {},
+        )
+        .absolute()
+        .size_full()
+    }
+
+    struct Header {
+        measurements: Measurements,
+        action_width: f32,
+    }
+
+    impl Render for Header {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().size_full().child(
+                div()
+                    .group("header")
+                    .flex()
+                    .w_full()
+                    .h(px(28.0))
+                    .child(
+                        div()
+                            .relative()
+                            .flex_1()
+                            .min_w_0()
+                            .h_full()
+                            .child(measure(self.measurements.title.clone())),
+                    )
+                    .child(
+                        hover_action_container("header")
+                            .relative()
+                            .h_full()
+                            .child(div().flex_shrink_0().w(px(self.action_width)).h_full())
+                            .child(measure(self.measurements.actions.clone())),
+                    ),
+            )
+        }
+    }
+
+    #[gpui::test]
+    fn header_reclaims_hidden_action_space_on_hover_exit(cx: &mut TestAppContext) {
+        // The wider action group also represents the optional shell selector.
+        for (width, action_width) in [(400.0_f32, 116.0_f32), (240.0, 180.0), (100.0, 116.0)] {
+            let measurements = Measurements::default();
+            let window = cx.open_window(size(px(width), px(100.0)), {
+                let measurements = measurements.clone();
+                move |_, _| Header {
+                    measurements,
+                    action_width,
+                }
+            });
+            cx.update_window(window.into(), |_, window, cx| {
+                window.simulate_mouse_move(point(px(10.0), px(60.0)), cx);
+                window.simulate_next_frame(cx);
+            })
+            .unwrap();
+            assert_eq!(measurements.title.borrow().size.width, px(width));
+
+            for _ in 0..2 {
+                cx.update_window(window.into(), |_, window, cx| {
+                    window.simulate_mouse_move(point(px(10.0), px(10.0)), cx);
+                })
+                .unwrap();
+                assert_eq!(
+                    measurements.title.borrow().size.width,
+                    px((width - action_width).max(0.0))
+                );
+                assert_eq!(measurements.actions.borrow().size.width, px(action_width));
+                assert_eq!(
+                    measurements.actions.borrow().right(),
+                    px(width.max(action_width))
+                );
+
+                // Moving over the revealed actions must keep them expanded.
+                cx.update_window(window.into(), |_, window, cx| {
+                    window.simulate_mouse_move(point(px(width - 10.0), px(10.0)), cx);
+                })
+                .unwrap();
+                assert_eq!(
+                    measurements.title.borrow().size.width,
+                    px((width - action_width).max(0.0))
+                );
+
+                cx.update_window(window.into(), |_, window, cx| {
+                    window.simulate_mouse_move(point(px(width - 10.0), px(60.0)), cx);
+                })
+                .unwrap();
+                assert_eq!(measurements.title.borrow().size.width, px(width));
+            }
+        }
     }
 }
