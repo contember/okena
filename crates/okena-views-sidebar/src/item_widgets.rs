@@ -231,12 +231,32 @@ pub fn sidebar_visibility_button(
     group_name: &'static str,
     tooltip_text: &'static str,
     t: &ThemeColors,
+    shortcut_target: Option<(Entity<okena_workspace::focus::FocusManager>, String)>,
 ) -> Stateful<Div> {
     icon_button(id, "icons/eye.svg", t)
         .opacity(0.0)
         .when(show_in_overview, |d| d.opacity(1.0))
         .group_hover(group_name, |s| s.opacity(1.0))
-        .tooltip(move |_window, cx| Tooltip::new(tooltip_text).build(_window, cx))
+        .tooltip(move |window, cx| {
+            let matches = shortcut_target.as_ref().is_some_and(|(focus, project_id)| {
+                let fm = focus.read(cx);
+                fm.focused_terminal_state()
+                    .map(|state| state.project_id)
+                    .or_else(|| fm.focused_project_id().cloned())
+                    .as_ref()
+                    == Some(project_id)
+            });
+            if matches {
+                okena_ui::shortcuts::named_action_tooltip(
+                    tooltip_text,
+                    "okena::ToggleProjectVisibility",
+                    window,
+                    cx,
+                )
+            } else {
+                Tooltip::new(tooltip_text).build(window, cx)
+            }
+        })
 }
 
 /// Project/worktree name with optional terminal count badge.

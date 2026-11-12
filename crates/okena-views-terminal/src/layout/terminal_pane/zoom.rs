@@ -167,7 +167,13 @@ impl<D: ActionDispatch + Send + Sync> TerminalPane<D> {
                                 size,
                                 &t,
                                 None,
-                                Some(Box::new(crate::actions::FullscreenPrevTerminal)),
+                                Some(okena_ui::shortcuts::ActionShortcut::new(
+                                    crate::actions::FullscreenPrevTerminal,
+                                    {
+                                        let focus = self.focus_handle.clone();
+                                        move |window, _| focus.is_focused(window)
+                                    },
+                                )),
                             )
                             .on_click({
                                 let workspace = workspace.clone();
@@ -211,7 +217,13 @@ impl<D: ActionDispatch + Send + Sync> TerminalPane<D> {
                                 size,
                                 &t,
                                 None,
-                                Some(Box::new(crate::actions::FullscreenNextTerminal)),
+                                Some(okena_ui::shortcuts::ActionShortcut::new(
+                                    crate::actions::FullscreenNextTerminal,
+                                    {
+                                        let focus = self.focus_handle.clone();
+                                        move |window, _| focus.is_focused(window)
+                                    },
+                                )),
                             )
                             .on_click({
                                 let workspace = workspace.clone();
@@ -252,7 +264,13 @@ impl<D: ActionDispatch + Send + Sync> TerminalPane<D> {
                             size,
                             &t,
                             None,
-                            Some(Box::new(crate::actions::ToggleFullscreen)),
+                            Some(okena_ui::shortcuts::ActionShortcut::new(
+                                crate::actions::ToggleFullscreen,
+                                {
+                                    let focus = self.focus_handle.clone();
+                                    move |window, _| focus.is_focused(window)
+                                },
+                            )),
                         )
                         .on_click({
                             let project_id = self.project_id.clone();

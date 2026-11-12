@@ -892,7 +892,27 @@ impl ProjectColumn {
                                 .size(px(14.0))
                                 .text_color(rgb(t.text_secondary)),
                         )
-                        .tooltip(move |_window, cx| Tooltip::new(vis_tooltip).build(_window, cx)),
+                        .tooltip({
+                            let focus_manager = self.focus_manager.clone();
+                            let project_id = self.project_id.clone();
+                            move |window, cx| {
+                                let fm = focus_manager.read(cx);
+                                let matches = fm
+                                    .focused_terminal_state()
+                                    .map(|state| state.project_id)
+                                    .or_else(|| fm.focused_project_id().cloned())
+                                    .as_ref()
+                                    == Some(&project_id);
+                                okena_ui::shortcuts::action_tooltip(
+                                    vis_tooltip,
+                                    matches.then_some(
+                                        &crate::keybindings::ToggleProjectVisibility as &dyn Action,
+                                    ),
+                                    window,
+                                    cx,
+                                )
+                            }
+                        }),
                 )
                 .child(
                     div()
@@ -927,7 +947,37 @@ impl ProjectColumn {
                                 .size(px(14.0))
                                 .text_color(rgb(t.text_secondary)),
                         )
-                        .tooltip(move |_window, cx| Tooltip::new(focus_tooltip).build(_window, cx)),
+                        .tooltip({
+                            let focus_manager = self.focus_manager.clone();
+                            let workspace = self.workspace.clone();
+                            let project_id = self.project_id.clone();
+                            let window_id = self.window_id;
+                            move |window, cx| {
+                                let fm = focus_manager.read(cx);
+                                // The keyboard exit also clears the folder filter;
+                                // the button does not. Show it only for an equal result.
+                                let matches = if is_focused_view {
+                                    fm.focused_project_id() == Some(&project_id)
+                                        && workspace
+                                            .read(cx)
+                                            .active_folder_filter(window_id)
+                                            .is_none()
+                                } else {
+                                    fm.focused_project_id().is_none()
+                                        && fm
+                                            .focused_terminal_state()
+                                            .is_some_and(|state| state.project_id == project_id)
+                                };
+                                okena_ui::shortcuts::action_tooltip(
+                                    focus_tooltip,
+                                    matches.then_some(
+                                        &crate::keybindings::FocusActiveProject as &dyn Action,
+                                    ),
+                                    window,
+                                    cx,
+                                )
+                            }
+                        }),
                 )
                 .into_any_element()
         });

@@ -2,7 +2,6 @@
 
 use gpui::prelude::*;
 use gpui::*;
-use gpui_component::tooltip::Tooltip;
 use okena_core::api::ActionRequest;
 use okena_core::types::WorktreeMarker;
 use okena_ui::color_dot::color_dot;
@@ -46,6 +45,32 @@ pub enum ProjectRowStyle {
 }
 
 impl Sidebar {
+    /// Sidebar rows address explicit terminals; keyboard commands address focus.
+    fn is_shortcut_terminal(
+        &self,
+        project_id: &str,
+        terminal_id: &str,
+        window: &Window,
+        cx: &App,
+    ) -> bool {
+        if !window
+            .context_stack()
+            .iter()
+            .any(|context| context.contains("TerminalPane"))
+        {
+            return false;
+        }
+        let fm = self.focus_manager.read(cx);
+        let Some(focused) = fm.focused_terminal_state() else {
+            return false;
+        };
+        focused.project_id == project_id
+            && self.workspace.read(cx).project(project_id)
+                .and_then(|project| project.layout.as_ref())
+                .and_then(|layout| layout.get_at_path(&focused.layout_path))
+                .is_some_and(|node| matches!(node, okena_workspace::state::LayoutNode::Terminal { terminal_id: Some(id), .. } if id == terminal_id))
+    }
+
     /// Appends standard project row content (expand arrow, color dot, name, badges, visibility)
     /// to a pre-configured container div. Each caller sets up its own container with drag/drop.
     pub fn append_project_row_content(
@@ -287,6 +312,8 @@ impl Sidebar {
                             vis_tooltip_show
                         },
                         &t,
+                        (!is_worktree_style)
+                            .then(|| (self.focus_manager.clone(), project_id.clone())),
                     )
                     .on_click(cx.listener({
                         let project_id = project_id.clone();
@@ -790,10 +817,24 @@ impl Sidebar {
                         }))
                         .tooltip({
                             let tooltip_text = if is_minimized { "Restore" } else { "Minimize" };
-                            move |_window, cx| {
-                                Tooltip::new(tooltip_text)
-                                    .action(&MinimizeTerminal as &dyn Action, None)
-                                    .build(_window, cx)
+                            let sidebar = cx.entity().downgrade();
+                            let project_id = project_id.clone();
+                            let terminal_id = terminal_id.clone();
+                            move |window, cx| {
+                                let matches = sidebar.upgrade().is_some_and(|sidebar| {
+                                    sidebar.read(cx).is_shortcut_terminal(
+                                        &project_id,
+                                        &terminal_id,
+                                        window,
+                                        cx,
+                                    )
+                                });
+                                okena_ui::shortcuts::action_tooltip(
+                                    tooltip_text,
+                                    matches.then_some(&MinimizeTerminal as &dyn Action),
+                                    window,
+                                    cx,
+                                )
                             }
                         }),
                     )
@@ -828,10 +869,28 @@ impl Sidebar {
                                 );
                             }
                         }))
-                        .tooltip(|_window, cx| {
-                            Tooltip::new("Fullscreen")
-                                .action(&ToggleFullscreen as &dyn Action, None)
-                                .build(_window, cx)
+                        .tooltip({
+                            let sidebar = cx.entity().downgrade();
+                            let project_id = project_id.clone();
+                            let terminal_id = terminal_id.clone();
+                            move |window, cx| {
+                                let matches = sidebar.upgrade().is_some_and(|sidebar| {
+                                    let sidebar = sidebar.read(cx);
+                                    !sidebar.focus_manager.read(cx).has_fullscreen()
+                                        && sidebar.is_shortcut_terminal(
+                                            &project_id,
+                                            &terminal_id,
+                                            window,
+                                            cx,
+                                        )
+                                });
+                                okena_ui::shortcuts::action_tooltip(
+                                    "Fullscreen",
+                                    matches.then_some(&ToggleFullscreen as &dyn Action),
+                                    window,
+                                    cx,
+                                )
+                            }
                         }),
                     ),
             )

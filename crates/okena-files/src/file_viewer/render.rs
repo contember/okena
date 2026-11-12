@@ -217,6 +217,43 @@ fn loading_row(depth: usize, t: &ThemeColors, cx: &App) -> Div {
 }
 
 impl FileViewer {
+    /// Cancel first dismisses transient UI or clears selection. Only advertise it
+    /// for navigation when it reaches the same Back/Close event as the button.
+    fn cancel_navigates(&self, window: &Window) -> bool {
+        let tab = self.active_tab();
+        self.focus_handle.is_focused(window)
+            && self.selection_context_menu.is_none()
+            && self.tab_context_menu.is_none()
+            && self.context_menu.is_none()
+            && self.rename_state.is_none()
+            && self.delete_confirm.is_none()
+            && self.search_state.is_none()
+            && (tab.display_mode != DisplayMode::Preview
+                || tab.markdown_selection.normalized_non_empty().is_none())
+            && tab.selection.normalized_non_empty().is_none()
+    }
+
+    fn navigation_tooltip(
+        &self,
+        label: &'static str,
+        back: bool,
+        cx: &Context<Self>,
+    ) -> impl Fn(&mut Window, &mut App) -> AnyView + use<> {
+        let viewer = cx.entity().downgrade();
+        move |window, cx| {
+            let matches = viewer.upgrade().is_some_and(|viewer| {
+                let viewer = viewer.read(cx);
+                viewer.can_go_back == back && viewer.cancel_navigates(window)
+            });
+            okena_ui::shortcuts::action_tooltip(
+                label,
+                matches.then_some(&Cancel as &dyn Action),
+                window,
+                cx,
+            )
+        }
+    }
+
     fn render_selectable_markdown_unit(
         &self,
         id: ElementId,
@@ -1674,10 +1711,7 @@ impl Render for FileViewer {
                                                 .bg(rgb(t.bg_hover))
                                                 .text_color(rgb(t.text_primary))
                                         })
-                                        .tooltip(|window, cx| {
-                                            gpui_component::tooltip::Tooltip::new("Back")
-                                                .build(window, cx)
-                                        })
+                                        .tooltip(self.navigation_tooltip("Back", true, cx))
                                         .on_click(cx.listener(|_this, _, _window, cx| {
                                             cx.emit(super::FileViewerEvent::Back);
                                         }))
@@ -2068,10 +2102,7 @@ impl Render for FileViewer {
                                     .justify_center()
                                     .rounded(px(6.0))
                                     .hover(|s| s.bg(rgb(t.bg_hover)))
-                                    .tooltip(|window, cx| {
-                                        gpui_component::tooltip::Tooltip::new("Close")
-                                            .build(window, cx)
-                                    })
+                                    .tooltip(self.navigation_tooltip("Close", false, cx))
                                     .on_click(cx.listener(|this, _, _window, cx| this.close(cx)))
                                     .child(
                                         svg()

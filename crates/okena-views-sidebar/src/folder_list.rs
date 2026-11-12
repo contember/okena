@@ -446,6 +446,7 @@ impl Sidebar {
                         "Show Project"
                     },
                     &t,
+                    Some((self.focus_manager.clone(), project_id.clone())),
                 )
                 .on_click(cx.listener({
                     let project_id = project_id.clone();

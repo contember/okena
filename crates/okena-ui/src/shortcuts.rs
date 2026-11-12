@@ -1,5 +1,5 @@
 //! Shared shortcut labels for tooltips, keybinding editors and command lists.
-use gpui::{Action, AnyView, App, AsKeystroke, KeyBinding, KeyContext, Keystroke, Window};
+use gpui::{Action, AnyView, App, AsKeystroke, KeyBinding, Keystroke, Window};
 use gpui_component::tooltip::Tooltip;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -32,7 +32,13 @@ pub fn format_keystroke_for_platform(source: &str, platform: ShortcutPlatform) -
         .split_whitespace()
         .map(|source| {
             Keystroke::parse(source)
-                .map(|key| format_stroke(&key, platform))
+                .map(|key| {
+                    if key.key.is_empty() {
+                        source.to_owned()
+                    } else {
+                        format_stroke(&key, platform)
+                    }
+                })
                 .unwrap_or_else(|_| source.to_owned())
         })
         .collect::<Vec<_>>()
@@ -91,152 +97,282 @@ fn format_stroke(key: &Keystroke, platform: ShortcutPlatform) -> String {
     parts.join(if mac { "" } else { "+" })
 }
 
-fn preferred_binding(bindings: &[KeyBinding], platform: ShortcutPlatform) -> Option<&KeyBinding> {
-    // Defaults contain both cmd and ctrl variants. Choose a usable native variant
-    // among effective bindings, keeping registration precedence within that set.
-    bindings
+/// Formats a binding with the same stroke formatter as the keybindings editor.
+pub fn format_binding(binding: &KeyBinding) -> String {
+    let platform = ShortcutPlatform::current();
+    binding
+        .keystrokes()
         .iter()
-        .rev()
-        .find(|binding| {
-            binding.keystrokes().iter().all(|key| {
-                let modifiers = key.as_keystroke().modifiers;
-                platform == ShortcutPlatform::Mac || !modifiers.platform
-            }) && (platform != ShortcutPlatform::Mac
-                || binding
-                    .keystrokes()
-                    .iter()
-                    .any(|key| key.as_keystroke().modifiers.platform))
-        })
-        .or_else(|| bindings.last())
+        .map(|key| format_stroke(key.as_keystroke(), platform))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
-/// Resolves the live keymap, including disabled/conflicting bindings, for a UI
-/// action's context. No settings cache or hard-coded default shortcuts are used.
-pub fn shortcut_for_action(
-    action: &dyn Action,
-    context: Option<&str>,
-    window: &Window,
-) -> Option<String> {
-    let bindings = match context {
-        Some(context) => {
-            window.bindings_for_action_in_context(action, KeyContext::parse(context).ok()?)
-        }
-        None => window.bindings_for_action(action),
-    };
-    let platform = ShortcutPlatform::current();
-    let binding = preferred_binding(&bindings, platform)?;
-    Some(
-        binding
-            .keystrokes()
-            .iter()
-            .map(|key| format_stroke(key.as_keystroke(), platform))
-            .collect::<Vec<_>>()
-            .join(" "),
-    )
+/// Returns all effective bindings on the actual focused dispatch path, retaining
+/// parameters, nested contexts and registration order for other UI consumers.
+pub fn bindings_for_action(action: &dyn Action, window: &Window, cx: &App) -> Vec<KeyBinding> {
+    let contexts = window.context_stack();
+    let keymap = cx.key_bindings();
+    let keymap = keymap.borrow();
+    // Use the same keymap input resolver as GPUI dispatch, with the actual path.
+    // A missing root context is an empty stack, not a synthetic empty context:
+    // negated predicates (e.g. !TerminalPane) distinguish those two cases.
+    keymap
+        .bindings_for_action(action)
+        .filter(|binding| {
+            keymap
+                .bindings_for_input(binding.keystrokes(), &contexts)
+                .0
+                .first()
+                .is_some_and(|effective| effective.action().partial_eq(action))
+        })
+        .cloned()
+        .collect()
+}
+
+/// Chooses one display binding without removing alternatives. GPUI returns effective
+/// bindings in registration order; the last one wins, on every platform. Modifiers
+/// do not determine eligibility: custom Ctrl on macOS and Win/Super elsewhere work.
+pub fn shortcut_for_action(action: &dyn Action, window: &Window, cx: &App) -> Option<String> {
+    bindings_for_action(action, window, cx)
+        .last()
+        .map(format_binding)
 }
 
 pub fn action_tooltip(
     label: &str,
     action: Option<&dyn Action>,
-    context: Option<&str>,
     window: &mut Window,
     cx: &mut App,
 ) -> AnyView {
-    let text = match action.and_then(|action| shortcut_for_action(action, context, window)) {
+    let text = match action.and_then(|action| shortcut_for_action(action, window, cx)) {
         Some(shortcut) => format!("{label} ({shortcut})"),
         None => label.to_owned(),
     };
     Tooltip::new(text).build(window, cx)
 }
 
+/// Resolve an explicitly named application action without reversing crate dependencies.
+/// Missing/unregistered actions keep their text-only tooltip.
+pub fn named_action_tooltip(
+    label: &str,
+    action_name: &str,
+    window: &mut Window,
+    cx: &mut App,
+) -> AnyView {
+    let action = cx.build_action(action_name, None).ok();
+    action_tooltip(label, action.as_deref(), window, cx)
+}
+
+/// A reusable button's shortcut and its live operation/target eligibility check.
+/// The check runs when the tooltip opens, not when the button was last rendered.
+pub struct ActionShortcut {
+    action: Box<dyn Action>,
+    is_applicable: Box<dyn Fn(&Window, &App) -> bool>,
+}
+
+impl ActionShortcut {
+    pub fn new(
+        action: impl Action,
+        is_applicable: impl Fn(&Window, &App) -> bool + 'static,
+    ) -> Self {
+        Self {
+            action: Box::new(action),
+            is_applicable: Box::new(is_applicable),
+        }
+    }
+
+    pub fn tooltip(&self, label: &str, window: &mut Window, cx: &mut App) -> AnyView {
+        let action = (self.is_applicable)(window, cx).then_some(self.action.as_ref());
+        action_tooltip(label, action, window, cx)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::{Context, IntoElement, Render, TestAppContext, div, px, size};
+    use gpui::{
+        Context, FocusHandle, InteractiveElement, IntoElement, ParentElement, Render,
+        TestAppContext, div,
+    };
     gpui::actions!(shortcut_tests, [SampleAction, OtherAction]);
 
-    struct TestView;
+    #[derive(Clone, Debug, PartialEq, gpui::Action)]
+    #[action(namespace = shortcut_tests, no_json)]
+    struct ParameterizedAction {
+        target: usize,
+    }
+
+    struct TestView {
+        focus: FocusHandle,
+        other_focus: FocusHandle,
+    }
     impl Render for TestView {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
             div()
+                .key_context("Workspace")
+                .child(
+                    div()
+                        .key_context("TerminalPane")
+                        .track_focus(&self.focus)
+                        .child(gpui::deferred(div())),
+                )
+                .child(div().key_context("Sidebar").track_focus(&self.other_focus))
         }
     }
 
     #[gpui::test]
-    fn resolves_live_remapped_contextual_and_shadowed_bindings(cx: &mut TestAppContext) {
-        let window = cx.open_window(size(px(300.), px(200.)), |_, _| TestView);
-        cx.update(|cx| {
+    fn resolves_live_nested_contexts_remapping_removal_and_shadowing(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let focus = cx.focus_handle();
+            focus.focus(window, cx);
+            TestView {
+                focus,
+                other_focus: cx.focus_handle(),
+            }
+        });
+        cx.update(|window, cx| {
+            cx.bind_keys([
+                KeyBinding::new("ctrl-d", SampleAction, Some("Workspace > TerminalPane")),
+                KeyBinding::new("ctrl-p", SampleAction, Some("Sidebar")),
+            ]);
+            assert_eq!(
+                shortcut_for_action(&SampleAction, window, cx),
+                Some(format_keystroke("ctrl-d"))
+            );
+            cx.bind_keys([KeyBinding::new("ctrl-d", OtherAction, Some("TerminalPane"))]);
+            assert_eq!(shortcut_for_action(&SampleAction, window, cx), None);
+            cx.bind_keys([KeyBinding::new(
+                "ctrl-k ctrl--",
+                SampleAction,
+                Some("Workspace > TerminalPane"),
+            )]);
+            assert_eq!(
+                shortcut_for_action(&SampleAction, window, cx),
+                Some(format_keystroke("ctrl-k ctrl--"))
+            );
+            cx.bind_keys([KeyBinding::new(
+                "ctrl-k ctrl--",
+                gpui::NoAction,
+                Some("TerminalPane"),
+            )]);
+            assert_eq!(shortcut_for_action(&SampleAction, window, cx), None);
+            // Simulate a configuration reload, including removal of old assignments.
+            cx.clear_key_bindings();
+            assert_eq!(shortcut_for_action(&SampleAction, window, cx), None);
+            cx.bind_keys([KeyBinding::new(
+                "cmd-j",
+                SampleAction,
+                Some("Workspace > TerminalPane"),
+            )]);
+            assert_eq!(
+                shortcut_for_action(&SampleAction, window, cx),
+                Some(format_keystroke("cmd-j"))
+            );
+            let other_focus = view.read(cx).other_focus.clone();
+            other_focus.focus(window, cx);
+            assert_eq!(shortcut_for_action(&SampleAction, window, cx), None);
+        });
+    }
+
+    #[gpui::test]
+    fn preserves_alternatives_parameters_and_custom_platform_modifiers(cx: &mut TestAppContext) {
+        let (_view, cx) = cx.add_window_view(|window, cx| {
+            let focus = cx.focus_handle();
+            focus.focus(window, cx);
+            TestView {
+                focus,
+                other_focus: cx.focus_handle(),
+            }
+        });
+        cx.update(|window, cx| {
             cx.bind_keys([
                 KeyBinding::new("ctrl-d", SampleAction, Some("TerminalPane")),
-                KeyBinding::new("ctrl-p", SampleAction, Some("Sidebar")),
-            ])
+                KeyBinding::new("cmd-d", SampleAction, Some("TerminalPane")),
+                KeyBinding::new(
+                    "ctrl-1",
+                    ParameterizedAction { target: 1 },
+                    Some("TerminalPane"),
+                ),
+            ]);
+            assert_eq!(bindings_for_action(&SampleAction, window, cx).len(), 2);
+            assert_eq!(
+                shortcut_for_action(&SampleAction, window, cx),
+                Some(format_keystroke("cmd-d"))
+            );
+            assert_eq!(
+                shortcut_for_action(&ParameterizedAction { target: 1 }, window, cx),
+                Some(format_keystroke("ctrl-1"))
+            );
+            assert_eq!(
+                shortcut_for_action(&ParameterizedAction { target: 2 }, window, cx),
+                None
+            );
+            cx.bind_keys([KeyBinding::new(
+                "ctrl-j",
+                SampleAction,
+                Some("TerminalPane"),
+            )]);
+            assert_eq!(
+                shortcut_for_action(&SampleAction, window, cx),
+                Some(format_keystroke("ctrl-j"))
+            );
         });
-        window
-            .update(cx, |_, window, _| {
-                assert_eq!(
-                    shortcut_for_action(&SampleAction, Some("TerminalPane"), window),
-                    Some(format_keystroke("ctrl-d"))
-                );
-                assert_eq!(
-                    shortcut_for_action(&SampleAction, Some("Sidebar"), window),
-                    Some(format_keystroke("ctrl-p"))
-                );
-                assert_eq!(
-                    shortcut_for_action(&SampleAction, Some("SearchBar"), window),
-                    None
-                );
-            })
-            .unwrap();
-        cx.update(|cx| {
+    }
+
+    #[gpui::test]
+    fn resolves_root_bindings_after_deferred_draw_without_focus(cx: &mut TestAppContext) {
+        let (_, cx) = cx.add_window_view(|_, cx| TestView {
+            focus: cx.focus_handle(),
+            other_focus: cx.focus_handle(),
+        });
+        cx.update(|window, cx| {
+            window.blur();
+            assert!(window.context_stack().is_empty());
             cx.bind_keys([
-                KeyBinding::new("ctrl-d", OtherAction, Some("TerminalPane")),
-                KeyBinding::new("ctrl-k ctrl-c", SampleAction, Some("TerminalPane")),
-            ])
+                KeyBinding::new("ctrl-g", SampleAction, None),
+                KeyBinding::new("ctrl-d", SampleAction, Some("TerminalPane")),
+                KeyBinding::new("ctrl-n", SampleAction, Some("!TerminalPane")),
+                KeyBinding::new("ctrl-g", OtherAction, Some("!TerminalPane")),
+            ]);
+            assert_eq!(
+                shortcut_for_action(&SampleAction, window, cx),
+                Some(format_keystroke("ctrl-g"))
+            );
+            assert_eq!(bindings_for_action(&SampleAction, window, cx).len(), 1);
         });
-        window
-            .update(cx, |_, window, _| {
-                assert_eq!(
-                    shortcut_for_action(&SampleAction, Some("TerminalPane"), window),
-                    Some(format_keystroke("ctrl-k ctrl-c"))
-                );
-            })
-            .unwrap();
-        cx.update(|cx| cx.clear_key_bindings());
-        window
-            .update(cx, |_, window, _| {
-                assert_eq!(
-                    shortcut_for_action(&SampleAction, Some("TerminalPane"), window),
-                    None
-                );
-            })
-            .unwrap();
     }
 
     #[test]
-    fn prefers_native_effective_binding_and_preserves_custom_fallback() {
-        let bindings = [
-            KeyBinding::new("cmd-d", SampleAction, None),
-            KeyBinding::new("ctrl-d", SampleAction, None),
-        ];
+    fn formats_named_keys_all_modifiers_and_preserves_invalid_input() {
         assert_eq!(
-            preferred_binding(&bindings, ShortcutPlatform::Mac)
-                .unwrap()
-                .keystrokes(),
-            bindings[0].keystrokes()
+            format_keystroke_for_platform(
+                "ctrl-alt-shift-cmd-fn-delete",
+                ShortcutPlatform::Windows
+            ),
+            "Ctrl+Alt+Shift+Win+Fn+Delete"
         );
         assert_eq!(
-            preferred_binding(&bindings, ShortcutPlatform::Windows)
-                .unwrap()
-                .keystrokes(),
-            bindings[1].keystrokes()
+            format_keystroke_for_platform("ctrl-alt-shift-cmd-delete", ShortcutPlatform::Mac),
+            "⌃⌥⇧⌘⌦"
         );
         assert_eq!(
-            preferred_binding(&bindings[1..], ShortcutPlatform::Mac)
-                .unwrap()
-                .keystrokes(),
-            bindings[1].keystrokes()
+            format_keystroke_for_platform(
+                "escape pageup pagedown f12 tab space",
+                ShortcutPlatform::Linux
+            ),
+            "Esc PgUp PgDn F12 Tab Space"
+        );
+        assert_eq!(
+            format_keystroke_for_platform("ctrl-", ShortcutPlatform::Windows),
+            "ctrl-"
+        );
+        assert_eq!(
+            format_keystroke_for_platform("", ShortcutPlatform::Windows),
+            ""
         );
     }
+
     #[test]
     fn formats_platform_modifiers_chords_and_punctuation() {
         assert_eq!(
