@@ -116,7 +116,7 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
                     &id_suffix,
                     ButtonSize::COMPACT,
                     &t,
-                    None,
+                    (!standalone).then_some("Split Tab Group Vertically"),
                     None,
                 )
                 .on_click(move |_, _window, cx| {
@@ -138,7 +138,7 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
                     &id_suffix,
                     ButtonSize::COMPACT,
                     &t,
-                    None,
+                    (!standalone).then_some("Split Tab Group Horizontally"),
                     None,
                 )
                 .on_click(move |_, _window, cx| {
@@ -160,7 +160,7 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
                     &id_suffix,
                     ButtonSize::COMPACT,
                     &t,
-                    None,
+                    (!standalone).then_some("Add Tab to Group"),
                     None,
                 )
                 .on_click(move |_, _window, cx| {
@@ -450,8 +450,13 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
                     let terminal_id = terminal_id.clone();
                     let tab_label = tab_label.clone();
                     let dispatcher_for_click = self.action_dispatcher.clone();
-                    cx.listener(move |this, _: &ClickEvent, window, cx| {
-                        let is_double_click = this.tab_click_detector.check(i);
+                    cx.listener(move |this, allow_rename: &bool, window, cx| {
+                        let is_double_click = if *allow_rename {
+                            this.tab_click_detector.check(i)
+                        } else {
+                            this.tab_click_detector = Default::default();
+                            false
+                        };
 
                         if this.tab_rename_state.is_some() && !is_double_click {
                             let is_renaming_this = terminal_id.as_ref().is_some_and(|tid| {
@@ -507,26 +512,31 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
                 .text_color(rgb(t.text_primary))
                 .hover(|s| s.bg(rgb(t.bg_hover)))
                 .child(truncated_text("hover-tab-name", tab_label.clone(), None))
-                .on_click(move |event, window, cx| {
-                    caption_activate(event, window, cx);
+                .on_click(move |_, window, cx| {
+                    caption_activate(&false, window, cx);
                     cx.stop_propagation();
                 });
-            let actions = h_flex()
-                .flex_shrink_0()
-                .when(terminal_view_settings(cx).show_shell_selector, |el| {
-                    el.child(self.render_shell_indicator(i, cx))
-                })
-                .child(self.render_tab_action_buttons(
-                    TabActionContext {
-                        project_id: self.project_id.clone(),
-                        layout_path: self.layout_path.clone(),
-                        active_tab: i,
-                        standalone,
-                        action_dispatcher: self.action_dispatcher.clone(),
-                    },
-                    terminal_id.clone(),
-                    cx,
-                ));
+            let actions_view = cx.entity();
+            let actions_terminal_id = terminal_id.clone();
+            let actions = move |cx: &mut App| actions_view.update(cx, |this, cx| {
+                h_flex()
+                    .flex_shrink_0()
+                    .when(terminal_view_settings(cx).show_shell_selector, |el| {
+                        el.child(this.render_shell_indicator(i, cx))
+                    })
+                    .child(this.render_tab_action_buttons(
+                        TabActionContext {
+                            project_id: this.project_id.clone(),
+                            layout_path: this.layout_path.clone(),
+                            active_tab: i,
+                            standalone,
+                            action_dispatcher: this.action_dispatcher.clone(),
+                        },
+                        actions_terminal_id,
+                        cx,
+                    ))
+                    .into_any_element()
+            });
             let hover_actions = TabHoverActions::new(
                 format!("tab-hover-{}", terminal_id.as_deref().unwrap_or(&tab_label)),
                 caption,
@@ -544,8 +554,7 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
                 .flex_shrink_0()
                 .max_w(relative(1.0))
                 .overflow_hidden()
-                .pl(px(8.0))
-                .pr(px(28.0))
+                .px(px(8.0))
                 .pt(px(4.0))
                 .pb(px(4.0))
                 .border_r_1()
@@ -798,7 +807,7 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
                         }
                     }))
                 })
-                .on_click(move |event, window, cx| on_activate(event, window, cx))
+                .on_click(move |_, window, cx| on_activate(&true, window, cx))
         }).collect();
 
         let project_id_for_new = self.project_id.clone();
