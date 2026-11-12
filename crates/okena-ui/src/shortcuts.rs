@@ -164,11 +164,13 @@ pub fn named_action_tooltip(
     action_tooltip(label, action.as_deref(), window, cx)
 }
 
+type ShortcutApplicability = Box<dyn Fn(&Window, &App) -> bool>;
+
 /// A reusable button's shortcut and its live operation/target eligibility check.
 /// The check runs when the tooltip opens, not when the button was last rendered.
 pub struct ActionShortcut {
     action: Box<dyn Action>,
-    is_applicable: Box<dyn Fn(&Window, &App) -> bool>,
+    is_applicable: ShortcutApplicability,
 }
 
 impl ActionShortcut {
