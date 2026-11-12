@@ -4,12 +4,17 @@ use crate::popover::popover_panel;
 use crate::theme::ThemeColors;
 use gpui::prelude::*;
 use gpui::*;
+use std::time::Duration;
+
+const OPEN_DELAY: Duration = Duration::from_millis(200);
 
 #[derive(Default)]
 struct HoverState {
     open: bool,
     trigger: Bounds<Pixels>,
     panel: Bounds<Pixels>,
+    anchor: Bounds<Pixels>,
+    pending_open: Option<Task<()>>,
 }
 
 /// Put this in a relatively positioned tab. Only its rightmost 20px opens
@@ -43,7 +48,7 @@ impl RenderOnce for TabHoverActions {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let state = window.use_keyed_state(self.id.clone(), cx, |_, _| HoverState::default());
         let open = state.read(cx).open && !cx.has_active_drag();
-        let trigger_bounds = state.read(cx).trigger;
+        let trigger_bounds = state.read(cx).anchor;
         let t = &self.theme;
 
         let trigger = div()
@@ -57,22 +62,27 @@ impl RenderOnce for TabHoverActions {
             .items_center()
             .justify_center()
             .cursor_pointer()
-            .opacity(0.0)
-            .hover(|s| s.opacity(1.0).bg(rgb(t.bg_hover)))
-            .child(
-                svg()
-                    .path("icons/more-horizontal.svg")
-                    .size(px(12.0))
-                    .text_color(rgb(t.text_muted)),
-            )
             .on_mouse_move({
                 let state = state.clone();
-                move |event, _, cx| {
+                move |event, window, cx| {
                     if event.pressed_button.is_none() && !cx.has_active_drag() {
                         state.update(cx, |state, cx| {
-                            if !state.open {
-                                state.open = true;
-                                cx.notify();
+                            if !state.open && state.pending_open.is_none() {
+                                let delay = cx.background_executor().timer(OPEN_DELAY);
+                                state.pending_open =
+                                    Some(cx.spawn_in(window, async move |state, cx| {
+                                        delay.await;
+                                        let _ = state.update_in(cx, |state, window, cx| {
+                                            state.pending_open = None;
+                                            if state.trigger.contains(&window.mouse_position())
+                                                && !cx.has_active_drag()
+                                            {
+                                                state.open = true;
+                                                state.anchor = state.trigger;
+                                                cx.notify();
+                                            }
+                                        });
+                                    }));
                             }
                         });
                     }
@@ -80,7 +90,7 @@ impl RenderOnce for TabHoverActions {
             })
             // Capture the clipped trigger, so scrolling a tab out of view cannot
             // leave an invisible hot spot. Paint registers an outside-move handler
-            // for both the trigger and its floating panel, with no hover timers.
+            // for both the trigger and its floating panel.
             .child(
                 canvas(
                     {
@@ -88,12 +98,15 @@ impl RenderOnce for TabHoverActions {
                         move |bounds, window, cx| {
                             let bounds = bounds.intersect(&window.content_mask().bounds);
                             state.update(cx, |state, cx| {
-                                // Scrolling/resizing can move or clip a tab without
-                                // a mouse event. Do not leave its panel stranded.
-                                if state.open && state.trigger != bounds {
-                                    state.open = false;
-                                    window.request_animation_frame();
-                                    cx.notify();
+                                // Close an off-screen tab's panel, but keep the
+                                // open panel anchored while titles/progress change.
+                                if bounds.is_empty() {
+                                    state.pending_open = None;
+                                    if state.open {
+                                        state.open = false;
+                                        window.request_animation_frame();
+                                        cx.notify();
+                                    }
                                 }
                                 state.trigger = bounds;
                             });
@@ -102,15 +115,25 @@ impl RenderOnce for TabHoverActions {
                     {
                         let state = state.clone();
                         move |_, _, window, _| {
+                            let pending = state.clone();
+                            window.on_mouse_event(move |_: &MouseDownEvent, phase, _, cx| {
+                                if phase == DispatchPhase::Capture {
+                                    pending.update(cx, |state, _| state.pending_open = None);
+                                }
+                            });
                             let state = state.clone();
                             window.on_mouse_event(move |event: &MouseMoveEvent, phase, _, cx| {
                                 if phase == DispatchPhase::Capture {
                                     let dragging =
                                         event.pressed_button.is_some() || cx.has_active_drag();
                                     state.update(cx, |state, cx| {
+                                        if dragging || !state.trigger.contains(&event.position) {
+                                            state.pending_open = None;
+                                        }
                                         if state.open
                                             && (dragging
                                                 || (!state.trigger.contains(&event.position)
+                                                    && !state.anchor.contains(&event.position)
                                                     && !state.panel.contains(&event.position)))
                                         {
                                             state.open = false;
@@ -180,7 +203,7 @@ impl RenderOnce for TabHoverActions {
 
 #[cfg(test)]
 mod tests {
-    use super::TabHoverActions;
+    use super::{OPEN_DELAY, TabHoverActions};
     use crate::theme::DARK_THEME;
     use gpui::{
         AppContext as _, Bounds, Context, InputEvent, InteractiveElement, IntoElement, MouseButton,
@@ -199,6 +222,7 @@ mod tests {
         action_target: Option<usize>,
         dragged: Option<usize>,
         action_builds: [usize; 2],
+        first_tab_width: Option<f32>,
     }
 
     struct Tabs(Rc<RefCell<Observed>>, Pixels, ScrollHandle);
@@ -234,7 +258,11 @@ mod tests {
                             .id(("tab", i))
                             .relative()
                             .flex_shrink_0()
-                            .w(px(160.0))
+                            .w(px(if i == 0 {
+                                self.0.borrow().first_tab_width.unwrap_or(160.0)
+                            } else {
+                                160.0
+                            }))
                             .h_full()
                             .overflow_hidden()
                             .on_click(move |_, _, _| on_click.borrow_mut().active = i)
@@ -331,6 +359,12 @@ mod tests {
         );
     }
 
+    fn wait_for_hover(cx: &mut TestAppContext) {
+        cx.run_until_parked();
+        cx.executor().advance_clock(OPEN_DELAY);
+        cx.run_until_parked();
+    }
+
     #[gpui::test]
     fn hovering_an_inactive_tab_keeps_it_selectable_and_targets_its_actions(
         cx: &mut TestAppContext,
@@ -357,6 +391,7 @@ mod tests {
                 window.simulate_mouse_move(point(px(310.0), px(10.0)), cx);
             })
             .unwrap();
+            wait_for_hover(cx);
             assert_eq!(observed.borrow().tabs, initial);
             assert!(observed.borrow().captions[0].is_none());
             assert_eq!(observed.borrow().action_builds[0], 0);
@@ -454,6 +489,7 @@ mod tests {
                 window.simulate_mouse_move(point(px(150.0), px(top + 10.0)), cx);
             })
             .unwrap();
+            wait_for_hover(cx);
             assert_eq!(observed.borrow().tabs, tabs);
             let caption = observed.borrow().captions[0].expect("first tab caption");
             let action = observed.borrow().actions[0].expect("first tab actions");
@@ -490,6 +526,7 @@ mod tests {
             window.simulate_mouse_move(point(px(170.0), px(10.0)), cx);
         })
         .unwrap();
+        wait_for_hover(cx);
         assert!(observed.borrow().captions[1].is_some());
         cx.update_window(window.into(), |_, window, _| {
             scroll.set_offset(point(px(0.0), px(0.0)));
@@ -501,5 +538,98 @@ mod tests {
         })
         .unwrap();
         assert_eq!(observed.borrow().captions, [None; 2]);
+    }
+
+    #[gpui::test]
+    fn passing_over_a_trigger_does_not_open_actions_over_the_terminal(cx: &mut TestAppContext) {
+        let observed = Rc::new(RefCell::new(Observed::default()));
+        let window = cx.open_window(size(px(400.0), px(160.0)), {
+            let observed = observed.clone();
+            move |_, _| Tabs(observed, px(0.0), ScrollHandle::new())
+        });
+        cx.update_window(window.into(), |_, window, cx| {
+            window.simulate_mouse_move(point(px(390.0), px(150.0)), cx);
+        })
+        .unwrap();
+        cx.update_window(window.into(), |_, window, cx| {
+            window.simulate_mouse_move(point(px(310.0), px(10.0)), cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.executor().advance_clock(OPEN_DELAY / 2);
+        assert_eq!(observed.borrow().captions, [None; 2]);
+        cx.update_window(window.into(), |_, window, cx| {
+            window.simulate_mouse_move(point(px(310.0), px(40.0)), cx);
+            click(window, point(px(310.0), px(40.0)), cx);
+        })
+        .unwrap();
+        wait_for_hover(cx);
+        assert_eq!(observed.borrow().action_builds, [0; 2]);
+        assert_eq!(observed.borrow().action_target, None);
+
+        // A stationary mouse-down also cancels the pending hover, before a drag.
+        cx.update_window(window.into(), |_, window, cx| {
+            window.simulate_mouse_move(point(px(310.0), px(10.0)), cx);
+            window.dispatch_event(
+                MouseDownEvent {
+                    position: point(px(310.0), px(10.0)),
+                    button: MouseButton::Left,
+                    click_count: 1,
+                    ..Default::default()
+                }
+                .to_platform_input(),
+                cx,
+            );
+        })
+        .unwrap();
+        wait_for_hover(cx);
+        assert_eq!(observed.borrow().action_builds, [0; 2]);
+    }
+
+    #[gpui::test]
+    fn a_changing_title_does_not_move_or_close_the_open_actions(cx: &mut TestAppContext) {
+        let observed = Rc::new(RefCell::new(Observed::default()));
+        let window = cx.open_window(size(px(400.0), px(160.0)), {
+            let observed = observed.clone();
+            move |_, _| Tabs(observed, px(0.0), ScrollHandle::new())
+        });
+        cx.update_window(window.into(), |_, window, cx| {
+            window.simulate_mouse_move(point(px(390.0), px(150.0)), cx);
+        })
+        .unwrap();
+        cx.update_window(window.into(), |_, window, cx| {
+            window.simulate_mouse_move(point(px(310.0), px(10.0)), cx);
+        })
+        .unwrap();
+        wait_for_hover(cx);
+        let action = observed.borrow().actions[1].unwrap();
+        // An earlier tab growing models a title, progress or idle-label update.
+        observed.borrow_mut().first_tab_width = Some(190.0);
+        cx.update_window(window.into(), |_, window, _| window.refresh())
+            .unwrap();
+        cx.update_window(window.into(), |_, window, cx| {
+            window.simulate_next_frame(cx)
+        })
+        .unwrap();
+        assert_eq!(observed.borrow().actions[1], Some(action));
+        cx.update_window(window.into(), |_, window, cx| {
+            // The old trigger remains a bridge to the stationary panel.
+            window.simulate_mouse_move(point(px(310.0), px(20.0)), cx);
+        })
+        .unwrap();
+        assert!(observed.borrow().captions[1].is_some());
+        cx.update_window(window.into(), |_, window, cx| {
+            window.simulate_mouse_move(action.center(), cx);
+        })
+        .unwrap();
+        observed.borrow_mut().first_tab_width = Some(200.0);
+        cx.update_window(window.into(), |_, window, _| window.refresh())
+            .unwrap();
+        assert_eq!(observed.borrow().actions[1], Some(action));
+        cx.update_window(window.into(), |_, window, cx| {
+            click(window, action.center(), cx)
+        })
+        .unwrap();
+        assert_eq!(observed.borrow().action_target, Some(1));
     }
 }
