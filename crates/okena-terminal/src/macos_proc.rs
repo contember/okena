@@ -62,6 +62,17 @@ pub fn process_path(pid: u32) -> Option<String> {
 /// `argv[0]` of `pid` (via `sysctl` `KERN_PROCARGS2`), `None` when the kernel
 /// refuses (another user's process) or the arguments are unreadable.
 pub fn process_arg0(pid: u32) -> Option<String> {
+    arg0_from_procargs2(&procargs2(pid)?)
+}
+
+/// Full `argv` of `pid` (via `sysctl` `KERN_PROCARGS2`), `None` when the kernel
+/// refuses (another user's process) or the arguments are unreadable.
+pub fn process_args(pid: u32) -> Option<Vec<std::ffi::OsString>> {
+    args_from_procargs2(&procargs2(pid)?)
+}
+
+/// The raw `KERN_PROCARGS2` buffer of `pid`.
+fn procargs2(pid: u32) -> Option<Vec<u8>> {
     // Cached once read; a failed read is retried on the next call.
     static ARG_MAX: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
     let arg_max = match ARG_MAX.get() {
@@ -89,7 +100,7 @@ pub fn process_arg0(pid: u32) -> Option<String> {
         return None;
     }
     buf.truncate(size);
-    arg0_from_procargs2(&buf)
+    Some(buf)
 }
 
 /// The kernel's limit on a process's arguments (`KERN_ARGMAX`), the buffer
@@ -125,6 +136,25 @@ fn arg0_from_procargs2(buf: &[u8]) -> Option<String> {
     let rest = &rest[rest.iter().position(|&b| b != 0)?..];
     let end = rest.iter().position(|&b| b == 0).unwrap_or(rest.len());
     String::from_utf8(rest[..end].to_vec()).ok()
+}
+
+/// Every `argv` entry from a `KERN_PROCARGS2` buffer (layout as in
+/// [`arg0_from_procargs2`]). `None` when the buffer holds fewer than `argc`
+/// arguments.
+fn args_from_procargs2(buf: &[u8]) -> Option<Vec<std::ffi::OsString>> {
+    const ARGC: usize = std::mem::size_of::<libc::c_int>();
+    let argc = libc::c_int::from_ne_bytes(buf.get(..ARGC)?.try_into().ok()?);
+    let argc = usize::try_from(argc).ok()?;
+    let rest = &buf[ARGC..];
+    let mut rest = &rest[rest.iter().position(|&b| b == 0)?..];
+    let mut args = Vec::with_capacity(argc);
+    for _ in 0..argc {
+        rest = &rest[rest.iter().position(|&b| b != 0)?..];
+        let end = rest.iter().position(|&b| b == 0).unwrap_or(rest.len());
+        args.push(OsStr::from_bytes(&rest[..end]).to_os_string());
+        rest = &rest[end..];
+    }
+    Some(args)
 }
 
 /// pid → direct-children map for every process on the system — equivalent to a
@@ -242,7 +272,7 @@ unsafe fn sun_path(sun: &libc::sockaddr_un) -> Option<PathBuf> {
 
 #[cfg(test)]
 mod procargs_tests {
-    use super::arg0_from_procargs2;
+    use super::{arg0_from_procargs2, args_from_procargs2};
 
     fn procargs(argc: i32, rest: &[u8]) -> Vec<u8> {
         let mut buf = argc.to_ne_bytes().to_vec();
@@ -260,5 +290,17 @@ mod procargs_tests {
         assert_eq!(arg0_from_procargs2(&procargs(0, b"/bin/x\0\0")), None);
         assert_eq!(arg0_from_procargs2(&procargs(1, b"/bin/x")), None);
         assert_eq!(arg0_from_procargs2(&[1, 0]), None);
+    }
+
+    #[test]
+    fn args_are_every_argument_up_to_argc() {
+        let buf = procargs(
+            3,
+            b"/opt/homebrew/bin/dtach\0\0\0dtach\0-A\0/tmp/okena-501/tm-1.sock\0HOME=/x\0",
+        );
+        let args = args_from_procargs2(&buf).unwrap();
+        assert_eq!(args, ["dtach", "-A", "/tmp/okena-501/tm-1.sock"]);
+        assert_eq!(args_from_procargs2(&procargs(2, b"/bin/x\0\0x\0")), None);
+        assert_eq!(args_from_procargs2(&procargs(-1, b"/bin/x\0\0")), None);
     }
 }

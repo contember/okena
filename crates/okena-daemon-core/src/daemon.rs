@@ -69,6 +69,7 @@ use okena_remote_server::server::RemoteServer;
 use okena_remote_server::usage::UsageHub;
 use okena_terminal::TerminalsRegistry;
 use okena_terminal::backend::{LocalBackend, TerminalBackend, TerminalSessionTeardown};
+use okena_terminal::dtach_pool::DtachPoolLease;
 use okena_terminal::pty_manager::{PtyEvent, PtyManager};
 use okena_terminal::session_backend::{SessionBackend, reconcile_dtach_sessions};
 use okena_workspace::persistence::{self, AppSettings, LockGuard, acquire_instance_lock};
@@ -271,10 +272,16 @@ pub struct DaemonCore {
     usage_hub: UsageHub,
     /// Refresh requests from `POST /v1/usage/refresh`, drained by the poller.
     usage_refresh_rx: mpsc::UnboundedReceiver<okena_remote_server::usage::UsageRefresh>,
+    /// This daemon's lease on the dtach session pool it shares with every other
+    /// daemon of the user (`okena_terminal::dtach_pool`). While held, no other
+    /// daemon's start-up reconciliation kills our sessions. `None` when it could
+    /// not be taken; this daemon then skipped its own reconciliation too.
+    _dtach_pool_lease: Option<DtachPoolLease>,
     /// Single-writer instance lock (§5). The daemon is the sole owner of the
     /// profile's `workspace.json` + lock; held for the daemon's lifetime so a
     /// second instance (or a classic in-process GUI) cannot clobber the profile.
     /// Released on drop at the end of [`run`](DaemonCore::run).
+    /// Declared after `_dtach_pool_lease`, so the lease goes first.
     _instance_lock: LockGuard,
     /// Graceful-shutdown trigger fired by `POST /v1/shutdown` (via the remote
     /// server's `AppState`). [`run`](DaemonCore::run) awaits it and returns,
@@ -327,10 +334,25 @@ impl DaemonCore {
         // successfully reloading authoritative state, before starting a PTY
         // manager. This closes the crash window where workspace state no longer
         // owns a terminal but its persistent dtach process tree survived.
+        //
+        // The dtach pool is shared with every other daemon of this user, so take
+        // our lease on it first: from here on no other daemon's reconciliation
+        // treats our sessions as orphans, and ours stands down while another
+        // daemon holds one.
+        let dtach_pool_lease = match DtachPoolLease::acquire() {
+            Ok(lease) => Some(lease),
+            Err(error) => {
+                log::warn!(
+                    "Could not take a dtach pool lease; skipping dtach reconciliation: {error}"
+                );
+                None
+            }
+        };
         if workspace_revalidated
+            && let Some(lease) = dtach_pool_lease.as_ref()
             && let Some(retained_terminal_ids) = reconciliation_terminal_ids(&params.workspace_data)
         {
-            reconcile_dtach_sessions(&retained_terminal_ids);
+            reconcile_dtach_sessions(lease, &retained_terminal_ids);
         }
 
         // ── 1. Multi-thread tokio runtime backing the reactor ────────────────
@@ -527,6 +549,7 @@ impl DaemonCore {
             claude_hub: command_loop_claude_hub,
             usage_hub,
             usage_refresh_rx,
+            _dtach_pool_lease: dtach_pool_lease,
             _instance_lock: instance_lock,
             shutdown_requested,
         })
@@ -565,6 +588,10 @@ impl DaemonCore {
             // Bound (not `..`) so the lock is held until the end of `run`, then
             // released on drop after the server is stopped.
             _instance_lock,
+            // Bound after `_instance_lock`, so it drops first: a successor that
+            // takes the freed instance lock never sees our lease and skips its
+            // reconciliation for nothing.
+            _dtach_pool_lease,
             shutdown_requested,
         } = self;
         let handle = runtime.handle().clone();

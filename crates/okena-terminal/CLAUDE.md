@@ -10,6 +10,7 @@ Wraps `alacritty_terminal` for ANSI processing and `portable-pty` for cross-plat
 | `pty_manager.rs` | `PtyManager` — PTY lifecycle. `PtyHandle` per terminal. Spawns OS reader/writer threads. `PtyOutputSink` trait for broadcasting. |
 | `shell_config.rs` | `ShellType` enum, `CommandBuilder` construction. Cross-platform shell detection (bash/zsh/fish/sh on Unix; cmd/PowerShell/WSL on Windows). |
 | `session_backend.rs` | `SessionBackend` enum — tmux/screen/dtach on Unix; psmux on Windows; per-distro tmux/dtach/screen inside WSL. |
+| `dtach_pool.rs` | Guards for the dtach session pool every daemon of a user shares: `DtachPoolLease` (one `flock`ed file per live daemon in `<pool>/leases/`) and the attached-client probe used by start-up reconciliation. |
 | `input.rs` | Key-to-bytes conversion. DECCKM cursor mode handling. Platform-specific modifier mappings. |
 | `backend.rs` | Terminal backend abstraction. |
 | `process.rs` | Process spawning utilities. |
@@ -140,6 +141,7 @@ See the doc comments on `pub struct Terminal` in `terminal.rs` for per-field thr
 - **Batched PTY processing**: The PTY reader thread sends `PtyEvent::Data` via `async_channel`. The host reactor drains all pending events before notifying, avoiding per-byte updates.
 - **Remote output decoupling**: Remote tokio readers call `enqueue_output` (append to `pending_output` + set `dirty`) and ring the manager's capacity-1 activity doorbell. The host reactor's activity pump drains/parses output, then emits targeted pane/sidebar notifications; `with_content` remains the fallback drain. Never restore per-pane polling or hold `term.lock()` on the tokio thread.
 - **Persistent dtach teardown**: `SIGTERM` to the dtach master does not propagate to its PTY child tree. Teardown must keep the socket discoverable, revalidate PID birth markers, quiesce/reap descendants before the master, and unlink only after socket death is verified.
+- **The dtach pool is shared by every daemon of the user.** It is keyed only by `XDG_RUNTIME_DIR` (else `/tmp/okena-<uid>`) and the profile id, so a daemon started with a scratch `HOME`, `TMPDIR` or config dir still sees the panes of the daemon the user works in. Start-up reconciliation (`reconcile_dtach_sessions`) kills pool sessions its workspace does not know, so it stands down while another daemon holds a `DtachPoolLease` and never kills a session with a live `dtach` client attached. Anything new that tears down pool sessions it does not own by id needs the same guards.
 - **Teardown waits are time-bounded, not attempt-bounded**: both process-tree teardowns (`freeze_process_tree`, `await_killed_exit` in `session_backend.rs`) poll with backoff (10 ms doubling to 200 ms) for up to 500 ms to quiesce and 2 s for SIGKILLed processes to leave, re-SIGKILLing survivors each round. A large tree (an agent with its tools) takes far longer than a few short sleeps. An unverified teardown's error contains `okena_core::api::TEARDOWN_UNVERIFIED`, which the CLI maps to exit 75.
 - **Teardown fixtures must be bounded**: process-tree teardown tests spawn real
   descendants. Keep the fixture to a handful of processes that die on `SIGKILL` —
