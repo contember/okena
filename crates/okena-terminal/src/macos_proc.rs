@@ -54,6 +54,13 @@ pub fn process_name(pid: u32) -> Option<String> {
     name(pid as i32).ok().filter(|s| !s.is_empty())
 }
 
+/// Real user id `pid` runs as, `None` when the process is gone.
+pub fn process_uid(pid: u32) -> Option<u32> {
+    pidinfo::<BSDInfo>(pid as i32, 0)
+        .ok()
+        .map(|info| info.pbi_uid)
+}
+
 /// Path of the executable `pid` runs, symlinks resolved.
 pub fn process_path(pid: u32) -> Option<String> {
     pidpath(pid as i32).ok().filter(|path| !path.is_empty())

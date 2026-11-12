@@ -9,13 +9,17 @@
 //! ([`reconcile_dtach_sessions`](crate::session_backend::reconcile_dtach_sessions)),
 //! so without a guard that second daemon kills every pane of the first one.
 //!
-//! Two guards, both independent of where a daemon keeps its config or control
-//! socket:
+//! Three guards, all independent of where a daemon keeps its control socket:
 //!
-//! - **Leases.** Each daemon holds a [`DtachPoolLease`] for its lifetime: an
-//!   exclusively `flock`ed file in `<pool base>/leases/`. The kernel drops the
-//!   lock when the process dies, however it dies, so a lock that cannot be
-//!   taken belongs to a live daemon and reconciliation stands down.
+//! - **Owner tags.** Every spawn or reattach writes `tm-<id>.owner` next to the
+//!   socket, naming the profile directory (config dir + profile) of the daemon
+//!   that runs it ([`record_session_owner`]). A daemon never kills a session
+//!   tagged by another owner, whether that owner is running or not: the user's
+//!   Okena may simply be closed while its panes live on.
+//! - **Leases**, for sessions from before owner tags. Each daemon holds a [`DtachPoolLease`] for its lifetime: an
+//!   exclusively `flock`ed file in `<pool>/leases/`. The kernel drops the lock
+//!   when the process dies, however it dies, so a lock that cannot be taken
+//!   belongs to a live daemon and untagged sessions are left alone.
 //! - **Attached sessions.** A daemon that predates the leases holds none, but it
 //!   keeps a `dtach -A <socket>` client attached to each pane it shows, and that
 //!   client dies with the daemon's PTY. A session with a live client is in use
@@ -29,7 +33,7 @@ use std::ffi::OsString;
 #[cfg(unix)]
 use std::path::{Path, PathBuf};
 
-/// Directory under the pool base that holds the lease files.
+/// Directory under the profile's pool that holds the lease files.
 #[cfg(unix)]
 const LEASES_DIR: &str = "leases";
 
@@ -57,11 +61,12 @@ impl DtachPoolLease {
 
 #[cfg(unix)]
 impl DtachPoolLease {
-    /// Take a lease in this machine's pool. Leases for every profile share the
-    /// pool base, like the daemon control sockets did, because a named profile
-    /// can still own legacy sessions in the base directory.
+    /// Take a lease in the active profile's pool. Per profile, so a running
+    /// daemon of another profile does not stop this one from cleaning up. The
+    /// default profile's reconciliation already retains every profile's known
+    /// terminals among the legacy sessions it shares with them.
     pub fn acquire() -> std::io::Result<Self> {
-        Self::acquire_in(&okena_core::profiles::dtach_socket_base_dir().join(LEASES_DIR))
+        Self::acquire_in(&crate::session_backend::okena_runtime_dir().join(LEASES_DIR))
     }
 
     /// Take a lease in `dir`. The file is locked under a temporary name and only
@@ -137,6 +142,53 @@ impl Drop for DtachPoolLease {
     }
 }
 
+/// Who started a pool session, read from its owner tag.
+#[cfg(unix)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SessionOwner {
+    /// Tagged with this daemon's identity.
+    Us,
+    /// Tagged by another daemon, or the tag exists but cannot be read.
+    Other,
+    /// No tag: started before owner tags existed.
+    Untagged,
+}
+
+/// Identity written into owner tags: the active profile's directory, which is
+/// unique per config dir and profile and stable across restarts.
+#[cfg(unix)]
+pub(crate) fn owner_identity() -> Option<String> {
+    okena_core::profiles::try_current().map(|profile| profile.root.to_string_lossy().into_owned())
+}
+
+#[cfg(unix)]
+pub(crate) fn owner_tag_path(socket_path: &Path) -> PathBuf {
+    socket_path.with_extension("owner")
+}
+
+/// Tag the session at `socket_path` as ours. Called on every spawn and
+/// reattach, so sessions from before owner tags get tagged by the daemon that
+/// picks them up.
+#[cfg(unix)]
+pub(crate) fn record_session_owner(socket_path: &Path, identity: &str) {
+    if let Some(parent) = socket_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Err(error) = std::fs::write(owner_tag_path(socket_path), identity) {
+        log::warn!("failed to record dtach session owner for {socket_path:?}: {error}");
+    }
+}
+
+#[cfg(unix)]
+pub(crate) fn session_owner(socket_path: &Path, identity: Option<&str>) -> SessionOwner {
+    match std::fs::read_to_string(owner_tag_path(socket_path)) {
+        Ok(tag) if identity.is_some_and(|identity| tag == identity) => SessionOwner::Us,
+        Ok(_) => SessionOwner::Other,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => SessionOwner::Untagged,
+        Err(_) => SessionOwner::Other,
+    }
+}
+
 /// The sockets among `socket_paths` that a live dtach client is attached to.
 /// `None` when the process table cannot be read, in which case the caller must
 /// treat every session as attached.
@@ -204,10 +256,15 @@ fn same_path(a: &Path, b: &Path) -> bool {
     }
 }
 
-/// `(pid, argv)` of every process named `dtach` we can see.
+/// `(pid, argv)` of every `dtach` process of this user. `None` when one of
+/// them is still running but its argv cannot be read: that client could be
+/// attached to any session.
 #[cfg(target_os = "linux")]
 fn dtach_process_argvs() -> Option<Vec<(u32, Vec<OsString>)>> {
     use std::os::unix::ffi::OsStrExt as _;
+    use std::os::unix::fs::MetadataExt as _;
+    // SAFETY: `getuid(2)` takes no arguments and never fails.
+    let my_uid = unsafe { libc::getuid() };
     let mut found = Vec::new();
     for entry in std::fs::read_dir("/proc").ok()?.flatten() {
         let Some(pid) = entry
@@ -217,13 +274,17 @@ fn dtach_process_argvs() -> Option<Vec<(u32, Vec<OsString>)>> {
         else {
             continue;
         };
-        let is_dtach = std::fs::read_to_string(entry.path().join("comm"))
-            .is_ok_and(|comm| comm.trim_end() == "dtach");
-        if !is_dtach {
+        let is_ours_and_dtach = entry.metadata().is_ok_and(|meta| meta.uid() == my_uid)
+            && std::fs::read_to_string(entry.path().join("comm"))
+                .is_ok_and(|comm| comm.trim_end() == "dtach");
+        if !is_ours_and_dtach {
             continue;
         }
-        let Ok(cmdline) = std::fs::read(entry.path().join("cmdline")) else {
-            continue;
+        let cmdline = match std::fs::read(entry.path().join("cmdline")) {
+            Ok(cmdline) => cmdline,
+            // Exited since the directory listing.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => return None,
         };
         let argv = cmdline
             .split(|&b| b == 0)
@@ -237,13 +298,22 @@ fn dtach_process_argvs() -> Option<Vec<(u32, Vec<OsString>)>> {
 
 #[cfg(target_os = "macos")]
 fn dtach_process_argvs() -> Option<Vec<(u32, Vec<OsString>)>> {
-    let pids = crate::macos_proc::all_pids()?;
-    Some(
-        pids.into_iter()
-            .filter(|&pid| crate::macos_proc::process_name(pid).as_deref() == Some("dtach"))
-            .filter_map(|pid| crate::macos_proc::process_args(pid).map(|argv| (pid, argv)))
-            .collect(),
-    )
+    use crate::macos_proc::{all_pids, process_args, process_name, process_uid};
+    // SAFETY: `getuid(2)` takes no arguments and never fails.
+    let my_uid = unsafe { libc::getuid() };
+    let mut found = Vec::new();
+    for pid in all_pids()? {
+        if process_uid(pid) != Some(my_uid) || process_name(pid).as_deref() != Some("dtach") {
+            continue;
+        }
+        match process_args(pid) {
+            Some(argv) => found.push((pid, argv)),
+            // Exited since the listing.
+            None if process_uid(pid).is_none() => {}
+            None => return None,
+        }
+    }
+    Some(found)
 }
 
 /// No process-table reader on other Unixes: report "unknown", which makes
@@ -297,6 +367,25 @@ mod tests {
         assert!(lease.live_peers().is_empty());
         assert!(!stale.exists());
         assert!(staging.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn owner_tags_tell_our_sessions_from_others_and_untagged_ones() {
+        let dir = scratch_dir("owner");
+        let ours = dir.join("tm-ours.sock");
+        let theirs = dir.join("tm-theirs.sock");
+        let legacy = dir.join("tm-legacy.sock");
+        record_session_owner(&ours, "/me/profiles/default/");
+        record_session_owner(&theirs, "/sandbox/profiles/default/");
+
+        let me = Some("/me/profiles/default/");
+        assert_eq!(session_owner(&ours, me), SessionOwner::Us);
+        assert_eq!(session_owner(&theirs, me), SessionOwner::Other);
+        assert_eq!(session_owner(&legacy, me), SessionOwner::Untagged);
+        // Without an identity of our own, no tagged session is ours.
+        assert_eq!(session_owner(&ours, None), SessionOwner::Other);
+        assert_eq!(owner_tag_path(&ours), dir.join("tm-ours.owner"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

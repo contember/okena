@@ -1038,7 +1038,7 @@ impl PtyManager {
 
         #[cfg(unix)]
         if self.session_backend() == ResolvedBackend::Dtach {
-            crate::session_backend::prepare_dtach_mode_state(
+            crate::session_backend::prepare_dtach_session(
                 &ResolvedBackend::Dtach.session_name(terminal_id),
             );
         }
