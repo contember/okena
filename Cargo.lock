@@ -6701,6 +6701,7 @@ dependencies = [
  "tokio-rustls",
  "tokio-tungstenite 0.24.0",
  "tokio-util",
+ "tower-http",
  "tower-service",
  "uuid",
 ]

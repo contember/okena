@@ -80,6 +80,8 @@ impl Sink<tungstenite::Message> for AnyWsStream {
 fn unix_http_client(path: &str) -> Result<reqwest::Client, String> {
     reqwest::Client::builder()
         .unix_socket(path)
+        // Same-host socket: compressing would only spend CPU on both ends.
+        .no_gzip()
         .build()
         .map_err(|error| format!("Cannot initialise Unix socket HTTP client: {error}"))
 }
