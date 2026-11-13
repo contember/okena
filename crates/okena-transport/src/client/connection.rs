@@ -10,7 +10,7 @@ use okena_core::api::{ActionRequest, ApiSystemStats, ApiUsage, StateResponse};
 use okena_core::ws::ClientPresentationRequest;
 
 use futures::{Sink, Stream};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -373,6 +373,11 @@ struct SessionControl {
     /// While true, the reconnect loop dials nothing (the app is in the
     /// background, where Android drops packets and attempts only burn budget).
     paused: Arc<tokio::sync::watch::Sender<bool>>,
+    /// Which terminals' PTY output to stream (unprefixed ids). `None` streams
+    /// every terminal in the state (desktop); `Some` streams only the listed
+    /// ones that exist, so a client showing one terminal does not download the
+    /// output of all of them.
+    streams: Arc<tokio::sync::watch::Sender<Option<HashSet<String>>>>,
 }
 
 impl SessionControl {
@@ -381,6 +386,7 @@ impl SessionControl {
             kick: Arc::new(tokio::sync::watch::channel(0).0),
             probe: Arc::new(tokio::sync::watch::channel(0).0),
             paused: Arc::new(tokio::sync::watch::channel(false).0),
+            streams: Arc::new(tokio::sync::watch::channel(None).0),
         }
     }
 
@@ -394,6 +400,95 @@ impl SessionControl {
 
     fn set_paused(&self, paused: bool) {
         self.paused.send_replace(paused);
+    }
+
+    fn set_streams(&self, streams: Option<HashSet<String>>) {
+        self.streams.send_if_modified(|current| {
+            if *current == streams {
+                return false;
+            }
+            *current = streams;
+            true
+        });
+    }
+}
+
+/// The terminals of `state` whose output should stream under `filter`, in
+/// state order. `None` wants all of them.
+fn wanted_streams(state: &StateResponse, filter: Option<&HashSet<String>>) -> Vec<String> {
+    let mut ids = collect_state_terminal_ids(state);
+    if let Some(filter) = filter {
+        ids.retain(|id| filter.contains(id));
+    }
+    ids
+}
+
+/// What to send to move the session's subscriptions from `subscribed` to
+/// `wanted`: `(subscribe, unsubscribe)`, each in a stable order.
+fn subscription_changes(
+    subscribed: &HashSet<String>,
+    wanted: &[String],
+) -> (Vec<String>, Vec<String>) {
+    let subscribe: Vec<String> = wanted
+        .iter()
+        .filter(|id| !subscribed.contains(*id))
+        .cloned()
+        .collect();
+    let wanted: HashSet<&String> = wanted.iter().collect();
+    let mut unsubscribe: Vec<String> = subscribed
+        .iter()
+        .filter(|id| !wanted.contains(id))
+        .cloned()
+        .collect();
+    unsubscribe.sort();
+    (subscribe, unsubscribe)
+}
+
+/// Move the session's subscriptions to `wanted`. Sends block rather than
+/// `try_send`: a dropped Subscribe leaves a terminal silently never streaming,
+/// a dropped Unsubscribe keeps downloading output nobody shows.
+async fn reconcile_streams(
+    subscribed: &mut HashSet<String>,
+    wanted: &[String],
+    ws_tx: &async_channel::Sender<WsClientMessage>,
+    stream_map: &std::sync::RwLock<HashMap<String, u32>>,
+    reverse_stream_map: &mut HashMap<u32, String>,
+) {
+    let (subscribe, unsubscribe) = subscription_changes(subscribed, wanted);
+    if !unsubscribe.is_empty() {
+        // Forget the stream ids now: input to these terminals falls back to the
+        // JSON path, and frames still in flight are not routed.
+        for id in &unsubscribe {
+            subscribed.remove(id);
+        }
+        if let Ok(mut map) = stream_map.write() {
+            for id in &unsubscribe {
+                if let Some(stream_id) = map.remove(id) {
+                    reverse_stream_map.remove(&stream_id);
+                }
+            }
+        }
+        let count = unsubscribe.len();
+        if let Err(e) = ws_tx
+            .send(WsClientMessage::Unsubscribe {
+                terminal_ids: unsubscribe,
+            })
+            .await
+        {
+            log::warn!("failed to send Unsubscribe for {count} terminals: {e}");
+        }
+    }
+    if !subscribe.is_empty() {
+        subscribed.extend(subscribe.iter().cloned());
+        let count = subscribe.len();
+        if let Err(e) = ws_tx
+            .send(WsClientMessage::Subscribe {
+                terminal_ids: subscribe,
+            })
+            .await
+        {
+            log::warn!("failed to send Subscribe for {count} terminals: {e}");
+        }
     }
 }
 
@@ -566,6 +661,10 @@ pub trait ConnectionHandler: Send + Sync + 'static {
     fn on_terminal_snapshot(&self, prefixed_id: &str, data: &[u8]) {
         self.on_terminal_output(prefixed_id, data);
     }
+    /// Any frame arrived on the live session (PTY data, state events, pong,
+    /// periodic stats). For a liveness indicator that must not depend on
+    /// terminal output, which a client streaming few terminals rarely gets.
+    fn on_inbound(&self) {}
     /// Terminal removed — clean up platform terminal object.
     fn remove_terminal(&self, prefixed_id: &str);
     /// Resize a terminal's grid to match the server's dimensions.
@@ -661,6 +760,16 @@ impl<H: ConnectionHandler> RemoteClient<H> {
     /// spends no attempt budget; an established session is left alone.
     pub fn set_reconnect_paused(&self, paused: bool) {
         self.control.set_paused(paused);
+    }
+
+    /// Limit PTY streaming to these terminals (unprefixed ids); `None` streams
+    /// every terminal (the default). Takes effect on the live session at once
+    /// and on every reconnect. A terminal that is not streamed keeps its last
+    /// content until it is streamed again, when the server sends a fresh
+    /// snapshot.
+    pub fn set_streamed_terminals(&self, terminal_ids: Option<Vec<String>>) {
+        self.control
+            .set_streams(terminal_ids.map(|ids| ids.into_iter().collect()));
     }
 
     /// Declare which of this connection's projects the client currently renders.
@@ -1409,7 +1518,11 @@ impl<H: ConnectionHandler> RemoteClient<H> {
                             config.display_endpoint()
                         ))
                     })??;
-                log::info!("WS connected to {} in {}ms", config.display_endpoint(), elapsed_ms());
+                log::info!(
+                    "WS connected to {} in {}ms",
+                    config.display_endpoint(),
+                    elapsed_ms()
+                );
                 AnyWsStream::Unix(Box::new(ws))
             }
             #[cfg(not(unix))]
@@ -1573,11 +1686,15 @@ impl<H: ConnectionHandler> RemoteClient<H> {
             Err(error) => log::warn!("{error}"),
         }
 
-        // Step 5: Subscribe to all terminal streams
-        if !terminal_ids.is_empty() {
+        // Step 5: Subscribe to the terminal streams the client wants (all of
+        // them unless it narrowed the set with `set_streamed_terminals`).
+        let mut streams_rx = control.streams.subscribe();
+        let initial_streams = wanted_streams(&state, streams_rx.borrow_and_update().as_ref());
+        let mut subscribed: HashSet<String> = initial_streams.iter().cloned().collect();
+        if !initial_streams.is_empty() {
             let subscribe_msg = serde_json::json!({
                 "type": "subscribe",
-                "terminal_ids": terminal_ids,
+                "terminal_ids": initial_streams,
             });
             futures::SinkExt::send(
                 &mut ws_write,
@@ -1764,6 +1881,19 @@ impl<H: ConnectionHandler> RemoteClient<H> {
                     let _ = ws_tx_clone.try_send(WsClientMessage::Ping);
                     continue;
                 }
+                Ok(()) = streams_rx.changed() => {
+                    let wanted =
+                        wanted_streams(&cached_state, streams_rx.borrow_and_update().as_ref());
+                    reconcile_streams(
+                        &mut subscribed,
+                        &wanted,
+                        &ws_tx_clone,
+                        &stream_map,
+                        &mut reverse_stream_map,
+                    )
+                    .await;
+                    continue;
+                }
                 Ok(()) = probe_rx.changed() => {
                     if liveness.on_probe_request(Instant::now(), WS_PROBE_MIN_QUIET) {
                         log::info!(
@@ -1784,6 +1914,7 @@ impl<H: ConnectionHandler> RemoteClient<H> {
             };
             if matches!(frame, Some(Ok(_))) {
                 liveness.on_inbound(Instant::now());
+                handler_clone.on_inbound();
             }
             match frame {
                 Some(Ok(tungstenite::Message::Binary(data))) => {
@@ -1818,11 +1949,17 @@ impl<H: ConnectionHandler> RemoteClient<H> {
                             match msg_type {
                                 "subscribed" => {
                                     if let Some(mappings) = value.get("mappings")
-                                        && let Ok(map) =
+                                        && let Ok(mut map) =
                                             serde_json::from_value::<HashMap<String, u32>>(
                                                 mappings.clone(),
                                             )
                                     {
+                                        // A reply that crossed an Unsubscribe: the server has
+                                        // dropped those streams already, so don't route to
+                                        // or send input on their ids.
+                                        map.retain(|terminal_id, _| {
+                                            subscribed.contains(terminal_id)
+                                        });
                                         log::info!("Subscribed to {} terminal streams", map.len());
                                         for (terminal_id, stream_id) in &map {
                                             reverse_stream_map
@@ -1912,44 +2049,20 @@ impl<H: ConnectionHandler> RemoteClient<H> {
                                                     handler_clone.remove_terminal(&prefixed);
                                                 }
 
-                                                // Subscribe to new terminals. Use a blocking
-                                                // send (not try_send): dropping this on a full
-                                                // channel would leave the new terminals silently
-                                                // never streaming output.
-                                                if !diff.added_terminals.is_empty()
-                                                    && let Err(e) = ws_tx_clone
-                                                        .send(WsClientMessage::Subscribe {
-                                                            terminal_ids: diff
-                                                                .added_terminals
-                                                                .clone(),
-                                                        })
-                                                        .await
-                                                {
-                                                    log::warn!(
-                                                        "failed to send Subscribe for {} terminals: {}",
-                                                        diff.added_terminals.len(),
-                                                        e
-                                                    );
-                                                }
-
-                                                // Unsubscribe from removed terminals. Likewise
-                                                // blocking — a dropped Unsubscribe leaks a stream
-                                                // for an already-gone terminal.
-                                                if !diff.removed_terminals.is_empty()
-                                                    && let Err(e) = ws_tx_clone
-                                                        .send(WsClientMessage::Unsubscribe {
-                                                            terminal_ids: diff
-                                                                .removed_terminals
-                                                                .clone(),
-                                                        })
-                                                        .await
-                                                {
-                                                    log::warn!(
-                                                        "failed to send Unsubscribe for {} terminals: {}",
-                                                        diff.removed_terminals.len(),
-                                                        e
-                                                    );
-                                                }
+                                                // Stream what is wanted now: new terminals
+                                                // that pass the filter start, removed ones stop.
+                                                let wanted = wanted_streams(
+                                                    &new_state,
+                                                    streams_rx.borrow().as_ref(),
+                                                );
+                                                reconcile_streams(
+                                                    &mut subscribed,
+                                                    &wanted,
+                                                    &ws_tx_clone,
+                                                    &stream_map,
+                                                    &mut reverse_stream_map,
+                                                )
+                                                .await;
 
                                                 cached_state = new_state.clone();
 
@@ -2296,6 +2409,99 @@ pub async fn try_refresh_token(
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn state_with_terminals(projects: &[(&str, &str)]) -> StateResponse {
+        let projects: Vec<serde_json::Value> = projects
+            .iter()
+            .map(|(project_id, terminal_id)| {
+                serde_json::json!({
+                    "id": project_id,
+                    "name": project_id,
+                    "path": "/tmp",
+                    "show_in_overview": true,
+                    "layout": {
+                        "type": "terminal",
+                        "terminal_id": terminal_id,
+                        "minimized": false,
+                        "detached": false,
+                    },
+                    "terminal_names": {},
+                    "folder_color": "default",
+                })
+            })
+            .collect();
+        serde_json::from_value(serde_json::json!({
+            "state_version": 1,
+            "projects": projects,
+            "focused_project_id": null,
+            "fullscreen_terminal": null,
+        }))
+        .expect("test state deserializes")
+    }
+
+    #[test]
+    fn without_a_filter_every_terminal_streams() {
+        let state = state_with_terminals(&[("p1", "t1"), ("p2", "t2")]);
+        assert_eq!(wanted_streams(&state, None), vec!["t1", "t2"]);
+    }
+
+    #[test]
+    fn a_filter_streams_only_listed_terminals_that_exist() {
+        let state = state_with_terminals(&[("p1", "t1"), ("p2", "t2")]);
+        let filter: HashSet<String> = ["t2", "gone"].map(String::from).into();
+        assert_eq!(wanted_streams(&state, Some(&filter)), vec!["t2"]);
+        assert!(wanted_streams(&state, Some(&HashSet::new())).is_empty());
+    }
+
+    #[test]
+    fn subscription_changes_start_new_streams_and_stop_unwanted_ones() {
+        let subscribed: HashSet<String> = ["t1", "t2"].map(String::from).into();
+        let wanted = vec!["t2".to_string(), "t3".to_string()];
+        assert_eq!(
+            subscription_changes(&subscribed, &wanted),
+            (vec!["t3".to_string()], vec!["t1".to_string()])
+        );
+        assert_eq!(
+            subscription_changes(&subscribed, &["t1".to_string(), "t2".to_string()]),
+            (vec![], vec![])
+        );
+    }
+
+    #[tokio::test]
+    async fn reconcile_forgets_stream_ids_of_stopped_terminals() {
+        let (tx, rx) = async_channel::unbounded();
+        let mut subscribed: HashSet<String> = ["t1", "t2"].map(String::from).into();
+        let stream_map = std::sync::RwLock::new(HashMap::from([
+            ("t1".to_string(), 1),
+            ("t2".to_string(), 2),
+        ]));
+        let mut reverse = HashMap::from([(1, "t1".to_string()), (2, "t2".to_string())]);
+
+        reconcile_streams(
+            &mut subscribed,
+            &["t2".to_string(), "t3".to_string()],
+            &tx,
+            &stream_map,
+            &mut reverse,
+        )
+        .await;
+
+        assert_eq!(subscribed, ["t2", "t3"].map(String::from).into());
+        assert_eq!(
+            *stream_map.read().unwrap(),
+            HashMap::from([("t2".to_string(), 2)])
+        );
+        assert_eq!(reverse, HashMap::from([(2, "t2".to_string())]));
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(WsClientMessage::Unsubscribe { terminal_ids }) if terminal_ids == ["t1"]
+        ));
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(WsClientMessage::Subscribe { terminal_ids }) if terminal_ids == ["t3"]
+        ));
+        assert!(rx.try_recv().is_err());
+    }
 
     #[derive(Default)]
     struct TestHandler {

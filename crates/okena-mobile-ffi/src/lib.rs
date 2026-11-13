@@ -79,6 +79,15 @@ pub fn on_app_background() {
     ConnectionManager::get().on_app_background();
 }
 
+/// Stream PTY output only for `terminal_ids`, the terminals on screen; an
+/// empty list streams nothing (dashboard, background). A connection starts
+/// with nothing streamed. A terminal that comes back on screen gets a fresh
+/// snapshot from the server.
+#[uniffi::export]
+pub fn set_streamed_terminals(conn_id: String, terminal_ids: Vec<String>) {
+    ConnectionManager::get().set_streamed_terminals(&conn_id, terminal_ids);
+}
+
 /// Retry one connection now ("Retry now" in the UI): skips the backoff and
 /// resets the attempt budget, keeping terminals and cached state.
 #[uniffi::export]
