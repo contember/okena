@@ -561,13 +561,21 @@ export interface OkenaNative {
   getProjectOrder(connId: ConnId): ProjectId[];
 
   /**
-   * Activity signals of every terminal the connection mirrors (the client
-   * subscribes to all of them). Cheap: one call per state poll.
+   * Activity signals of every terminal the connection mirrors. Bell,
+   * notification and output time only move for streamed terminals (see
+   * {@link setStreamedTerminals}). Cheap: one call per state poll.
    */
   getTerminalActivity(connId: ConnId): TerminalActivity[];
 
   /** The user viewed a terminal: clear its unseen bell / notification. */
   markTerminalSeen(connId: ConnId, terminalId: TerminalId): void;
+
+  /**
+   * Stream PTY output only for these terminals (the ones on screen); `[]`
+   * streams nothing. A connection starts with nothing streamed. A terminal
+   * that is streamed again gets a fresh snapshot from the server.
+   */
+  setStreamedTerminals(connId: ConnId, terminalIds: TerminalId[]): void;
 
   /** The fullscreen terminal, if one is active. */
   getFullscreenTerminal(connId: ConnId): FullscreenInfo | undefined;
@@ -937,6 +945,12 @@ export function getOkenaNative(): OkenaNative {
           : [],
       markTerminalSeen: (connId: ConnId, terminalId: TerminalId) => {
         if (typeof gen.markTerminalSeen === 'function') gen.markTerminalSeen(connId, terminalId);
+      },
+      // Bindings generated before `set_streamed_terminals` existed stream
+      // every terminal, as before.
+      setStreamedTerminals: (connId: ConnId, terminalIds: TerminalId[]) => {
+        if (typeof gen.setStreamedTerminals === 'function')
+          gen.setStreamedTerminals(connId, terminalIds);
       },
       // Bindings generated before `scroll_wheel` / `take_dirty` existed: keep
       // scrolling the local scrollback and keep the always-repaint loop.

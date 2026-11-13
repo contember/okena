@@ -27,13 +27,17 @@ impl MobileConnectionHandler {
         &self.terminals
     }
 
-    /// Seconds since last WS activity (terminal output).
+    /// Seconds since anything last arrived on the WebSocket.
     pub fn seconds_since_activity(&self) -> f64 {
         self.last_activity.lock().elapsed().as_secs_f64()
     }
 }
 
 impl ConnectionHandler for MobileConnectionHandler {
+    fn on_inbound(&self) {
+        *self.last_activity.lock() = Instant::now();
+    }
+
     fn create_terminal(
         &self,
         _connection_id: &str,
