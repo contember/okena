@@ -514,6 +514,9 @@ impl Okena {
         nudge_whats_new(cx);
 
         cx.subscribe(&remote_manager, |this, _rm, event, cx| match event {
+            // Window views handle title invalidation directly, independently of
+            // content pacing and sidebar activity throttling.
+            RemoteManagerEvent::TerminalTitlesChanged(_) => {}
             RemoteManagerEvent::TerminalActivity(terminal_ids) => {
                 if !terminal_ids.is_empty() {
                     for terminal_id in terminal_ids {

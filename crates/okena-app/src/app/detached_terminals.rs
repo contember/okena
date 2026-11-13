@@ -138,13 +138,13 @@ impl Okena {
                     .detach();
                     let observed_id = terminal_id_owned.clone();
                     cx.subscribe_in(&remote_manager, window, move |this, _, event, window, cx| {
-                        if let okena_remote_client::manager::RemoteManagerEvent::TerminalActivity(
+                        if let okena_remote_client::manager::RemoteManagerEvent::TerminalTitlesChanged(
                             ids,
                         ) = event
-                            && crate::settings::settings(cx).show_active_terminal_title
                             && ids.contains(&observed_id)
                         {
                             this.sync_window_title(window, cx);
+                            cx.notify();
                         }
                     })
                     .detach();
