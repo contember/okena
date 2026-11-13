@@ -29,7 +29,7 @@ log = "0.4"
 
 # Client feature deps (async networking)
 tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "macros", "time"], optional = true }
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"], optional = true }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "gzip"], optional = true }
 tokio-tungstenite = { version = "0.24", features = ["rustls-tls-native-roots"], optional = true }
 async-channel = { version = "2.3", optional = true }
 futures = { version = "0.3", optional = true }

@@ -193,10 +193,13 @@ pub fn build_router(
 
     // Routes that require auth
     let protected = Router::new()
-        .route("/v1/state", axum::routing::get(state::get_state))
+        .route(
+            "/v1/state",
+            axum::routing::get(state::get_state).layer(gzip()),
+        )
         .route(
             "/v1/claude/terminals/{terminal_id}",
-            axum::routing::get(claude::get_session),
+            axum::routing::get(claude::get_session).layer(gzip()),
         )
         .route(
             "/v1/claude/sessions/{session_id}",
@@ -204,7 +207,7 @@ pub fn build_router(
         )
         .route(
             "/v1/claude/terminals/{terminal_id}/transcript",
-            axum::routing::get(claude::get_transcript),
+            axum::routing::get(claude::get_transcript).layer(gzip()),
         )
         .route(
             "/v1/claude/terminals/{terminal_id}/subagents",
@@ -218,7 +221,10 @@ pub fn build_router(
             "/v1/claude/terminals/{terminal_id}/dialogs/{dialog_id}",
             axum::routing::post(claude::post_dialog_decision),
         )
-        .route("/v1/actions", axum::routing::post(actions::post_actions))
+        .route(
+            "/v1/actions",
+            axum::routing::post(actions::post_actions).layer(gzip()),
+        )
         .route(
             "/v1/files/download",
             axum::routing::post(download::post_download),
@@ -239,14 +245,17 @@ pub fn build_router(
                 .layer(DefaultBodyLimit::max(paste_image::FILE_UPLOAD_LIMIT)),
         )
         .route("/v1/refresh", axum::routing::post(refresh::post_refresh))
-        .route("/v1/usage", axum::routing::get(usage::get_usage))
+        .route(
+            "/v1/usage",
+            axum::routing::get(usage::get_usage).layer(gzip()),
+        )
         .route(
             "/v1/usage/refresh",
             axum::routing::post(usage::post_refresh),
         )
         .route(
             "/v1/usage/pool/{account_id}",
-            axum::routing::get(usage::get_pool_account_history),
+            axum::routing::get(usage::get_pool_account_history).layer(gzip()),
         )
         .route("/v1/tokens", axum::routing::get(tokens::list_tokens))
         .route(
@@ -337,6 +346,15 @@ pub fn build_router(
         .layer(DefaultBodyLimit::max(1024 * 1024)) // 1 MB
         .fallback(serve_web_asset)
         .with_state(state)
+}
+
+/// gzip for the JSON routes, applied per route rather than router-wide so file
+/// downloads and the WebSocket upgrade keep their raw bodies (and a download
+/// keeps its `Content-Length`). A full `/v1/state` runs to hundreds of KB and a
+/// remote client refetches it on every `state_changed`; JSON compresses ~7x.
+/// Only responses to requests that send `Accept-Encoding: gzip` are compressed.
+fn gzip() -> tower_http::compression::CompressionLayer {
+    tower_http::compression::CompressionLayer::new()
 }
 
 /// Serve embedded web client assets (SPA with index.html fallback for client-side routing).
@@ -622,6 +640,44 @@ mod tests {
                 .await,
             StatusCode::OK
         );
+    }
+
+    #[tokio::test]
+    async fn json_routes_are_gzipped_only_when_the_client_accepts_it() {
+        let store = Arc::new(AuthStore::with_secret(vec![7u8; 32]));
+        let token = paired_token(&store);
+        let mut router = test_router(store);
+        let encoding = |accept: Option<&'static str>| {
+            let mut builder = axum::http::Request::builder()
+                .uri("/v1/usage")
+                .header("authorization", format!("Bearer {token}"));
+            if let Some(accept) = accept {
+                builder = builder.header("accept-encoding", accept);
+            }
+            let mut req = builder.body(Body::empty()).expect("build request");
+            req.extensions_mut().insert(OFF_HOST);
+            req
+        };
+
+        let response = router
+            .call(encoding(Some("gzip")))
+            .await
+            .expect("the router is infallible");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get("content-encoding")
+                .map(|v| v.to_str().unwrap()),
+            Some("gzip")
+        );
+
+        let response = router
+            .call(encoding(None))
+            .await
+            .expect("the router is infallible");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(response.headers().get("content-encoding").is_none());
     }
 
     #[tokio::test]
