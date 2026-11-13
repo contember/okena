@@ -14,6 +14,7 @@ pub mod owner_only;
 pub mod process;
 pub mod profiles;
 pub mod render_probe;
+pub mod report;
 pub mod review;
 pub mod selection;
 pub mod send_payload;

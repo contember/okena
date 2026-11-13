@@ -167,6 +167,7 @@ pub async fn post_prompt(
     Path(terminal_id): Path<String>,
     Json(request): Json<ApiClaudePromptRequest>,
 ) -> Result<Json<ApiClaudePromptResponse>, ClaudeRemoteError> {
+    state.report_hub.note_input(&terminal_id);
     let delivery = state
         .claude_hub
         .send_prompt(

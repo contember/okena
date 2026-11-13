@@ -205,6 +205,123 @@ pub enum Command {
         cmd: UpdateCmd,
     },
 
+    // ── Report-back ──────────────────────────────────────────────────────────
+    /// Start a command or agent in a new terminal that reports back to yours
+    ///
+    /// The new terminal joins your project (or --project), is named after the
+    /// program (or --name) and linked to the terminal you run this in (or
+    /// --parent): when the command exits, an agent's turn ends or it needs
+    /// you, a `<okena-report …>` message lands in your input, or in your
+    /// `okena wait`. Prints the new terminal id. It closes with your terminal
+    /// unless --keep. The command is typed into a POSIX shell, followed by
+    /// `; okena report --exit-code $?`.
+    Spawn {
+        /// Name of the new terminal (default: the program's name)
+        #[arg(long)]
+        name: Option<String>,
+        /// Project for the new terminal (default: the parent's)
+        #[arg(long)]
+        project: Option<String>,
+        /// Terminal to report to (default: $OKENA_TERMINAL_ID)
+        #[arg(long)]
+        parent: Option<String>,
+        /// Keep the new terminal when the parent terminal closes
+        #[arg(long)]
+        keep: bool,
+        /// Start `claude` like `okena claude start` (the args after `--` go to claude)
+        #[arg(long)]
+        claude: bool,
+        /// With --claude: the first prompt
+        #[arg(long)]
+        prompt: Option<String>,
+        /// With --claude: read the first prompt from this file
+        #[arg(long)]
+        prompt_file: Option<std::path::PathBuf>,
+        /// With --claude: accept the folder-trust dialog
+        #[arg(long)]
+        trust: bool,
+        /// Block until the child reports, print the report and exit with its exit code
+        #[arg(long)]
+        wait: bool,
+        /// With --wait: seconds to wait
+        #[arg(long, default_value_t = 3600)]
+        timeout: u64,
+        /// Output JSON instead of the default plain text
+        #[arg(long)]
+        json: bool,
+        /// The command (after `--`)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        command: Vec<String>,
+    },
+    /// Report to the terminal that started yours (run inside a child)
+    ///
+    /// Sends the text to the parent as `<okena-report event="report">`, or
+    /// `event="ask"` with --ask. Uses $OKENA_TERMINAL_ID. Exit 1 when this
+    /// terminal has no parent.
+    Report {
+        /// Ask the parent for help or a decision
+        #[arg(long)]
+        ask: bool,
+        /// Report that the started command exited with this code (what `spawn` appends)
+        #[arg(long, allow_hyphen_values = true)]
+        exit_code: Option<i32>,
+        /// Read a codex `notify` event (the JSON argument) and report a finished turn
+        #[arg(long, hide = true)]
+        codex_notify: bool,
+        /// The report (joined with spaces)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        text: Vec<String>,
+    },
+    /// Block until a child of yours reports
+    ///
+    /// Prints each report (`<okena-report …>`) not returned by an earlier
+    /// wait. Without children it waits for all of yours. Reports that arrive
+    /// while you wait are not typed into your input. Exit 1 on timeout.
+    Wait {
+        /// Children to wait for (default: all of yours)
+        children: Vec<String>,
+        /// Wait until every one of them has reported
+        #[arg(long)]
+        all: bool,
+        /// Whose children (default: $OKENA_TERMINAL_ID)
+        #[arg(long)]
+        parent: Option<String>,
+        /// Seconds to wait
+        #[arg(long, default_value_t = 3600)]
+        timeout: u64,
+        /// Output JSON instead of the default plain text
+        #[arg(long)]
+        json: bool,
+    },
+    /// List your children: `id<TAB>name<TAB>state<TAB>delivery<TAB>parent`
+    Children {
+        /// Every link in this Okena, not just yours
+        #[arg(long)]
+        all: bool,
+        /// Whose children (default: $OKENA_TERMINAL_ID)
+        #[arg(long)]
+        parent: Option<String>,
+        /// Output JSON instead of the default plain text
+        #[arg(long)]
+        json: bool,
+    },
+    /// Make an existing terminal report to yours (or --parent)
+    Link {
+        /// The child terminal
+        child: String,
+        /// Terminal to report to (default: $OKENA_TERMINAL_ID)
+        #[arg(long)]
+        parent: Option<String>,
+        /// Close the child when the parent terminal closes
+        #[arg(long)]
+        owned: bool,
+    },
+    /// Stop a terminal reporting to its parent
+    Unlink {
+        /// The child terminal
+        child: String,
+    },
+
     /// Follow and steer the `claude` sessions running in terminals
     Claude {
         #[command(subcommand)]

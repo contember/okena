@@ -6,6 +6,7 @@ pub mod health;
 pub mod pair;
 pub mod paste_image;
 pub mod refresh;
+mod report;
 pub mod restart;
 pub mod shutdown;
 pub mod state;
@@ -47,6 +48,7 @@ struct WebAssets;
 pub struct AppState {
     pub bridge_tx: BridgeSender,
     pub claude_hub: Arc<crate::claude_remote::ClaudeRemoteHub>,
+    pub report_hub: Arc<crate::report::ReportHub>,
     pub auth_store: Arc<AuthStore>,
     pub broadcaster: Arc<PtyBroadcaster>,
     pub state_version: Arc<tokio::sync::watch::Sender<u64>>,
@@ -164,9 +166,11 @@ pub fn build_router(
     update_info: okena_ext_updater::UpdateInfo,
     usage: crate::usage::UsageHub,
 ) -> Router {
+    let report_hub = crate::report::ReportHub::new(bridge_tx.clone(), claude_hub.clone());
     let state = AppState {
         bridge_tx,
         claude_hub,
+        report_hub,
         auth_store,
         broadcaster,
         state_version,
@@ -217,6 +221,14 @@ pub fn build_router(
         .route(
             "/v1/claude/terminals/{terminal_id}/dialogs/{dialog_id}",
             axum::routing::post(claude::post_dialog_decision),
+        )
+        .route("/v1/report", axum::routing::post(report::post_report))
+        .route("/v1/report/link", axum::routing::post(report::post_link))
+        .route("/v1/report/unlink", axum::routing::post(report::post_unlink))
+        .route("/v1/report/wait", axum::routing::post(report::post_wait))
+        .route(
+            "/v1/report/children",
+            axum::routing::get(report::get_children),
         )
         .route("/v1/actions", axum::routing::post(actions::post_actions))
         .route(

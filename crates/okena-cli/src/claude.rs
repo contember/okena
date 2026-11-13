@@ -182,13 +182,37 @@ pub fn cli_start(
     json_mode: bool,
     claude_args: &[String],
 ) -> i32 {
+    let prompt = prompt_file
+        .map(|path| {
+            std::fs::read_to_string(path)
+                .map_err(|e| format!("Cannot read {}: {e}", path.display()))
+        })
+        .transpose();
+    match prompt {
+        Ok(prompt) => start(
+            terminal,
+            prompt,
+            trust,
+            wait,
+            timeout_secs,
+            json_mode,
+            claude_args,
+        ),
+        Err(e) => exit_code(Err(e)),
+    }
+}
+
+/// `claude start` with the prompt in hand (`okena spawn --claude` too).
+pub(crate) fn start(
+    terminal: &str,
+    prompt: Option<String>,
+    trust: bool,
+    wait: Option<Duration>,
+    timeout_secs: u64,
+    json_mode: bool,
+    claude_args: &[String],
+) -> i32 {
     exit_code((|| {
-        let prompt = prompt_file
-            .map(|path| {
-                std::fs::read_to_string(path)
-                    .map_err(|e| format!("Cannot read {}: {e}", path.display()))
-            })
-            .transpose()?;
         let (token, state) = connect()?;
         let (project_id, terminal_id) = resolve::resolve_terminal(&state, terminal)?;
         let settings = remote_settings(&token)?;
@@ -448,7 +472,7 @@ fn check_claude_args(args: &[String], shell: &ShellType) -> Result<(), String> {
 /// The shell a terminal runs, resolved the way the daemon spawns it: its own
 /// setting, else the project's default (a project set to `Default` means the
 /// system shell), else the global `default_shell`.
-fn pane_shell(
+pub(crate) fn pane_shell(
     state: &StateResponse,
     project_id: &str,
     terminal_id: &str,
@@ -480,7 +504,7 @@ fn terminal_shell(node: &ApiLayoutNode, terminal_id: &str) -> Option<ShellType> 
 /// The system default is `$SHELL` on Unix (unknown: assumed POSIX) and cmd on
 /// Windows; a custom shell is judged by its program name, case-insensitively,
 /// looking through an `env` wrapper.
-fn reads_posix_quoting(shell: &ShellType) -> bool {
+pub(crate) fn reads_posix_quoting(shell: &ShellType) -> bool {
     let program = match shell {
         ShellType::Custom { path, args } => {
             if program_name(path) == "env" {

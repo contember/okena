@@ -48,6 +48,13 @@ pub enum RemoteCommand {
         probe_foreground: bool,
         read_screen: bool,
     },
+    /// The terminals of `terminal_ids` that still exist, answered with a
+    /// serialized `Vec<okena_core::report::ReportProbeEntry>`. Those also in
+    /// `screen_of` carry their visible screen.
+    ReportProbe {
+        terminal_ids: Vec<String>,
+        screen_of: Vec<String>,
+    },
 }
 
 /// Channel types for the bridge.

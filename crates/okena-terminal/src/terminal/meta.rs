@@ -109,6 +109,14 @@ impl Terminal {
     /// edge. Returns true if anything marked it since the previous call, then
     /// resets it. The PTY event loop uses this to bump the remote
     /// `state_version` so remote / mobile clients re-fetch.
+    /// How many times the agent status's lifecycle changed in this pane
+    /// (including to and from no status). Comparing two reads tells a poller
+    /// that the lifecycle moved even when it is back where it was.
+    pub fn agent_lifecycle_changes(&self) -> u64 {
+        self.agent_lifecycle_changes
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     pub fn take_remote_dirty(&self) -> bool {
         self.remote_dirty
             .swap(false, std::sync::atomic::Ordering::Relaxed)

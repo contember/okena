@@ -242,6 +242,10 @@ pub struct Terminal {
     /// `okena-app`. Mirrors `bell_pending`.
     pub(super) remote_dirty: Arc<AtomicBool>,
 
+    /// How often the agent status's lifecycle changed. `Arc` shared with
+    /// `OscSidecar`, read via `agent_lifecycle_changes`.
+    pub(super) agent_lifecycle_changes: Arc<AtomicU64>,
+
     /// Durable agent session captured from the agent-status OSC `lbl=` (`agent`
     /// + `session_id` + `transcript_path`). `Arc` shared with `OscSidecar`.
     ///
@@ -491,6 +495,7 @@ impl Terminal {
         let progress = Arc::new(Mutex::new(None));
         let agent_status = Arc::new(Mutex::new(None));
         let remote_dirty = Arc::new(AtomicBool::new(false));
+        let agent_lifecycle_changes = Arc::new(AtomicU64::new(0));
         let agent_session = Arc::new(Mutex::new(None));
         let agent_session_dirty = Arc::new(AtomicBool::new(false));
         let pending_agent_sessions = Arc::new(Mutex::new(Vec::new()));
@@ -500,6 +505,7 @@ impl Terminal {
             progress.clone(),
             agent_status.clone(),
             remote_dirty.clone(),
+            agent_lifecycle_changes.clone(),
             agent_session.clone(),
             agent_session_dirty.clone(),
             pending_agent_sessions.clone(),
@@ -538,6 +544,7 @@ impl Terminal {
             progress,
             agent_status,
             remote_dirty,
+            agent_lifecycle_changes,
             agent_session,
             agent_session_dirty,
             pending_agent_sessions,

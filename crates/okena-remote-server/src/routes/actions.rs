@@ -179,6 +179,9 @@ pub async fn post_actions(
     State(state): State<AppState>,
     Json(action): Json<ActionRequest>,
 ) -> impl IntoResponse {
+    if let Some(terminal_id) = input_target(&action) {
+        state.report_hub.note_input(terminal_id);
+    }
     match run_action(
         &state.bridge_tx,
         &state.presentation_tx,
@@ -209,6 +212,18 @@ pub async fn post_actions(
             Json(serde_json::json!({"error": "command processing failed"})),
         )
             .into_response(),
+    }
+}
+
+/// The terminal an action types into: a child of another terminal that gets
+/// input runs again, and its next report is awaited.
+fn input_target(action: &ActionRequest) -> Option<&str> {
+    match action {
+        ActionRequest::SendText { terminal_id, .. }
+        | ActionRequest::SendBytes { terminal_id, .. }
+        | ActionRequest::RunCommand { terminal_id, .. }
+        | ActionRequest::SendSpecialKey { terminal_id, .. } => Some(terminal_id),
+        _ => None,
     }
 }
 

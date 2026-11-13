@@ -5,7 +5,7 @@ use okena_core::agent_status::{AgentLifecycle, AgentStatus};
 use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use super::app_version::app_version;
 use super::program_status::{self, ProgramStatus, Report};
@@ -66,6 +66,7 @@ impl OscSidecar {
         progress: Arc<Mutex<Option<TerminalProgress>>>,
         agent_status: Arc<Mutex<Option<AgentStatus>>>,
         remote_dirty: Arc<AtomicBool>,
+        agent_lifecycle_changes: Arc<AtomicU64>,
         agent_session: Arc<Mutex<Option<AgentSession>>>,
         agent_session_dirty: Arc<AtomicBool>,
         pending_agent_sessions: Arc<Mutex<Vec<AgentSession>>>,
@@ -80,6 +81,7 @@ impl OscSidecar {
                 progress,
                 agent_status,
                 remote_dirty,
+                agent_lifecycle_changes,
                 agent_session,
                 agent_session_dirty,
                 pending_agent_sessions,
@@ -117,6 +119,10 @@ struct SidecarPerform {
     /// remote / mobile clients re-fetch. Generic by design — not agent-specific.
     /// Mirrors `bell_pending`.
     remote_dirty: Arc<AtomicBool>,
+    /// Counts changes of the effective status's lifecycle (including to and
+    /// from no status), shared with `Terminal`. A reader that polls the status
+    /// sees from it that a turn started and ended between two reads.
+    agent_lifecycle_changes: Arc<AtomicU64>,
     /// Sticky agent session identity (`agent` + `session_id` + `transcript_path`)
     /// captured from the `lbl=` of an agent-status OSC. Unlike `agent_status`
     /// it survives `st=clear`; the app layer persists it for resume + stats.
@@ -515,6 +521,9 @@ impl SidecarPerform {
 
         if changed {
             self.remote_dirty.store(true, Ordering::Relaxed);
+        }
+        if previous_lifecycle != new_lifecycle {
+            self.agent_lifecycle_changes.fetch_add(1, Ordering::Relaxed);
         }
         if let Some(body) = notify_body {
             self.queue_notification(TerminalNotification { title: None, body });

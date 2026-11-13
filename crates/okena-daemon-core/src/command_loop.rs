@@ -4547,6 +4547,12 @@ pub async fn daemon_command_loop(
                     None => CommandResult::Err(format!("terminal not found: {terminal_id}")),
                 }
             }
+
+            // ── ReportProbe ──────────────────────────────────────────────────
+            RemoteCommand::ReportProbe {
+                terminal_ids,
+                screen_of,
+            } => report_probe(&terminal_ids, &screen_of, &terminals, &workspace),
         };
 
         if let Some(reply) = reply {
@@ -4594,6 +4600,54 @@ fn serialize_terminal_info(info: ClaudeTerminalInfo) -> CommandResult {
     match serde_json::to_value(info) {
         Ok(v) => CommandResult::Ok(Some(v)),
         Err(e) => CommandResult::Err(format!("failed to serialize terminal info: {e}")),
+    }
+}
+
+/// The report hub's poll: each terminal of `terminal_ids` that is still in a
+/// project, with its name and agent status, and the visible screen of those in
+/// `screen_of`. A terminal not in any project is left out: it is gone.
+fn report_probe(
+    terminal_ids: &[String],
+    screen_of: &[String],
+    terminals: &TerminalsRegistry,
+    workspace: &Arc<Mutex<Workspace>>,
+) -> CommandResult {
+    let located: Vec<(String, String, Option<String>)> = {
+        let ws = workspace.lock();
+        terminal_ids
+            .iter()
+            .filter_map(|terminal_id| {
+                let project = ws.find_project_for_terminal(terminal_id)?;
+                Some((
+                    terminal_id.clone(),
+                    project.id.clone(),
+                    project.terminal_names.get(terminal_id).cloned(),
+                ))
+            })
+            .collect()
+    };
+    let registry = terminals.lock();
+    let entries: Vec<okena_core::report::ReportProbeEntry> = located
+        .into_iter()
+        .map(|(terminal_id, project_id, name)| {
+            let terminal = registry.get(&terminal_id);
+            let status = terminal.and_then(|terminal| terminal.agent_status());
+            okena_core::report::ReportProbeEntry {
+                screen: terminal
+                    .filter(|_| screen_of.contains(&terminal_id))
+                    .map(|terminal| terminal.visible_text()),
+                lifecycle_changes: terminal.map_or(0, |terminal| terminal.agent_lifecycle_changes()),
+                lifecycle: status.as_ref().map(|status| status.lifecycle),
+                custom: status.and_then(|status| status.custom),
+                terminal_id,
+                project_id,
+                name,
+            }
+        })
+        .collect();
+    match serde_json::to_value(entries) {
+        Ok(value) => CommandResult::Ok(Some(value)),
+        Err(error) => CommandResult::Err(format!("failed to serialize report probe: {error}")),
     }
 }
 

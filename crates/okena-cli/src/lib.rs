@@ -3,6 +3,7 @@ pub mod claude_remote;
 pub mod commands;
 pub mod parser;
 pub mod register;
+pub mod report;
 pub mod resolve;
 pub mod status;
 
@@ -410,6 +411,55 @@ fn dispatch(cli: Cli) -> i32 {
                 json,
             } => commands::cli_update_revert(&version, keep_config, dry_run, yes, restart, json),
         },
+        Command::Spawn {
+            name,
+            project,
+            parent,
+            keep,
+            claude,
+            prompt,
+            prompt_file,
+            trust,
+            wait,
+            timeout,
+            json,
+            command,
+        } => report::cli_spawn(report::SpawnOptions {
+            name: name.as_deref(),
+            project: project.as_deref(),
+            parent: parent.as_deref(),
+            keep,
+            claude,
+            prompt,
+            prompt_file: prompt_file.as_deref(),
+            trust,
+            wait,
+            timeout_secs: timeout,
+            json,
+            command: &command,
+        }),
+        Command::Report {
+            ask,
+            exit_code,
+            codex_notify,
+            text,
+        } => report::cli_report(&text, ask, exit_code, codex_notify),
+        Command::Wait {
+            children,
+            all,
+            parent,
+            timeout,
+            json,
+        } => report::cli_wait(&children, all, parent.as_deref(), timeout, json),
+        Command::Children { all, parent, json } => {
+            report::cli_children(all, parent.as_deref(), json)
+        }
+        Command::Link {
+            child,
+            parent,
+            owned,
+        } => report::cli_link(&child, parent.as_deref(), owned),
+        Command::Unlink { child } => report::cli_unlink(&child),
         Command::Claude { cmd } => match cmd {
             ClaudeCmd::Ls { json } => claude::cli_ls(json),
             ClaudeCmd::Start {
@@ -613,13 +663,25 @@ fn ensure_token() -> Result<String, String> {
     register::register()
 }
 
+const API_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 fn api_get(path: &str, token: &str) -> Result<String, String> {
-    api_request(path, token, None)
+    api_request(path, token, None, API_TIMEOUT)
 }
 
 /// POST a JSON body to a REST route (not an `ActionRequest`).
 fn api_post_json(path: &str, token: &str, body: &serde_json::Value) -> Result<String, String> {
-    api_request(path, token, Some(body))
+    api_request(path, token, Some(body), API_TIMEOUT)
+}
+
+/// [`api_post_json`] for a route that may block up to `timeout` (a long poll).
+fn api_post_json_blocking(
+    path: &str,
+    token: &str,
+    body: &serde_json::Value,
+    timeout: std::time::Duration,
+) -> Result<String, String> {
+    api_request(path, token, Some(body), timeout)
 }
 
 /// GET `path`, or POST `body` to it. A failure carries the server's plain-text
@@ -628,6 +690,7 @@ fn api_request(
     path: &str,
     token: &str,
     body: Option<&serde_json::Value>,
+    timeout: std::time::Duration,
 ) -> Result<String, String> {
     let server = discover_server()?;
     let (client, url) = server.client_and_url(path)?;
@@ -637,7 +700,7 @@ fn api_request(
     };
     let resp = request
         .header("Authorization", format!("Bearer {}", token))
-        .timeout(std::time::Duration::from_secs(10))
+        .timeout(timeout)
         .send()
         .map_err(|e| format!("Request failed: {e}"))?;
 
