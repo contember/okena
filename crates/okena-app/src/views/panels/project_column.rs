@@ -181,6 +181,26 @@ pub struct ProjectColumn {
 }
 
 impl ProjectColumn {
+    /// Titles are runtime terminal state, not workspace snapshots. Invalidate
+    /// the cached column and its nested tab/pane headers when a title changes.
+    pub(crate) fn refresh_terminal_titles(&mut self, ids: &[String], cx: &mut Context<Self>) {
+        let affected = self
+            .workspace
+            .read(cx)
+            .project(&self.project_id)
+            .and_then(|project| project.layout.as_ref())
+            .is_some_and(|layout| ids.iter().any(|id| layout.find_terminal_path(id).is_some()));
+        if !affected {
+            return;
+        }
+        if let Some(container) = &self.layout_container {
+            container.update(cx, |container, cx| {
+                container.refresh_terminal_titles(ids, cx)
+            });
+        }
+        cx.notify();
+    }
+
     // GPUI view constructor: each param is a distinct injected dependency.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
