@@ -103,6 +103,25 @@ Soft keyboard / KeyToolbar tap → sendText() / sendSpecialKey() (JSI)
   → ConnectionManager.send_ws_message() → WsClientMessage::SendText → WS → server PTY stdin
 ```
 
+### What streams
+
+The phone streams PTY output only for the terminal on screen. A connection starts with nothing
+streamed (`ConnectionManager` sets an empty filter before connecting), and the workspace store
+calls `setStreamedTerminals` with the selected terminal, or with `[]` while the dashboard is open,
+the app is in the background or polling stopped. The filter lives in the transport
+(`RemoteClient::set_streamed_terminals`), so it survives reconnects; the session reconciles its
+subscriptions on every filter change and `state_changed`. A terminal that streams again gets a
+fresh snapshot from the server, so switching terminals costs one snapshot.
+
+Consequence: bell, OSC 9/777 notification and the output-based "running" signal come only from
+the streamed terminal. Agent status (`terminalAgentStatus`) and Claude dialogs come with the state
+and cover every terminal. The connection dot's liveness counts any inbound frame (pong, the 2 s
+system stats), not terminal output.
+
+The JSON routes (`/v1/state`, `/v1/actions`, usage, Claude session/transcript) are gzipped for
+clients that send `Accept-Encoding: gzip`; the transport's reqwest client does, except over the
+local Unix socket.
+
 ### State sync (project list, layouts)
 
 ```

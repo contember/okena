@@ -507,6 +507,10 @@ impl ConnectionManager {
         let (event_tx, event_rx) = async_channel::bounded::<ConnectionEvent>(256);
 
         let client = RemoteClient::new(config, self.runtime.clone(), handler.clone(), event_tx);
+        // The phone shows one terminal at a time: stream nothing until the UI
+        // names what is on screen (`set_streamed_terminals`), instead of
+        // downloading every terminal's output on connect.
+        client.set_streamed_terminals(Some(Vec::new()));
 
         // Spawn event processor task
         let conn_id_clone = conn_id.clone();
@@ -610,6 +614,18 @@ impl ConnectionManager {
         for (conn_id, conn) in connections.iter() {
             log::info!("[{conn_id}] app background, pausing reconnects");
             conn.client.read().set_reconnect_paused(true);
+        }
+    }
+
+    /// Stream PTY output only for these terminals (unprefixed ids): the ones
+    /// on screen. Survives reconnects; the rest keep their last content until
+    /// streamed again, when the server sends a fresh snapshot.
+    pub fn set_streamed_terminals(&self, conn_id: &str, terminal_ids: Vec<String>) {
+        let connections = self.connections.read();
+        if let Some(conn) = connections.get(conn_id) {
+            conn.client
+                .read()
+                .set_streamed_terminals(Some(terminal_ids));
         }
     }
 
