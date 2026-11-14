@@ -17,9 +17,10 @@
  *     `getUsageRevision` moved, so an unchanged snapshot costs one call.
  *
  * Only the terminal on screen streams its PTY output (`setStreamedTerminals`):
- * none while the dashboard is open or the app is in the background. Bell,
- * notification and output-based "running" signals therefore only come from
- * the terminal on screen; agent status and Claude dialogs come with the state.
+ * none while the dashboard is open or the app is in the background. The
+ * output-based "running" signal therefore only comes from the terminal on
+ * screen; bells, notifications, agent status and Claude dialogs of every
+ * terminal come with the state.
  *
  * The terminal on screen counts as seen: each poll (and each selection)
  * clears its unseen bell / notification and acknowledges a `done` agent. Its

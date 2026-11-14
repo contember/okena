@@ -217,6 +217,28 @@ impl Terminal {
             .swap(false, std::sync::atomic::Ordering::Relaxed)
     }
 
+    /// Stamp the drained bell / notification edges with `now_ms` (Unix millis).
+    /// Called by the daemon's PTY loop right after `take_pending_bell` /
+    /// `take_pending_notifications`.
+    pub fn record_attention(&self, bell: bool, notification: bool, now_ms: u64) {
+        if bell {
+            self.last_bell_at
+                .store(now_ms, std::sync::atomic::Ordering::Relaxed);
+        }
+        if notification {
+            self.last_notification_at
+                .store(now_ms, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    /// Unix millis of the last recorded bell and notification, if any.
+    pub fn attention(&self) -> (Option<u64>, Option<u64>) {
+        let load = |at: &std::sync::atomic::AtomicU64| {
+            Some(at.load(std::sync::atomic::Ordering::Relaxed)).filter(|&ms| ms != 0)
+        };
+        (load(&self.last_bell_at), load(&self.last_notification_at))
+    }
+
     /// Consume the one-shot "a command finished (OSC 133 ;D) since last drain"
     /// edge. Returns true if a command completed since the previous call, then
     /// resets it. The PTY event loop uses this to bump the owning project's

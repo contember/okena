@@ -2,7 +2,8 @@ use crate::client::handler::MobileConnectionHandler;
 use crate::client::terminal_holder::{TerminalActivity, TerminalHolder};
 
 use okena_core::api::{
-    ActionRequest, ApiFullscreen, ApiLayoutNode, ApiUsage, ApiUsageProvider, StateResponse,
+    ActionRequest, ApiFullscreen, ApiLayoutNode, ApiTerminalAttention, ApiUsage, ApiUsageProvider,
+    StateResponse,
 };
 use okena_transport::client::{
     ConnectionEvent, ConnectionStatus, RemoteClient, RemoteConnectionConfig, StateSyncPolicy,
@@ -279,6 +280,29 @@ fn apply_terminal_presentation(
             terminal_id: None, ..
         } => {}
     }
+}
+
+/// Terminals whose bell / notification timestamp moved between two states:
+/// `(terminal_id, bell, notification)`. A terminal absent from `previous` had
+/// none yet, so any stamp it now has is new. Only movement counts, so the
+/// phone never compares the server's clock with its own; the first state of a
+/// connection is the baseline and raises nothing.
+fn new_attention(
+    previous: &HashMap<String, ApiTerminalAttention>,
+    next: &HashMap<String, ApiTerminalAttention>,
+) -> Vec<(String, bool, bool)> {
+    let moved = |before: Option<u64>, now: Option<u64>| now > before;
+    let mut raised: Vec<(String, bool, bool)> = next
+        .iter()
+        .filter_map(|(terminal_id, now)| {
+            let before = previous.get(terminal_id).copied().unwrap_or_default();
+            let bell = moved(before.bell_at, now.bell_at);
+            let notification = moved(before.notification_at, now.notification_at);
+            (bell || notification).then(|| (terminal_id.clone(), bell, notification))
+        })
+        .collect();
+    raised.sort();
+    raised
 }
 
 fn merge_state_presentation(next: &mut StateResponse, previous: &StateResponse) {
@@ -1018,6 +1042,20 @@ impl ConnectionManager {
                 ConnectionEvent::StateReceived { mut state, .. } => {
                     let mut cache = conn.state_cache.write();
                     if let Some(previous) = cache.as_ref() {
+                        // Bells and notifications of terminals the phone does
+                        // not stream reach it only through the state.
+                        let raised =
+                            new_attention(&previous.terminal_attention, &state.terminal_attention);
+                        if !raised.is_empty() {
+                            let terminals = conn.handler.terminals().read();
+                            for (terminal_id, bell, notification) in raised {
+                                if let Some(holder) =
+                                    terminals.get(&make_prefixed_id(&conn_id, &terminal_id))
+                                {
+                                    holder.raise_attention(bell, notification);
+                                }
+                            }
+                        }
                         merge_state_presentation(&mut state, previous);
                     } else {
                         state.fullscreen_terminal = None;
@@ -1060,6 +1098,37 @@ mod tests {
     use okena_core::api::ApiProject;
     use okena_core::shell::ShellType;
     use okena_core::types::SplitDirection;
+
+    fn attention(bell_at: Option<u64>, notification_at: Option<u64>) -> ApiTerminalAttention {
+        ApiTerminalAttention {
+            bell_at,
+            notification_at,
+        }
+    }
+
+    #[test]
+    fn only_moved_attention_stamps_raise() {
+        let previous = HashMap::from([
+            ("t1".to_string(), attention(Some(10), None)),
+            ("t2".to_string(), attention(Some(10), Some(20))),
+        ]);
+        let next = HashMap::from([
+            // Bell rang again.
+            ("t1".to_string(), attention(Some(15), None)),
+            // Unchanged.
+            ("t2".to_string(), attention(Some(10), Some(20))),
+            // New terminal with a notification.
+            ("t3".to_string(), attention(None, Some(5))),
+        ]);
+        assert_eq!(
+            new_attention(&previous, &next),
+            vec![
+                ("t1".to_string(), true, false),
+                ("t3".to_string(), false, true),
+            ]
+        );
+        assert!(new_attention(&next, &next).is_empty());
+    }
 
     fn terminal(id: &str, minimized: bool, shell_type: ShellType) -> ApiLayoutNode {
         ApiLayoutNode::Terminal {
@@ -1110,6 +1179,7 @@ mod tests {
             hooks: Vec::new(),
             claude_dialogs: Default::default(),
             claude_sessions: Vec::new(),
+            terminal_attention: Default::default(),
         }
     }
 
