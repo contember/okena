@@ -628,23 +628,68 @@ fn subscription_changes(
     (subscribe, unsubscribe)
 }
 
+/// The session's view of its terminal subscriptions.
+#[derive(Default)]
+struct StreamSubscriptions {
+    /// Terminals the session wants streamed (sent Subscribe, no Unsubscribe).
+    subscribed: HashSet<String>,
+    /// Subscribes sent per terminal whose `subscribed` reply has not arrived.
+    /// The server hands out a fresh stream id per Subscribe, so only the reply
+    /// to the latest one carries a live id.
+    pending: HashMap<String, u32>,
+}
+
+impl StreamSubscriptions {
+    fn sent_subscribe(&mut self, ids: &[String]) {
+        for id in ids {
+            self.subscribed.insert(id.clone());
+            *self.pending.entry(id.clone()).or_default() += 1;
+        }
+    }
+
+    fn sent_unsubscribe(&mut self, ids: &[String]) {
+        for id in ids {
+            self.subscribed.remove(id);
+        }
+    }
+
+    /// Keep the mappings of a `subscribed` reply that are still live: the
+    /// terminal is wanted and this answers its latest Subscribe. A reply that
+    /// crossed an Unsubscribe, or one superseded by a later Subscribe, names a
+    /// stream the server has already dropped.
+    fn accept_reply(&mut self, mut mappings: HashMap<String, u32>) -> HashMap<String, u32> {
+        mappings.retain(|id, _| {
+            let outstanding = match self.pending.get_mut(id) {
+                Some(count) => {
+                    *count = count.saturating_sub(1);
+                    *count
+                }
+                None => 0,
+            };
+            if outstanding == 0 {
+                self.pending.remove(id);
+            }
+            outstanding == 0 && self.subscribed.contains(id)
+        });
+        mappings
+    }
+}
+
 /// Move the session's subscriptions to `wanted`. Sends block rather than
 /// `try_send`: a dropped Subscribe leaves a terminal silently never streaming,
 /// a dropped Unsubscribe keeps downloading output nobody shows.
 async fn reconcile_streams(
-    subscribed: &mut HashSet<String>,
+    subs: &mut StreamSubscriptions,
     wanted: &[String],
     ws_tx: &async_channel::Sender<WsClientMessage>,
     stream_map: &std::sync::RwLock<HashMap<String, u32>>,
     reverse_stream_map: &mut HashMap<u32, String>,
 ) {
-    let (subscribe, unsubscribe) = subscription_changes(subscribed, wanted);
+    let (subscribe, unsubscribe) = subscription_changes(&subs.subscribed, wanted);
     if !unsubscribe.is_empty() {
         // Forget the stream ids now: input to these terminals falls back to the
         // JSON path, and frames still in flight are not routed.
-        for id in &unsubscribe {
-            subscribed.remove(id);
-        }
+        subs.sent_unsubscribe(&unsubscribe);
         if let Ok(mut map) = stream_map.write() {
             for id in &unsubscribe {
                 if let Some(stream_id) = map.remove(id) {
@@ -663,7 +708,7 @@ async fn reconcile_streams(
         }
     }
     if !subscribe.is_empty() {
-        subscribed.extend(subscribe.iter().cloned());
+        subs.sent_subscribe(&subscribe);
         let count = subscribe.len();
         if let Err(e) = ws_tx
             .send(WsClientMessage::Subscribe {
@@ -1935,8 +1980,9 @@ impl<H: ConnectionHandler> RemoteClient<H> {
         // them unless it narrowed the set with `set_streamed_terminals`).
         let mut streams_rx = control.streams.subscribe();
         let initial_streams = wanted_streams(&state, streams_rx.borrow_and_update().as_ref());
-        let mut subscribed: HashSet<String> = initial_streams.iter().cloned().collect();
+        let mut subscribed = StreamSubscriptions::default();
         if !initial_streams.is_empty() {
+            subscribed.sent_subscribe(&initial_streams);
             let subscribe_msg = serde_json::json!({
                 "type": "subscribe",
                 "terminal_ids": initial_streams,
@@ -2323,17 +2369,14 @@ impl<H: ConnectionHandler> RemoteClient<H> {
                             match msg_type {
                                 "subscribed" => {
                                     if let Some(mappings) = value.get("mappings")
-                                        && let Ok(mut map) =
+                                        && let Ok(map) =
                                             serde_json::from_value::<HashMap<String, u32>>(
                                                 mappings.clone(),
                                             )
                                     {
-                                        // A reply that crossed an Unsubscribe: the server has
-                                        // dropped those streams already, so don't route to
-                                        // or send input on their ids.
-                                        map.retain(|terminal_id, _| {
-                                            subscribed.contains(terminal_id)
-                                        });
+                                        // Only live ids: never route to or send input on
+                                        // a stream the server has already dropped.
+                                        let map = subscribed.accept_reply(map);
                                         log::info!("Subscribed to {} terminal streams", map.len());
                                         for (terminal_id, stream_id) in &map {
                                             reverse_stream_map
@@ -2888,10 +2931,47 @@ mod tests {
         );
     }
 
+    #[test]
+    fn only_the_reply_to_the_latest_subscribe_maps_a_stream() {
+        let mut subs = StreamSubscriptions::default();
+        let t1 = || vec!["t1".to_string()];
+        // Subscribe, unsubscribe and subscribe again before any reply.
+        subs.sent_subscribe(&t1());
+        subs.sent_unsubscribe(&t1());
+        subs.sent_subscribe(&t1());
+
+        // The first reply names stream 1, which the server already dropped.
+        assert!(
+            subs.accept_reply(HashMap::from([("t1".to_string(), 1)]))
+                .is_empty()
+        );
+        // The reply to the second Subscribe is live.
+        assert_eq!(
+            subs.accept_reply(HashMap::from([("t1".to_string(), 2)])),
+            HashMap::from([("t1".to_string(), 2)])
+        );
+        assert!(subs.pending.is_empty());
+    }
+
+    #[test]
+    fn a_reply_after_an_unsubscribe_maps_nothing() {
+        let mut subs = StreamSubscriptions::default();
+        subs.sent_subscribe(&["t1".to_string()]);
+        subs.sent_unsubscribe(&["t1".to_string()]);
+        assert!(
+            subs.accept_reply(HashMap::from([("t1".to_string(), 1)]))
+                .is_empty()
+        );
+        assert!(subs.pending.is_empty());
+    }
+
     #[tokio::test]
     async fn reconcile_forgets_stream_ids_of_stopped_terminals() {
         let (tx, rx) = async_channel::unbounded();
-        let mut subscribed: HashSet<String> = ["t1", "t2"].map(String::from).into();
+        let mut subscribed = StreamSubscriptions {
+            subscribed: ["t1", "t2"].map(String::from).into(),
+            pending: HashMap::new(),
+        };
         let stream_map = std::sync::RwLock::new(HashMap::from([
             ("t1".to_string(), 1),
             ("t2".to_string(), 2),
@@ -2907,7 +2987,8 @@ mod tests {
         )
         .await;
 
-        assert_eq!(subscribed, ["t2", "t3"].map(String::from).into());
+        assert_eq!(subscribed.subscribed, ["t2", "t3"].map(String::from).into());
+        assert_eq!(subscribed.pending, HashMap::from([("t3".to_string(), 1)]));
         assert_eq!(
             *stream_map.read().unwrap(),
             HashMap::from([("t2".to_string(), 2)])
