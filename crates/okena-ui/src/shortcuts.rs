@@ -131,12 +131,27 @@ pub fn bindings_for_action(action: &dyn Action, window: &Window, cx: &App) -> Ve
 }
 
 /// Chooses one display binding without removing alternatives. GPUI returns effective
-/// bindings in registration order; the last one wins, on every platform. Modifiers
-/// do not determine eligibility: custom Ctrl on macOS and Win/Super elsewhere work.
+/// bindings in registration order; the last one wins, on every platform.
 pub fn shortcut_for_action(action: &dyn Action, window: &Window, cx: &App) -> Option<String> {
-    bindings_for_action(action, window, cx)
-        .last()
-        .map(format_binding)
+    let bindings = bindings_for_action(action, window, cx);
+    preferred_binding(&bindings, ShortcutPlatform::current()).map(format_binding)
+}
+
+/// Defaults register both a `cmd-…` and a Ctrl variant on every platform, so prefer
+/// the native one (Cmd on macOS, no Win/Super elsewhere); among equals the last wins.
+/// Other modifiers stay eligible as a fallback: custom Ctrl on macOS and Win/Super work.
+fn preferred_binding(bindings: &[KeyBinding], platform: ShortcutPlatform) -> Option<&KeyBinding> {
+    let is_native = |binding: &&KeyBinding| {
+        binding.keystrokes().first().is_some_and(|stroke| {
+            let uses_platform_key = stroke.as_keystroke().modifiers.platform;
+            uses_platform_key == (platform == ShortcutPlatform::Mac)
+        })
+    };
+    bindings
+        .iter()
+        .rev()
+        .find(is_native)
+        .or_else(|| bindings.last())
 }
 
 pub fn action_tooltip(
@@ -298,9 +313,14 @@ mod tests {
                 ),
             ]);
             assert_eq!(bindings_for_action(&SampleAction, window, cx).len(), 2);
+            let native = if ShortcutPlatform::current() == ShortcutPlatform::Mac {
+                "cmd-d"
+            } else {
+                "ctrl-d"
+            };
             assert_eq!(
                 shortcut_for_action(&SampleAction, window, cx),
-                Some(format_keystroke("cmd-d"))
+                Some(format_keystroke(native))
             );
             assert_eq!(
                 shortcut_for_action(&ParameterizedAction { target: 1 }, window, cx),
@@ -310,16 +330,48 @@ mod tests {
                 shortcut_for_action(&ParameterizedAction { target: 2 }, window, cx),
                 None
             );
+            let remapped = if ShortcutPlatform::current() == ShortcutPlatform::Mac {
+                "cmd-j"
+            } else {
+                "ctrl-j"
+            };
             cx.bind_keys([KeyBinding::new(
-                "ctrl-j",
+                remapped,
                 SampleAction,
                 Some("TerminalPane"),
             )]);
             assert_eq!(
                 shortcut_for_action(&SampleAction, window, cx),
-                Some(format_keystroke("ctrl-j"))
+                Some(format_keystroke(remapped))
             );
         });
+    }
+
+    #[test]
+    fn prefers_the_native_default_and_falls_back_to_the_last_binding() {
+        let defaults = [
+            KeyBinding::new("cmd-d", SampleAction, None),
+            KeyBinding::new("ctrl-shift-d", SampleAction, None),
+        ];
+        let chosen = |bindings: &[KeyBinding], platform| {
+            preferred_binding(bindings, platform).map(format_binding)
+        };
+        assert_eq!(
+            chosen(&defaults, ShortcutPlatform::Mac),
+            Some(format_binding(&defaults[0]))
+        );
+        for platform in [ShortcutPlatform::Linux, ShortcutPlatform::Windows] {
+            assert_eq!(
+                chosen(&defaults, platform),
+                Some(format_binding(&defaults[1]))
+            );
+        }
+        let custom_only = [KeyBinding::new("ctrl-j", SampleAction, None)];
+        assert_eq!(
+            chosen(&custom_only, ShortcutPlatform::Mac),
+            Some(format_binding(&custom_only[0]))
+        );
+        assert_eq!(chosen(&[], ShortcutPlatform::Linux), None);
     }
 
     #[gpui::test]
