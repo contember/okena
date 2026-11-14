@@ -125,10 +125,16 @@ export type WorkspaceNative = Pick<
 export interface WorkspaceDeps {
   native: WorkspaceNative;
   /**
-   * Whether the app is in the foreground. The terminal on screen only counts
-   * as seen while it is.
+   * Whether the app is in the foreground (`active`). The terminal on screen
+   * only counts as seen while it is.
    */
   isForeground: () => boolean;
+  /**
+   * Whether the app is in the background. The terminal on screen streams
+   * until it is: `inactive` (Control Center, a system alert, Face ID) is a
+   * transient overlay, and resubscribing would download a fresh snapshot.
+   */
+  isInBackground: () => boolean;
 }
 
 /**
@@ -247,11 +253,10 @@ function deps(): WorkspaceDeps {
     resolvedDeps = {
       native: injectedDeps.native ?? getOkenaNative(),
       isForeground:
-        // `inactive` (Control Center, a system alert, Face ID) is a transient
-        // overlay over the app: still foreground, so the terminal keeps
-        // streaming instead of resubscribing with a fresh snapshot.
-        injectedDeps.isForeground ??
-        (() => AppState.currentState !== 'background'),
+        injectedDeps.isForeground ?? (() => AppState.currentState === 'active'),
+      isInBackground:
+        injectedDeps.isInBackground ??
+        (() => AppState.currentState === 'background'),
     };
   }
   return resolvedDeps;
@@ -507,7 +512,7 @@ function syncStreams(get: StoreApi<WorkspaceState>['getState']): void {
   if (!connId) return;
   const { dashboardOpen, selectedTerminalId } = get();
   const ids =
-    !dashboardOpen && selectedTerminalId !== null && deps().isForeground()
+    !dashboardOpen && selectedTerminalId !== null && !deps().isInBackground()
       ? [selectedTerminalId]
       : [];
   const key = ids.join('\n');
