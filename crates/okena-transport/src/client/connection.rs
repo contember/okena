@@ -382,6 +382,9 @@ struct SessionControl {
     state_sync: Arc<tokio::sync::watch::Sender<StateSyncPolicy>>,
     /// Bytes received, by kind. Lives as long as the client, across sessions.
     traffic: Arc<TrafficCounters>,
+    /// Whether the server should push host metrics (`system_stats_changed`).
+    /// Only a `false` is ever sent; servers default to on.
+    system_stats: Arc<tokio::sync::watch::Sender<bool>>,
 }
 
 /// How a session follows `state_changed`, which makes it refetch the whole
@@ -567,6 +570,7 @@ impl SessionControl {
             streams: Arc::new(tokio::sync::watch::channel(None).0),
             state_sync: Arc::new(tokio::sync::watch::channel(StateSyncPolicy::default()).0),
             traffic: Arc::new(TrafficCounters::default()),
+            system_stats: Arc::new(tokio::sync::watch::channel(true).0),
         }
     }
 
@@ -968,6 +972,16 @@ impl<H: ConnectionHandler> RemoteClient<H> {
         self.control.state_sync.send_if_modified(|policy| {
             let changed = policy.deferred != deferred;
             policy.deferred = deferred;
+            changed
+        });
+    }
+
+    /// Ask the server to push host metrics (`system_stats_changed`, every 2 s)
+    /// or not. On by default; applies to the live session and every reconnect.
+    pub fn set_system_stats_push(&self, enabled: bool) {
+        self.control.system_stats.send_if_modified(|current| {
+            let changed = *current != enabled;
+            *current = enabled;
             changed
         });
     }
@@ -1933,6 +1947,19 @@ impl<H: ConnectionHandler> RemoteClient<H> {
             })?;
         }
 
+        // Host metrics are on by default server-side; only an opt-out is sent,
+        // so servers that predate the message never see it from clients that
+        // keep the default.
+        let mut system_stats_rx = control.system_stats.subscribe();
+        if !*system_stats_rx.borrow_and_update() {
+            let msg = serde_json::json!({ "type": "set_system_stats", "enabled": false });
+            futures::SinkExt::send(&mut ws_write, tungstenite::Message::Text(msg.to_string()))
+                .await
+                .map_err(|e| {
+                    SessionError::Transient(format!("Failed to send system stats opt-out: {e}"))
+                })?;
+        }
+
         // Notify connected
         *reached_connected = true;
         log::info!(
@@ -2029,6 +2056,12 @@ impl<H: ConnectionHandler> RemoteClient<H> {
                             "project_ids": project_ids,
                         })
                     }
+                    WsClientMessage::SetSystemStats { enabled } => {
+                        serde_json::json!({
+                            "type": "set_system_stats",
+                            "enabled": enabled,
+                        })
+                    }
                     WsClientMessage::Ping => serde_json::json!({ "type": "ping" }),
                 };
                 if let Err(e) = futures::SinkExt::send(
@@ -2060,6 +2093,11 @@ impl<H: ConnectionHandler> RemoteClient<H> {
             let frame = tokio::select! {
                 frame = futures::StreamExt::next(&mut ws_read) => frame,
                 Ok(()) = sync_rx.changed() => continue,
+                Ok(()) = system_stats_rx.changed() => {
+                    let enabled = *system_stats_rx.borrow_and_update();
+                    let _ = ws_tx_clone.try_send(WsClientMessage::SetSystemStats { enabled });
+                    continue;
+                }
                 _ = tokio::time::sleep_until(tokio::time::Instant::from_std(
                     state_due.unwrap_or_else(Instant::now),
                 )), if state_due.is_some() => {

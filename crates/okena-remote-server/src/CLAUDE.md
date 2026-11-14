@@ -42,6 +42,10 @@ logic lives in `crates/okena-remote-client/` (desktop) and `okena-transport`
 
 - **Thread boundary**: All mutable state access happens on the daemon reactor's `LocalSet`. The tokio server only serializes/deserializes and forwards via channels.
 - **Discovery file**: `remote.json` (in config dir) contains the port and auth info so clients can auto-discover the running instance.
+- **Push cadence**: `state_changed` makes clients refetch the whole `/v1/state`, so bump
+  `state_version` only for changes that live in the state. Git status has its own
+  `git_status_changed` push and does not bump it. `system_stats_changed` goes out every 2 s
+  unless the client sent `set_system_stats` with `enabled: false`.
 - **PTY fan-out**: `PtyBroadcaster` uses tokio's `broadcast` channel so multiple WebSocket clients can subscribe to the same terminal's output independently.
 - **Window model**: `GET /v1/state` returns `windows` (`ApiWindow[]`). The daemon serves a **single synthetic main window** (`command_loop.rs`, `GetState` arm) with `visible_project_ids` populated and the presentation fields (`focused_project_id`, `focused_terminal_id`, `fullscreen`, `bounds`, `folder_filter`, `sidebar_open`) left `None` — those are client-owned by design, not missing. The flat `focused_project_id`/`fullscreen_terminal` stay for backward compatibility.
 - **Per-window action targeting**: `FocusTerminal`, `SetProjectShowInOverview`, and `SetFullscreen` accept an optional `window` field (`"main"` | extra UUID), parsed by `WindowId::from_wire` (`okena-state`). On the daemon, `None` and `"main"` target its synthetic main window; an extra UUID yields "window not found" (except for `FocusTerminal`, which passes it through to desktops).

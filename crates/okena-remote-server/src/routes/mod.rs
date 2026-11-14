@@ -1038,6 +1038,56 @@ mod tests {
         );
     }
 
+    /// A client that opts out of host metrics gets no more `system_stats_changed`
+    /// pushes (they come every 2 s otherwise).
+    #[tokio::test]
+    async fn a_client_can_opt_out_of_system_stats() {
+        use futures::StreamExt as _;
+
+        let store = Arc::new(AuthStore::with_secret(vec![7u8; 32]));
+        let token = paired_token(&store);
+        let addr = spawn_stream_server(store).await;
+        let mut socket = connect_stream(addr).await;
+        send_frame(
+            &mut socket,
+            serde_json::json!({ "type": "auth", "token": token }),
+        )
+        .await;
+        assert_eq!(
+            next_frame_type(&mut socket).await.as_deref(),
+            Some("auth_ok")
+        );
+
+        send_frame(
+            &mut socket,
+            serde_json::json!({ "type": "set_system_stats", "enabled": false }),
+        )
+        .await;
+        // Messages are handled in order: once the ping is answered, the
+        // opt-out has been applied.
+        send_frame(&mut socket, serde_json::json!({ "type": "ping" })).await;
+        loop {
+            match next_frame_type(&mut socket).await.as_deref() {
+                Some("pong") => break,
+                Some(_) => continue,
+                None => panic!("stream ended before the pong"),
+            }
+        }
+
+        let quiet = tokio::time::timeout(std::time::Duration::from_millis(2500), async {
+            while let Some(Ok(frame)) = socket.next().await {
+                if let TestFrame::Text(text) = frame {
+                    assert!(
+                        !text.contains("system_stats_changed"),
+                        "stats pushed after the opt-out: {text}"
+                    );
+                }
+            }
+        })
+        .await;
+        assert!(quiet.is_err(), "the stream must stay open");
+    }
+
     /// Revocation must end the established stream, not merely refuse the next
     /// handshake — the connection already has terminal read/write.
     #[tokio::test]

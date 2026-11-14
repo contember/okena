@@ -29,6 +29,12 @@ pub enum WsInbound {
     SetVisibleProjects {
         project_ids: Vec<String>,
     },
+    /// Whether this connection wants the periodic `system_stats_changed`
+    /// push (on by default). A client that never shows host metrics turns it
+    /// off; on a phone the 2 s cadence adds up to megabytes a day.
+    SetSystemStats {
+        enabled: bool,
+    },
     SendText {
         terminal_id: String,
         text: String,

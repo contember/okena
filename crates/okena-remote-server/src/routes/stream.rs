@@ -175,6 +175,7 @@ async fn handle_ws(
     let mut auth_deadline = session_deadline(session.as_ref());
     let mut system_stats = SystemStatsCache::new();
     let mut system_stats_interval = tokio::time::interval(SYSTEM_STATS_REFRESH_INTERVAL);
+    let mut system_stats_enabled = true;
     system_stats_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     // Pin the writer handle for use in select!
@@ -274,6 +275,9 @@ async fn handle_ws(
                                         map.insert(connection_id, subscribed_ids.keys().cloned().collect());
                                     }
                                 }
+                            }
+                            Ok(WsInbound::SetSystemStats { enabled }) => {
+                                system_stats_enabled = enabled;
                             }
                             Ok(WsInbound::SetVisibleProjects { project_ids }) => {
                                 // Full replacement set, kept even when empty: the git
@@ -603,7 +607,7 @@ async fn handle_ws(
 
             // Periodic host metrics for remote status UI. Kept separate from
             // `state_version` so status refreshes do not force workspace resync.
-            _ = system_stats_interval.tick() => {
+            _ = system_stats_interval.tick(), if system_stats_enabled => {
                 system_stats.refresh();
                 let resp = serde_json::to_string(&WsOutbound::SystemStatsChanged {
                     stats: system_stats.stats(),
