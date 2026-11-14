@@ -807,10 +807,9 @@ mod jump_gpui_tests {
             "fullscreen follows the jump onto the target pane"
         );
     }
+
     #[gpui::test]
-    fn focusing_a_hidden_parent_lands_on_its_first_visible_worktree(
-        cx: &mut gpui::TestAppContext,
-    ) {
+    fn focusing_a_hidden_parent_lands_on_its_first_visible_worktree(cx: &mut gpui::TestAppContext) {
         // The zoom leaves out the hidden parent, so focus must not stay on a
         // pane the window no longer renders.
         let mut data = workspace_with_worktree();

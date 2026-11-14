@@ -336,7 +336,12 @@ impl WindowView {
         let workspace_for_status = workspace.clone();
         let focus_manager_for_status = focus_manager.clone();
         let status_bar = cx.new(|cx| {
-            let mut sb = StatusBar::new(workspace_for_status, focus_manager_for_status, window_id, cx);
+            let mut sb = StatusBar::new(
+                workspace_for_status,
+                focus_manager_for_status,
+                window_id,
+                cx,
+            );
             sb.set_sidebar_open(sidebar_initially_open, cx);
             sb
         });

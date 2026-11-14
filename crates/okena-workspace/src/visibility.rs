@@ -211,9 +211,8 @@ fn push_project_with_worktrees<'a>(
                     result.push(p);
                     return;
                 }
-                let shown = |id: &String| {
-                    show_hidden_worktrees || !window.hidden_project_ids.contains(id)
-                };
+                let shown =
+                    |id: &String| show_hidden_worktrees || !window.hidden_project_ids.contains(id);
                 let start = result.len();
                 if shown(&p.id) {
                     result.push(p);
@@ -335,7 +334,8 @@ mod tests {
             &["p3"],
         );
         let focused = "p3".to_string();
-        let visible = compute_visible_projects(&data, Some(&focused), false, false, &data.main_window);
+        let visible =
+            compute_visible_projects(&data, Some(&focused), false, false, &data.main_window);
         assert_eq!(visible.len(), 1);
         assert_eq!(visible[0].id, "p3");
     }
