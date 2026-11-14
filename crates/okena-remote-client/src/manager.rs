@@ -430,18 +430,25 @@ impl RemoteConnectionManager {
                         // current even for terminals with no mounted pane.
                         terminal.process_pending_output();
                         let title = terminal.title();
-                        if last_titles.get(id).and_then(Option::as_ref) != title.as_ref() {
+                        let title_changed =
+                            last_titles.get(id).and_then(Option::as_ref) != title.as_ref();
+                        if title_changed {
                             changed_titles.push(id.clone());
                         }
                         next_titles.insert(id.clone(), title);
                         okena_core::latency_probe::client_output_parsed(id);
                         let generation = terminal.content_generation();
-                        if last_generations.get(id) != Some(&generation) {
+                        // Every title event must be followed by activity for
+                        // the same ID, even if a replacement has the same content
+                        // generation. The app queues titles and schedules once
+                        // on activity, through its existing repaint throttles.
+                        if title_changed || last_generations.get(id) != Some(&generation) {
                             advanced.push(id.clone());
                         }
                         next_generations.insert(id.clone(), generation);
                     }
-                    let changed = activity_changed(&last_generations, &next_generations);
+                    let changed = !advanced.is_empty()
+                        || activity_changed(&last_generations, &next_generations);
                     last_generations = next_generations;
                     last_titles = next_titles;
 
@@ -1875,16 +1882,26 @@ mod tests {
         terminals.lock().insert(id.clone(), terminal.clone());
         let manager = cx.new(|cx| RemoteConnectionManager::new(terminals.clone(), cx));
         let titles = Arc::new(PMutex::new(Vec::new()));
+        let awaiting_activity = Arc::new(PMutex::new(Vec::<String>::new()));
         let _subscription = cx.update({
             let titles = titles.clone();
-            let terminal = terminal.clone();
+            let awaiting_activity = awaiting_activity.clone();
+            let terminals = terminals.clone();
             let id = id.clone();
             |cx| {
                 cx.subscribe(&manager, move |_, event: &RemoteManagerEvent, _| {
                     if let RemoteManagerEvent::TerminalTitlesChanged(ids) = event {
                         assert_eq!(ids, &vec![id.clone()]);
                         // Subscribers must see the already parsed title.
-                        titles.lock().push(terminal.title());
+                        titles
+                            .lock()
+                            .push(terminals.lock().get(&id).unwrap().title());
+                        assert!(awaiting_activity.lock().is_empty());
+                        *awaiting_activity.lock() = ids.clone();
+                    } else if let RemoteManagerEvent::TerminalActivity(ids) = event {
+                        let mut pending = awaiting_activity.lock();
+                        assert!(pending.iter().all(|id| ids.contains(id)));
+                        pending.clear();
                     }
                 })
             }
@@ -1894,6 +1911,10 @@ mod tests {
                 manager.activity_tx.try_send(()).unwrap();
             });
             cx.run_until_parked();
+            assert!(
+                awaiting_activity.lock().is_empty(),
+                "title event must be followed by activity"
+            );
         };
 
         // A split OSC is not a title change until its terminator arrives.
@@ -1924,10 +1945,32 @@ mod tests {
         wake(cx);
         terminals.lock().remove(&id);
         wake(cx);
-        terminals.lock().insert(id, terminal);
+        terminals.lock().insert(id.clone(), terminal.clone());
         wake(cx);
         assert_eq!(titles.lock().len(), 5);
         assert_eq!(titles.lock().last(), Some(&Some("reused".into())));
+
+        // Replacement without an intervening removal wake can reuse a content
+        // generation. Its changed title still needs one scheduling activity.
+        let (tx, _rx) = async_channel::unbounded();
+        let replacement = Arc::new(Terminal::new(
+            id.clone(),
+            TerminalSize::default(),
+            Arc::new(crate::backend::RemoteTransport::new(tx, "test".into())),
+            String::new(),
+        ));
+        for _ in 0..terminal.content_generation() {
+            replacement.enqueue_output(b"\x1b]0;replacement\x07");
+            replacement.process_pending_output();
+        }
+        assert_eq!(
+            replacement.content_generation(),
+            terminal.content_generation()
+        );
+        terminals.lock().insert(id, replacement);
+        wake(cx);
+        assert_eq!(titles.lock().len(), 6);
+        assert_eq!(titles.lock().last(), Some(&Some("replacement".into())));
     }
 
     #[gpui::test]

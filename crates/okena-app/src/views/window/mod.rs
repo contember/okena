@@ -640,6 +640,13 @@ impl WindowView {
         self.center_next_navigation = true;
     }
 
+    /// Invalidate cached title-bearing views after the app admits this frame.
+    pub fn refresh_terminal_titles(&mut self, ids: &[String], cx: &mut Context<Self>) {
+        for column in self.project_columns.values() {
+            column.update(cx, |column, cx| column.refresh_terminal_titles(ids, cx));
+        }
+    }
+
     /// Set the remote connection manager (called after creation by Okena).
     pub fn set_remote_manager(
         &mut self,
@@ -652,10 +659,6 @@ impl WindowView {
             if let okena_remote_client::manager::RemoteManagerEvent::TerminalTitlesChanged(ids) =
                 event
             {
-                this.sidebar.update(cx, |_, cx| cx.notify());
-                for column in this.project_columns.values() {
-                    column.update(cx, |column, cx| column.refresh_terminal_titles(ids, cx));
-                }
                 if settings(cx).show_active_terminal_title
                     && this
                         .focused_terminal_id(cx)

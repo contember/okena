@@ -4,6 +4,7 @@ mod extras;
 mod local_build;
 mod notifications;
 mod presentation_requests;
+mod title_repaints;
 mod update_restart;
 
 pub use detached_overlays::open_detached_overlay;
@@ -224,6 +225,7 @@ pub struct Okena {
     /// Paces terminal repaints of windows without OS focus while
     /// `cap_unfocused_window_fps` is on, and holds the panes it deferred.
     unfocused_window_pacer: UnfocusedWindowPacer<WindowId, String>,
+    pending_title_repaints: title_repaints::PendingTitleRepaints<WindowId>,
     /// Sender handed to desktop-notification threads. When a user clicks an
     /// XDG notification, the thread sends a `NotificationJump` here and the
     /// click loop focuses the originating pane. See `app/notifications.rs`.
@@ -414,6 +416,7 @@ impl Okena {
             terminal_activity_repaints: ActivityRepaintBatch::default(),
             sidebar_activity_repaints: ActivityRepaintThrottle::default(),
             unfocused_window_pacer: UnfocusedWindowPacer::new(UNFOCUSED_WINDOW_REPAINT_INTERVAL),
+            pending_title_repaints: Default::default(),
             notification_jump_tx,
             spawned_daemon,
             preserve_daemon_on_quit: false,
@@ -514,9 +517,13 @@ impl Okena {
         nudge_whats_new(cx);
 
         cx.subscribe(&remote_manager, |this, _rm, event, cx| match event {
-            // Window views handle title invalidation directly, independently of
-            // content pacing and sidebar activity throttling.
-            RemoteManagerEvent::TerminalTitlesChanged(_) => {}
+            RemoteManagerEvent::TerminalTitlesChanged(ids) => {
+                let windows = std::iter::once(this.main_window.read(cx).window_id())
+                    .chain(this.extra_windows.keys().copied());
+                this.pending_title_repaints.queue(windows, ids);
+                // The pump emits TerminalActivity for these IDs immediately
+                // afterwards. Schedule only there to avoid a duplicate frame.
+            }
             RemoteManagerEvent::TerminalActivity(terminal_ids) => {
                 if !terminal_ids.is_empty() {
                     for terminal_id in terminal_ids {
@@ -1062,6 +1069,20 @@ impl Okena {
                 },
             )
         };
+        // Use the same frame as content panes, including deferred title-only
+        // updates for inactive tabs that have no registered content pane.
+        for view in std::iter::once(&self.main_window).chain(self.extra_windows.values()) {
+            let window_id = view.read(cx).window_id();
+            let paced = cap_unfocused && Some(window_id) != active_window;
+            let titles = self
+                .pending_title_repaints
+                .take_admitted(window_id, terminal_ids, |id| {
+                    pacer.admit(&mut frame, id, Some(window_id), paced)
+                });
+            if !titles.is_empty() {
+                view.update(cx, |view, cx| view.refresh_terminal_titles(&titles, cx));
+            }
+        }
         if let Some(deadline) = self.unfocused_window_pacer.finish_frame(frame) {
             self.arm_unfocused_flush(deadline, cx);
         }

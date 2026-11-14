@@ -13,20 +13,21 @@ Use a disposable terminal if you need to preserve its exact original tab label.
 .PARAMETER IntervalMs
 Delay between title updates, in milliseconds.
 .PARAMETER DurationSeconds
-Test duration, in seconds. Ctrl+C stops early and restores the original title.
+Optional test duration in seconds. Zero (the default) runs until Ctrl+C.
+Cleanup restores the saved console API title.
 .PARAMETER Mode
 Osc sends an escape sequence; Console sets Console.Title.
 .PARAMETER WithOutput
 Also print each frame to compare title-only and ordinary-output refresh.
 .EXAMPLE
-pwsh -NoProfile -File ./scripts/test-terminal-title.ps1 -IntervalMs 150
+pwsh -NoProfile -File ./docs/reference/test-terminal-title.ps1 -IntervalMs 150
 .EXAMPLE
-pwsh -NoProfile -File ./scripts/test-terminal-title.ps1 -Mode Console -WithOutput
+pwsh -NoProfile -File ./docs/reference/test-terminal-title.ps1 -Mode Console -WithOutput
 #>
 [CmdletBinding()]
 param(
     [ValidateRange(20, 10000)][int] $IntervalMs = 150,
-    [ValidateRange(1, 3600)][int] $DurationSeconds = 60,
+    [ValidateRange(0, 3600)][int] $DurationSeconds = 0,
     [ValidateSet('Osc', 'Console')][string] $Mode = 'Osc',
     [switch] $WithOutput
 )
@@ -52,7 +53,7 @@ function Set-TestTitle([string] $Title) {
 
 try {
     [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
-    while ($timer.Elapsed.TotalSeconds -lt $DurationSeconds) {
+    while ($DurationSeconds -eq 0 -or $timer.Elapsed.TotalSeconds -lt $DurationSeconds) {
         $icon = [char] $frames[$frame % $frames.Count]
         $title = '{0} Title refresh test | frame {1:D4} | {2}' -f $icon, $frame, $Mode
         Set-TestTitle $title
