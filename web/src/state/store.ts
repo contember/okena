@@ -66,15 +66,21 @@ export interface AppState {
   gitStatuses: Record<string, ApiGitStatus> | null;
 }
 
+/**
+ * Apply a pushed git status map. The push is the daemon's complete map, so a
+ * project it lacks has no status, except in a state response that is newer
+ * than the push (`keepMissing`): a project added since keeps its own status.
+ */
 function withGitStatuses(
   workspace: StateResponse,
   statuses: Record<string, ApiGitStatus>,
+  keepMissing: boolean,
 ): StateResponse {
   return {
     ...workspace,
     projects: workspace.projects.map((p) => ({
       ...p,
-      git_status: statuses[p.id] ?? null,
+      git_status: statuses[p.id] ?? (keepMissing ? p.git_status : null),
     })),
   };
 }
@@ -97,7 +103,7 @@ export function appReducer(state: AppState, action: AppAction): AppState {
       return {
         ...state,
         workspace: state.gitStatuses
-          ? withGitStatuses(action.workspace, state.gitStatuses)
+          ? withGitStatuses(action.workspace, state.gitStatuses, true)
           : action.workspace,
       };
     case "set_git_statuses":
@@ -106,7 +112,7 @@ export function appReducer(state: AppState, action: AppAction): AppState {
         ...state,
         gitStatuses: action.statuses,
         workspace: state.workspace
-          ? withGitStatuses(state.workspace, action.statuses)
+          ? withGitStatuses(state.workspace, action.statuses, false)
           : null,
       };
     case "select_project":
