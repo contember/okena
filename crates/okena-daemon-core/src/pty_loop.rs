@@ -487,16 +487,23 @@ fn process_activity_edges(
     // Drain ALL THREE edges with `|=` (never `||`): each is a one-shot that must
     // be consumed to clear it, so short-circuiting would leak the notification
     // queue (and miss a bell that follows a command-finish in the same batch).
+    //
+    // Bells and notifications are also stamped on the terminal, so clients
+    // that do not stream it see them through the state.
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as u64);
     let active: Vec<String> = {
         let reg = terminals.lock();
         dirty_terminal_ids
             .iter()
             .filter(|tid| {
                 reg.get(*tid).is_some_and(|t| {
-                    let mut a = t.take_pending_command_finished();
-                    a |= t.take_pending_bell();
-                    a |= !t.take_pending_notifications().is_empty();
-                    a
+                    let finished = t.take_pending_command_finished();
+                    let bell = t.take_pending_bell();
+                    let notification = !t.take_pending_notifications().is_empty();
+                    t.record_attention(bell, notification, now_ms);
+                    finished || bell || notification
                 })
             })
             .cloned()
