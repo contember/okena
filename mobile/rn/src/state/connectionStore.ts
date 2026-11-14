@@ -500,8 +500,10 @@ export const useConnectionStore: UseBoundStore<StoreApi<ConnectionState>> =
         if (!deps().service.isRunning()) native.onAppBackground();
         return;
       }
+      // Resume state fetches on any return to active: iOS may go background →
+      // inactive → active, and a deferral left on would freeze the state.
+      if (next === 'active') native.setAppInBackground(false);
       if (next !== 'active' || previous !== 'background') return;
-      native.setAppInBackground(false);
       native.onAppForeground();
       const { connId } = get();
       if (!connId) return;

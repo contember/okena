@@ -457,7 +457,17 @@ describe('reconnect handling', () => {
     expect(setAppInBackground).toHaveBeenLastCalledWith(true);
     store.onAppStateChange('active');
     expect(setAppInBackground).toHaveBeenLastCalledWith(false);
-    expect(setAppInBackground).toHaveBeenCalledTimes(2);
+  });
+
+  it('resumes state fetches when iOS returns through inactive', () => {
+    const setAppInBackground = jest.fn();
+    setup(stubNative({ setAppInBackground }));
+    const store = useConnectionStore.getState();
+
+    store.onAppStateChange('background');
+    store.onAppStateChange('inactive');
+    store.onAppStateChange('active');
+    expect(setAppInBackground).toHaveBeenLastCalledWith(false);
   });
 
   it('keeps reconnects running in the background only while the service is running', () => {
