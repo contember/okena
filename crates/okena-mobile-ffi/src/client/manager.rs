@@ -526,6 +526,8 @@ impl ConnectionManager {
             deferred: self.in_background.load(Ordering::Relaxed),
             fetch_settings: false,
         });
+        // The app shows no host metrics; skip the 2 s `system_stats` push.
+        client.set_system_stats_push(false);
 
         // Spawn event processor task
         let conn_id_clone = conn_id.clone();
