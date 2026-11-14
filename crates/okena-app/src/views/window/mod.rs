@@ -645,6 +645,13 @@ impl WindowView {
         self.center_next_navigation = true;
     }
 
+    /// Invalidate cached title-bearing views after the app admits this frame.
+    pub fn refresh_terminal_titles(&mut self, ids: &[String], cx: &mut Context<Self>) {
+        for column in self.project_columns.values() {
+            column.update(cx, |column, cx| column.refresh_terminal_titles(ids, cx));
+        }
+    }
+
     /// Set the remote connection manager (called after creation by Okena).
     pub fn set_remote_manager(
         &mut self,
@@ -654,13 +661,16 @@ impl WindowView {
     ) {
         // Terminal output can change OSC titles without a workspace snapshot.
         cx.subscribe_in(&manager, window, |this, _, event, window, cx| {
-            if let okena_remote_client::manager::RemoteManagerEvent::TerminalActivity(ids) = event
-                && settings(cx).show_active_terminal_title
-                && this
-                    .focused_terminal_id(cx)
-                    .is_some_and(|(_, id)| ids.contains(&id))
+            if let okena_remote_client::manager::RemoteManagerEvent::TerminalTitlesChanged(ids) =
+                event
             {
-                this.sync_native_window_title(window, cx);
+                if settings(cx).show_active_terminal_title
+                    && this
+                        .focused_terminal_id(cx)
+                        .is_some_and(|(_, id)| ids.contains(&id))
+                {
+                    this.sync_native_window_title(window, cx);
+                }
             }
         })
         .detach();

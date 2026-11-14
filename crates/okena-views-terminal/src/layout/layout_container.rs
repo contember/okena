@@ -184,6 +184,29 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
         self.project_path = path;
     }
 
+    /// Invalidate title-bearing cached views all the way down the layout tree.
+    /// A parent repaint alone cannot refresh a cached nested tabs container.
+    pub fn refresh_terminal_titles(&mut self, ids: &[String], cx: &mut Context<Self>) {
+        if !self
+            .get_layout(self.workspace.read(cx))
+            .is_some_and(|layout| ids.iter().any(|id| layout.find_terminal_path(id).is_some()))
+        {
+            return;
+        }
+        if let Some(pane) = &self.terminal_pane
+            && pane
+                .read(cx)
+                .terminal_id()
+                .is_some_and(|id| ids.contains(&id))
+        {
+            pane.update(cx, |_, cx| cx.notify());
+        }
+        for child in self.child_containers.values() {
+            child.update(cx, |child, cx| child.refresh_terminal_titles(ids, cx));
+        }
+        cx.notify();
+    }
+
     fn ensure_terminal_pane(
         &mut self,
         terminal_id: Option<String>,
