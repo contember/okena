@@ -57,6 +57,26 @@ export interface AppState {
   streamMappings: Record<string, number>;
   /** Terminal whose Claude chat panel is open, if any. */
   claudePanelTerminalId: string | null;
+  /**
+   * The last `git_status_changed` map of this WS connection. Git changes do
+   * not trigger a state refetch, so a `/v1/state` response that was in flight
+   * when the push arrived must not overwrite it. Cleared when the connection
+   * status changes (no push is replayed on reconnect).
+   */
+  gitStatuses: Record<string, ApiGitStatus> | null;
+}
+
+function withGitStatuses(
+  workspace: StateResponse,
+  statuses: Record<string, ApiGitStatus>,
+): StateResponse {
+  return {
+    ...workspace,
+    projects: workspace.projects.map((p) => ({
+      ...p,
+      git_status: statuses[p.id] ?? null,
+    })),
+  };
 }
 
 export type AppAction =
@@ -74,19 +94,20 @@ export type AppAction =
 export function appReducer(state: AppState, action: AppAction): AppState {
   switch (action.type) {
     case "set_workspace":
-      return { ...state, workspace: action.workspace };
-    case "set_git_statuses":
-      // Git status changes arrive as their own message, not as a state change.
-      if (!state.workspace) return state;
       return {
         ...state,
-        workspace: {
-          ...state.workspace,
-          projects: state.workspace.projects.map((p) => ({
-            ...p,
-            git_status: action.statuses[p.id] ?? null,
-          })),
-        },
+        workspace: state.gitStatuses
+          ? withGitStatuses(action.workspace, state.gitStatuses)
+          : action.workspace,
+      };
+    case "set_git_statuses":
+      // Git status changes arrive as their own message, not as a state change.
+      return {
+        ...state,
+        gitStatuses: action.statuses,
+        workspace: state.workspace
+          ? withGitStatuses(state.workspace, action.statuses)
+          : null,
       };
     case "select_project":
       return { ...state, selectedProjectId: action.projectId };
@@ -95,7 +116,11 @@ export function appReducer(state: AppState, action: AppAction): AppState {
     case "set_sidebar_open":
       return { ...state, sidebarOpen: action.open };
     case "set_ws_status":
-      return { ...state, wsStatus: action.status };
+      return {
+        ...state,
+        wsStatus: action.status,
+        gitStatuses: action.status === state.wsStatus ? state.gitStatuses : null,
+      };
     case "set_stream_mappings":
       return { ...state, streamMappings: { ...state.streamMappings, ...action.mappings } };
     case "clear_stream_mappings":
@@ -115,6 +140,7 @@ export const initialState: AppState = {
   wsStatus: "disconnected",
   streamMappings: {},
   claudePanelTerminalId: null,
+  gitStatuses: null,
 };
 
 // ── Context ─────────────────────────────────────────────────────────────────

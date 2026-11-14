@@ -121,6 +121,13 @@ first state of a connection is the baseline). Agent status (`terminalAgentStatus
 dialogs also come with the state. The connection dot's liveness counts any inbound frame (pong,
 state events), not terminal output.
 
+The daemon's git poller puts projects with a streamed terminal on its responsive tier, and the
+phone declares no visible projects. With only the phone connected, projects other than the one on
+screen get a full git walk only after a change signal (terminal output, index, HEAD) or every
+5 minutes, so their line counts on the dashboard can lag behind edits that print nothing. This is
+deliberate: every git change is pushed to every client as the full `git_status_changed` map, so a
+faster tier for all projects would cost data.
+
 The phone opts out of the 2 s `system_stats_changed` push (`set_system_stats` with
 `enabled: false`); it shows no host metrics. Git status arrives as `git_status_changed` and is
 patched into the cached state; it no longer bumps `state_version`, so a git change does not make
