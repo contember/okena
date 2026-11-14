@@ -75,6 +75,15 @@ import {
 } from '../models/activityOrder';
 import type { TerminalActivity } from '../native/okena';
 
+/**
+ * Connection dot thresholds (s since anything last arrived). The phone streams
+ * at most one terminal and skips host metrics, so on a quiet connection the
+ * pong to the transport's 15 s ping is the only frame: green up to one missed
+ * beat, red from 45 s, where the transport itself starts probing.
+ */
+export const ACTIVITY_LIVE_S = 20;
+export const ACTIVITY_STALE_S = 45;
+
 /** Poll interval (ms) for the workspace state — Dart used 1000ms. */
 export const WORKSPACE_POLL_MS = 1000;
 
@@ -238,7 +247,11 @@ function deps(): WorkspaceDeps {
     resolvedDeps = {
       native: injectedDeps.native ?? getOkenaNative(),
       isForeground:
-        injectedDeps.isForeground ?? (() => AppState.currentState === 'active'),
+        // `inactive` (Control Center, a system alert, Face ID) is a transient
+        // overlay over the app: still foreground, so the terminal keeps
+        // streaming instead of resubscribing with a fresh snapshot.
+        injectedDeps.isForeground ??
+        (() => AppState.currentState !== 'background'),
     };
   }
   return resolvedDeps;
@@ -659,12 +672,12 @@ function pollState(
     }
   }
 
-  // Connection health (drives the staleness indicator's 3s / 10s thresholds).
+  // Connection health (drives the connection dot, see ACTIVITY_LIVE_S).
   const newActivity = native.secondsSinceActivity(connId);
   const oldActivity = prev.secondsSinceActivity;
   if (
-    oldActivity < 3 !== newActivity < 3 ||
-    oldActivity < 10 !== newActivity < 10
+    oldActivity < ACTIVITY_LIVE_S !== newActivity < ACTIVITY_LIVE_S ||
+    oldActivity < ACTIVITY_STALE_S !== newActivity < ACTIVITY_STALE_S
   ) {
     changed = true;
   }

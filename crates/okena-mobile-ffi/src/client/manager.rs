@@ -36,10 +36,6 @@ struct MobileConnection {
     /// Bumped on every stored usage change so pollers can skip unchanged
     /// snapshots cheaply (`usage_revision`).
     usage_revision: AtomicU32,
-    /// Terminals the UI streams (unprefixed ids). Their bells and
-    /// notifications arrive in the output itself and are marked seen there, so
-    /// the state's attention stamps must not raise them again.
-    streamed: RwLock<HashSet<String>>,
     _event_task: Option<tokio::task::JoinHandle<()>>,
 }
 
@@ -568,7 +564,6 @@ impl ConnectionManager {
             status,
             state_cache,
             usage_revision: AtomicU32::new(0),
-            streamed: RwLock::new(HashSet::new()),
             _event_task: None,
         };
 
@@ -669,7 +664,6 @@ impl ConnectionManager {
     pub fn set_streamed_terminals(&self, conn_id: &str, terminal_ids: Vec<String>) {
         let connections = self.connections.read();
         if let Some(conn) = connections.get(conn_id) {
-            *conn.streamed.write() = terminal_ids.iter().cloned().collect();
             conn.client
                 .read()
                 .set_streamed_terminals(Some(terminal_ids));
@@ -1049,23 +1043,28 @@ impl ConnectionManager {
                     let mut cache = conn.state_cache.write();
                     if let Some(previous) = cache.as_ref() {
                         // Bells and notifications of terminals the phone does
-                        // not stream reach it only through the state.
+                        // not stream reach it only through the state. One a
+                        // terminal already showed in its own output since the
+                        // last state is the same event, maybe already seen.
                         let raised =
                             new_attention(&previous.terminal_attention, &state.terminal_attention);
-                        if !raised.is_empty() {
-                            let terminals = conn.handler.terminals().read();
-                            let streamed = conn.streamed.read();
-                            for (terminal_id, bell, notification) in raised {
-                                if streamed.contains(&terminal_id) {
-                                    continue;
-                                }
-                                if let Some(holder) =
-                                    terminals.get(&make_prefixed_id(&conn_id, &terminal_id))
-                                {
-                                    holder.raise_attention(bell, notification);
-                                }
+                        let terminals = conn.handler.terminals().read();
+                        let mut local: HashMap<&str, (bool, bool)> = terminals
+                            .iter()
+                            .map(|(id, holder)| (id.as_str(), holder.take_local_attention()))
+                            .collect();
+                        for (terminal_id, bell, notification) in raised {
+                            let prefixed = make_prefixed_id(&conn_id, &terminal_id);
+                            if let Some(holder) = terminals.get(&prefixed) {
+                                let (bell_here, notification_here) =
+                                    local.remove(prefixed.as_str()).unwrap_or_default();
+                                holder.raise_attention(
+                                    bell && !bell_here,
+                                    notification && !notification_here,
+                                );
                             }
                         }
+                        drop(terminals);
                         merge_state_presentation(&mut state, previous);
                     } else {
                         state.fullscreen_terminal = None;

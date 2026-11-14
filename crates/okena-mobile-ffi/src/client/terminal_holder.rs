@@ -55,12 +55,15 @@ pub(crate) const FREEZE_MAX_DURATION: Duration = Duration::from_secs(15);
 /// cause duplicates.
 pub(crate) struct MobileEventListener {
     bell: Arc<AtomicBool>,
+    /// Same edge, consumed by [`TerminalHolder::take_local_attention`].
+    bell_seen_locally: Arc<AtomicBool>,
 }
 
 impl EventListener for MobileEventListener {
     fn send_event(&self, event: TermEvent) {
         if let TermEvent::Bell = event {
             self.bell.store(true, Ordering::Relaxed);
+            self.bell_seen_locally.store(true, Ordering::Relaxed);
         }
     }
 }
@@ -134,6 +137,11 @@ pub struct TerminalHolder {
     bell: Arc<AtomicBool>,
     /// Unseen desktop notification (OSC 9 / 777).
     notification: AtomicBool,
+    /// A bell / notification arrived in this terminal's own output since the
+    /// last state was applied. The state's attention stamps for that event
+    /// must not raise it again: the user may already have seen it here.
+    bell_seen_locally: Arc<AtomicBool>,
+    notification_seen_locally: AtomicBool,
     /// Parser for [`NotificationScanner`], kept across chunks so a sequence
     /// split between two frames is still recognized.
     notify_parser: Mutex<Parser>,
@@ -214,10 +222,14 @@ impl TerminalHolder {
             .saturating_sub(1)
             .clamp(1, MAX_OUTPUT_STEP);
         let bell = Arc::new(AtomicBool::new(false));
+        let bell_seen_locally = Arc::new(AtomicBool::new(false));
         let term = Term::new(
             config,
             &term_size,
-            MobileEventListener { bell: bell.clone() },
+            MobileEventListener {
+                bell: bell.clone(),
+                bell_seen_locally: bell_seen_locally.clone(),
+            },
         );
 
         Self {
@@ -231,6 +243,8 @@ impl TerminalHolder {
             output_step,
             bell,
             notification: AtomicBool::new(false),
+            bell_seen_locally,
+            notification_seen_locally: AtomicBool::new(false),
             notify_parser: Mutex::new(Parser::new()),
             last_output_at: AtomicU64::new(0),
             freeze: Mutex::new(None),
@@ -262,6 +276,8 @@ impl TerminalHolder {
         self.notify_parser.lock().advance(&mut scanner, data);
         if scanner.seen {
             self.notification.store(true, Ordering::Relaxed);
+            self.notification_seen_locally
+                .store(true, Ordering::Relaxed);
         }
         self.last_output_at.store(monotonic_ms(), Ordering::Relaxed);
         let mut freeze = self.freeze.lock();
@@ -288,8 +304,11 @@ impl TerminalHolder {
         let mut freeze = self.freeze.lock();
         self.replay_frozen(&mut freeze);
         let bell = self.bell.load(Ordering::Relaxed);
+        let bell_seen_locally = self.bell_seen_locally.load(Ordering::Relaxed);
         self.feed(data);
         self.bell.store(bell, Ordering::Relaxed);
+        self.bell_seen_locally
+            .store(bell_seen_locally, Ordering::Relaxed);
         self.end_freeze_if_unselected(&mut freeze);
     }
 
@@ -353,8 +372,20 @@ impl TerminalHolder {
         }
     }
 
-    /// A bell / notification the server reported for this terminal (it is not
-    /// streamed, so the phone did not see the bytes itself).
+    /// Consume "a bell / notification arrived in this terminal's own output
+    /// since the last state": `(bell, notification)`. Called once per applied
+    /// state, for every terminal.
+    pub fn take_local_attention(&self) -> (bool, bool) {
+        (
+            self.bell_seen_locally.swap(false, Ordering::Relaxed),
+            self.notification_seen_locally
+                .swap(false, Ordering::Relaxed),
+        )
+    }
+
+    /// A bell / notification the server reported for this terminal. One the
+    /// terminal already showed in its own output since the last state (see
+    /// [`Self::take_local_attention`]) is skipped by the caller.
     pub fn raise_attention(&self, bell: bool, notification: bool) {
         if bell {
             self.bell.store(true, Ordering::Relaxed);
@@ -798,6 +829,20 @@ pub(crate) fn mouse_wheel_bytes(up: bool, col: u16, row: u16, count: u32, sgr: b
 mod tests {
     use super::*;
     use okena_core::theme::DARK_THEME;
+
+    #[test]
+    fn local_attention_is_reported_once_per_state() {
+        let holder = TerminalHolder::new(20, 5);
+        assert_eq!(holder.take_local_attention(), (false, false));
+        holder.process_output(b"\x07\x1b]9;build done\x07");
+        assert_eq!(holder.take_local_attention(), (true, true));
+        // Consumed: the next state finds nothing local.
+        assert_eq!(holder.take_local_attention(), (false, false));
+        // Seeing it does not hide that it happened here.
+        holder.process_output(b"\x07");
+        holder.mark_seen();
+        assert_eq!(holder.take_local_attention(), (true, false));
+    }
 
     #[test]
     fn bell_sets_unseen_until_marked_seen() {
