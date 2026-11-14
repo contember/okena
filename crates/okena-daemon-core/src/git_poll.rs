@@ -497,7 +497,6 @@ fn apply_github_result(
     ci_checks: &mut HashMap<String, Option<git::CiCheckSummary>>,
     last: &mut HashMap<String, GitStatus>,
     git_status_tx: &watch::Sender<HashMap<String, ApiGitStatus>>,
-    state_version: &watch::Sender<u64>,
 ) {
     let GithubPollResult {
         head_generations,
@@ -563,7 +562,7 @@ fn apply_github_result(
         status.pr_info = pr_infos.get(id).cloned().flatten();
         status.ci_checks = ci_checks.get(id).cloned().flatten();
     }
-    publish(last, &enriched, git_status_tx, state_version);
+    publish(last, &enriched, git_status_tx);
 }
 
 /// Run the daemon git-status poll loop until the `watch` channel is closed (all
@@ -576,12 +575,13 @@ fn apply_github_result(
 /// stable even when targeted triggers wake the loop between cadence ticks.
 /// PR/CI lookups retain their existing visible-project adaptive cadence.
 ///
-/// Bumps `state_version` on a real change so a snapshot/broadcast observer can
-/// react; the *primary* output is the `git_status_tx` watch.
+/// Publishes into the `git_status_tx` watch only. Remote clients get git status
+/// as its own `git_status_changed` message and patch their copy of the state, so
+/// a git change does not bump `state_version` (which would make every client
+/// refetch the whole state).
 pub async fn run_git_poll(
     workspace: Arc<Mutex<Workspace>>,
     git_status_tx: Arc<watch::Sender<HashMap<String, ApiGitStatus>>>,
-    state_version: watch::Sender<u64>,
     remote_subscribed_terminals: Arc<RwLock<HashMap<u64, HashSet<String>>>>,
     remote_visible_projects: Arc<RwLock<HashMap<u64, HashSet<String>>>>,
     mut trigger_rx: mpsc::UnboundedReceiver<GitPollTrigger>,
@@ -745,7 +745,7 @@ pub async fn run_git_poll(
         // never block the branch/diff badge from appearing.
         // No receiver-count exit: receivers exist only while clients are connected,
         // so "none left" also means "none yet". The loop ends with the daemon's LocalSet.
-        publish(&mut last, &new_statuses, &git_status_tx, &state_version);
+        publish(&mut last, &new_statuses, &git_status_tx);
 
         // ── 4. Start GitHub PR/CI fan-out without blocking local git refreshes ─
         // Only visible projects (plus anything explicitly asked for) and only
@@ -848,7 +848,6 @@ pub async fn run_git_poll(
                             &mut ci_checks,
                             &mut last,
                             &git_status_tx,
-                            &state_version,
                         ),
                         GithubPassMessage::Finished(ids) => {
                             for id in &ids {
@@ -915,15 +914,14 @@ fn clear_github_cache_for_ids(
     }
 }
 
-/// Broadcast the slimmed `ApiGitStatus` map into `git_status_tx` and bump
-/// `state_version`, but only on a real change. `last` holds the previously
+/// Broadcast the slimmed `ApiGitStatus` map into `git_status_tx`, but only on a
+/// real change. `last` holds the previously
 /// published richer `GitStatus` map (the GUI's `commit_statuses` change check);
 /// no-ops when `new_statuses` equals it, so re-committing the same data is free.
 fn publish(
     last: &mut HashMap<String, GitStatus>,
     new_statuses: &HashMap<String, GitStatus>,
     git_status_tx: &watch::Sender<HashMap<String, ApiGitStatus>>,
-    state_version: &watch::Sender<u64>,
 ) {
     if new_statuses == last {
         return;
@@ -932,7 +930,6 @@ fn publish(
     let api_statuses: HashMap<String, ApiGitStatus> =
         last.iter().map(|(id, s)| (id.clone(), to_api(s))).collect();
     git_status_tx.send_replace(api_statuses);
-    state_version.send_modify(|v| *v += 1);
 }
 
 #[cfg(test)]
@@ -947,7 +944,6 @@ mod tests {
         let workspace = Arc::new(Mutex::new(Workspace::new(empty_workspace_data())));
         let (tx, rx) = watch::channel(HashMap::<String, ApiGitStatus>::new());
         drop(rx);
-        let (state_version, _svrx) = watch::channel(0u64);
         let subscribed = Arc::new(RwLock::new(HashMap::new()));
         let client_visible = Arc::new(RwLock::new(HashMap::new()));
         let (_trigger_tx, trigger_rx) = mpsc::unbounded_channel();
@@ -956,7 +952,6 @@ mod tests {
             _ = run_git_poll(
                 workspace,
                 Arc::new(tx),
-                state_version,
                 subscribed,
                 client_visible,
                 trigger_rx,
@@ -1413,15 +1408,12 @@ mod tests {
         ci_checks: HashMap<String, Option<git::CiCheckSummary>>,
         last: HashMap<String, GitStatus>,
         git_status_tx: watch::Sender<HashMap<String, ApiGitStatus>>,
-        state_version: watch::Sender<u64>,
         _rx: watch::Receiver<HashMap<String, ApiGitStatus>>,
-        _state_rx: watch::Receiver<u64>,
     }
 
     impl ApplyHarness {
         fn new() -> Self {
             let (git_status_tx, _rx) = watch::channel(HashMap::new());
-            let (state_version, _state_rx) = watch::channel(0);
             Self {
                 schedule: GithubPollSchedule::default(),
                 pr_infos: HashMap::new(),
@@ -1434,9 +1426,7 @@ mod tests {
                     },
                 )]),
                 git_status_tx,
-                state_version,
                 _rx,
-                _state_rx,
             }
         }
 
@@ -1455,7 +1445,6 @@ mod tests {
                 &mut self.ci_checks,
                 &mut self.last,
                 &self.git_status_tx,
-                &self.state_version,
             );
         }
     }
