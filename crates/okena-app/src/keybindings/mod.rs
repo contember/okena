@@ -501,22 +501,7 @@ fn create_keybinding(action: &str, keystroke: &str, context: Option<&str>) -> Op
     }
 }
 
-/// Format a keystroke for display (convert to human-readable format)
-pub fn format_keystroke(keystroke: &str) -> String {
-    keystroke
-        .replace("cmd", "⌘")
-        .replace("ctrl", "Ctrl")
-        .replace("alt", "Alt")
-        .replace("shift", "⇧")
-        .replace("-", "+")
-        .replace("pageup", "PgUp")
-        .replace("pagedown", "PgDn")
-        .replace("escape", "Esc")
-        .replace("left", "←")
-        .replace("right", "→")
-        .replace("up", "↑")
-        .replace("down", "↓")
-}
+pub use okena_ui::shortcuts::format_keystroke;
 
 /// The active shortcut for an action, formatted for the current platform.
 pub fn shortcut_for_action(action: &str) -> Option<String> {

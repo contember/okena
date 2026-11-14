@@ -678,12 +678,20 @@ impl Sidebar {
                                                 .text_color(rgb(t.text_secondary)),
                                         )
                                         .tooltip(move |window, cx| {
-                                            Tooltip::new(if expand {
-                                                "Expand active projects (Terminals)"
-                                            } else {
-                                                "Collapse active projects (Terminals)"
-                                            })
-                                            .build(window, cx)
+                                            okena_ui::shortcuts::named_action_tooltip(
+                                                if expand {
+                                                    "Expand active projects (Terminals)"
+                                                } else {
+                                                    "Collapse active projects (Terminals)"
+                                                },
+                                                if expand {
+                                                    "okena::ExpandActiveProjects"
+                                                } else {
+                                                    "okena::CollapseActiveProjects"
+                                                },
+                                                window,
+                                                cx,
+                                            )
                                         })
                                         .on_click(cx.listener(move |this, _, _, cx| {
                                             cx.stop_propagation();

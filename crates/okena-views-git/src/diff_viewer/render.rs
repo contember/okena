@@ -91,8 +91,28 @@ impl DiffViewer {
                         .text_size(ui_text_md(cx))
                         .text_color(rgb(t.text_secondary))
                         .hover(|s| s.bg(rgb(t.bg_hover)).text_color(rgb(t.text_primary)))
-                        .tooltip(|window, cx| {
-                            gpui_component::tooltip::Tooltip::new("Back").build(window, cx)
+                        .tooltip({
+                            let viewer = cx.entity().downgrade();
+                            move |window, cx| {
+                                let matches = viewer.upgrade().is_some_and(|viewer| {
+                                    let viewer = viewer.read(cx);
+                                    viewer.focus_handle.is_focused(window)
+                                        && viewer.can_go_back
+                                        && viewer.search.is_none()
+                                        && viewer.delete_confirm.is_none()
+                                        && viewer.discard_confirm.is_none()
+                                        && viewer.context_menu.is_none()
+                                        && viewer.commit_hash_menu.is_none()
+                                        && viewer.selection_context_menu.is_none()
+                                        && viewer.selection.normalized_non_empty().is_none()
+                                });
+                                okena_ui::shortcuts::action_tooltip(
+                                    "Back",
+                                    matches.then_some(&Cancel as &dyn Action),
+                                    window,
+                                    cx,
+                                )
+                            }
                         })
                         .on_click(cx.listener(|this, _, _window, cx| this.back(cx)))
                         .child(

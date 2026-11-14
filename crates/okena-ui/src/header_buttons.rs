@@ -5,7 +5,6 @@
 
 use crate::theme::ThemeColors;
 use gpui::*;
-use gpui_component::tooltip::Tooltip;
 
 /// All available header actions for terminal panes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -104,7 +103,7 @@ pub fn header_button_base(
     size: ButtonSize,
     t: &ThemeColors,
     tooltip_override: Option<&'static str>,
-    gpui_action: Option<Box<dyn Action>>,
+    gpui_action: Option<crate::shortcuts::ActionShortcut>,
 ) -> Stateful<Div> {
     let tooltip_text = tooltip_override.unwrap_or_else(|| action.tooltip());
     let bg_hover = t.bg_hover;
@@ -127,12 +126,9 @@ pub fn header_button_base(
                 .size(px(size.icon))
                 .text_color(rgb(t.text_secondary)),
         )
-        .tooltip(move |_window, cx| {
-            let mut tooltip = Tooltip::new(tooltip_text);
-            if let Some(ref action) = gpui_action {
-                tooltip = tooltip.action(action.as_ref(), None);
-            }
-            tooltip.build(_window, cx)
+        .tooltip(move |window, cx| match &gpui_action {
+            Some(shortcut) => shortcut.tooltip(tooltip_text, window, cx),
+            None => crate::shortcuts::action_tooltip(tooltip_text, None, window, cx),
         });
 
     // Apply hover style - red for close, normal for others

@@ -167,7 +167,13 @@ impl<D: ActionDispatch + Send + Sync> TerminalPane<D> {
                                 size,
                                 &t,
                                 None,
-                                None,
+                                Some(okena_ui::shortcuts::ActionShortcut::new(
+                                    crate::actions::FullscreenPrevTerminal,
+                                    {
+                                        let focus = self.focus_handle.clone();
+                                        move |window, _| focus.is_focused(window)
+                                    },
+                                )),
                             )
                             .on_click({
                                 let workspace = workspace.clone();
@@ -211,7 +217,13 @@ impl<D: ActionDispatch + Send + Sync> TerminalPane<D> {
                                 size,
                                 &t,
                                 None,
-                                None,
+                                Some(okena_ui::shortcuts::ActionShortcut::new(
+                                    crate::actions::FullscreenNextTerminal,
+                                    {
+                                        let focus = self.focus_handle.clone();
+                                        move |window, _| focus.is_focused(window)
+                                    },
+                                )),
                             )
                             .on_click({
                                 let workspace = workspace.clone();
@@ -246,24 +258,37 @@ impl<D: ActionDispatch + Send + Sync> TerminalPane<D> {
                         )
                     })
                     .child(
-                        header_button_base(HeaderAction::ExitZoom, id_suffix, size, &t, None, None)
-                            .on_click({
-                                let project_id = self.project_id.clone();
-                                let dispatcher = dispatcher.clone();
-                                move |_, _window, cx| {
-                                    cx.stop_propagation();
-                                    if let Some(ref dispatcher) = dispatcher {
-                                        dispatcher.dispatch(
-                                            ActionRequest::SetFullscreen {
-                                                project_id: project_id.clone(),
-                                                terminal_id: None,
-                                                window: None,
-                                            },
-                                            cx,
-                                        );
-                                    }
+                        header_button_base(
+                            HeaderAction::ExitZoom,
+                            id_suffix,
+                            size,
+                            &t,
+                            None,
+                            Some(okena_ui::shortcuts::ActionShortcut::new(
+                                crate::actions::ToggleFullscreen,
+                                {
+                                    let focus = self.focus_handle.clone();
+                                    move |window, _| focus.is_focused(window)
+                                },
+                            )),
+                        )
+                        .on_click({
+                            let project_id = self.project_id.clone();
+                            let dispatcher = dispatcher.clone();
+                            move |_, _window, cx| {
+                                cx.stop_propagation();
+                                if let Some(ref dispatcher) = dispatcher {
+                                    dispatcher.dispatch(
+                                        ActionRequest::SetFullscreen {
+                                            project_id: project_id.clone(),
+                                            terminal_id: None,
+                                            window: None,
+                                        },
+                                        cx,
+                                    );
                                 }
-                            }),
+                            }
+                        }),
                     ),
             )
     }

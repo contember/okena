@@ -36,6 +36,7 @@ pub mod resize_handle;
 pub mod scrollbar;
 pub mod selectable_list;
 pub mod settings;
+pub mod shortcuts;
 pub mod simple_input;
 pub mod submenu;
 pub mod text_utils;
