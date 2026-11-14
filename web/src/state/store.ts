@@ -1,5 +1,5 @@
 import { createContext, useContext } from "react";
-import type { StateResponse, WsOutbound } from "../api/types";
+import type { ApiGitStatus, StateResponse, WsOutbound } from "../api/types";
 import { WsManager, type WsStatus } from "../api/websocket";
 
 // ── Terminal Registry ───────────────────────────────────────────────────────
@@ -61,6 +61,7 @@ export interface AppState {
 
 export type AppAction =
   | { type: "set_workspace"; workspace: StateResponse }
+  | { type: "set_git_statuses"; statuses: Record<string, ApiGitStatus> }
   | { type: "select_project"; projectId: string }
   | { type: "select_terminal"; terminalId: string | null }
   | { type: "set_sidebar_open"; open: boolean }
@@ -74,6 +75,19 @@ export function appReducer(state: AppState, action: AppAction): AppState {
   switch (action.type) {
     case "set_workspace":
       return { ...state, workspace: action.workspace };
+    case "set_git_statuses":
+      // Git status changes arrive as their own message, not as a state change.
+      if (!state.workspace) return state;
+      return {
+        ...state,
+        workspace: {
+          ...state.workspace,
+          projects: state.workspace.projects.map((p) => ({
+            ...p,
+            git_status: action.statuses[p.id] ?? null,
+          })),
+        },
+      };
     case "select_project":
       return { ...state, selectedProjectId: action.projectId };
     case "select_terminal":
