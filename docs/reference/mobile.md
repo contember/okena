@@ -122,6 +122,21 @@ The JSON routes (`/v1/state`, `/v1/actions`, usage, Claude session/transcript) a
 clients that send `Accept-Encoding: gzip`; the transport's reqwest client does, except over the
 local Unix socket.
 
+### State fetches
+
+Every `state_changed` makes the transport refetch the whole `/v1/state`. The phone sets a
+`StateSyncPolicy` on each connection: at most one fetch per second (changes inside the window
+are coalesced into one fetch at its end, the first change after a quiet window fetches at once),
+none in the background (the store calls `setAppInBackground` on every lifecycle change, also while
+the Android connection service keeps the session alive; a state that changed meanwhile is fetched
+once on return), and no settings, which the app does not use. The desktop keeps the default
+policy: fetch on every change, settings included.
+
+The transport counts payload bytes per connection (`traffic_stats`: PTY, snapshots, state with
+the number of fetches, settings, other events). The state is fetched with transparent
+decompression off and decoded by hand, so the count is the size on the wire. Settings shows it
+under Data while connected.
+
 ### State sync (project list, layouts)
 
 ```

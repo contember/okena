@@ -15,6 +15,8 @@
  * Projects: the project order of the drawer and the switcher (Activity, the
  * default, or Manual).
  *
+ * Data: what the current connection has downloaded (only while connected).
+ *
  * Advanced: the terminal renderer toggle (native view, the default, or the
  * Skia fallback) for the native renderer rollout.
  */
@@ -41,6 +43,9 @@ import {
   type ProjectSortMode,
 } from '../state/settingsStore';
 import { OkenaColors, OkenaTypography, TerminalTheme } from '../theme';
+import { DataUsageGroup, type TrafficNative } from '../components/DataUsage';
+import { getOkenaNative } from '../native/okena';
+import { useConnectionStore } from '../state/connectionStore';
 
 /** JetBrains Mono advance width as a fraction of the font size (600/1000 em). */
 const MONO_ADVANCE_EM = 0.6;
@@ -55,10 +60,23 @@ export function formatFontSize(size: number): string {
   return Number.isInteger(size) ? `${size} pt` : `${size.toFixed(1)} pt`;
 }
 
-export const SettingsSheet: React.FC<{ visible: boolean; onClose: () => void }> = ({
-  visible,
-  onClose,
-}) => {
+function defaultTrafficNative(): TrafficNative | undefined {
+  try {
+    return getOkenaNative();
+  } catch {
+    // Off-device without generated bindings: no data section.
+    return undefined;
+  }
+}
+
+export const SettingsSheet: React.FC<{
+  visible: boolean;
+  onClose: () => void;
+  /** Injected for tests; defaults to the native module. */
+  native?: TrafficNative;
+}> = ({ visible, onClose, native }) => {
+  const connId = useConnectionStore((s) => (s.status.kind === 'connected' ? s.connId : null));
+  const trafficNative = React.useMemo(() => native ?? defaultTrafficNative(), [native]);
   const insets = useSafeAreaInsets();
   const { width } = useWindowDimensions();
   const fontSize = useSettingsStore((s) => s.terminalFontSize);
@@ -215,6 +233,17 @@ export const SettingsSheet: React.FC<{ visible: boolean; onClose: () => void }> 
               ? 'Pinned first, then projects that need attention, running ones and the rest by recent activity, like the desktop sidebar. Applies to the drawer and the project switcher.'
               : "The desktop sidebar's manual order, with folders."}
           </Text>
+
+          {connId && trafficNative ? (
+            <>
+              <Text style={[styles.sectionLabel, styles.sectionSpacing]}>DATA</Text>
+              <DataUsageGroup native={trafficNative} connId={connId} />
+              <Text style={styles.footnote}>
+                Downloaded from this server since connecting. Only the terminal on screen streams
+                its output; TLS and protocol overhead are not counted.
+              </Text>
+            </>
+          ) : null}
 
           <Text style={[styles.sectionLabel, styles.sectionSpacing]}>ADVANCED</Text>
           <View style={styles.group}>

@@ -5,8 +5,8 @@ use okena_core::api::{
     ActionRequest, ApiFullscreen, ApiLayoutNode, ApiUsage, ApiUsageProvider, StateResponse,
 };
 use okena_transport::client::{
-    ConnectionEvent, ConnectionStatus, RemoteClient, RemoteConnectionConfig, WsClientMessage,
-    make_prefixed_id,
+    ConnectionEvent, ConnectionStatus, RemoteClient, RemoteConnectionConfig, StateSyncPolicy,
+    TrafficStats, WsClientMessage, make_prefixed_id,
 };
 use parking_lot::RwLock;
 use std::collections::{HashMap, HashSet};
@@ -18,7 +18,14 @@ static MANAGER: OnceLock<ConnectionManager> = OnceLock::new();
 pub struct ConnectionManager {
     runtime: Arc<tokio::runtime::Runtime>,
     connections: RwLock<HashMap<String, MobileConnection>>,
+    /// The app is in the background: connections defer state fetches.
+    in_background: std::sync::atomic::AtomicBool,
 }
+
+/// Least time between two state fetches on the phone. A busy workspace bumps
+/// the state several times a second (agent status edges, finished commands,
+/// git); each fetch downloads the whole snapshot.
+const STATE_SYNC_MIN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
 
 struct MobileConnection {
     client: RwLock<RemoteClient<MobileConnectionHandler>>,
@@ -363,6 +370,7 @@ impl ConnectionManager {
             ConnectionManager {
                 runtime: Arc::new(runtime),
                 connections: RwLock::new(HashMap::new()),
+                in_background: std::sync::atomic::AtomicBool::new(false),
             }
         });
     }
@@ -511,6 +519,13 @@ impl ConnectionManager {
         // names what is on screen (`set_streamed_terminals`), instead of
         // downloading every terminal's output on connect.
         client.set_streamed_terminals(Some(Vec::new()));
+        // Coalesce state fetches, hold them in the background, and skip the
+        // settings, which the app does not use.
+        client.set_state_sync(StateSyncPolicy {
+            min_interval: STATE_SYNC_MIN_INTERVAL,
+            deferred: self.in_background.load(Ordering::Relaxed),
+            fetch_settings: false,
+        });
 
         // Spawn event processor task
         let conn_id_clone = conn_id.clone();
@@ -627,6 +642,25 @@ impl ConnectionManager {
                 .read()
                 .set_streamed_terminals(Some(terminal_ids));
         }
+    }
+
+    /// The app went to (or left) the background. In the background no state is
+    /// fetched; a state that changed meanwhile is fetched once on return.
+    /// Unlike [`Self::on_app_background`] this also applies while the Android
+    /// connection service keeps the session alive.
+    pub fn set_app_in_background(&self, background: bool) {
+        self.in_background.store(background, Ordering::Relaxed);
+        for conn in self.connections.read().values() {
+            conn.client.read().set_state_sync_deferred(background);
+        }
+    }
+
+    /// Payload bytes a connection has received since it was created.
+    pub fn traffic_stats(&self, conn_id: &str) -> Option<TrafficStats> {
+        let connections = self.connections.read();
+        connections
+            .get(conn_id)
+            .map(|conn| conn.client.read().traffic_stats())
     }
 
     /// Pair with the remote server using a pairing code.
