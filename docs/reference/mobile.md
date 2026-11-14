@@ -118,8 +118,12 @@ OSC 9/777 notifications of the others come with the state: the daemon stamps eac
 bell and notification (`StateResponse.terminal_attention`, Unix millis), and the phone raises a
 terminal's unseen flag when its stamp moved between two states (never by comparing clocks; the
 first state of a connection is the baseline). Agent status (`terminalAgentStatus`) and Claude
-dialogs also come with the state. The connection dot's liveness counts any inbound frame (pong,
-state events), not terminal output.
+dialogs also come with the state. A bell the terminal already showed in its own output since the
+last state is not raised again from the stamp. The stamps need a daemon that sends
+`terminal_attention`; against an older one, bells and notifications of terminals off screen are
+not flagged. The connection dot's liveness counts any inbound frame (pong, state events), not
+terminal output; on a quiet connection only the pong to the 15 s ping arrives, so the dot stays
+green up to 20 s and turns red from 45 s.
 
 The daemon's git poller puts projects with a streamed terminal on its responsive tier, and the
 phone declares no visible projects. With only the phone connected, projects other than the one on
