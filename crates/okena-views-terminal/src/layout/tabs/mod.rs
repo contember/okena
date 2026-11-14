@@ -15,11 +15,12 @@ use gpui_component::{h_flex, v_flex};
 use okena_files::theme::theme;
 use okena_terminal::terminal::TerminalProgressState;
 use okena_ui::header_buttons::{ButtonSize, HeaderAction, header_button_base};
+use okena_ui::tab_hover_actions::TabHoverActions;
 use okena_ui::theme::with_alpha;
 use okena_ui::tokens::{ui_text_md, ui_text_sm};
 use okena_ui::truncated_text::{adaptive_label_container, truncated_text};
 use okena_workspace::state::{LayoutNode, SplitDirection};
-use std::collections::HashSet;
+use std::{collections::HashSet, rc::Rc};
 
 /// Context for tab action button closures.
 #[derive(Clone)]
@@ -115,7 +116,7 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
                     &id_suffix,
                     ButtonSize::COMPACT,
                     &t,
-                    None,
+                    (!standalone).then_some("Split Tab Group Vertically"),
                     None,
                 )
                 .on_click(move |_, _window, cx| {
@@ -137,7 +138,7 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
                     &id_suffix,
                     ButtonSize::COMPACT,
                     &t,
-                    None,
+                    (!standalone).then_some("Split Tab Group Horizontally"),
                     None,
                 )
                 .on_click(move |_, _window, cx| {
@@ -159,7 +160,7 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
                     &id_suffix,
                     ButtonSize::COMPACT,
                     &t,
-                    None,
+                    (!standalone).then_some("Add Tab to Group"),
                     None,
                 )
                 .on_click(move |_, _window, cx| {
@@ -442,6 +443,107 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
                 .map(|(_, p)| p)
                 .unwrap_or(0.0);
 
+            let on_activate = Rc::new({
+                    let workspace = workspace.clone();
+                    let project_id = project_id.clone();
+                    let layout_path = layout_path.clone();
+                    let terminal_id = terminal_id.clone();
+                    let tab_label = tab_label.clone();
+                    let dispatcher_for_click = self.action_dispatcher.clone();
+                    cx.listener(move |this, allow_rename: &bool, window, cx| {
+                        let is_double_click = if *allow_rename {
+                            this.tab_click_detector.check(i)
+                        } else {
+                            this.tab_click_detector = Default::default();
+                            false
+                        };
+
+                        if this.tab_rename_state.is_some() && !is_double_click {
+                            let is_renaming_this = terminal_id.as_ref().is_some_and(|tid| {
+                                is_renaming(&this.tab_rename_state, tid)
+                            });
+                            if !is_renaming_this {
+                                this.cancel_tab_rename(cx);
+                            }
+                        }
+
+                        if !standalone
+                            && let Some(ref dispatcher) = dispatcher_for_click {
+                                dispatcher.dispatch(okena_core::api::ActionRequest::SetActiveTab {
+                                    project_id: project_id.clone(),
+                                    path: layout_path.clone(),
+                                    index: i,
+                                }, cx);
+                            }
+
+                        if terminal_id.is_some() {
+                            let terminal_path = if standalone {
+                                layout_path.clone()
+                            } else {
+                                let mut p = layout_path.clone();
+                                p.push(i);
+                                p
+                            };
+                            let workspace_clone = workspace.clone();
+                            let pid = project_id.clone();
+                            this.focus_manager.update(cx, |fm, cx| {
+                                workspace_clone.update(cx, |ws, cx| {
+                                    ws.set_focused_terminal(fm, pid, terminal_path, cx);
+                                });
+                                cx.notify();
+                            });
+                        }
+
+                        if is_double_click
+                            && let Some(ref tid) = terminal_id {
+                                this.start_tab_rename(tid.clone(), tab_label.clone(), window, cx);
+                            }
+                    })
+                });
+            let caption_activate = on_activate.clone();
+            let caption = div()
+                .id("hover-tab-title")
+                .min_w(px(80.0))
+                .flex_1()
+                .truncate()
+                .px(px(4.0))
+                .py(px(4.0))
+                .cursor_pointer()
+                .text_color(rgb(t.text_primary))
+                .hover(|s| s.bg(rgb(t.bg_hover)))
+                .child(truncated_text("hover-tab-name", tab_label.clone(), None))
+                .on_click(move |_, window, cx| {
+                    caption_activate(&false, window, cx);
+                    cx.stop_propagation();
+                });
+            let actions_view = cx.entity();
+            let actions_terminal_id = terminal_id.clone();
+            let actions = move |cx: &mut App| actions_view.update(cx, |this, cx| {
+                h_flex()
+                    .flex_shrink_0()
+                    .when(terminal_view_settings(cx).show_shell_selector, |el| {
+                        el.child(this.render_shell_indicator(i, cx))
+                    })
+                    .child(this.render_tab_action_buttons(
+                        TabActionContext {
+                            project_id: this.project_id.clone(),
+                            layout_path: this.layout_path.clone(),
+                            active_tab: i,
+                            standalone,
+                            action_dispatcher: this.action_dispatcher.clone(),
+                        },
+                        actions_terminal_id,
+                        cx,
+                    ))
+                    .into_any_element()
+            });
+            let hover_actions = TabHoverActions::new(
+                format!("tab-hover-{}", terminal_id.as_deref().unwrap_or(&tab_label)),
+                caption,
+                actions,
+                &t,
+            );
+
             div()
                 .id(ElementId::Name(format!("tab-{}-{:?}", i, layout_path).into()))
                 .cursor_pointer()
@@ -566,6 +668,7 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
                             .into_any_element()
                     }
                 })
+                .child(hover_actions)
                 .children(progress.map(|p| {
                     // Color the bar by reported progress state.
                     let fill_color = match p.state {
@@ -704,58 +807,7 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
                         }
                     }))
                 })
-                .on_click({
-                    let workspace = workspace.clone();
-                    let project_id = project_id.clone();
-                    let layout_path = layout_path.clone();
-                    let terminal_id = terminal_id.clone();
-                    let tab_label = tab_label.clone();
-                    let dispatcher_for_click = self.action_dispatcher.clone();
-                    cx.listener(move |this, _, window, cx| {
-                        let is_double_click = this.tab_click_detector.check(i);
-
-                        if this.tab_rename_state.is_some() && !is_double_click {
-                            let is_renaming_this = terminal_id.as_ref().is_some_and(|tid| {
-                                is_renaming(&this.tab_rename_state, tid)
-                            });
-                            if !is_renaming_this {
-                                this.cancel_tab_rename(cx);
-                            }
-                        }
-
-                        if !standalone
-                            && let Some(ref dispatcher) = dispatcher_for_click {
-                                dispatcher.dispatch(okena_core::api::ActionRequest::SetActiveTab {
-                                    project_id: project_id.clone(),
-                                    path: layout_path.clone(),
-                                    index: i,
-                                }, cx);
-                            }
-
-                        if terminal_id.is_some() {
-                            let terminal_path = if standalone {
-                                layout_path.clone()
-                            } else {
-                                let mut p = layout_path.clone();
-                                p.push(i);
-                                p
-                            };
-                            let workspace_clone = workspace.clone();
-                            let pid = project_id.clone();
-                            this.focus_manager.update(cx, |fm, cx| {
-                                workspace_clone.update(cx, |ws, cx| {
-                                    ws.set_focused_terminal(fm, pid, terminal_path, cx);
-                                });
-                                cx.notify();
-                            });
-                        }
-
-                        if is_double_click
-                            && let Some(ref tid) = terminal_id {
-                                this.start_tab_rename(tid.clone(), tab_label.clone(), window, cx);
-                            }
-                    })
-                })
+                .on_click(move |_, window, cx| on_activate(&true, window, cx))
         }).collect();
 
         let project_id_for_new = self.project_id.clone();
@@ -838,38 +890,12 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
                 }));
         }
 
-        let action_ctx = TabActionContext {
-            project_id: self.project_id.clone(),
-            layout_path: self.layout_path.clone(),
-            active_tab,
-            standalone,
-            action_dispatcher: self.action_dispatcher.clone(),
-        };
-
-        let terminal_id_for_actions = if standalone {
-            match children.first() {
-                Some(LayoutNode::Terminal { terminal_id, .. }) => terminal_id.clone(),
-                _ => None,
-            }
-        } else {
-            self.get_active_terminal_id(active_tab, cx)
-        };
-
-        let action_buttons =
-            self.render_tab_action_buttons(action_ctx, terminal_id_for_actions.clone(), cx);
-
-        // Shell switching is routed through the daemon (SwitchTerminalShell) and
-        // the current shell comes from mirrored layout state, so the selector
-        // works for remote backends too — gate only on the user setting.
-        let show_shell = terminal_view_settings(cx).show_shell_selector;
-
         if self.last_scrolled_to_tab != Some(active_tab) {
             self.tab_scroll_handle.scroll_to_item(active_tab);
             self.last_scrolled_to_tab = Some(active_tab);
         }
 
         div()
-            .group("tab-bar-row")
             .h(px(28.0))
             .px(px(0.0))
             .flex()
@@ -893,16 +919,6 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
                     .track_scroll(&self.tab_scroll_handle)
                     .children(tab_elements)
                     .child(end_drop_zone),
-            )
-            .child(
-                h_flex()
-                    .flex_shrink_0()
-                    .opacity(0.0)
-                    .group_hover("tab-bar-row", |s| s.opacity(1.0))
-                    .when(show_shell, |el| {
-                        el.child(self.render_shell_indicator(active_tab, cx))
-                    })
-                    .child(action_buttons),
             )
     }
 }
