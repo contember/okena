@@ -7,7 +7,7 @@ pub mod tls;
 pub mod types;
 
 pub use crate::{LOCAL_DAEMON_CONNECTION_ID, LocalEndpoint, RemoteConnectionConfig};
-pub use connection::{ConnectionHandler, RemoteClient};
+pub use connection::{ConnectionHandler, RemoteClient, StateSyncPolicy, TrafficStats};
 pub use id::{is_remote_terminal, make_prefixed_id, strip_prefix};
 pub use state::{
     StateDiff, collect_all_terminal_ids, collect_layout_terminal_ids, collect_state_terminal_ids,

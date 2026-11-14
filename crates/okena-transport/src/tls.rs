@@ -184,14 +184,25 @@ pub fn build_reqwest_client(
     pinned: Option<String>,
     observed: ObservedFingerprint,
 ) -> Result<reqwest::Client, String> {
-    if !tls {
-        return Ok(reqwest::Client::new());
-    }
-    let config = pinned_client_config(pinned, observed);
-    reqwest::Client::builder()
-        .use_preconfigured_tls(config)
+    reqwest_client_builder(tls, pinned, observed)
         .build()
-        .map_err(|error| format!("Cannot initialise pinned TLS client: {error}"))
+        .map_err(|error| format!("Cannot initialise HTTP client: {error}"))
+}
+
+/// The builder behind [`build_reqwest_client`], for callers that need to
+/// adjust it (e.g. turn off transparent decompression to measure the wire).
+#[cfg(any(feature = "client", feature = "cancellable-http"))]
+pub fn reqwest_client_builder(
+    tls: bool,
+    pinned: Option<String>,
+    observed: ObservedFingerprint,
+) -> reqwest::ClientBuilder {
+    let builder = reqwest::Client::builder();
+    if tls {
+        builder.use_preconfigured_tls(pinned_client_config(pinned, observed))
+    } else {
+        builder
+    }
 }
 
 /// Build a blocking reqwest client for a connection. This applies the same
