@@ -6792,6 +6792,7 @@ name = "okena-transport"
 version = "0.1.0"
 dependencies = [
  "async-channel",
+ "flate2",
  "futures",
  "log",
  "okena-core",

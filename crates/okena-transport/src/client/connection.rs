@@ -378,6 +378,184 @@ struct SessionControl {
     /// ones that exist, so a client showing one terminal does not download the
     /// output of all of them.
     streams: Arc<tokio::sync::watch::Sender<Option<HashSet<String>>>>,
+    /// How eagerly the session refetches state after `state_changed`.
+    state_sync: Arc<tokio::sync::watch::Sender<StateSyncPolicy>>,
+    /// Bytes received, by kind. Lives as long as the client, across sessions.
+    traffic: Arc<TrafficCounters>,
+}
+
+/// How a session follows `state_changed`, which makes it refetch the whole
+/// `/v1/state` snapshot (and, by default, the settings).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StateSyncPolicy {
+    /// Least time between two state fetches. Changes inside the window are
+    /// coalesced into one fetch at its end; the first change after a quiet
+    /// window fetches at once. Zero fetches on every change.
+    pub min_interval: Duration,
+    /// Only note that the state is stale and fetch once this turns false
+    /// (an app in the background, where nobody sees the state).
+    pub deferred: bool,
+    /// Fetch the settings on connect and with every state fetch. A client
+    /// that ignores `SettingsChanged` turns it off.
+    pub fetch_settings: bool,
+}
+
+impl Default for StateSyncPolicy {
+    fn default() -> Self {
+        Self {
+            min_interval: Duration::ZERO,
+            deferred: false,
+            fetch_settings: true,
+        }
+    }
+}
+
+/// Payload bytes a client has received since it was created. Excludes TLS,
+/// HTTP and WebSocket framing overhead.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TrafficStats {
+    /// Live PTY output.
+    pub pty_bytes: u64,
+    /// Screen snapshots sent on (re)subscribe.
+    pub snapshot_bytes: u64,
+    /// `/v1/state` bodies as received (compressed when the server gzips).
+    pub state_bytes: u64,
+    /// Number of `/v1/state` fetches.
+    pub state_fetches: u64,
+    /// Settings bodies.
+    pub settings_bytes: u64,
+    /// Every other WebSocket message (state, git, usage and stats events).
+    pub event_bytes: u64,
+}
+
+#[derive(Default)]
+struct TrafficCounters {
+    pty: std::sync::atomic::AtomicU64,
+    snapshot: std::sync::atomic::AtomicU64,
+    state: std::sync::atomic::AtomicU64,
+    state_fetches: std::sync::atomic::AtomicU64,
+    settings: std::sync::atomic::AtomicU64,
+    events: std::sync::atomic::AtomicU64,
+}
+
+impl TrafficCounters {
+    fn add(counter: &std::sync::atomic::AtomicU64, bytes: usize) {
+        counter.fetch_add(bytes as u64, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn record_state(&self, bytes: usize) {
+        Self::add(&self.state, bytes);
+        Self::add(&self.state_fetches, 1);
+    }
+
+    fn snapshot(&self) -> TrafficStats {
+        let load = |c: &std::sync::atomic::AtomicU64| c.load(std::sync::atomic::Ordering::Relaxed);
+        TrafficStats {
+            pty_bytes: load(&self.pty),
+            snapshot_bytes: load(&self.snapshot),
+            state_bytes: load(&self.state),
+            state_fetches: load(&self.state_fetches),
+            settings_bytes: load(&self.settings),
+            event_bytes: load(&self.events),
+        }
+    }
+}
+
+/// When the session should next fetch the state.
+struct StateRefresh {
+    stale: bool,
+    last_fetch: Instant,
+}
+
+impl StateRefresh {
+    fn fetched_at(now: Instant) -> Self {
+        Self {
+            stale: false,
+            last_fetch: now,
+        }
+    }
+
+    fn on_changed(&mut self) {
+        self.stale = true;
+    }
+
+    fn on_fetched(&mut self, now: Instant) {
+        self.stale = false;
+        self.last_fetch = now;
+    }
+
+    /// The instant to fetch at, or `None` while there is nothing to fetch or
+    /// fetching is deferred. May be in the past (fetch now).
+    fn due(&self, policy: &StateSyncPolicy) -> Option<Instant> {
+        (self.stale && !policy.deferred).then(|| self.last_fetch + policy.min_interval)
+    }
+}
+
+/// Why a `/v1/state` fetch failed.
+enum StateFetchError {
+    Unauthorized(reqwest::StatusCode),
+    Status(reqwest::StatusCode),
+    Other(String),
+}
+
+impl std::fmt::Display for StateFetchError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unauthorized(status) | Self::Status(status) => write!(f, "HTTP {status}"),
+            Self::Other(error) => f.write_str(error),
+        }
+    }
+}
+
+/// Fetch `/v1/state`, returning it with its body size as received. The
+/// session client has transparent decompression off, so a gzipped body is
+/// decoded here and the count is what crossed the network.
+async fn fetch_state(
+    client: &reqwest::Client,
+    base_url: &str,
+    token: &str,
+    accept_gzip: bool,
+) -> Result<(StateResponse, usize), StateFetchError> {
+    let mut request = client
+        .get(format!("{base_url}/v1/state"))
+        .header("Authorization", format!("Bearer {token}"))
+        .timeout(Duration::from_secs(10));
+    if accept_gzip {
+        request = request.header(reqwest::header::ACCEPT_ENCODING, "gzip");
+    }
+    let response = request
+        .send()
+        .await
+        .map_err(|e| StateFetchError::Other(e.to_string()))?;
+    let status = response.status();
+    if status == reqwest::StatusCode::UNAUTHORIZED {
+        return Err(StateFetchError::Unauthorized(status));
+    }
+    if !status.is_success() {
+        return Err(StateFetchError::Status(status));
+    }
+    let gzipped = response
+        .headers()
+        .get(reqwest::header::CONTENT_ENCODING)
+        .is_some_and(|value| value.as_bytes().eq_ignore_ascii_case(b"gzip"));
+    let body = response
+        .bytes()
+        .await
+        .map_err(|e| StateFetchError::Other(e.to_string()))?;
+    let state = parse_state_body(&body, gzipped).map_err(StateFetchError::Other)?;
+    Ok((state, body.len()))
+}
+
+fn parse_state_body(body: &[u8], gzipped: bool) -> Result<StateResponse, String> {
+    if gzipped {
+        let mut json = Vec::new();
+        std::io::Read::read_to_end(&mut flate2::read::GzDecoder::new(body), &mut json)
+            .map_err(|e| format!("cannot decompress state: {e}"))?;
+        serde_json::from_slice(&json)
+    } else {
+        serde_json::from_slice(body)
+    }
+    .map_err(|e| format!("cannot parse state: {e}"))
 }
 
 impl SessionControl {
@@ -387,6 +565,8 @@ impl SessionControl {
             probe: Arc::new(tokio::sync::watch::channel(0).0),
             paused: Arc::new(tokio::sync::watch::channel(false).0),
             streams: Arc::new(tokio::sync::watch::channel(None).0),
+            state_sync: Arc::new(tokio::sync::watch::channel(StateSyncPolicy::default()).0),
+            traffic: Arc::new(TrafficCounters::default()),
         }
     }
 
@@ -773,6 +953,31 @@ impl<H: ConnectionHandler> RemoteClient<H> {
     pub fn set_streamed_terminals(&self, terminal_ids: Option<Vec<String>>) {
         self.control
             .set_streams(terminal_ids.map(|ids| ids.into_iter().collect()));
+    }
+
+    /// Set how the session follows `state_changed` (see [`StateSyncPolicy`]).
+    /// Applies to the live session at once and to every reconnect.
+    pub fn set_state_sync(&self, policy: StateSyncPolicy) {
+        self.control.state_sync.send_if_modified(|current| {
+            let changed = *current != policy;
+            *current = policy;
+            changed
+        });
+    }
+
+    /// Defer (or resume) state fetches, keeping the rest of the policy. On
+    /// resume a stale state is fetched at once.
+    pub fn set_state_sync_deferred(&self, deferred: bool) {
+        self.control.state_sync.send_if_modified(|policy| {
+            let changed = policy.deferred != deferred;
+            policy.deferred = deferred;
+            changed
+        });
+    }
+
+    /// Payload bytes received since this client was created.
+    pub fn traffic_stats(&self) -> TrafficStats {
+        self.control.traffic.snapshot()
     }
 
     /// Declare which of this connection's projects the client currently renders.
@@ -1637,42 +1842,41 @@ impl<H: ConnectionHandler> RemoteClient<H> {
 
         // Step 3: Fetch state via HTTP
         let base_url = config.http_origin();
+        // Off-host the state is fetched gzipped and decoded by hand (see
+        // `fetch_state`); the local socket is not worth compressing.
+        let accept_gzip = local_unix_path(config).is_none();
         let client = if let Some(path) = local_unix_path(config) {
             unix_http_client(path)
         } else {
-            crate::client::tls::build_reqwest_client(
+            crate::client::tls::reqwest_client_builder(
                 config.tls,
                 config.pinned_cert_sha256.clone(),
                 observed.clone(),
             )
+            .no_gzip()
+            .build()
+            .map_err(|error| format!("Cannot initialise HTTP client: {error}"))
         }
         .map_err(SessionError::Transient)?;
+        let traffic = control.traffic.clone();
+        let mut sync_rx = control.state_sync.subscribe();
+        let fetch_settings = sync_rx.borrow_and_update().fetch_settings;
         log::info!("State fetch starting at +{}ms", elapsed_ms());
-        let state_resp = client
-            .get(format!("{}/v1/state", base_url))
-            .header("Authorization", format!("Bearer {}", token))
-            .timeout(std::time::Duration::from_secs(10))
-            .send()
-            .await
-            .map_err(|e| SessionError::Transient(format!("Failed to fetch state: {}", e)))?;
-
-        if state_resp.status() == reqwest::StatusCode::UNAUTHORIZED {
-            return Err(SessionError::Auth(format!(
-                "State fetch failed: HTTP {}",
-                state_resp.status()
-            )));
-        }
-        if !state_resp.status().is_success() {
-            return Err(SessionError::Transient(format!(
-                "State fetch failed: HTTP {}",
-                state_resp.status()
-            )));
-        }
-
-        let state: StateResponse = state_resp
-            .json()
-            .await
-            .map_err(|e| SessionError::Transient(format!("Failed to parse state: {}", e)))?;
+        let state = match fetch_state(&client, &base_url, token, accept_gzip).await {
+            Ok((state, bytes)) => {
+                traffic.record_state(bytes);
+                state
+            }
+            Err(error @ StateFetchError::Unauthorized(_)) => {
+                return Err(SessionError::Auth(format!("State fetch failed: {error}")));
+            }
+            Err(error) => {
+                return Err(SessionError::Transient(format!(
+                    "State fetch failed: {error}"
+                )));
+            }
+        };
+        let mut refresh = StateRefresh::fetched_at(Instant::now());
         log::info!("State fetched at +{}ms", elapsed_ms());
 
         // Step 4: Sync terminal objects.
@@ -1698,16 +1902,19 @@ impl<H: ConnectionHandler> RemoteClient<H> {
                 state: state.clone(),
             })
             .await;
-        match fetch_remote_settings(&client, &base_url, token).await {
-            Ok(settings) => {
-                let _ = event_tx
-                    .send(ConnectionEvent::SettingsChanged {
-                        connection_id: config.id.clone(),
-                        settings,
-                    })
-                    .await;
+        if fetch_settings {
+            match fetch_remote_settings(&client, &base_url, token).await {
+                Ok(settings) => {
+                    TrafficCounters::add(&traffic.settings, settings.to_string().len());
+                    let _ = event_tx
+                        .send(ConnectionEvent::SettingsChanged {
+                            connection_id: config.id.clone(),
+                            settings,
+                        })
+                        .await;
+                }
+                Err(error) => log::warn!("{error}"),
             }
-            Err(error) => log::warn!("{error}"),
         }
 
         // Step 5: Subscribe to the terminal streams the client wants (all of
@@ -1895,8 +2102,85 @@ impl<H: ConnectionHandler> RemoteClient<H> {
         ping_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut probe_rx = control.probe.subscribe();
         loop {
+            let state_due = refresh.due(&sync_rx.borrow_and_update());
             let frame = tokio::select! {
                 frame = futures::StreamExt::next(&mut ws_read) => frame,
+                Ok(()) = sync_rx.changed() => continue,
+                _ = tokio::time::sleep_until(tokio::time::Instant::from_std(
+                    state_due.unwrap_or_else(Instant::now),
+                )), if state_due.is_some() => {
+                    // Reuse the session HTTP client (built once at Step 3) so
+                    // connection pooling / keep-alive is preserved across
+                    // refetches instead of rebuilding a client per event.
+                    match fetch_state(&client, &base_url, token, accept_gzip).await {
+                        Ok((new_state, bytes)) => {
+                            traffic.record_state(bytes);
+                            let diff = diff_states(&cached_state, &new_state);
+                            let new_size_map = collect_terminal_sizes(&new_state);
+
+                            // Add new terminals via handler
+                            for tid in &diff.added_terminals {
+                                let prefixed = make_prefixed_id(&config_id, tid);
+                                let (cols, rows) =
+                                    new_size_map.get(tid).copied().unwrap_or((0, 0));
+                                handler_clone.create_terminal(
+                                    &config_id,
+                                    tid,
+                                    &prefixed,
+                                    ws_tx_clone.clone(),
+                                    cols,
+                                    rows,
+                                );
+                            }
+
+                            // Remove old terminals via handler
+                            for tid in &diff.removed_terminals {
+                                let prefixed = make_prefixed_id(&config_id, tid);
+                                handler_clone.remove_terminal(&prefixed);
+                            }
+
+                            // Stream what is wanted now: new terminals that
+                            // pass the filter start, removed ones stop.
+                            let wanted = wanted_streams(&new_state, streams_rx.borrow().as_ref());
+                            reconcile_streams(
+                                &mut subscribed,
+                                &wanted,
+                                &ws_tx_clone,
+                                &stream_map,
+                                &mut reverse_stream_map,
+                            )
+                            .await;
+
+                            cached_state = new_state.clone();
+
+                            let _ = event_tx_clone
+                                .send(ConnectionEvent::StateReceived {
+                                    connection_id: config_id.clone(),
+                                    state: new_state,
+                                })
+                                .await;
+                        }
+                        Err(error) => log::warn!("State re-fetch failed: {error}"),
+                    }
+                    if sync_rx.borrow().fetch_settings {
+                        match fetch_remote_settings(&client, &base_url, token).await {
+                            Ok(settings) => {
+                                TrafficCounters::add(&traffic.settings, settings.to_string().len());
+                                let _ = event_tx_clone
+                                    .send(ConnectionEvent::SettingsChanged {
+                                        connection_id: config_id.clone(),
+                                        settings,
+                                    })
+                                    .await;
+                            }
+                            Err(error) => log::warn!("{error}"),
+                        }
+                    }
+                    // A failed fetch is not retried until the next change,
+                    // as before: retrying at once could spin on a dead route.
+                    refresh.on_fetched(Instant::now());
+                    continue;
+                }
                 _ = tokio::time::sleep_until(tokio::time::Instant::from_std(liveness.deadline())) => {
                     match liveness.on_deadline(Instant::now()) {
                         LivenessAction::SendProbe => {
@@ -1965,9 +2249,14 @@ impl<H: ConnectionHandler> RemoteClient<H> {
             match frame {
                 Some(Ok(tungstenite::Message::Binary(data))) => {
                     // Generic binary frame: [proto:1][type:1][stream_id:4 BE][payload...]
-                    if let Some((frame_type, stream_id, payload)) =
-                        okena_core::ws::parse_binary_frame(&data)
-                    {
+                    let parsed = okena_core::ws::parse_binary_frame(&data);
+                    let counter = match parsed {
+                        Some((okena_core::ws::FRAME_TYPE_PTY, _, _)) => &traffic.pty,
+                        Some((okena_core::ws::FRAME_TYPE_SNAPSHOT, _, _)) => &traffic.snapshot,
+                        _ => &traffic.events,
+                    };
+                    TrafficCounters::add(counter, data.len());
+                    if let Some((frame_type, stream_id, payload)) = parsed {
                         match frame_type {
                             okena_core::ws::FRAME_TYPE_PTY
                             | okena_core::ws::FRAME_TYPE_SNAPSHOT => {
@@ -1988,6 +2277,7 @@ impl<H: ConnectionHandler> RemoteClient<H> {
                     }
                 }
                 Some(Ok(tungstenite::Message::Text(text))) => {
+                    TrafficCounters::add(&traffic.events, text.len());
                     // JSON message
                     match serde_json::from_str::<serde_json::Value>(&text) {
                         Ok(value) => {
@@ -2050,97 +2340,9 @@ impl<H: ConnectionHandler> RemoteClient<H> {
                                     }
                                 }
                                 "state_changed" => {
-                                    log::info!("State changed on remote server");
-                                    // Reuse the session HTTP client (built once at
-                                    // Step 3) so connection pooling / keep-alive is
-                                    // preserved across state_changed events instead
-                                    // of rebuilding a client per event.
-                                    match client
-                                        .get(format!("{}/v1/state", base_url))
-                                        .header("Authorization", format!("Bearer {}", token))
-                                        .timeout(std::time::Duration::from_secs(10))
-                                        .send()
-                                        .await
-                                    {
-                                        Ok(resp) if resp.status().is_success() => {
-                                            if let Ok(new_state) =
-                                                resp.json::<StateResponse>().await
-                                            {
-                                                let diff = diff_states(&cached_state, &new_state);
-                                                let new_size_map =
-                                                    collect_terminal_sizes(&new_state);
-
-                                                // Add new terminals via handler
-                                                for tid in &diff.added_terminals {
-                                                    let prefixed =
-                                                        make_prefixed_id(&config_id, tid);
-                                                    let (cols, rows) = new_size_map
-                                                        .get(tid)
-                                                        .copied()
-                                                        .unwrap_or((0, 0));
-                                                    handler_clone.create_terminal(
-                                                        &config_id,
-                                                        tid,
-                                                        &prefixed,
-                                                        ws_tx_clone.clone(),
-                                                        cols,
-                                                        rows,
-                                                    );
-                                                }
-
-                                                // Remove old terminals via handler
-                                                for tid in &diff.removed_terminals {
-                                                    let prefixed =
-                                                        make_prefixed_id(&config_id, tid);
-                                                    handler_clone.remove_terminal(&prefixed);
-                                                }
-
-                                                // Stream what is wanted now: new terminals
-                                                // that pass the filter start, removed ones stop.
-                                                let wanted = wanted_streams(
-                                                    &new_state,
-                                                    streams_rx.borrow().as_ref(),
-                                                );
-                                                reconcile_streams(
-                                                    &mut subscribed,
-                                                    &wanted,
-                                                    &ws_tx_clone,
-                                                    &stream_map,
-                                                    &mut reverse_stream_map,
-                                                )
-                                                .await;
-
-                                                cached_state = new_state.clone();
-
-                                                let _ = event_tx_clone
-                                                    .send(ConnectionEvent::StateReceived {
-                                                        connection_id: config_id.clone(),
-                                                        state: new_state,
-                                                    })
-                                                    .await;
-                                            }
-                                        }
-                                        Ok(resp) => {
-                                            log::warn!(
-                                                "State re-fetch failed: HTTP {}",
-                                                resp.status()
-                                            );
-                                        }
-                                        Err(e) => {
-                                            log::warn!("State re-fetch failed: {}", e);
-                                        }
-                                    }
-                                    match fetch_remote_settings(&client, &base_url, token).await {
-                                        Ok(settings) => {
-                                            let _ = event_tx_clone
-                                                .send(ConnectionEvent::SettingsChanged {
-                                                    connection_id: config_id.clone(),
-                                                    settings,
-                                                })
-                                                .await;
-                                        }
-                                        Err(error) => log::warn!("{error}"),
-                                    }
+                                    // Fetched by the refresh branch above, at
+                                    // once or coalesced per the sync policy.
+                                    refresh.on_changed();
                                 }
                                 "pong" => {
                                     // Keep-alive response, ignore
@@ -2556,6 +2758,68 @@ mod tests {
             "fullscreen_terminal": null,
         }))
         .expect("test state deserializes")
+    }
+
+    #[test]
+    fn state_refresh_fetches_at_once_without_an_interval() {
+        let t0 = Instant::now();
+        let mut refresh = StateRefresh::fetched_at(t0);
+        let policy = StateSyncPolicy::default();
+        assert_eq!(refresh.due(&policy), None);
+        refresh.on_changed();
+        assert_eq!(refresh.due(&policy), Some(t0));
+        refresh.on_fetched(t0);
+        assert_eq!(refresh.due(&policy), None);
+    }
+
+    #[test]
+    fn state_refresh_coalesces_changes_inside_the_interval() {
+        let t0 = Instant::now();
+        let mut refresh = StateRefresh::fetched_at(t0);
+        let policy = StateSyncPolicy {
+            min_interval: Duration::from_secs(1),
+            ..StateSyncPolicy::default()
+        };
+        // Several changes right after a fetch: one fetch when the window ends.
+        refresh.on_changed();
+        refresh.on_changed();
+        assert_eq!(refresh.due(&policy), Some(t0 + Duration::from_secs(1)));
+        // A change that comes after a quiet window is already due when it
+        // arrives: the window ended a second after the last fetch.
+        refresh.on_fetched(t0);
+        refresh.on_changed();
+        let arrives = t0 + Duration::from_secs(5);
+        assert!(refresh.due(&policy).unwrap() < arrives);
+    }
+
+    #[test]
+    fn deferred_state_refresh_waits_and_then_fetches_once() {
+        let t0 = Instant::now();
+        let mut refresh = StateRefresh::fetched_at(t0);
+        let mut policy = StateSyncPolicy {
+            deferred: true,
+            ..StateSyncPolicy::default()
+        };
+        refresh.on_changed();
+        refresh.on_changed();
+        assert_eq!(refresh.due(&policy), None);
+        policy.deferred = false;
+        assert_eq!(refresh.due(&policy), Some(t0));
+    }
+
+    #[test]
+    fn state_bodies_parse_plain_and_gzipped() {
+        let state = state_with_terminals(&[("p1", "t1")]);
+        let json = serde_json::to_vec(&state).unwrap();
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        std::io::Write::write_all(&mut encoder, &json).unwrap();
+        let gzipped = encoder.finish().unwrap();
+
+        for (body, gzip) in [(&json, false), (&gzipped, true)] {
+            let parsed = parse_state_body(body, gzip).expect("state parses");
+            assert_eq!(wanted_streams(&parsed, None), vec!["t1"]);
+        }
+        assert!(parse_state_body(&json, true).is_err());
     }
 
     #[test]
