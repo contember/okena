@@ -18,6 +18,8 @@
     <string>VERSION</string>
     <key>CFBundleShortVersionString</key>
     <string>VERSION</string>
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>Okena needs local network access so commands you run in the terminal can reach devices and VMs on your network.</string>
     <key>NSHighResolutionCapable</key>
     <true/>
     <key>LSMinimumSystemVersion</key>
