@@ -353,6 +353,17 @@ impl TerminalHolder {
         }
     }
 
+    /// A bell / notification the server reported for this terminal (it is not
+    /// streamed, so the phone did not see the bytes itself).
+    pub fn raise_attention(&self, bell: bool, notification: bool) {
+        if bell {
+            self.bell.store(true, Ordering::Relaxed);
+        }
+        if notification {
+            self.notification.store(true, Ordering::Relaxed);
+        }
+    }
+
     /// The user viewed the terminal: clear the unseen bell and notification.
     pub fn mark_seen(&self) {
         self.bell.store(false, Ordering::Relaxed);

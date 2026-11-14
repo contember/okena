@@ -174,6 +174,12 @@ pub struct Terminal {
     /// exactly once instead of on every batch while `has_bell` stays set.
     pub(super) bell_pending: Arc<AtomicBool>,
 
+    /// Unix millis of the last bell / desktop notification the daemon's PTY
+    /// loop drained, 0 when none yet. Published in the state so clients that
+    /// do not stream this terminal can still flag it.
+    pub(super) last_bell_at: AtomicU64,
+    pub(super) last_notification_at: AtomicU64,
+
     /// "The user marked this pane unread by hand" flag. Holds `has_bell`
     /// against the render path's clear-on-focus, so marking the pane you are
     /// looking at actually sticks; released when focus leaves, so the next
@@ -519,6 +525,8 @@ impl Terminal {
             title,
             has_bell,
             bell_pending,
+            last_bell_at: AtomicU64::new(0),
+            last_notification_at: AtomicU64::new(0),
             manual_unread: AtomicBool::new(false),
             has_notification: AtomicBool::new(false),
             pending_clipboard,

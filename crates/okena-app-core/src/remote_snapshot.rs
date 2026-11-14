@@ -219,5 +219,6 @@ pub fn build_state_response(
         claude_dialogs: Default::default(),
         claude_sessions: Vec::new(),
         claude_pr_links: Default::default(),
+        terminal_attention: Default::default(),
     }
 }

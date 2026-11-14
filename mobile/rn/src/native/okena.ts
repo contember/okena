@@ -571,9 +571,10 @@ export interface OkenaNative {
   getProjectOrder(connId: ConnId): ProjectId[];
 
   /**
-   * Activity signals of every terminal the connection mirrors. Bell,
-   * notification and output time only move for streamed terminals (see
-   * {@link setStreamedTerminals}). Cheap: one call per state poll.
+   * Activity signals of every terminal the connection mirrors. Output time
+   * only moves for streamed terminals (see {@link setStreamedTerminals});
+   * bells and notifications of the rest arrive with the state. Cheap: one
+   * call per state poll.
    */
   getTerminalActivity(connId: ConnId): TerminalActivity[];
 

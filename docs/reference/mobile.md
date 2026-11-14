@@ -113,10 +113,18 @@ the app is in the background or polling stopped. The filter lives in the transpo
 subscriptions on every filter change and `state_changed`. A terminal that streams again gets a
 fresh snapshot from the server, so switching terminals costs one snapshot.
 
-Consequence: bell, OSC 9/777 notification and the output-based "running" signal come only from
-the streamed terminal. Agent status (`terminalAgentStatus`) and Claude dialogs come with the state
-and cover every terminal. The connection dot's liveness counts any inbound frame (pong, the 2 s
-system stats), not terminal output.
+Consequence: the output-based "running" signal comes only from the streamed terminal. Bells and
+OSC 9/777 notifications of the others come with the state: the daemon stamps each terminal's last
+bell and notification (`StateResponse.terminal_attention`, Unix millis), and the phone raises a
+terminal's unseen flag when its stamp moved between two states (never by comparing clocks; the
+first state of a connection is the baseline). Agent status (`terminalAgentStatus`) and Claude
+dialogs also come with the state. The connection dot's liveness counts any inbound frame (pong,
+state events), not terminal output.
+
+The phone opts out of the 2 s `system_stats_changed` push (`set_system_stats` with
+`enabled: false`); it shows no host metrics. Git status arrives as `git_status_changed` and is
+patched into the cached state; it no longer bumps `state_version`, so a git change does not make
+any client refetch the whole state.
 
 The JSON routes (`/v1/state`, `/v1/actions`, usage, Claude session/transcript) are gzipped for
 clients that send `Accept-Encoding: gzip`; the transport's reqwest client does, except over the
