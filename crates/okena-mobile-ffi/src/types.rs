@@ -303,3 +303,34 @@ impl TerminalActivity {
         }
     }
 }
+
+/// Payload bytes a connection has received since the app connected it (TLS,
+/// HTTP and WebSocket framing excluded).
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct TrafficInfo {
+    /// Live PTY output.
+    pub pty_bytes: u64,
+    /// Screen snapshots sent when a terminal starts streaming.
+    pub snapshot_bytes: u64,
+    /// Workspace state bodies as received.
+    pub state_bytes: u64,
+    /// Number of workspace state fetches.
+    pub state_fetches: u64,
+    /// Settings bodies.
+    pub settings_bytes: u64,
+    /// Every other WebSocket message.
+    pub event_bytes: u64,
+}
+
+impl From<okena_transport::client::TrafficStats> for TrafficInfo {
+    fn from(s: okena_transport::client::TrafficStats) -> Self {
+        Self {
+            pty_bytes: s.pty_bytes,
+            snapshot_bytes: s.snapshot_bytes,
+            state_bytes: s.state_bytes,
+            state_fetches: s.state_fetches,
+            settings_bytes: s.settings_bytes,
+            event_bytes: s.event_bytes,
+        }
+    }
+}
