@@ -45,7 +45,7 @@ use crate::client::manager::ConnectionManager;
 
 pub use types::{
     CellData, ConnectionStatus, CursorShape, CursorState, FolderInfo, FullscreenInfo, ProjectInfo,
-    ScrollInfo, SelectionBounds, ServiceInfo, TerminalActivity,
+    ScrollInfo, SelectionBounds, ServiceInfo, TerminalActivity, TrafficInfo,
 };
 pub use usage::{
     ExtraUsageInfo, PoolAccountInfo, PoolAmountInfo, PoolInfo, PoolNonstopInfo, PoolPaceInfo,
@@ -86,6 +86,22 @@ pub fn on_app_background() {
 #[uniffi::export]
 pub fn set_streamed_terminals(conn_id: String, terminal_ids: Vec<String>) {
     ConnectionManager::get().set_streamed_terminals(&conn_id, terminal_ids);
+}
+
+/// The app went to (`true`) or left (`false`) the background. Call on every
+/// change, also while the Android connection service runs: in the background
+/// no workspace state is fetched, and a changed state is fetched once on return.
+#[uniffi::export]
+pub fn set_app_in_background(background: bool) {
+    ConnectionManager::get().set_app_in_background(background);
+}
+
+/// Payload bytes a connection has received since it was created, by kind.
+#[uniffi::export]
+pub fn get_traffic_stats(conn_id: String) -> Option<TrafficInfo> {
+    ConnectionManager::get()
+        .traffic_stats(&conn_id)
+        .map(Into::into)
 }
 
 /// Retry one connection now ("Retry now" in the UI): skips the backoff and

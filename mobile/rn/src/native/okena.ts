@@ -466,6 +466,16 @@ export interface OkenaNative {
   onAppBackground(): void;
 
   /**
+   * The app went to (`true`) or left (`false`) the background. Call on every
+   * change, also while the Android connection service runs: in the background
+   * no workspace state is fetched; a changed state is fetched once on return.
+   */
+  setAppInBackground(background: boolean): void;
+
+  /** Payload bytes the connection has received since it connected, by kind. */
+  getTrafficStats(connId: ConnId): TrafficStats | undefined;
+
+  /**
    * Retry one connection now: skip the backoff and reset the attempt budget,
    * keeping terminals and cached state. Only meaningful when
    * {@link canReconnectNow} is true.
@@ -883,6 +893,29 @@ function toProjectInfo(p: GenProjectInfo): ProjectInfo {
   };
 }
 
+/** Payload bytes received since connecting (framing overhead excluded). */
+export interface TrafficStats {
+  ptyBytes: number;
+  snapshotBytes: number;
+  stateBytes: number;
+  stateFetches: number;
+  settingsBytes: number;
+  eventBytes: number;
+}
+
+type GenTrafficStats = { [K in keyof TrafficStats]: bigint | number };
+
+function toTrafficStats(s: GenTrafficStats): TrafficStats {
+  return {
+    ptyBytes: Number(s.ptyBytes),
+    snapshotBytes: Number(s.snapshotBytes),
+    stateBytes: Number(s.stateBytes),
+    stateFetches: Number(s.stateFetches),
+    settingsBytes: Number(s.settingsBytes),
+    eventBytes: Number(s.eventBytes),
+  };
+}
+
 type GenTerminalActivity = Omit<TerminalActivity, 'lastOutputMsAgo'> & {
   lastOutputMsAgo?: bigint | number;
 };
@@ -974,6 +1007,14 @@ export function getOkenaNative(): OkenaNative {
       },
       onAppBackground: () => {
         if (typeof gen.onAppBackground === 'function') gen.onAppBackground();
+      },
+      setAppInBackground: (background: boolean) => {
+        if (typeof gen.setAppInBackground === 'function') gen.setAppInBackground(background);
+      },
+      getTrafficStats: (connId: ConnId) => {
+        if (typeof gen.getTrafficStats !== 'function') return undefined;
+        const stats = gen.getTrafficStats(connId) as GenTrafficStats | undefined;
+        return stats === undefined ? undefined : toTrafficStats(stats);
       },
       reconnectNow: (connId: ConnId) => {
         if (typeof gen.reconnectNow === 'function') gen.reconnectNow(connId);
