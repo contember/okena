@@ -2,11 +2,12 @@ use crate::client::handler::MobileConnectionHandler;
 use crate::client::terminal_holder::{TerminalActivity, TerminalHolder};
 
 use okena_core::api::{
-    ActionRequest, ApiFullscreen, ApiLayoutNode, ApiUsage, ApiUsageProvider, StateResponse,
+    ActionRequest, ApiFullscreen, ApiLayoutNode, ApiTerminalAttention, ApiUsage, ApiUsageProvider,
+    StateResponse,
 };
 use okena_transport::client::{
-    ConnectionEvent, ConnectionStatus, RemoteClient, RemoteConnectionConfig, WsClientMessage,
-    make_prefixed_id,
+    ConnectionEvent, ConnectionStatus, RemoteClient, RemoteConnectionConfig, StateSyncPolicy,
+    TrafficStats, WsClientMessage, make_prefixed_id,
 };
 use parking_lot::RwLock;
 use std::collections::{HashMap, HashSet};
@@ -18,7 +19,14 @@ static MANAGER: OnceLock<ConnectionManager> = OnceLock::new();
 pub struct ConnectionManager {
     runtime: Arc<tokio::runtime::Runtime>,
     connections: RwLock<HashMap<String, MobileConnection>>,
+    /// The app is in the background: connections defer state fetches.
+    in_background: std::sync::atomic::AtomicBool,
 }
+
+/// Least time between two state fetches on the phone. A busy workspace bumps
+/// the state several times a second (agent status edges, finished commands,
+/// git); each fetch downloads the whole snapshot.
+const STATE_SYNC_MIN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
 
 struct MobileConnection {
     client: RwLock<RemoteClient<MobileConnectionHandler>>,
@@ -274,6 +282,29 @@ fn apply_terminal_presentation(
     }
 }
 
+/// Terminals whose bell / notification timestamp moved between two states:
+/// `(terminal_id, bell, notification)`. A terminal absent from `previous` had
+/// none yet, so any stamp it now has is new. Only movement counts, so the
+/// phone never compares the server's clock with its own; the first state of a
+/// connection is the baseline and raises nothing.
+fn new_attention(
+    previous: &HashMap<String, ApiTerminalAttention>,
+    next: &HashMap<String, ApiTerminalAttention>,
+) -> Vec<(String, bool, bool)> {
+    let moved = |before: Option<u64>, now: Option<u64>| now > before;
+    let mut raised: Vec<(String, bool, bool)> = next
+        .iter()
+        .filter_map(|(terminal_id, now)| {
+            let before = previous.get(terminal_id).copied().unwrap_or_default();
+            let bell = moved(before.bell_at, now.bell_at);
+            let notification = moved(before.notification_at, now.notification_at);
+            (bell || notification).then(|| (terminal_id.clone(), bell, notification))
+        })
+        .collect();
+    raised.sort();
+    raised
+}
+
 fn merge_state_presentation(next: &mut StateResponse, previous: &StateResponse) {
     for project in &mut next.projects {
         let Some(previous_project) = previous.projects.iter().find(|old| old.id == project.id)
@@ -363,6 +394,7 @@ impl ConnectionManager {
             ConnectionManager {
                 runtime: Arc::new(runtime),
                 connections: RwLock::new(HashMap::new()),
+                in_background: std::sync::atomic::AtomicBool::new(false),
             }
         });
     }
@@ -507,6 +539,19 @@ impl ConnectionManager {
         let (event_tx, event_rx) = async_channel::bounded::<ConnectionEvent>(256);
 
         let client = RemoteClient::new(config, self.runtime.clone(), handler.clone(), event_tx);
+        // The phone shows one terminal at a time: stream nothing until the UI
+        // names what is on screen (`set_streamed_terminals`), instead of
+        // downloading every terminal's output on connect.
+        client.set_streamed_terminals(Some(Vec::new()));
+        // Coalesce state fetches, hold them in the background, and skip the
+        // settings, which the app does not use.
+        client.set_state_sync(StateSyncPolicy {
+            min_interval: STATE_SYNC_MIN_INTERVAL,
+            deferred: self.in_background.load(Ordering::Relaxed),
+            fetch_settings: false,
+        });
+        // The app shows no host metrics; skip the 2 s `system_stats` push.
+        client.set_system_stats_push(false);
 
         // Spawn event processor task
         let conn_id_clone = conn_id.clone();
@@ -611,6 +656,37 @@ impl ConnectionManager {
             log::info!("[{conn_id}] app background, pausing reconnects");
             conn.client.read().set_reconnect_paused(true);
         }
+    }
+
+    /// Stream PTY output only for these terminals (unprefixed ids): the ones
+    /// on screen. Survives reconnects; the rest keep their last content until
+    /// streamed again, when the server sends a fresh snapshot.
+    pub fn set_streamed_terminals(&self, conn_id: &str, terminal_ids: Vec<String>) {
+        let connections = self.connections.read();
+        if let Some(conn) = connections.get(conn_id) {
+            conn.client
+                .read()
+                .set_streamed_terminals(Some(terminal_ids));
+        }
+    }
+
+    /// The app went to (or left) the background. In the background no state is
+    /// fetched; a state that changed meanwhile is fetched once on return.
+    /// Unlike [`Self::on_app_background`] this also applies while the Android
+    /// connection service keeps the session alive.
+    pub fn set_app_in_background(&self, background: bool) {
+        self.in_background.store(background, Ordering::Relaxed);
+        for conn in self.connections.read().values() {
+            conn.client.read().set_state_sync_deferred(background);
+        }
+    }
+
+    /// Payload bytes a connection has received since it was created.
+    pub fn traffic_stats(&self, conn_id: &str) -> Option<TrafficStats> {
+        let connections = self.connections.read();
+        connections
+            .get(conn_id)
+            .map(|conn| conn.client.read().traffic_stats())
     }
 
     /// Pair with the remote server using a pairing code.
@@ -966,6 +1042,29 @@ impl ConnectionManager {
                 ConnectionEvent::StateReceived { mut state, .. } => {
                     let mut cache = conn.state_cache.write();
                     if let Some(previous) = cache.as_ref() {
+                        // Bells and notifications of terminals the phone does
+                        // not stream reach it only through the state. One a
+                        // terminal already showed in its own output since the
+                        // last state is the same event, maybe already seen.
+                        let raised =
+                            new_attention(&previous.terminal_attention, &state.terminal_attention);
+                        let terminals = conn.handler.terminals().read();
+                        let mut local: HashMap<&str, (bool, bool)> = terminals
+                            .iter()
+                            .map(|(id, holder)| (id.as_str(), holder.take_local_attention()))
+                            .collect();
+                        for (terminal_id, bell, notification) in raised {
+                            let prefixed = make_prefixed_id(&conn_id, &terminal_id);
+                            if let Some(holder) = terminals.get(&prefixed) {
+                                let (bell_here, notification_here) =
+                                    local.remove(prefixed.as_str()).unwrap_or_default();
+                                holder.raise_attention(
+                                    bell && !bell_here,
+                                    notification && !notification_here,
+                                );
+                            }
+                        }
+                        drop(terminals);
                         merge_state_presentation(&mut state, previous);
                     } else {
                         state.fullscreen_terminal = None;
@@ -1009,6 +1108,37 @@ mod tests {
     use okena_core::api::ApiProject;
     use okena_core::shell::ShellType;
     use okena_core::types::SplitDirection;
+
+    fn attention(bell_at: Option<u64>, notification_at: Option<u64>) -> ApiTerminalAttention {
+        ApiTerminalAttention {
+            bell_at,
+            notification_at,
+        }
+    }
+
+    #[test]
+    fn only_moved_attention_stamps_raise() {
+        let previous = HashMap::from([
+            ("t1".to_string(), attention(Some(10), None)),
+            ("t2".to_string(), attention(Some(10), Some(20))),
+        ]);
+        let next = HashMap::from([
+            // Bell rang again.
+            ("t1".to_string(), attention(Some(15), None)),
+            // Unchanged.
+            ("t2".to_string(), attention(Some(10), Some(20))),
+            // New terminal with a notification.
+            ("t3".to_string(), attention(None, Some(5))),
+        ]);
+        assert_eq!(
+            new_attention(&previous, &next),
+            vec![
+                ("t1".to_string(), true, false),
+                ("t3".to_string(), false, true),
+            ]
+        );
+        assert!(new_attention(&next, &next).is_empty());
+    }
 
     fn terminal(id: &str, minimized: bool, shell_type: ShellType) -> ApiLayoutNode {
         ApiLayoutNode::Terminal {
@@ -1060,6 +1190,7 @@ mod tests {
             claude_dialogs: Default::default(),
             claude_sessions: Vec::new(),
             claude_pr_links: Default::default(),
+            terminal_attention: Default::default(),
         }
     }
 

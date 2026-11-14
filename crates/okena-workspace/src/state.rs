@@ -2883,6 +2883,7 @@ mod workspace_tests {
                 claude_dialogs: Default::default(),
                 claude_sessions: Vec::new(),
                 claude_pr_links: Default::default(),
+                terminal_attention: Default::default(),
             }),
         }
     }
@@ -4578,6 +4579,7 @@ mod gpui_tests {
                 claude_dialogs: Default::default(),
                 claude_sessions: Vec::new(),
                 claude_pr_links: Default::default(),
+                terminal_attention: Default::default(),
             }),
         }
     }

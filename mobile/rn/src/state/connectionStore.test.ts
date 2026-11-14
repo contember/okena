@@ -41,6 +41,7 @@ function stubNative(
     secondsSinceActivity: () => 0,
     onAppForeground: () => {},
     onAppBackground: () => {},
+    setAppInBackground: () => {},
     reconnectNow: () => {},
     canReconnectNow: () => true,
     ...overrides,
@@ -442,6 +443,31 @@ describe('reconnect handling', () => {
     expect(onAppBackground).toHaveBeenCalledTimes(1);
     store.onAppStateChange('active');
     expect(onAppForeground).toHaveBeenCalledTimes(1);
+  });
+
+  it('defers state fetches in the background, also while the service runs', () => {
+    const setAppInBackground = jest.fn();
+    setup(stubNative({ setAppInBackground }));
+    configureConnectionStore({
+      service: { setActive: jest.fn(), isRunning: () => true },
+    });
+    const store = useConnectionStore.getState();
+
+    store.onAppStateChange('background');
+    expect(setAppInBackground).toHaveBeenLastCalledWith(true);
+    store.onAppStateChange('active');
+    expect(setAppInBackground).toHaveBeenLastCalledWith(false);
+  });
+
+  it('resumes state fetches when iOS returns through inactive', () => {
+    const setAppInBackground = jest.fn();
+    setup(stubNative({ setAppInBackground }));
+    const store = useConnectionStore.getState();
+
+    store.onAppStateChange('background');
+    store.onAppStateChange('inactive');
+    store.onAppStateChange('active');
+    expect(setAppInBackground).toHaveBeenLastCalledWith(false);
   });
 
   it('keeps reconnects running in the background only while the service is running', () => {

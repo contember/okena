@@ -7,7 +7,7 @@ license = "MIT"
 [features]
 default = []
 # Async client engine: WS connection manager, TLS certificate pinning (TOFU).
-client = ["dep:tokio", "dep:reqwest", "dep:tokio-tungstenite", "dep:async-channel", "dep:futures", "dep:rustls", "dep:rustls-pki-types", "dep:sha2"]
+client = ["dep:tokio", "dep:reqwest", "dep:tokio-tungstenite", "dep:async-channel", "dep:futures", "dep:rustls", "dep:rustls-pki-types", "dep:sha2", "dep:flate2"]
 # Blocking HTTP helper + remote_action over it (used by extensions and the
 # file/git read paths). TLS deps are shared with the async client so blocking
 # remote actions enforce the same pinned-certificate policy.
@@ -29,7 +29,7 @@ log = "0.4"
 
 # Client feature deps (async networking)
 tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "macros", "time"], optional = true }
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"], optional = true }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "gzip"], optional = true }
 tokio-tungstenite = { version = "0.24", features = ["rustls-tls-native-roots"], optional = true }
 async-channel = { version = "2.3", optional = true }
 futures = { version = "0.3", optional = true }
@@ -41,6 +41,8 @@ futures = { version = "0.3", optional = true }
 rustls = { version = "0.23", default-features = false, features = ["ring", "tls12", "logging", "std"], optional = true }
 rustls-pki-types = { version = "1", optional = true }
 sha2 = { version = "0.10", optional = true }
+# Decodes gzipped /v1/state by hand so the session can count wire bytes.
+flate2 = { version = "1", optional = true }
 
 [dev-dependencies]
 tempfile = "3"

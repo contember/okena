@@ -42,6 +42,8 @@ pub enum WsClientMessage {
     /// Declare this client's windows, as a full replacement list. Server-side
     /// project ids (unprefixed) — `GET /v1/state` lists them.
     SetWindows { windows: Vec<ApiWindow> },
+    /// Whether the server should push `system_stats_changed` to this client.
+    SetSystemStats { enabled: bool },
     /// Application-level keepalive (`{"type":"ping"}`); the server answers
     /// `pong`. Sent by the session itself to detect dead connections.
     Ping,

@@ -103,6 +103,59 @@ Soft keyboard / KeyToolbar tap → sendText() / sendSpecialKey() (JSI)
   → ConnectionManager.send_ws_message() → WsClientMessage::SendText → WS → server PTY stdin
 ```
 
+### What streams
+
+The phone streams PTY output only for the terminal on screen. A connection starts with nothing
+streamed (`ConnectionManager` sets an empty filter before connecting), and the workspace store
+calls `setStreamedTerminals` with the selected terminal, or with `[]` while the dashboard is open,
+the app is in the background or polling stopped. The filter lives in the transport
+(`RemoteClient::set_streamed_terminals`), so it survives reconnects; the session reconciles its
+subscriptions on every filter change and `state_changed`. A terminal that streams again gets a
+fresh snapshot from the server, so switching terminals costs one snapshot.
+
+Consequence: the output-based "running" signal comes only from the streamed terminal. Bells and
+OSC 9/777 notifications of the others come with the state: the daemon stamps each terminal's last
+bell and notification (`StateResponse.terminal_attention`, Unix millis), and the phone raises a
+terminal's unseen flag when its stamp moved between two states (never by comparing clocks; the
+first state of a connection is the baseline). Agent status (`terminalAgentStatus`) and Claude
+dialogs also come with the state. A bell the terminal already showed in its own output since the
+last state is not raised again from the stamp. The stamps need a daemon that sends
+`terminal_attention`; against an older one, bells and notifications of terminals off screen are
+not flagged. The connection dot's liveness counts any inbound frame (pong, state events), not
+terminal output; on a quiet connection only the pong to the 15 s ping arrives, so the dot stays
+green up to 20 s and turns red from 45 s.
+
+The daemon's git poller puts projects with a streamed terminal on its responsive tier, and the
+phone declares no visible projects. With only the phone connected, projects other than the one on
+screen get a full git walk only after a change signal (terminal output, index, HEAD) or every
+5 minutes, so their line counts on the dashboard can lag behind edits that print nothing. This is
+deliberate: every git change is pushed to every client as the full `git_status_changed` map, so a
+faster tier for all projects would cost data.
+
+The phone opts out of the 2 s `system_stats_changed` push (`set_system_stats` with
+`enabled: false`); it shows no host metrics. Git status arrives as `git_status_changed` and is
+patched into the cached state; it no longer bumps `state_version`, so a git change does not make
+any client refetch the whole state.
+
+The JSON routes (`/v1/state`, `/v1/actions`, usage, Claude session/transcript) are gzipped for
+clients that send `Accept-Encoding: gzip`; the transport's reqwest client does, except over the
+local Unix socket.
+
+### State fetches
+
+Every `state_changed` makes the transport refetch the whole `/v1/state`. The phone sets a
+`StateSyncPolicy` on each connection: at most one fetch per second (changes inside the window
+are coalesced into one fetch at its end, the first change after a quiet window fetches at once),
+none in the background (the store calls `setAppInBackground` on every lifecycle change, also while
+the Android connection service keeps the session alive; a state that changed meanwhile is fetched
+once on return), and no settings, which the app does not use. The desktop keeps the default
+policy: fetch on every change, settings included.
+
+The transport counts payload bytes per connection (`traffic_stats`: PTY, snapshots, state with
+the number of fetches, settings, other events). The state is fetched with transparent
+decompression off and decoded by hand, so the count is the size on the wire. Settings shows it
+under Data while connected.
+
 ### State sync (project list, layouts)
 
 ```

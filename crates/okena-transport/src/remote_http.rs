@@ -13,6 +13,8 @@ pub fn async_client_and_url(
     if let Some(crate::LocalEndpoint::UnixSocket { path: socket_path }) = &config.local_endpoint {
         let client = reqwest::Client::builder()
             .unix_socket(socket_path.as_str())
+            // Same-host socket: compressing would only spend CPU on both ends.
+            .no_gzip()
             .build()
             .map_err(|error| format!("Cannot initialise Unix socket HTTP client: {error}"))?;
         return Ok((client, config.http_url(path)));
@@ -38,6 +40,8 @@ pub fn blocking_client_and_url(
     if let Some(crate::LocalEndpoint::UnixSocket { path: socket_path }) = &config.local_endpoint {
         let client = reqwest::blocking::Client::builder()
             .unix_socket(socket_path.as_str())
+            // Same-host socket: compressing would only spend CPU on both ends.
+            .no_gzip()
             .timeout(timeout)
             .connect_timeout(std::time::Duration::from_secs(5))
             .build()

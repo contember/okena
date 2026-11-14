@@ -42,6 +42,9 @@ export function App() {
         case "state_changed":
           fetchState();
           break;
+        case "git_status_changed":
+          dispatch({ type: "set_git_statuses", statuses: msg.projects });
+          break;
         case "auth_failed":
           clearToken();
           setAuthed(false);

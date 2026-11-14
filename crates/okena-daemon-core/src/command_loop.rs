@@ -4457,6 +4457,22 @@ pub async fn daemon_command_loop(
                 resp.claude_dialogs = claude_dialogs;
                 resp.claude_sessions = claude_sessions;
                 resp.claude_pr_links = claude_pr_links;
+                resp.terminal_attention = {
+                    let registry = terminals.lock();
+                    registry
+                        .iter()
+                        .filter_map(|(id, term)| match term.attention() {
+                            (None, None) => None,
+                            (bell_at, notification_at) => Some((
+                                id.clone(),
+                                okena_core::api::ApiTerminalAttention {
+                                    bell_at,
+                                    notification_at,
+                                },
+                            )),
+                        })
+                        .collect()
+                };
 
                 // `match` (not `.expect`) so the daemon-core crate stays clean
                 // under `clippy::expect_used` had it been enabled — the serialize

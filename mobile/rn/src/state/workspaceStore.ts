@@ -16,6 +16,12 @@
  *   - the server's agent usage (`getUsage`), fetched only when
  *     `getUsageRevision` moved, so an unchanged snapshot costs one call.
  *
+ * Only the terminal on screen streams its PTY output (`setStreamedTerminals`):
+ * none while the dashboard is open or the app is in the background. The
+ * output-based "running" signal therefore only comes from the terminal on
+ * screen; bells, notifications, agent status and Claude dialogs of every
+ * terminal come with the state.
+ *
  * The terminal on screen counts as seen: each poll (and each selection)
  * clears its unseen bell / notification and acknowledges a `done` agent. Its
  * output does not make its project "running". While the dashboard is open no
@@ -69,6 +75,15 @@ import {
 } from '../models/activityOrder';
 import type { TerminalActivity } from '../native/okena';
 
+/**
+ * Connection dot thresholds (s since anything last arrived). The phone streams
+ * at most one terminal and skips host metrics, so on a quiet connection the
+ * pong to the transport's 15 s ping is the only frame: green up to one missed
+ * beat, red from 45 s, where the transport itself starts probing.
+ */
+export const ACTIVITY_LIVE_S = 20;
+export const ACTIVITY_STALE_S = 45;
+
 /** Poll interval (ms) for the workspace state — Dart used 1000ms. */
 export const WORKSPACE_POLL_MS = 1000;
 
@@ -99,6 +114,7 @@ export type WorkspaceNative = Pick<
   | 'secondsSinceActivity'
   | 'getTerminalActivity'
   | 'markTerminalSeen'
+  | 'setStreamedTerminals'
   | 'focusTerminal'
   | 'getUsage'
   | 'getUsageRevision'
@@ -109,10 +125,16 @@ export type WorkspaceNative = Pick<
 export interface WorkspaceDeps {
   native: WorkspaceNative;
   /**
-   * Whether the app is in the foreground. The terminal on screen only counts
-   * as seen while it is.
+   * Whether the app is in the foreground (`active`). The terminal on screen
+   * only counts as seen while it is.
    */
   isForeground: () => boolean;
+  /**
+   * Whether the app is in the background. The terminal on screen streams
+   * until it is: `inactive` (Control Center, a system alert, Face ID) is a
+   * transient overlay, and resubscribing would download a fresh snapshot.
+   */
+  isInBackground: () => boolean;
 }
 
 /**
@@ -207,6 +229,12 @@ export interface WorkspaceState {
    * {@link selectProject}) or on the current selection.
    */
   showWorkspace(projectId?: ProjectId, terminalId?: TerminalId): void;
+  /**
+   * Stream only the terminal on screen (none on the dashboard or in the
+   * background). Runs after every poll and selection; call it when the app
+   * changes foreground state, since polling may be paused in the background.
+   */
+  syncStreams(): void;
   /** Acknowledge {@link restoreProjectMissing}. */
   clearRestoreProjectMissing(): void;
   /**
@@ -226,6 +254,9 @@ function deps(): WorkspaceDeps {
       native: injectedDeps.native ?? getOkenaNative(),
       isForeground:
         injectedDeps.isForeground ?? (() => AppState.currentState === 'active'),
+      isInBackground:
+        injectedDeps.isInBackground ??
+        (() => AppState.currentState === 'background'),
     };
   }
   return resolvedDeps;
@@ -250,6 +281,8 @@ let activeConnId: ConnId | null = null;
 let previousTerminalIds: Set<TerminalId> | null = null;
 /** Selection to reopen once the first non-empty project list arrives. */
 let pendingRestore: SelectionMemory | null = null;
+/** Terminals last passed to `setStreamedTerminals`, joined; null = not yet sent. */
+let streamedKey: string | null = null;
 /** Latest per-terminal activity, reused when a selection re-derives signals. */
 let lastActivity: TerminalActivity[] = [];
 /**
@@ -283,6 +316,10 @@ function stopPolling(): void {
     clearInterval(pollTimer);
     pollTimer = null;
   }
+  // Nothing is on screen any more; a connection that stays up stops streaming.
+  if (activeConnId !== null && streamedKey !== '')
+    deps().native.setStreamedTerminals(activeConnId, []);
+  streamedKey = null;
   activeConnId = null;
   previousTerminalIds = null;
   pendingRestore = null;
@@ -466,6 +503,24 @@ function resolveSelectedProject(
 }
 
 /** One poll tick — refresh remote state + run auto-selection. Mirrors `_pollState`. */
+/**
+ * Tell the native side which terminals to stream: the one on screen, or none
+ * on the dashboard and in the background. Sent only when the set changes.
+ */
+function syncStreams(get: StoreApi<WorkspaceState>['getState']): void {
+  const connId = activeConnId;
+  if (!connId) return;
+  const { dashboardOpen, selectedTerminalId } = get();
+  const ids =
+    !dashboardOpen && selectedTerminalId !== null && !deps().isInBackground()
+      ? [selectedTerminalId]
+      : [];
+  const key = ids.join('\n');
+  if (key === streamedKey) return;
+  streamedKey = key;
+  deps().native.setStreamedTerminals(connId, ids);
+}
+
 function pollState(
   get: StoreApi<WorkspaceState>['getState'],
   set: StoreApi<WorkspaceState>['setState'],
@@ -622,12 +677,12 @@ function pollState(
     }
   }
 
-  // Connection health (drives the staleness indicator's 3s / 10s thresholds).
+  // Connection health (drives the connection dot, see ACTIVITY_LIVE_S).
   const newActivity = native.secondsSinceActivity(connId);
   const oldActivity = prev.secondsSinceActivity;
   if (
-    oldActivity < 3 !== newActivity < 3 ||
-    oldActivity < 10 !== newActivity < 10
+    oldActivity < ACTIVITY_LIVE_S !== newActivity < ACTIVITY_LIVE_S ||
+    oldActivity < ACTIVITY_STALE_S !== newActivity < ACTIVITY_STALE_S
   ) {
     changed = true;
   }
@@ -639,6 +694,7 @@ function pollState(
     // threshold crossed (cheap, avoids a stale value).
     set({ secondsSinceActivity: newActivity });
   }
+  syncStreams(get);
 }
 
 /**
@@ -781,6 +837,7 @@ export const useWorkspaceStore: UseBoundStore<StoreApi<WorkspaceState>> =
           : null,
         ...(connId ? signalsPatch(get, projects, terminalId, connId) : {}),
       });
+      syncStreams(get);
       // Opening a project is activity: the daemon stamps `lastActivityAt`
       // (`RecordProjectActivity`), which the activity order sorts by.
       if (connId && terminalId !== null && selectedProjectId !== projectId) {
@@ -804,6 +861,7 @@ export const useWorkspaceStore: UseBoundStore<StoreApi<WorkspaceState>> =
           ? signalsPatch(get, get().projects, terminalId, connId)
           : {}),
       });
+      syncStreams(get);
     },
 
     setTerminalView(terminalId, view) {
@@ -816,6 +874,7 @@ export const useWorkspaceStore: UseBoundStore<StoreApi<WorkspaceState>> =
     showDashboard() {
       if (get().dashboardOpen) return;
       set({ dashboardOpen: true });
+      syncStreams(get);
     },
 
     showWorkspace(projectId, terminalId) {
@@ -829,6 +888,11 @@ export const useWorkspaceStore: UseBoundStore<StoreApi<WorkspaceState>> =
         set(
           signalsPatch(get, get().projects, get().selectedTerminalId, connId),
         );
+      syncStreams(get);
+    },
+
+    syncStreams() {
+      syncStreams(get);
     },
 
     clearRestoreProjectMissing() {

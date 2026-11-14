@@ -68,6 +68,7 @@ export type ConnectionNative = Pick<
   | 'secondsSinceActivity'
   | 'onAppForeground'
   | 'onAppBackground'
+  | 'setAppInBackground'
   | 'reconnectNow'
   | 'canReconnectNow'
 >;
@@ -493,9 +494,15 @@ export const useConnectionStore: UseBoundStore<StoreApi<ConnectionState>> =
       lastAppState = next;
       const native = deps().native;
       if (next === 'background') {
+        // State fetches wait for the foreground even while the service keeps
+        // the session alive; reconnects pause only without the service.
+        native.setAppInBackground(true);
         if (!deps().service.isRunning()) native.onAppBackground();
         return;
       }
+      // Resume state fetches on any return to active: iOS may go background →
+      // inactive → active, and a deferral left on would freeze the state.
+      if (next === 'active') native.setAppInBackground(false);
       if (next !== 'active' || previous !== 'background') return;
       native.onAppForeground();
       const { connId } = get();
