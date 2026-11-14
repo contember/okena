@@ -663,14 +663,12 @@ impl WindowView {
         cx.subscribe_in(&manager, window, |this, _, event, window, cx| {
             if let okena_remote_client::manager::RemoteManagerEvent::TerminalTitlesChanged(ids) =
                 event
+                && settings(cx).show_active_terminal_title
+                && this
+                    .focused_terminal_id(cx)
+                    .is_some_and(|(_, id)| ids.contains(&id))
             {
-                if settings(cx).show_active_terminal_title
-                    && this
-                        .focused_terminal_id(cx)
-                        .is_some_and(|(_, id)| ids.contains(&id))
-                {
-                    this.sync_native_window_title(window, cx);
-                }
+                this.sync_native_window_title(window, cx);
             }
         })
         .detach();
