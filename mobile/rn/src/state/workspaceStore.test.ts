@@ -798,12 +798,13 @@ describe('terminal streaming', () => {
         },
       },
       isForeground: () => foreground,
+      isInBackground: () => !foreground,
     });
   });
 
   afterEach(() => {
     useWorkspaceStore.getState().stop();
-    configureWorkspaceStore({ isForeground: undefined });
+    configureWorkspaceStore({ isForeground: undefined, isInBackground: undefined });
     jest.useRealTimers();
   });
 
@@ -842,6 +843,21 @@ describe('terminal streaming', () => {
     foreground = true;
     useWorkspaceStore.getState().syncStreams();
     expect(streamed.at(-1)).toEqual(['t1']);
+  });
+
+  it('keeps streaming while iOS is inactive', () => {
+    let background = false;
+    configureWorkspaceStore({
+      isForeground: () => false,
+      isInBackground: () => background,
+    });
+    useWorkspaceStore.getState().start('conn-1');
+    useWorkspaceStore.getState().showWorkspace();
+    expect(streamed.at(-1)).toEqual(['t1']);
+
+    background = true;
+    useWorkspaceStore.getState().syncStreams();
+    expect(streamed.at(-1)).toEqual([]);
   });
 
   it('stops streaming when polling stops', () => {
