@@ -301,6 +301,7 @@ Controls default behavior when creating and closing git worktrees:
 | `worktree.default_delete_branch` | bool | `false` | Delete branch after close |
 | `worktree.auto_track` | bool | `false` | Opt-in. Add worktrees created outside Okena to the sidebar. See [worktrees](worktrees.md#worktrees-created-outside-okena) |
 | `worktree.auto_track_ignore` | string[] | `[".claude/worktrees/agent-*"]` | Globs that discovery leaves alone, over the checkout path relative to the repository root |
+| `worktree.show_hidden_when_focused` | bool | `false` | Clicking a project also shows its worktrees hidden with the eye toggle. Off: the zoom shows only the visible ones. See [worktrees](worktrees.md#sidebar-integration) |
 
 ---
 

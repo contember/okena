@@ -629,7 +629,7 @@ impl Sidebar {
                     .on_click(move |_, _window, cx| {
                         focus_manager.update(cx, |fm, cx| {
                             workspace_entity.update(cx, |ws, cx| {
-                                ws.set_focused_project(fm, None, cx);
+                                ws.set_focused_project(fm, window_id, None, cx);
                                 ws.set_folder_filter(window_id, None, cx);
                             });
                             cx.notify();

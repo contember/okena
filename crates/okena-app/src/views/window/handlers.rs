@@ -774,21 +774,23 @@ impl WindowView {
                     .map(|wt| wt.parent_project_id.clone());
 
                 if let Some(parent_id) = parent_id {
+                    let window_id = self.window_id;
                     let workspace = self.workspace.clone();
                     self.focus_manager.update(cx, |fm, cx| {
                         workspace.update(cx, |ws, cx| {
-                            ws.set_focused_project(fm, Some(parent_id), cx);
+                            ws.set_focused_project(fm, window_id, Some(parent_id), cx);
                         });
                         cx.notify();
                     });
                 }
             }
             OverlayManagerEvent::FocusProject(project_id) => {
+                let window_id = self.window_id;
                 let workspace = self.workspace.clone();
                 let pid = project_id.clone();
                 self.focus_manager.update(cx, |fm, cx| {
                     workspace.update(cx, |ws, cx| {
-                        ws.set_focused_project(fm, Some(pid), cx);
+                        ws.set_focused_project(fm, window_id, Some(pid), cx);
                     });
                     cx.notify();
                 });

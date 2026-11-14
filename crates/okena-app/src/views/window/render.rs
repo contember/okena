@@ -1188,7 +1188,7 @@ impl Render for WindowView {
                 let workspace = this.workspace.clone();
                 this.focus_manager.update(cx, |fm, cx| {
                     workspace.update(cx, |ws, cx| {
-                        ws.set_focused_project(fm, None, cx);
+                        ws.set_focused_project(fm, window_id, None, cx);
                         ws.set_folder_filter(window_id, None, cx);
                     });
                     cx.notify();
@@ -1202,7 +1202,7 @@ impl Render for WindowView {
                     let workspace = this.workspace.clone();
                     this.focus_manager.update(cx, |fm, cx| {
                         workspace.update(cx, |ws, cx| {
-                            ws.set_focused_project(fm, None, cx);
+                            ws.set_focused_project(fm, window_id, None, cx);
                             ws.set_folder_filter(window_id, None, cx);
                         });
                         cx.notify();
@@ -1214,10 +1214,11 @@ impl Render for WindowView {
                         .focused_terminal_state()
                         .map(|state| state.project_id);
                     if let Some(project_id) = project_id {
+                        let window_id = this.window_id;
                         let workspace = this.workspace.clone();
                         this.focus_manager.update(cx, |fm, cx| {
                             workspace.update(cx, |ws, cx| {
-                                ws.set_focused_project(fm, Some(project_id), cx);
+                                ws.set_focused_project(fm, window_id, Some(project_id), cx);
                             });
                             cx.notify();
                         });
