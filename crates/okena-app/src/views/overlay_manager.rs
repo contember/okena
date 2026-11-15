@@ -740,7 +740,7 @@ impl OverlayManager {
                         this.close_modal(cx);
                     }
                     KeybindingsHelpEvent::ReloadBindings => {
-                        crate::keybindings::reload_keybindings(cx);
+                        crate::keybindings::apply_current_keybindings(cx);
                     }
                 },
             )

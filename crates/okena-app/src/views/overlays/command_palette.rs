@@ -68,7 +68,14 @@ impl CommandPalette {
                 let keybinding = config_data
                     .bindings
                     .get(*action)
-                    .and_then(|entries| entries.iter().find(|e| e.enabled))
+                    .and_then(|entries| {
+                        entries.iter().find(|e| {
+                            e.enabled
+                                && e.is_supported_on(
+                                    okena_ui::shortcuts::ShortcutPlatform::current(),
+                                )
+                        })
+                    })
                     .map(|e| format_keystroke(&e.keystroke));
 
                 CommandEntry {

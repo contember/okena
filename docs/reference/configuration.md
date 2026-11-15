@@ -309,7 +309,7 @@ Controls default behavior when creating and closing git worktrees:
 
 Custom keybindings override the defaults. The file maps action names to an array of binding entries. Each entry has a `keystroke`, an optional `context`, and an `enabled` flag.
 
-Okena generates this file with defaults if it does not exist. You can view and edit bindings in-app with `Cmd+K Cmd+S` / `Ctrl+K Ctrl+S`.
+Okena stores only custom action overrides in this file; omitted actions inherit the current defaults. A new file contains an empty `bindings` map until you customize a command. Complete arrays identical to defaults are automatically removed when loading or saving. Each custom action keeps its full binding array; use `[]` to disable all defaults for that action. You can view and edit bindings in-app with `Cmd+K Cmd+S` / `Ctrl+K Ctrl+S`.
 
 ### Format
 
@@ -337,6 +337,37 @@ Keystrokes use modifiers joined by `-`:
 - **Chords:** Two keystrokes separated by a space, e.g. `"cmd-k cmd-s"`
 
 Examples: `"cmd-shift-d"`, `"ctrl-alt-left"`, `"shift-pageup"`, `"cmd-k cmd-t"`
+
+### Platform Scoping and Search
+
+Bindings can include `"platforms": ["macos"]` or `"platforms": ["windows", "linux"]`.
+Omitting `platforms` applies a binding on every platform; an empty list applies it
+nowhere. Complete legacy default arrays without platform metadata are recognized and
+replaced with the current platform-scoped defaults. Partial or modified legacy arrays
+remain custom and are preserved. New paired defaults specify their platforms, and bindings added in the dialog
+apply to the current OS. Platform restrictions affect dispatch as well as display.
+Windows defaults never use the Win modifier. Directional focus and prompt-navigation
+bindings that use Cmd/Super remain scoped to macOS/Linux; their commands remain
+assignable on Windows. On Windows the recorder rejects any Win-key assignment. Existing custom JSON entries
+containing Win are preserved for editing but stay inactive; the restriction applies
+to every stroke of a chord and also covers the `cmd` and `super` aliases. Scope
+macOS Cmd or Linux Super bindings to those platforms. Okena does not register OS-wide
+hotkeys: a binding without `context` is global across Okena contexts only, while an
+explicit context limits dispatch to that focused UI scope.
+Older Okena versions do not understand these restrictions and can drop them on save.
+
+The Keyboard Shortcuts dialog defaults to **All commands** and **Current OS only**.
+Both dropdowns show their current selection and mark the selected option when open.
+Unassigned commands have an Add button; disabled bindings remain visible as assigned.
+Use **Record shortcut** to search by pressing one key combination or a two-step
+chord. A chord prefix waits for the next key without a timeout. Escape clears the
+capture; **Text search** exits capture mode. Captured shortcuts never execute actions.
+OS-reserved shortcuts may be intercepted by the operating system before Okena sees them.
+
+**Edit in keybindings.json** opens the active profile's file and closes the dialog.
+Reopen the dialog or use **Reload from disk** to apply external changes. Invalid
+configuration keeps the current bindings active and displays an error. Inline edits
+refuse to overwrite a file changed externally while the dialog was open.
 
 ### Context Scoping
 
