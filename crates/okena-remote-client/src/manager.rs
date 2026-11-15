@@ -398,7 +398,7 @@ impl RemoteConnectionManager {
             // disappeared) means derived state the sidebar reads may have
             // changed.
             let mut last_generations: HashMap<String, u64> = HashMap::new();
-            let mut last_titles: HashMap<String, Option<String>> = HashMap::new();
+            let mut last_title_stamps: HashMap<String, u64> = HashMap::new();
 
             while activity_rx.recv().await.is_ok() {
                 let result = this.update(cx, |this, cx| {
@@ -412,7 +412,7 @@ impl RemoteConnectionManager {
                     };
 
                     let mut next_generations = HashMap::with_capacity(terminals.len());
-                    let mut next_titles = HashMap::with_capacity(terminals.len());
+                    let mut next_title_stamps = HashMap::with_capacity(terminals.len());
                     let mut changed_titles = Vec::new();
                     // Terminals whose generation advanced this wake — i.e. ones
                     // that actually parsed new output. `Okena` drains their
@@ -429,13 +429,14 @@ impl RemoteConnectionManager {
                         // Parse on the GPUI thread so bell/idle flags are
                         // current even for terminals with no mounted pane.
                         terminal.process_pending_output();
-                        let title = terminal.title();
+                        // A stamp compare, not a title clone, per terminal and wake.
+                        let title_stamp = terminal.title_stamp();
                         let title_changed =
-                            last_titles.get(id).and_then(Option::as_ref) != title.as_ref();
+                            last_title_stamps.get(id).copied().unwrap_or(0) != title_stamp;
                         if title_changed {
                             changed_titles.push(id.clone());
                         }
-                        next_titles.insert(id.clone(), title);
+                        next_title_stamps.insert(id.clone(), title_stamp);
                         okena_core::latency_probe::client_output_parsed(id);
                         let generation = terminal.content_generation();
                         // Every title event must be followed by activity for
@@ -450,7 +451,7 @@ impl RemoteConnectionManager {
                     let changed = !advanced.is_empty()
                         || activity_changed(&last_generations, &next_generations);
                     last_generations = next_generations;
-                    last_titles = next_titles;
+                    last_title_stamps = next_title_stamps;
 
                     if !changed_titles.is_empty() {
                         cx.emit(RemoteManagerEvent::TerminalTitlesChanged(changed_titles));

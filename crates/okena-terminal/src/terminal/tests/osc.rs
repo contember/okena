@@ -24,6 +24,38 @@ fn test_osc_title_set() {
 }
 
 #[test]
+fn title_stamp_changes_only_with_the_title_and_is_unique_across_terminals() {
+    let new_terminal = || {
+        Terminal::new(
+            "test-id".to_string(),
+            TerminalSize::default(),
+            Arc::new(NullTransport),
+            "/tmp".to_string(),
+        )
+    };
+    let terminal = new_terminal();
+    assert_eq!(terminal.title_stamp(), 0);
+
+    terminal.process_output(b"\x1b]0;working\x07");
+    let first = terminal.title_stamp();
+    assert_ne!(first, 0);
+
+    // The same title again, or ordinary output, is not a change.
+    terminal.process_output(b"\x1b]2;working\x1b\\plain text");
+    assert_eq!(terminal.title_stamp(), first);
+
+    terminal.process_output(b"\x1b]0;done\x07");
+    let second = terminal.title_stamp();
+    assert_ne!(second, first);
+
+    // A replacement terminal reaching the same title still gets its own stamp.
+    let replacement = new_terminal();
+    replacement.process_output(b"\x1b]0;done\x07");
+    assert_ne!(replacement.title_stamp(), 0);
+    assert_ne!(replacement.title_stamp(), second);
+}
+
+#[test]
 fn test_osc_title_with_surrounding_data() {
     let transport = Arc::new(NullTransport);
     let terminal = Terminal::new(

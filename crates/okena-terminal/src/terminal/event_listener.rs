@@ -1,10 +1,42 @@
 use alacritty_terminal::event::{Event as TermEvent, EventListener};
 use parking_lot::Mutex;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use super::transport::TerminalTransport;
 use super::types::{ClipboardReadResponder, ResizeState};
+
+/// The OSC title, shared by the listener (writer) and `Terminal` (reader).
+#[derive(Default)]
+pub(crate) struct SharedTitle {
+    value: Mutex<Option<String>>,
+    /// Process-unique stamp of the last change, 0 while never titled. Unique
+    /// across terminals, so a terminal replaced under the same ID also differs.
+    stamp: AtomicU64,
+}
+
+static NEXT_TITLE_STAMP: AtomicU64 = AtomicU64::new(1);
+
+impl SharedTitle {
+    fn set(&self, title: Option<String>) {
+        let mut value = self.value.lock();
+        if *value != title {
+            *value = title;
+            self.stamp.store(
+                NEXT_TITLE_STAMP.fetch_add(1, Ordering::Relaxed),
+                Ordering::Relaxed,
+            );
+        }
+    }
+
+    pub(super) fn get(&self) -> Option<String> {
+        self.value.lock().clone()
+    }
+
+    pub(super) fn stamp(&self) -> u64 {
+        self.stamp.load(Ordering::Relaxed)
+    }
+}
 
 /// The two OSC 52 clipboard queues the listener shares with `Terminal`.
 ///
@@ -42,7 +74,7 @@ pub(super) struct CurrentState {
 /// Event listener for alacritty_terminal that captures title changes, bell, and PTY write requests
 pub struct ZedEventListener {
     /// Shared title storage - OSC 0/1/2 sequences update this
-    title: Arc<Mutex<Option<String>>>,
+    title: Arc<SharedTitle>,
     /// Sticky bell flag for the UI (red border / sidebar dot), cleared on focus.
     has_bell: Arc<Mutex<bool>>,
     /// One-shot "the bell rang since the last drain" edge, consumed by the PTY
@@ -62,7 +94,7 @@ pub struct ZedEventListener {
 
 impl ZedEventListener {
     pub(super) fn new(
-        title: Arc<Mutex<Option<String>>>,
+        title: Arc<SharedTitle>,
         has_bell: Arc<Mutex<bool>>,
         bell_pending: Arc<AtomicBool>,
         clipboard: ClipboardQueues,
@@ -186,10 +218,10 @@ impl EventListener for ZedEventListener {
     fn send_event(&self, event: TermEvent) {
         match event {
             TermEvent::Title(title) => {
-                *self.title.lock() = Some(title);
+                self.title.set(Some(title));
             }
             TermEvent::ResetTitle => {
-                *self.title.lock() = None;
+                self.title.set(None);
             }
             TermEvent::Bell => {
                 *self.has_bell.lock() = true;
