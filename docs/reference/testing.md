@@ -81,10 +81,9 @@ Okena can only display titles that the session backend forwards. psmux's separat
 unsolicited title-delivery bug is fixed by
 [psmux PR #1047](https://github.com/psmux/psmux/pull/1047), incorporated into master
 as [c22e60aa](https://github.com/psmux/psmux/commit/c22e60aad3cb1269d4acce57261954ee20e33d88).
-The latest release checked on 2026-11-14, **v3.4.0**, does not contain that fix.
-Build psmux from that commit (or a descendant containing it), or wait for and
-install an official release that includes it. This Okena change alone does not
-fix missing title delivery from an older psmux server.
+psmux builds without that commit do not forward titles, so use a release or
+source build that contains it. Okena cannot show titles an older psmux server
+never sends.
 
 Enable title forwarding in `%USERPROFILE%\.psmux.conf`:
 
