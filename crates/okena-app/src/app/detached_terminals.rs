@@ -1,11 +1,8 @@
-#[cfg(target_os = "linux")]
-use crate::simple_root::SimpleRoot as Root;
 use crate::terminal::terminal::TerminalTransport;
 use crate::views::overlays::detached_terminal::DetachedTerminalView;
+use crate::window_root::new_root;
 use crate::workspace::state::Workspace;
 use gpui::*;
-#[cfg(not(target_os = "linux"))]
-use gpui_component::Root;
 use std::collections::HashSet;
 use std::sync::Arc;
 
@@ -164,7 +161,7 @@ impl Okena {
                     view.default_window_title = default_title.clone();
                     view
                 });
-                cx.new(|cx| Root::new(detached_view, window, cx))
+                cx.new(|cx| new_root(detached_view, window, cx))
             },
         )
         .ok();

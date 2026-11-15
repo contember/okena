@@ -309,7 +309,7 @@ Controls default behavior when creating and closing git worktrees:
 
 Custom keybindings override the defaults. The file maps action names to an array of binding entries. Each entry has a `keystroke`, an optional `context`, and an `enabled` flag.
 
-Okena stores only custom action overrides in this file; omitted actions inherit the current defaults. A new file contains an empty `bindings` map until you customize a command. Complete arrays identical to defaults are automatically removed when loading or saving. Each custom action keeps its full binding array; use `[]` to disable all defaults for that action. You can view and edit bindings in-app with `Cmd+K Cmd+S` / `Ctrl+K Ctrl+S`.
+Okena stores only custom action overrides in this file; omitted actions inherit the current defaults. A new file contains an empty `bindings` map until you customize a command. Complete arrays identical to defaults are omitted on explicit saves. Startup, dialog opening and reload only read the file; they never clean or reformat it. Each custom action keeps its full binding array; use `[]` to disable all defaults for that action. You can view and edit bindings in-app with `Cmd+K Cmd+S` / `Ctrl+K Ctrl+S`.
 
 ### Format
 
@@ -344,9 +344,11 @@ Bindings can include `"platforms": ["macos"]` or `"platforms": ["windows", "linu
 Omitting `platforms` applies a binding on every platform; an empty list applies it
 nowhere. Complete legacy default arrays without platform metadata are recognized and
 replaced with the current platform-scoped defaults. Partial or modified legacy arrays
-remain custom and are preserved. New paired defaults specify their platforms, and bindings added in the dialog
-apply to the current OS. Platform restrictions affect dispatch as well as display.
-Windows defaults never use the Win modifier. Directional focus and prompt-navigation
+remain custom and are preserved. Cmd/Super defaults apply to macOS and Linux; Ctrl defaults apply to every OS.
+Bindings added in the dialog apply to the current OS. Platform restrictions affect dispatch as well as display.
+macOS keeps the existing Ctrl alternatives alongside Cmd, and Linux keeps both Ctrl
+and Super alternatives. Platform filtering must not remove previously supported
+macOS/Linux assignments. Windows defaults never use the Win modifier. Directional focus and prompt-navigation
 bindings that use Cmd/Super remain scoped to macOS/Linux; their commands remain
 assignable on Windows. On Windows the recorder rejects any Win-key assignment. Existing custom JSON entries
 containing Win are preserved for editing but stay inactive; the restriction applies
@@ -365,7 +367,13 @@ capture; **Text search** exits capture mode. Captured shortcuts never execute ac
 OS-reserved shortcuts may be intercepted by the operating system before Okena sees them.
 
 **Edit in keybindings.json** opens the active profile's file and closes the dialog.
-Reopen the dialog or use **Reload from disk** to apply external changes. Invalid
+Reopen the dialog or use **Reload from disk** to apply external changes. These actions
+do not write the configuration. Use **Clean keybindings…**, then confirm **Clean keybindings** in the modal dialog, to
+remove redundant default entries and reformat the file explicitly. As with other
+saves, unrecognized JSON fields are omitted. Clean does not create a missing file.
+Cancel or closing the modal prompt leaves the file untouched. The same `gpui-component::AlertDialog` confirmation is used on Windows, macOS and
+Linux, with a blocking overlay, keyboard actions and focus trapping. Custom shortcuts, disabled bindings and explicit empty arrays
+are preserved; a concurrently edited file must be reloaded before cleaning. Invalid
 configuration keeps the current bindings active and displays an error. Inline edits
 refuse to overwrite a file changed externally while the dialog was open.
 

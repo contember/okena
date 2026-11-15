@@ -5,16 +5,12 @@ use std::path::{Path, PathBuf};
 
 use super::types::{KeybindingConflict, KeybindingEntry};
 
-fn mac_default(keystroke: &str, context: Option<&str>) -> KeybindingEntry {
-    KeybindingEntry::for_platforms(keystroke, context, &[ShortcutPlatform::Mac])
+fn cmd_default(keystroke: &str, context: Option<&str>) -> KeybindingEntry {
+    non_windows_default(keystroke, context)
 }
 
-fn desktop_default(keystroke: &str, context: Option<&str>) -> KeybindingEntry {
-    KeybindingEntry::for_platforms(
-        keystroke,
-        context,
-        &[ShortcutPlatform::Windows, ShortcutPlatform::Linux],
-    )
+fn ctrl_default(keystroke: &str, context: Option<&str>) -> KeybindingEntry {
+    KeybindingEntry::new(keystroke, context)
 }
 
 // Preserve existing Mac/Linux navigation without claiming Windows system shortcuts.
@@ -54,94 +50,94 @@ impl KeybindingConfig {
         // Global keybindings
         bindings.insert(
             "Quit".to_string(),
-            vec![mac_default("cmd-q", None), desktop_default("ctrl-q", None)],
+            vec![cmd_default("cmd-q", None), ctrl_default("ctrl-q", None)],
         );
         bindings.insert(
             "ToggleSidebar".to_string(),
-            vec![mac_default("cmd-b", None), desktop_default("ctrl-b", None)],
+            vec![cmd_default("cmd-b", None), ctrl_default("ctrl-b", None)],
         );
         bindings.insert(
             "ToggleSidebarAutoHide".to_string(),
             vec![
-                mac_default("cmd-shift-b", None),
-                desktop_default("ctrl-shift-b", None),
+                cmd_default("cmd-shift-b", None),
+                ctrl_default("ctrl-shift-b", None),
             ],
         );
         bindings.insert(
             "FocusSidebar".to_string(),
-            vec![mac_default("cmd-1", None), desktop_default("ctrl-1", None)],
+            vec![cmd_default("cmd-1", None), ctrl_default("ctrl-1", None)],
         );
         bindings.insert(
             "ClearFocus".to_string(),
-            vec![mac_default("cmd-0", None), desktop_default("ctrl-0", None)],
+            vec![cmd_default("cmd-0", None), ctrl_default("ctrl-0", None)],
         );
         bindings.insert(
             "FocusActiveProject".to_string(),
             vec![
-                mac_default("cmd-shift-0", None),
-                desktop_default("ctrl-shift-0", None),
+                cmd_default("cmd-shift-0", None),
+                ctrl_default("ctrl-shift-0", None),
             ],
         );
         bindings.insert(
             "ShowKeybindings".to_string(),
             vec![
-                mac_default("cmd-k cmd-s", None),
-                desktop_default("ctrl-k ctrl-s", None),
+                cmd_default("cmd-k cmd-s", None),
+                ctrl_default("ctrl-k ctrl-s", None),
             ],
         );
         bindings.insert(
             "ShowSessionManager".to_string(),
             vec![
-                mac_default("cmd-k cmd-w", None),
-                desktop_default("ctrl-k ctrl-w", None),
+                cmd_default("cmd-k cmd-w", None),
+                ctrl_default("ctrl-k ctrl-w", None),
             ],
         );
         bindings.insert(
             "ShowThemeSelector".to_string(),
             vec![
-                mac_default("cmd-k cmd-t", None),
-                desktop_default("ctrl-k ctrl-t", None),
+                cmd_default("cmd-k cmd-t", None),
+                ctrl_default("ctrl-k ctrl-t", None),
             ],
         );
         bindings.insert(
             "ShowCommandPalette".to_string(),
             vec![
-                mac_default("cmd-shift-p", None),
-                desktop_default("ctrl-shift-p", None),
+                cmd_default("cmd-shift-p", None),
+                ctrl_default("ctrl-shift-p", None),
             ],
         );
         bindings.insert(
             "ShowSettings".to_string(),
-            vec![mac_default("cmd-,", None), desktop_default("ctrl-,", None)],
+            vec![cmd_default("cmd-,", None), ctrl_default("ctrl-,", None)],
         );
         bindings.insert(
             "ToggleStatusLanes".to_string(),
             vec![
-                mac_default("cmd-shift-k", None),
-                desktop_default("ctrl-shift-k", None),
+                cmd_default("cmd-shift-k", None),
+                ctrl_default("ctrl-shift-k", None),
             ],
         );
         bindings.insert(
             "OpenSettingsFile".to_string(),
             vec![
-                mac_default("cmd-alt-,", None),
-                desktop_default("ctrl-alt-,", None),
+                cmd_default("cmd-alt-,", None),
+                ctrl_default("ctrl-alt-,", None),
             ],
         );
         bindings.insert(
             "ShowFileSearch".to_string(),
-            vec![mac_default("cmd-p", None), desktop_default("ctrl-p", None)],
+            vec![cmd_default("cmd-p", None), ctrl_default("ctrl-p", None)],
         );
         bindings.insert(
             "ShowContentSearch".to_string(),
             vec![
-                mac_default("cmd-shift-f", None),
-                desktop_default("ctrl-shift-f", None),
+                cmd_default("cmd-shift-f", None),
+                ctrl_default("ctrl-shift-f", None),
             ],
         );
         bindings.insert(
             "ShowProjectSwitcher".to_string(),
-            vec![mac_default("cmd-e", None), desktop_default("ctrl-e", None)],
+            vec![cmd_default("cmd-e", None), ctrl_default("ctrl-e", None)],
         );
 
         // Fullscreen keybindings
@@ -152,15 +148,15 @@ impl KeybindingConfig {
         bindings.insert(
             "FullscreenNextTerminal".to_string(),
             vec![
-                mac_default("cmd-]", Some("TerminalPane")),
-                desktop_default("ctrl-]", Some("TerminalPane")),
+                cmd_default("cmd-]", Some("TerminalPane")),
+                ctrl_default("ctrl-]", Some("TerminalPane")),
             ],
         );
         bindings.insert(
             "FullscreenPrevTerminal".to_string(),
             vec![
-                mac_default("cmd-[", Some("TerminalPane")),
-                desktop_default("ctrl-[", Some("TerminalPane")),
+                cmd_default("cmd-[", Some("TerminalPane")),
+                ctrl_default("ctrl-[", Some("TerminalPane")),
             ],
         );
 
@@ -168,15 +164,15 @@ impl KeybindingConfig {
         bindings.insert(
             "SplitVertical".to_string(),
             vec![
-                mac_default("cmd-d", Some("TerminalPane")),
-                desktop_default("ctrl-shift-d", Some("TerminalPane")),
+                cmd_default("cmd-d", Some("TerminalPane")),
+                ctrl_default("ctrl-shift-d", Some("TerminalPane")),
             ],
         );
         bindings.insert(
             "SplitHorizontal".to_string(),
             vec![
-                mac_default("cmd-shift-d", Some("TerminalPane")),
-                desktop_default("ctrl-d", Some("TerminalPane")),
+                cmd_default("cmd-shift-d", Some("TerminalPane")),
+                ctrl_default("ctrl-d", Some("TerminalPane")),
             ],
         );
         // Also bound globally: a project with no terminals has no TerminalPane
@@ -186,52 +182,52 @@ impl KeybindingConfig {
         bindings.insert(
             "AddTab".to_string(),
             vec![
-                mac_default("cmd-t", Some("TerminalPane")),
-                desktop_default("ctrl-shift-t", Some("TerminalPane")),
-                mac_default("cmd-t", None),
-                desktop_default("ctrl-shift-t", None),
+                cmd_default("cmd-t", Some("TerminalPane")),
+                ctrl_default("ctrl-shift-t", Some("TerminalPane")),
+                cmd_default("cmd-t", None),
+                ctrl_default("ctrl-shift-t", None),
             ],
         );
         bindings.insert(
             "CloseTerminal".to_string(),
             vec![
-                mac_default("cmd-w", Some("TerminalPane")),
-                desktop_default("ctrl-shift-w", Some("TerminalPane")),
+                cmd_default("cmd-w", Some("TerminalPane")),
+                ctrl_default("ctrl-shift-w", Some("TerminalPane")),
             ],
         );
         bindings.insert(
             "MinimizeTerminal".to_string(),
             vec![
-                mac_default("cmd-m", Some("TerminalPane")),
-                desktop_default("ctrl-shift-m", Some("TerminalPane")),
+                cmd_default("cmd-m", Some("TerminalPane")),
+                ctrl_default("ctrl-shift-m", Some("TerminalPane")),
             ],
         );
         bindings.insert(
             "ToggleUnread".to_string(),
             vec![
-                mac_default("cmd-u", Some("TerminalPane")),
-                desktop_default("ctrl-shift-u", Some("TerminalPane")),
+                cmd_default("cmd-u", Some("TerminalPane")),
+                ctrl_default("ctrl-shift-u", Some("TerminalPane")),
             ],
         );
         bindings.insert(
             "Copy".to_string(),
             vec![
-                mac_default("cmd-c", Some("TerminalPane")),
-                desktop_default("ctrl-shift-c", Some("TerminalPane")),
+                cmd_default("cmd-c", Some("TerminalPane")),
+                ctrl_default("ctrl-shift-c", Some("TerminalPane")),
             ],
         );
         bindings.insert(
             "Paste".to_string(),
             vec![
-                mac_default("cmd-v", Some("TerminalPane")),
-                desktop_default("ctrl-shift-v", Some("TerminalPane")),
+                cmd_default("cmd-v", Some("TerminalPane")),
+                ctrl_default("ctrl-shift-v", Some("TerminalPane")),
             ],
         );
         bindings.insert(
             "AnnotateSelection".to_string(),
             vec![
-                mac_default("cmd-shift-a", Some("TerminalPane")),
-                desktop_default("ctrl-shift-a", Some("TerminalPane")),
+                cmd_default("cmd-shift-a", Some("TerminalPane")),
+                ctrl_default("ctrl-shift-a", Some("TerminalPane")),
             ],
         );
         bindings.insert(
@@ -245,8 +241,8 @@ impl KeybindingConfig {
         bindings.insert(
             "Search".to_string(),
             vec![
-                mac_default("cmd-f", Some("TerminalPane")),
-                desktop_default("ctrl-f", Some("TerminalPane")),
+                cmd_default("cmd-f", Some("TerminalPane")),
+                ctrl_default("ctrl-f", Some("TerminalPane")),
             ],
         );
 
@@ -254,22 +250,22 @@ impl KeybindingConfig {
         bindings.insert(
             "ZoomIn".to_string(),
             vec![
-                mac_default("cmd-=", Some("TerminalPane")),
-                desktop_default("ctrl-=", Some("TerminalPane")),
+                cmd_default("cmd-=", Some("TerminalPane")),
+                ctrl_default("ctrl-=", Some("TerminalPane")),
             ],
         );
         bindings.insert(
             "ZoomOut".to_string(),
             vec![
-                mac_default("cmd--", Some("TerminalPane")),
-                desktop_default("ctrl--", Some("TerminalPane")),
+                cmd_default("cmd--", Some("TerminalPane")),
+                ctrl_default("ctrl--", Some("TerminalPane")),
             ],
         );
         bindings.insert(
             "ResetZoom".to_string(),
             vec![
-                mac_default("cmd-0", Some("TerminalPane")),
-                desktop_default("ctrl-0", Some("TerminalPane")),
+                cmd_default("cmd-0", Some("TerminalPane")),
+                ctrl_default("ctrl-0", Some("TerminalPane")),
             ],
         );
 
@@ -293,15 +289,15 @@ impl KeybindingConfig {
         bindings.insert(
             "FocusNextTerminal".to_string(),
             vec![
-                mac_default("cmd-shift-]", Some("TerminalPane")),
-                desktop_default("ctrl-tab", Some("TerminalPane")),
+                cmd_default("cmd-shift-]", Some("TerminalPane")),
+                ctrl_default("ctrl-tab", Some("TerminalPane")),
             ],
         );
         bindings.insert(
             "FocusPrevTerminal".to_string(),
             vec![
-                mac_default("cmd-shift-[", Some("TerminalPane")),
-                desktop_default("ctrl-shift-tab", Some("TerminalPane")),
+                cmd_default("cmd-shift-[", Some("TerminalPane")),
+                ctrl_default("ctrl-shift-tab", Some("TerminalPane")),
             ],
         );
 
@@ -325,51 +321,51 @@ impl KeybindingConfig {
 
         bindings.insert(
             "TogglePaneSwitcher".to_string(),
-            vec![mac_default("cmd-`", None), desktop_default("ctrl-`", None)],
+            vec![cmd_default("cmd-`", None), ctrl_default("ctrl-`", None)],
         );
 
         bindings.insert(
             "EqualizeLayout".to_string(),
             vec![
-                mac_default("cmd-shift-e", None),
-                desktop_default("ctrl-shift-e", None),
+                cmd_default("cmd-shift-e", None),
+                ctrl_default("ctrl-shift-e", None),
             ],
         );
 
         bindings.insert(
             "ToggleProjectLayout".to_string(),
             vec![
-                mac_default("cmd-shift-l", None),
-                desktop_default("ctrl-shift-l", None),
+                cmd_default("cmd-shift-l", None),
+                ctrl_default("ctrl-shift-l", None),
             ],
         );
 
         bindings.insert(
             "ToggleProjectVisibility".to_string(),
             vec![
-                mac_default("cmd-shift-h", None),
-                desktop_default("ctrl-shift-h", None),
+                cmd_default("cmd-shift-h", None),
+                ctrl_default("ctrl-shift-h", None),
             ],
         );
 
         bindings.insert(
             "ShowBranchSwitcher".to_string(),
             vec![
-                mac_default("cmd-alt-b", None),
-                desktop_default("ctrl-alt-b", None),
+                cmd_default("cmd-alt-b", None),
+                ctrl_default("ctrl-alt-b", None),
             ],
         );
 
         bindings.insert(
             "NewProject".to_string(),
-            vec![mac_default("cmd-n", None), desktop_default("ctrl-n", None)],
+            vec![cmd_default("cmd-n", None), ctrl_default("ctrl-n", None)],
         );
 
         bindings.insert(
             "NewWindow".to_string(),
             vec![
-                mac_default("cmd-shift-n", None),
-                desktop_default("ctrl-shift-n", None),
+                cmd_default("cmd-shift-n", None),
+                ctrl_default("ctrl-shift-n", None),
             ],
         );
 
@@ -567,37 +563,20 @@ pub fn parse_keybindings(content: &str) -> anyhow::Result<KeybindingConfig> {
     Ok(config)
 }
 
-/// Read and validate a specific file, removing redundant default arrays only.
-/// Custom-only files keep their original formatting and bytes.
+/// Read and validate a specific file without changing its contents.
 pub fn load_keybindings_from_path(path: &Path) -> anyhow::Result<KeybindingConfig> {
     load_keybindings_with_snapshot(path).map(|(config, _)| config)
 }
 
-/// Return exactly the bytes used for the effective configuration, including cleanup.
+/// Normalize defaults in memory and return exactly the original on-disk bytes.
+/// Loading never saves, cleans, or reformats the file.
 pub(super) fn load_keybindings_with_snapshot(
     path: &Path,
 ) -> anyhow::Result<(KeybindingConfig, String)> {
     let original = std::fs::read(path)?;
     let content = std::str::from_utf8(&original)?;
     let config = parse_keybindings(content)?;
-    let raw: KeybindingConfig = serde_json::from_str(content)?;
-    let overrides = config.overrides();
-    if raw.bindings.len() != overrides.bindings.len() {
-        let cleaned = serde_json::to_string_pretty(&overrides)?;
-        // An editor may have saved while parsing. Never replace its new bytes.
-        clean_if_unchanged(path, &original, &cleaned)?;
-        return Ok((config, cleaned));
-    }
     Ok((config, content.to_owned()))
-}
-
-fn clean_if_unchanged(path: &Path, original: &[u8], cleaned: &str) -> anyhow::Result<()> {
-    anyhow::ensure!(
-        std::fs::read(path)? == original,
-        "Keybindings file changed during cleanup"
-    );
-    write_keybindings_atomically(path, cleaned, Some(original))?;
-    Ok(())
 }
 
 /// Load configuration at startup, retaining the historical fallback on failure.
@@ -612,14 +591,10 @@ pub fn load_keybindings() -> KeybindingConfig {
                 return config;
             }
             Err(error) => {
-                log::warn!("Failed to load or clean keybindings config: {}", error);
-                // A read-only file can still contain valid overrides. Cleanup failure
-                // must not discard them; re-read to avoid using stale editor bytes.
-                if let Ok(content) = std::fs::read_to_string(&path)
-                    && let Ok(config) = parse_keybindings(&content)
-                {
-                    return config;
-                }
+                log::warn!(
+                    "Failed to load keybindings config: {}, using defaults",
+                    error
+                );
             }
         }
     }
@@ -724,7 +699,7 @@ mod tests {
     }
 
     #[test]
-    fn only_overrides_are_saved_and_legacy_defaults_are_cleaned_idempotently() {
+    fn loading_preserves_legacy_bytes_and_only_explicit_save_cleans_defaults() {
         let mut legacy = KeybindingConfig::defaults();
         for entries in legacy.bindings.values_mut() {
             for entry in entries {
@@ -732,23 +707,47 @@ mod tests {
             }
         }
         assert!(legacy.get_customized_actions().is_empty());
-        let fixture = ConfigFixture::new(&serde_json::to_string(&legacy).unwrap());
+        let original = format!("  {}\n", serde_json::to_string(&legacy).unwrap());
+        let fixture = ConfigFixture::new(&original);
         let (loaded, snapshot) = load_keybindings_with_snapshot(&fixture.0).unwrap();
-        assert_eq!(snapshot, std::fs::read_to_string(&fixture.0).unwrap());
+        assert_eq!(snapshot, original);
+        assert_eq!(std::fs::read_to_string(&fixture.0).unwrap(), original);
         assert_eq!(loaded.bindings, KeybindingConfig::defaults().bindings);
         assert!(loaded.get_customized_actions().is_empty());
+        load_keybindings_from_path(&fixture.0).unwrap();
+        assert_eq!(std::fs::read_to_string(&fixture.0).unwrap(), original);
+
+        save_keybindings_to_path(&loaded, &fixture.0).unwrap();
         let cleaned = std::fs::read(&fixture.0).unwrap();
         let raw: KeybindingConfig = serde_json::from_slice(&cleaned).unwrap();
         assert_eq!(raw.version, 1);
         assert!(raw.bindings.is_empty());
         load_keybindings_from_path(&fixture.0).unwrap();
         assert_eq!(std::fs::read(&fixture.0).unwrap(), cleaned);
-        save_keybindings_to_path(&KeybindingConfig::defaults(), &fixture.0).unwrap();
-        assert!(
-            serde_json::from_slice::<KeybindingConfig>(&std::fs::read(&fixture.0).unwrap())
-                .unwrap()
-                .bindings
-                .is_empty()
+    }
+
+    #[test]
+    fn loading_read_only_legacy_file_keeps_overrides_and_creates_no_files() {
+        let mut config = KeybindingConfig::defaults();
+        config.bindings.insert(
+            "FutureAction".into(),
+            vec![KeybindingEntry::new("alt-f12", None)],
+        );
+        let original = serde_json::to_string_pretty(&config).unwrap();
+        let fixture = ConfigFixture::new(&original);
+        let permissions = std::fs::metadata(&fixture.0).unwrap().permissions();
+        let mut read_only = permissions.clone();
+        read_only.set_readonly(true);
+        std::fs::set_permissions(&fixture.0, read_only).unwrap();
+        // Restore permissions before assertions so a failure cannot leave fixture litter.
+        let result = load_keybindings_with_snapshot(&fixture.0);
+        std::fs::set_permissions(&fixture.0, permissions).unwrap();
+        let (loaded, snapshot) = result.unwrap();
+        assert_eq!(snapshot, original);
+        assert_eq!(std::fs::read_to_string(&fixture.0).unwrap(), original);
+        assert_eq!(
+            loaded.bindings["FutureAction"],
+            config.bindings["FutureAction"]
         );
     }
 
@@ -764,6 +763,7 @@ mod tests {
         platform[0].platforms = Some(vec![ShortcutPlatform::Linux]);
         let mut mixed = original.clone();
         mixed[0].platforms = None;
+        mixed[1].platforms = Some(vec![ShortcutPlatform::Windows, ShortcutPlatform::Linux]);
         let mut changed = original.clone();
         changed[0].keystroke = "alt-f12".into();
         for entries in [
@@ -797,7 +797,7 @@ mod tests {
     #[test]
     fn platform_order_is_equivalent_but_partial_legacy_arrays_are_custom() {
         let mut config = KeybindingConfig::defaults();
-        config.bindings.get_mut("SplitVertical").unwrap()[1]
+        config.bindings.get_mut("SplitVertical").unwrap()[0]
             .platforms
             .as_mut()
             .unwrap()
@@ -813,7 +813,7 @@ mod tests {
     }
 
     #[test]
-    fn corrupt_and_concurrently_modified_files_are_never_cleaned() {
+    fn corrupt_loads_and_stale_explicit_writes_preserve_original_files() {
         for content in [
             "invalid",
             r#"{"bindings":{"Quit":[{"keystroke":"unset"}]}}"#,
@@ -823,7 +823,6 @@ mod tests {
             assert_eq!(std::fs::read_to_string(&fixture.0).unwrap(), content);
         }
         let fixture = ConfigFixture::new("external editor bytes");
-        assert!(clean_if_unchanged(&fixture.0, b"original bytes", "cleaned").is_err());
         assert!(
             write_keybindings_atomically(&fixture.0, "cleaned", Some(b"original bytes")).is_err()
         );
@@ -846,19 +845,51 @@ mod tests {
                 .iter()
                 .filter(|entry| entry.applies_to(platform))
                 .collect();
-            assert_eq!(active.len(), 1);
             assert_eq!(
-                active[0].keystroke,
-                if platform == ShortcutPlatform::Mac {
-                    "cmd-d"
+                active.len(),
+                if platform == ShortcutPlatform::Windows {
+                    1
                 } else {
-                    "ctrl-shift-d"
+                    2
                 }
+            );
+            assert!(active.iter().any(|entry| entry.keystroke == "ctrl-shift-d"));
+            assert_eq!(
+                active.iter().any(|entry| entry.keystroke == "cmd-d"),
+                platform != ShortcutPlatform::Windows
             );
             assert!(config.bindings["ToggleFullscreen"][0].applies_to(platform));
             assert_eq!(
                 config.bindings["FocusLeft"][0].applies_to(platform),
                 platform != ShortcutPlatform::Windows
+            );
+        }
+    }
+
+    #[test]
+    fn mac_and_linux_defaults_keep_every_original_cmd_and_ctrl_alternative() {
+        let defaults = KeybindingConfig::defaults();
+        for platform in [ShortcutPlatform::Mac, ShortcutPlatform::Linux] {
+            for entries in defaults.bindings.values() {
+                for entry in entries {
+                    assert!(
+                        entry.is_supported_on(platform),
+                        "{} must remain supported on {platform:?}",
+                        entry.keystroke
+                    );
+                }
+            }
+            let split = &defaults.bindings["SplitVertical"];
+            assert!(
+                split
+                    .iter()
+                    .any(|entry| entry.keystroke == "cmd-d" && entry.is_supported_on(platform))
+            );
+            assert!(
+                split
+                    .iter()
+                    .any(|entry| entry.keystroke == "ctrl-shift-d"
+                        && entry.is_supported_on(platform))
             );
         }
     }

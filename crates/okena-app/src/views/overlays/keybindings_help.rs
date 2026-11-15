@@ -12,7 +12,7 @@ use crate::views::components::{
 };
 use gpui::prelude::*;
 use gpui::*;
-use gpui_component::{h_flex, v_flex};
+use gpui_component::{WindowExt as _, dialog::DialogButtonProps, h_flex, v_flex};
 use okena_ui::shortcuts::ShortcutPlatform;
 use okena_ui::simple_input::InputChangedEvent;
 use search::{CaptureQuery, build_rows};
@@ -40,6 +40,7 @@ struct EditingState {
 pub struct KeybindingsHelp {
     focus_handle: FocusHandle,
     show_reset_confirmation: bool,
+    clean_dialog_open: bool,
     /// Current editing/recording state
     editing: Option<EditingState>,
     /// Timer handle for chord timeout
@@ -89,6 +90,7 @@ impl KeybindingsHelp {
         Self {
             focus_handle,
             show_reset_confirmation: false,
+            clean_dialog_open: false,
             editing: None,
             _chord_timer: None,
             recording_generation: 0,
@@ -117,6 +119,7 @@ impl KeybindingsHelp {
     }
 
     fn handle_reset_to_defaults(&mut self, cx: &mut Context<Self>) {
+        self.clean_dialog_open = false;
         if !self.can_save(cx) {
             return;
         }
@@ -146,8 +149,72 @@ impl KeybindingsHelp {
         cx.notify();
     }
 
+    fn request_clean(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.clean_dialog_open {
+            return;
+        }
+        self.cancel_recording(cx);
+        self.stop_search(cx);
+        self.filter_open = None;
+        self.clean_dialog_open = true;
+        self.show_reset_confirmation = false;
+        let confirm = cx.entity().downgrade();
+        let cancel = confirm.clone();
+        // Use the existing component dialog on every platform, including Linux.
+        // The common window host supplies its modal layer and focus trap.
+        window.open_alert_dialog(cx, move |alert, _, _| {
+            let confirm = confirm.clone();
+            let cancel = cancel.clone();
+            alert.confirm()
+                .title("Clean keybindings?")
+                .description("Remove default entries and reformat keybindings.json? Custom shortcuts are kept; unrecognized fields are omitted.")
+                .button_props(DialogButtonProps::default().ok_text("Clean keybindings").cancel_text("Cancel").show_cancel(true))
+                .overlay_closable(false)
+                .on_ok(move |_, _, cx| {
+                    if let Some(this) = confirm.upgrade() {
+                        this.update(cx, |this, cx| {
+                            this.confirm_clean(cx);
+                            this.clean_dialog_open = false;
+                            cx.notify();
+                        });
+                    }
+                    true
+                })
+                .on_cancel(move |_, _, cx| {
+                    if let Some(this) = cancel.upgrade() {
+                        this.update(cx, |this, cx| { this.clean_dialog_open = false; cx.notify(); });
+                    }
+                    true
+                })
+        });
+        cx.notify();
+    }
+
+    fn confirm_clean(&mut self, cx: &mut Context<Self>) {
+        if !self.clean_dialog_open {
+            return;
+        }
+        if self.disk_snapshot.is_none() {
+            self.clean_dialog_open = false;
+            cx.notify();
+            return;
+        }
+        if !self.can_save(cx) {
+            return;
+        }
+        self.cancel_recording(cx);
+        self.stop_search(cx);
+        // The same checked, atomic save keeps all custom overrides and [] removals.
+        self.save_changes(cx);
+        if self.file_error.is_none() {
+            self.clean_dialog_open = false;
+        }
+        cx.notify();
+    }
+
     /// Start recording a keystroke for a specific binding
     fn start_recording(&mut self, action: String, entry_index: usize, cx: &mut Context<Self>) {
+        self.clean_dialog_open = false;
         self.stop_search(cx);
         self.recording_generation += 1;
         self.editing = Some(EditingState {
@@ -212,6 +279,7 @@ impl KeybindingsHelp {
     }
 
     fn toggle_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.clean_dialog_open = false;
         if self.capture.is_some() {
             self.stop_search(cx);
         } else {
@@ -272,6 +340,7 @@ impl KeybindingsHelp {
     }
 
     fn reload_from_disk(&mut self, cx: &mut Context<Self>) {
+        self.clean_dialog_open = false;
         self.cancel_recording(cx);
         self.stop_search(cx);
         match crate::keybindings::refresh_keybindings_from_disk(cx) {
@@ -285,6 +354,7 @@ impl KeybindingsHelp {
     }
 
     fn open_json(&mut self, cx: &mut Context<Self>) {
+        self.clean_dialog_open = false;
         self.cancel_recording(cx);
         self.stop_search(cx);
         let result = (|| -> anyhow::Result<()> {
@@ -480,6 +550,7 @@ impl KeybindingsHelp {
 
     /// Remove a binding entry
     fn remove_binding_entry(&mut self, action: &str, entry_index: usize, cx: &mut Context<Self>) {
+        self.clean_dialog_open = false;
         if !self.can_save(cx) {
             return;
         }
@@ -494,6 +565,7 @@ impl KeybindingsHelp {
 
     /// Toggle enabled/disabled state
     fn toggle_binding_entry(&mut self, action: &str, entry_index: usize, cx: &mut Context<Self>) {
+        self.clean_dialog_open = false;
         if !self.can_save(cx) {
             return;
         }
@@ -508,6 +580,7 @@ impl KeybindingsHelp {
 
     /// Reset a single action to defaults
     fn reset_single_action(&mut self, action: &str, cx: &mut Context<Self>) {
+        self.clean_dialog_open = false;
         if !self.can_save(cx) {
             return;
         }
@@ -558,6 +631,12 @@ impl KeybindingsHelp {
                         button("reload-keybindings-json", "Reload from disk").on_mouse_down(
                             MouseButton::Left,
                             cx.listener(|this, _, _, cx| this.reload_from_disk(cx)),
+                        ),
+                    )
+                    .child(
+                        button("clean-keybindings-json", "Clean keybindings…").on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _, window, cx| this.request_clean(window, cx)),
                         ),
                     ),
             )
@@ -1061,7 +1140,7 @@ impl Render for KeybindingsHelp {
                     this.held_keys.clear();
                 }));
         }
-        if self.capture.is_none() && self.editing.is_none() {
+        if self.capture.is_none() && self.editing.is_none() && !self.clean_dialog_open {
             focus_input(&self.search_input, window, cx);
         }
 
@@ -1381,6 +1460,55 @@ mod capture_tests {
                             .remove(&search::held_key(&event.keystroke, cx));
                     });
                 })
+        }
+    }
+
+    #[gpui::test]
+    fn cleanup_uses_component_dialog_and_cancel_or_missing_file_never_saves(
+        cx: &mut TestAppContext,
+    ) {
+        use gpui_component::WindowExt as _;
+        cx.update(gpui_component::init);
+        let dialog = cx.update(|cx| cx.new(|cx| KeybindingsHelp::with_snapshot(cx, None, None)));
+        let window = cx.open_window(size(px(650.), px(700.)), |window, cx| {
+            let harness = cx.new(|_| Harness {
+                dialog: dialog.clone(),
+                actions: Default::default(),
+            });
+            crate::window_root::new_root(harness, window, cx)
+        });
+        let window: gpui::AnyWindowHandle = window.into();
+        for answer in [false, true] {
+            window
+                .update(cx, |_, window, cx| {
+                    dialog.update(cx, |dialog, cx| {
+                        dialog.request_clean(window, cx);
+                        dialog.request_clean(window, cx);
+                        assert!(dialog.clean_dialog_open);
+                    });
+                    assert!(window.has_active_dialog(cx));
+                })
+                .unwrap();
+            cx.run_until_parked();
+            window
+                .update(cx, |_, window, cx| {
+                    if answer {
+                        window.dispatch_action(Box::new(gpui_component::dialog::ConfirmDialog), cx);
+                    } else {
+                        window.dispatch_action(Box::new(gpui_component::dialog::CancelDialog), cx);
+                    }
+                })
+                .unwrap();
+            cx.run_until_parked();
+            window
+                .update(cx, |_, window, cx| {
+                    assert!(!window.has_active_dialog(cx));
+                    let dialog = dialog.read(cx);
+                    assert!(!dialog.clean_dialog_open);
+                    assert!(dialog.disk_snapshot.is_none());
+                    assert!(dialog.file_error.is_none());
+                })
+                .unwrap();
         }
     }
 

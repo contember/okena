@@ -29,3 +29,16 @@ Defines all keyboard actions, default bindings, and user-configurable keybinding
   explicit empty array suppresses defaults. Use the same comparison for persistence and Custom badges.
 - See [configuration reference](../../../../docs/reference/configuration.md#keybindingsjson)
   for the file format, global/contextual assignment and platform restrictions.
+
+- Loading (startup, dialog open or reload) must never write or reformat keybindings.json.
+  Remove redundant defaults only on an explicit save or confirmed **Clean keybindings**.
+- Preserve the original Ctrl alternatives on macOS and Super alternatives on Linux.
+  The Win-key prohibition is Windows-only; do not use platform filtering to drop
+  existing macOS/Linux default assignments.
+- Confirm **Clean keybindings** with the existing `gpui-component::AlertDialog`
+  on all platforms. Its common window host must provide the dialog layer; Linux
+  keeps SimpleRoot's resize workaround inside a borderless component Root.
+- Keep Cancel explicit, block background clicks, and save only from the positive
+  callback. Do not restore the native Window::prompt / basic Linux fallback path.
+- Label the launcher **Clean keybindings…** because it opens a confirmation;
+  keep the final **Clean keybindings** action without an ellipsis.
