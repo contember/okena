@@ -1,5 +1,5 @@
 use crate::app_menu::{AppMenuAction, AppMenuEntry, TITLE_BAR_MENU};
-use crate::keybindings::{CloseWindow, ToggleSidebar, shortcut_for_action};
+use crate::keybindings::{CloseWindow, ToggleSidebar};
 use crate::theme::theme;
 use crate::ui::tokens::{ui_text, ui_text_sm, ui_text_xl};
 use gpui::prelude::*;
@@ -81,9 +81,15 @@ impl TitleBar {
         cx.notify();
     }
 
-    fn render_menu_action(&self, action: AppMenuAction, cx: &mut Context<Self>) -> Stateful<Div> {
+    fn render_menu_action(
+        &self,
+        action: AppMenuAction,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
         let t = theme(cx);
-        let shortcut = shortcut_for_action(action.action_name());
+        let shortcut =
+            okena_ui::shortcuts::shortcut_for_action(action.boxed_action().as_ref(), window, cx);
         let app_menu_handler = self.app_menu_handler.clone();
 
         div()
@@ -118,7 +124,7 @@ impl TitleBar {
     }
 
     /// Render the app dropdown menu overlay (must be called from a parent with full window coverage).
-    pub fn render_menu(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    pub fn render_menu(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let t = theme(cx);
 
         let traffic_light_padding = if cfg!(target_os = "macos") {
@@ -147,12 +153,14 @@ impl TitleBar {
                     .top(px(32.0))
                     .left(traffic_light_padding + px(40.0))
                     .min_w(px(260.0))
-                    .children(TITLE_BAR_MENU.iter().map(|entry| match entry {
-                        AppMenuEntry::Action(action) => {
-                            self.render_menu_action(*action, cx).into_any_element()
+                    .children(TITLE_BAR_MENU.iter().map(|entry| {
+                        match entry {
+                            AppMenuEntry::Action(action) => self
+                                .render_menu_action(*action, window, cx)
+                                .into_any_element(),
+                            AppMenuEntry::Separator => menu_separator(&t).into_any_element(),
+                            AppMenuEntry::SystemServices => div().into_any_element(),
                         }
-                        AppMenuEntry::Separator => menu_separator(&t).into_any_element(),
-                        AppMenuEntry::SystemServices => div().into_any_element(),
                     })),
             )
     }

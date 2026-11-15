@@ -1,5 +1,5 @@
 //! Shared shortcut labels for tooltips, keybinding editors and command lists.
-use gpui::{Action, AnyView, App, AsKeystroke, KeyBinding, Keystroke, Window};
+use gpui::{Action, AnyView, App, AsKeystroke, KeyBinding, KeyContext, Keymap, Keystroke, Window};
 use gpui_component::tooltip::Tooltip;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -117,41 +117,71 @@ pub fn bindings_for_action(action: &dyn Action, window: &Window, cx: &App) -> Ve
     // Use the same keymap input resolver as GPUI dispatch, with the actual path.
     // A missing root context is an empty stack, not a synthetic empty context:
     // negated predicates (e.g. !TerminalPane) distinguish those two cases.
-    keymap
-        .bindings_for_action(action)
-        .filter(|binding| {
-            keymap
-                .bindings_for_input(binding.keystrokes(), &contexts)
-                .0
-                .first()
-                .is_some_and(|effective| effective.action().partial_eq(action))
-        })
+    effective_bindings(action, &contexts, &keymap)
         .cloned()
         .collect()
 }
 
+fn effective_bindings<'a>(
+    action: &'a dyn Action,
+    contexts: &'a [KeyContext],
+    keymap: &'a Keymap,
+) -> impl DoubleEndedIterator<Item = &'a KeyBinding> {
+    keymap.bindings_for_action(action).filter(|binding| {
+        keymap
+            .bindings_for_input(binding.keystrokes(), contexts)
+            .0
+            .first()
+            .is_some_and(|effective| effective.action().partial_eq(action))
+    })
+}
+
 /// Chooses one display binding without removing alternatives. GPUI returns effective
-/// bindings in registration order; the last one wins, on every platform.
+/// bindings in registration order; prefer the last native binding, then fall back
+/// to the last effective binding.
 pub fn shortcut_for_action(action: &dyn Action, window: &Window, cx: &App) -> Option<String> {
-    let bindings = bindings_for_action(action, window, cx);
-    preferred_binding(&bindings, ShortcutPlatform::current()).map(format_binding)
+    shortcut_for_action_in(action, &window.context_stack(), cx)
+}
+
+/// Resolve a discoverability label for an explicit usage context. Unlike an
+/// actionable tooltip, educational tips need not describe the current focus.
+/// Uses the same live keymap, precedence and native formatting as tooltips.
+/// A custom binding scoped to another context is intentionally not advertised.
+pub fn shortcut_for_action_in(
+    action: &dyn Action,
+    contexts: &[KeyContext],
+    cx: &App,
+) -> Option<String> {
+    let keymap = cx.key_bindings();
+    let keymap = keymap.borrow();
+    // Tooltip/menu labels need just one binding: borrow candidates and stop at
+    // the preferred match instead of cloning and formatting all alternatives.
+    preferred_binding(
+        effective_bindings(action, contexts, &keymap),
+        ShortcutPlatform::current(),
+    )
+    .map(format_binding)
 }
 
 /// Defaults register both a `cmd-…` and a Ctrl variant on every platform, so prefer
 /// the native one (Cmd on macOS, no Win/Super elsewhere); among equals the last wins.
 /// Other modifiers stay eligible as a fallback: custom Ctrl on macOS and Win/Super work.
-fn preferred_binding(bindings: &[KeyBinding], platform: ShortcutPlatform) -> Option<&KeyBinding> {
-    let is_native = |binding: &&KeyBinding| {
-        binding.keystrokes().first().is_some_and(|stroke| {
+fn preferred_binding<'a>(
+    bindings: impl DoubleEndedIterator<Item = &'a KeyBinding>,
+    platform: ShortcutPlatform,
+) -> Option<&'a KeyBinding> {
+    let mut fallback = None;
+    for binding in bindings.rev() {
+        fallback.get_or_insert(binding);
+        let is_native = binding.keystrokes().first().is_some_and(|stroke| {
             let uses_platform_key = stroke.as_keystroke().modifiers.platform;
             uses_platform_key == (platform == ShortcutPlatform::Mac)
-        })
-    };
-    bindings
-        .iter()
-        .rev()
-        .find(is_native)
-        .or_else(|| bindings.last())
+        });
+        if is_native {
+            return Some(binding);
+        }
+    }
+    fallback
 }
 
 pub fn action_tooltip(
@@ -354,7 +384,7 @@ mod tests {
             KeyBinding::new("ctrl-shift-d", SampleAction, None),
         ];
         let chosen = |bindings: &[KeyBinding], platform| {
-            preferred_binding(bindings, platform).map(format_binding)
+            preferred_binding(bindings.iter(), platform).map(format_binding)
         };
         assert_eq!(
             chosen(&defaults, ShortcutPlatform::Mac),
@@ -372,6 +402,62 @@ mod tests {
             Some(format_binding(&custom_only[0]))
         );
         assert_eq!(chosen(&[], ShortcutPlatform::Linux), None);
+    }
+
+    #[test]
+    fn preferred_binding_stops_after_the_last_native_candidate() {
+        let bindings = [
+            KeyBinding::new("ctrl-a", SampleAction, None),
+            KeyBinding::new("ctrl-b", SampleAction, None),
+            KeyBinding::new("cmd-c", SampleAction, None),
+        ];
+        let inspected = std::cell::Cell::new(0);
+        let chosen = preferred_binding(
+            bindings
+                .iter()
+                .inspect(|_| inspected.set(inspected.get() + 1)),
+            ShortcutPlatform::Windows,
+        );
+        assert_eq!(chosen.map(format_binding), Some(format_keystroke("ctrl-b")));
+        assert_eq!(inspected.get(), 2, "older candidates must not be resolved");
+    }
+
+    /// Opt-in measurement, not a timing assertion: avoid flaky CI thresholds.
+    #[gpui::test]
+    #[ignore]
+    fn measure_shortcut_lookup_with_large_keymap(cx: &mut TestAppContext) {
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            let focus = cx.focus_handle();
+            focus.focus(window, cx);
+            TestView {
+                focus,
+                other_focus: cx.focus_handle(),
+            }
+        });
+        cx.update(|window, cx| {
+            for i in 0..512 {
+                let context = if i % 2 == 0 { "Workspace > TerminalPane" } else { "!TerminalPane" };
+                cx.bind_keys([KeyBinding::new("ctrl-z", OtherAction, Some(context))]);
+            }
+            cx.bind_keys([
+                KeyBinding::new("cmd-d", SampleAction, Some("TerminalPane")),
+                KeyBinding::new("ctrl-d", SampleAction, Some("TerminalPane")),
+            ]);
+            let started = std::time::Instant::now();
+            for _ in 0..10_000 {
+                assert!(
+                    std::hint::black_box(shortcut_for_action(&SampleAction, window, cx)).is_some()
+                );
+            }
+            let optimized = started.elapsed();
+            let started = std::time::Instant::now();
+            for _ in 0..10_000 {
+                // The pre-change display path collected/cloned every effective binding.
+                let bindings = bindings_for_action(&SampleAction, window, cx);
+                assert!(std::hint::black_box(preferred_binding(bindings.iter(), ShortcutPlatform::current()).map(format_binding)).is_some());
+            }
+            eprintln!("10,000 lookups / 514 contextual bindings: optimized={optimized:?}, previous collect-all={:?}", started.elapsed());
+        });
     }
 
     #[gpui::test]
