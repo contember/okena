@@ -163,6 +163,7 @@ impl Okena {
             }
             self.extra_windows.remove(&window_id);
             self.unfocused_window_pacer.forget(window_id);
+            self.pending_title_repaints.forget(window_id);
         }
 
         let to_open = extras_to_open(&data, &opened);

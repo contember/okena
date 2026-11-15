@@ -5,7 +5,13 @@ use super::Terminal;
 impl Terminal {
     /// Get the terminal title (from OSC sequences)
     pub fn title(&self) -> Option<String> {
-        self.title.lock().clone()
+        self.title.get()
+    }
+
+    /// Changes whenever [`Self::title`] does, without cloning it. Unique per
+    /// change across all terminals; 0 while the terminal has never had a title.
+    pub fn title_stamp(&self) -> u64 {
+        self.title.stamp()
     }
 
     /// Check if terminal has unread bell notification

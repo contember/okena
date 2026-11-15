@@ -61,7 +61,7 @@ pub use types::{
 
 pub use osc_sidecar::TerminalNotification;
 
-use event_listener::{ClipboardQueues, CurrentState, ZedEventListener};
+use event_listener::{ClipboardQueues, CurrentState, SharedTitle, ZedEventListener};
 use osc_sidecar::OscSidecar;
 use prompt_marks::{PromptSidecar, PromptTracker};
 use types::FocusReportState;
@@ -159,9 +159,9 @@ pub struct Terminal {
 
     /// Terminal title set by OSC 0/1/2 sequences. `Arc` shared with
     /// `ZedEventListener` (which lives inside `Term`): the listener writes
-    /// on title-change events during `process_output`, and the GPUI render
-    /// path reads via `get_title`. Both happen on the GPUI thread.
-    pub(super) title: Arc<Mutex<Option<String>>>,
+    /// on title-change events during `process_output`; `title()` and
+    /// `title_stamp()` read it. Both happen on the GPUI thread.
+    pub(super) title: Arc<SharedTitle>,
 
     /// Bell notification flag. `Arc` shared with `ZedEventListener`: set on
     /// BEL during `process_output`, cleared by the render path on focus.
@@ -458,7 +458,7 @@ impl Terminal {
         let term_size = TermSize::new(size.cols as usize, size.rows as usize);
 
         // Create shared storage for OSC sequence handling and bell
-        let title = Arc::new(Mutex::new(None));
+        let title = Arc::new(SharedTitle::default());
         let has_bell = Arc::new(Mutex::new(false));
         let bell_pending = Arc::new(AtomicBool::new(false));
         let pending_clipboard = Arc::new(Mutex::new(Vec::new()));
