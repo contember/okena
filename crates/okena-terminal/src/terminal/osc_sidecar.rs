@@ -88,16 +88,23 @@ impl OscSidecar {
                 osc99_pending: HashMap::new(),
                 hook_status: None,
                 program_status: ProgramStatus::default(),
+                content_activity: false,
             },
         }
     }
 
-    pub(super) fn advance(&mut self, bytes: &[u8]) {
+    /// Whether this chunk contains anything other than title updates or an
+    /// unfinished escape. Reuse the existing parser, including its state across
+    /// chunks, rather than inspecting raw bytes for complete OSC sequences.
+    pub(super) fn advance(&mut self, bytes: &[u8]) -> bool {
+        self.perform.content_activity = false;
         self.parser.advance(&mut self.perform, bytes);
+        self.perform.content_activity
     }
 }
 
 struct SidecarPerform {
+    content_activity: bool,
     reported_cwd: Arc<Mutex<Option<String>>>,
     /// `OSC 9` / `OSC 777` / `OSC 99` notifications, drained by the GPUI thread
     /// in the PTY event loop (same model as `pending_clipboard`).
@@ -603,7 +610,38 @@ fn agent_default_body(lifecycle: AgentLifecycle) -> String {
 }
 
 impl Perform for SidecarPerform {
+    fn print(&mut self, _c: char) {
+        self.content_activity = true;
+    }
+
+    fn execute(&mut self, _byte: u8) {
+        self.content_activity = true;
+    }
+
+    fn hook(
+        &mut self,
+        _params: &alacritty_terminal::vte::Params,
+        _intermediates: &[u8],
+        _ignore: bool,
+        _action: char,
+    ) {
+        self.content_activity = true;
+    }
+
+    fn put(&mut self, _byte: u8) {
+        self.content_activity = true;
+    }
+
+    fn unhook(&mut self) {
+        self.content_activity = true;
+    }
+
     fn osc_dispatch(&mut self, params: &[&[u8]], _bell_terminated: bool) {
+        // Everything except the standard title commands is conservatively
+        // content activity, including colors, hyperlinks and notifications.
+        if !matches!(params.first().copied(), Some(b"0" | b"1" | b"2")) {
+            self.content_activity = true;
+        }
         if params.len() < 2 {
             return;
         }
@@ -711,6 +749,11 @@ impl Perform for SidecarPerform {
     }
 
     fn esc_dispatch(&mut self, intermediates: &[u8], _ignore: bool, byte: u8) {
+        // The ST following an OSC is dispatched separately, possibly in the
+        // next chunk. A bare ST has no content effect either.
+        if byte != b'\\' || !intermediates.is_empty() {
+            self.content_activity = true;
+        }
         // RIS (`ESC c`) resets the terminal, program-status records included.
         if byte == b'c' && intermediates.is_empty() && self.program_status.clear() {
             self.publish_status(false);
@@ -724,6 +767,7 @@ impl Perform for SidecarPerform {
         _ignore: bool,
         action: char,
     ) {
+        self.content_activity = true;
         // XTVERSION query: `CSI > Ps q`. Per xterm ctlseqs, only Ps=0 (or
         // omitted) asks for the terminal name+version; other Ps values
         // belong to unrelated private CSI sequences we must not answer.

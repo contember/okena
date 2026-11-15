@@ -102,8 +102,10 @@ pub fn request_registered_content_pane_repaints(
     update_registered_panes_with_stats(registry, terminal_ids, cx, |terminal_id, weaks, cx| {
         let mut repainted = 0;
         update_pane_weaks(weaks, cx, |pane, cx| {
-            if admit(terminal_id, pane.window_id()) {
-                pane.request_activity_repaint(cx);
+            if pane.needs_activity_repaint()
+                && admit(terminal_id, pane.window_id())
+                && pane.request_activity_repaint(cx)
+            {
                 repainted += 1;
             }
         });
@@ -1221,6 +1223,116 @@ mod tests {
         cx.update(|cx| {
             assert!(!notify_pane_weaks(&mut weaks, cx));
             assert!(weaks.is_empty(), "all dead entries pruned");
+        });
+    }
+}
+
+#[cfg(test)]
+mod title_only_content_tests {
+    use super::request_registered_content_pane_repaints;
+    use gpui::AppContext as _;
+    use okena_terminal::terminal::{Terminal, TerminalSize, TerminalTransport};
+    use okena_views_terminal::layout::terminal_pane::TerminalContent;
+    use okena_workspace::request_broker::RequestBroker;
+    use okena_workspace::state::{Workspace, WorkspaceData};
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    struct NoTransport;
+    impl TerminalTransport for NoTransport {
+        fn send_input(&self, _: &str, _: &[u8]) {}
+        fn resize(&self, _: &str, _: u16, _: u16) {}
+        fn uses_mouse_backend(&self) -> bool {
+            false
+        }
+    }
+
+    fn terminal() -> Arc<Terminal> {
+        Arc::new(Terminal::new(
+            "test".into(),
+            TerminalSize::default(),
+            Arc::new(NoTransport),
+            "/tmp".into(),
+        ))
+    }
+
+    #[gpui::test]
+    fn title_only_activity_skips_content_but_preserves_deferred_and_replaced_panes(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            let workspace = cx.new(|_| Workspace::new(WorkspaceData::empty()));
+            let broker = cx.new(|_| RequestBroker::new());
+            let panes: Vec<_> = (0..2)
+                .map(|_| {
+                    cx.new(|cx| {
+                        TerminalContent::new(
+                            cx.focus_handle(),
+                            None,
+                            "project".into(),
+                            vec![],
+                            workspace.clone(),
+                            broker.clone(),
+                            cx,
+                        )
+                    })
+                })
+                .collect();
+            let terminal = terminal();
+            for pane in &panes {
+                pane.update(cx, |pane, cx| pane.set_terminal(Some(terminal.clone()), cx));
+            }
+            let mut registry = HashMap::from([(
+                "test".into(),
+                panes.iter().map(|pane| pane.downgrade()).collect(),
+            )]);
+            let ids = vec!["test".to_owned()];
+            let first =
+                request_registered_content_pane_repaints(&mut registry, &ids, cx, |_, _| true);
+            assert_eq!(first.panes, 2);
+            for _ in 0..1000 {
+                terminal.enqueue_output(b"\x1b]2;spinner\x07");
+                terminal.process_pending_output();
+                let stats =
+                    request_registered_content_pane_repaints(&mut registry, &ids, cx, |_, _| {
+                        panic!("unchanged content must not consume a pacing slot")
+                    });
+                assert_eq!(stats.panes, 0);
+            }
+            panes[0].update(cx, |pane, cx| pane.set_terminal(Some(terminal.clone()), cx));
+            assert!(!panes[0].read(cx).needs_activity_repaint());
+            // A title event must not erase content still waiting on the pacer.
+            terminal.process_output(b"new content");
+            let blocked =
+                request_registered_content_pane_repaints(&mut registry, &ids, cx, |_, _| false);
+            assert_eq!(blocked.panes, 0);
+            terminal.process_output(b"\x1b]2;done\x07");
+            let trailing =
+                request_registered_content_pane_repaints(&mut registry, &ids, cx, |_, _| true);
+            assert_eq!(trailing.panes, 2);
+            assert_eq!(
+                request_registered_content_pane_repaints(&mut registry, &ids, cx, |_, _| true)
+                    .panes,
+                0
+            );
+            // Same ID and same counter must not hide a replacement terminal.
+            let replacement = Arc::new(Terminal::new(
+                "test".into(),
+                TerminalSize::default(),
+                Arc::new(NoTransport),
+                "/tmp".into(),
+            ));
+            replacement.process_output(b"replacement");
+            assert_eq!(
+                replacement.content_repaint_generation(),
+                terminal.content_repaint_generation()
+            );
+            panes[0].update(cx, |pane, cx| pane.set_terminal(Some(replacement), cx));
+            assert_eq!(
+                request_registered_content_pane_repaints(&mut registry, &ids, cx, |_, _| true)
+                    .panes,
+                1
+            );
         });
     }
 }

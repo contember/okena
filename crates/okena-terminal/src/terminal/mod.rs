@@ -371,6 +371,15 @@ pub struct Terminal {
     /// the atomic avoids locking, not cross-thread access).
     pub(super) content_generation: AtomicU64,
 
+    /// Output batches with no content commands (titles, unfinished escapes,
+    /// or input ignored by the parser).
+    /// Subtracted from content_generation for activity-driven content repaints;
+    /// the original generation still drives notifications and activity delivery.
+    /// Access both counters only on the same owning reactor thread: GPUI for
+    /// desktop mirrors, the daemon reactor for its terminals. Atomic storage
+    /// does not make the derived pair safe to read on a background thread.
+    pub(super) non_content_output_generations: AtomicU64,
+
     /// Latest broadcaster sequence incorporated into the terminal model.
     pub(super) processed_output_sequence: AtomicU64,
 
@@ -531,6 +540,7 @@ impl Terminal {
             input_repaint_request: Mutex::new(None),
             dirty: AtomicBool::new(false),
             content_generation: AtomicU64::new(0),
+            non_content_output_generations: AtomicU64::new(0),
             processed_output_sequence: AtomicU64::new(0),
             initial_cwd,
             reported_cwd,
