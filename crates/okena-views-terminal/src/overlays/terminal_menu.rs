@@ -144,6 +144,16 @@ impl TerminalMenu {
         }
     }
 
+    fn split_layout_path(&self) -> &[usize] {
+        match &self.invocation {
+            TerminalMenuInvocation::Header {
+                split_layout_path: Some(path),
+                ..
+            } => path,
+            _ => &self.layout_path,
+        }
+    }
+
     fn close(&self, cx: &mut Context<Self>) {
         cx.emit(TerminalMenuEvent::Close);
     }
@@ -437,7 +447,7 @@ impl Render for TerminalMenu {
                                             cx.listener(|this: &mut Self, _, _window, cx| {
                                                 cx.emit(TerminalMenuEvent::Split {
                                                     project_id: this.project_id.clone(),
-                                                    layout_path: this.layout_path.clone(),
+                                                    layout_path: this.split_layout_path().to_vec(),
                                                     direction: SplitDirection::Vertical,
                                                 });
                                             }),
@@ -449,7 +459,7 @@ impl Render for TerminalMenu {
                                             cx.listener(|this: &mut Self, _, _window, cx| {
                                                 cx.emit(TerminalMenuEvent::Split {
                                                     project_id: this.project_id.clone(),
-                                                    layout_path: this.layout_path.clone(),
+                                                    layout_path: this.split_layout_path().to_vec(),
                                                     direction: SplitDirection::Horizontal,
                                                 });
                                             }),
@@ -666,6 +676,7 @@ mod tests {
     fn project_header_includes_primary_but_not_content_actions() {
         let invocation = TerminalMenuInvocation::Header {
             include_primary_actions: true,
+            split_layout_path: None,
         };
 
         assert!(!invocation.includes_content_actions());
@@ -676,9 +687,76 @@ mod tests {
     fn tab_overflow_includes_only_secondary_management_actions() {
         let invocation = TerminalMenuInvocation::Header {
             include_primary_actions: false,
+            split_layout_path: None,
         };
 
         assert!(!invocation.includes_content_actions());
         assert!(!invocation.includes_primary_actions());
+    }
+
+    #[gpui::test]
+    fn header_split_override_preserves_leaf_target_for_other_actions(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use gpui::AppContext as _;
+        cx.update(|cx| {
+            cx.set_global(okena_extensions::ExtensionSettingsStore::new(
+                |_, _| None,
+                |_, _, _| {},
+            ))
+        });
+        let leaf = vec![1, 2, 0];
+        for (invocation, expected) in [
+            (
+                TerminalMenuInvocation::Header {
+                    include_primary_actions: true,
+                    split_layout_path: Some(vec![1, 2]),
+                },
+                vec![1, 2],
+            ),
+            (
+                TerminalMenuInvocation::Header {
+                    include_primary_actions: true,
+                    split_layout_path: Some(vec![]),
+                },
+                vec![],
+            ),
+            (
+                TerminalMenuInvocation::Header {
+                    include_primary_actions: true,
+                    split_layout_path: None,
+                },
+                leaf.clone(),
+            ),
+            (
+                TerminalMenuInvocation::Content {
+                    has_selection: false,
+                    link_url: None,
+                },
+                leaf.clone(),
+            ),
+        ] {
+            let menu = cx.new(|cx| {
+                super::TerminalMenu::new(
+                    "terminal".into(),
+                    "project".into(),
+                    leaf.clone(),
+                    gpui::Point::default(),
+                    "Terminal".into(),
+                    okena_terminal::shell_config::ShellType::Default,
+                    false,
+                    false,
+                    invocation,
+                    cx,
+                )
+            });
+            menu.read_with(cx, |menu, _| {
+                assert_eq!(menu.split_layout_path(), expected.as_slice());
+                assert_eq!(
+                    menu.layout_path, leaf,
+                    "move/detach must still target the leaf"
+                );
+            });
+        }
     }
 }

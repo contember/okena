@@ -110,6 +110,7 @@ pub fn header_button_base(
 
     let base = div()
         .id(format!("{}-{}", action.id_prefix(), id_suffix))
+        .debug_selector(|| format!("{}-{}", action.id_prefix(), id_suffix))
         .cursor_pointer()
         .w(px(size.button))
         .h(px(size.button))

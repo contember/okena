@@ -1,7 +1,11 @@
 //! Tab bar rendering and management
 
-mod shell_selector;
+pub(super) mod shell_selector;
 
+#[cfg(test)]
+mod tests;
+
+use super::header_actions::{TabActionContext, render_action_buttons};
 use crate::ActionDispatch;
 use crate::actions::Cancel;
 use crate::layout::layout_container::{LayoutContainer, is_renaming, rename_input};
@@ -14,22 +18,12 @@ use gpui_component::tooltip::Tooltip;
 use gpui_component::{h_flex, v_flex};
 use okena_files::theme::theme;
 use okena_terminal::terminal::TerminalProgressState;
-use okena_ui::header_buttons::{ButtonSize, HeaderAction, header_button_base};
+use okena_ui::header_action_bar::HeaderActionBar;
 use okena_ui::theme::with_alpha;
 use okena_ui::tokens::{ui_text_md, ui_text_sm};
 use okena_ui::truncated_text::{adaptive_label_container, truncated_text};
-use okena_workspace::state::{LayoutNode, SplitDirection};
+use okena_workspace::state::LayoutNode;
 use std::collections::HashSet;
-
-/// Context for tab action button closures.
-#[derive(Clone)]
-pub(super) struct TabActionContext<D: ActionDispatch> {
-    pub project_id: String,
-    pub layout_path: Vec<usize>,
-    pub active_tab: usize,
-    pub standalone: bool,
-    pub action_dispatcher: Option<D>,
-}
 
 impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
     pub(super) fn start_drop_animation(&mut self, tab_index: usize, cx: &mut Context<Self>) {
@@ -65,178 +59,6 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
             });
         })
         .detach();
-    }
-
-    pub(super) fn render_tab_action_buttons(
-        &self,
-        ctx: TabActionContext<D>,
-        terminal_id: Option<String>,
-        cx: &mut Context<Self>,
-    ) -> Div {
-        let t = theme(cx);
-        let id_suffix = format!("tabs-{:?}", ctx.layout_path);
-
-        let terminal_id_for_close = terminal_id.clone();
-
-        let ctx_split_v = ctx.clone();
-        let ctx_split_h = ctx.clone();
-        let ctx_add_tab = ctx.clone();
-        let ctx_close = ctx.clone();
-
-        let standalone = ctx.standalone;
-        let terminal_layout_path = if standalone {
-            ctx.layout_path.clone()
-        } else {
-            let mut path = ctx.layout_path.clone();
-            path.push(ctx.active_tab);
-            path
-        };
-        // Group split/add-tab callbacks address the group, while keyboard actions
-        // address its focused leaf. Only standalone targets are equivalent.
-        let shortcut_guard = || {
-            let focus_manager = self.focus_manager.clone();
-            let workspace = self.workspace.clone();
-            let project_id = ctx.project_id.clone();
-            let path = terminal_layout_path.clone();
-            let terminal_id = terminal_id.clone();
-            move |window: &Window, cx: &App| {
-                window
-                    .context_stack()
-                    .iter()
-                    .any(|context| context.contains("TerminalPane"))
-                    && focus_manager.read(cx).is_focused(&project_id, &path)
-                    && workspace.read(cx).project(&project_id)
-                        .and_then(|project| project.layout.as_ref())
-                        .and_then(|layout| layout.get_at_path(&path))
-                        .is_some_and(|node| matches!(node, LayoutNode::Terminal { terminal_id: Some(id), .. } if Some(id) == terminal_id.as_ref()))
-            }
-        };
-        let more_button = crate::layout::layout_container::terminal_actions_button(
-            HeaderAction::More,
-            &id_suffix,
-            ctx.project_id.clone(),
-            self.request_broker.clone(),
-            terminal_layout_path.clone(),
-            terminal_id.clone(),
-            self.backend.supports_buffer_capture(),
-            false,
-            cx,
-        );
-
-        div()
-            .flex()
-            .flex_none()
-            .items_center()
-            .gap(px(2.0))
-            .px(px(4.0))
-            .child(
-                header_button_base(
-                    HeaderAction::SplitVertical,
-                    &id_suffix,
-                    ButtonSize::COMPACT,
-                    &t,
-                    None,
-                    standalone.then(|| {
-                        okena_ui::shortcuts::ActionShortcut::new(
-                            crate::actions::SplitVertical,
-                            shortcut_guard(),
-                        )
-                    }),
-                )
-                .on_click(move |_, _window, cx| {
-                    if let Some(ref dispatcher) = ctx_split_v.action_dispatcher {
-                        dispatcher.dispatch(
-                            okena_core::api::ActionRequest::SplitTerminal {
-                                project_id: ctx_split_v.project_id.clone(),
-                                path: ctx_split_v.layout_path.clone(),
-                                direction: SplitDirection::Vertical,
-                            },
-                            cx,
-                        );
-                    }
-                }),
-            )
-            .child(
-                header_button_base(
-                    HeaderAction::SplitHorizontal,
-                    &id_suffix,
-                    ButtonSize::COMPACT,
-                    &t,
-                    None,
-                    standalone.then(|| {
-                        okena_ui::shortcuts::ActionShortcut::new(
-                            crate::actions::SplitHorizontal,
-                            shortcut_guard(),
-                        )
-                    }),
-                )
-                .on_click(move |_, _window, cx| {
-                    if let Some(ref dispatcher) = ctx_split_h.action_dispatcher {
-                        dispatcher.dispatch(
-                            okena_core::api::ActionRequest::SplitTerminal {
-                                project_id: ctx_split_h.project_id.clone(),
-                                path: ctx_split_h.layout_path.clone(),
-                                direction: SplitDirection::Horizontal,
-                            },
-                            cx,
-                        );
-                    }
-                }),
-            )
-            .child(
-                header_button_base(
-                    HeaderAction::AddTab,
-                    &id_suffix,
-                    ButtonSize::COMPACT,
-                    &t,
-                    None,
-                    standalone.then(|| {
-                        okena_ui::shortcuts::ActionShortcut::new(
-                            crate::actions::AddTab,
-                            shortcut_guard(),
-                        )
-                    }),
-                )
-                .on_click(move |_, _window, cx| {
-                    if let Some(ref dispatcher) = ctx_add_tab.action_dispatcher {
-                        dispatcher.add_tab(
-                            &ctx_add_tab.project_id,
-                            &ctx_add_tab.layout_path,
-                            !ctx_add_tab.standalone,
-                            cx,
-                        );
-                    }
-                }),
-            )
-            .child(more_button)
-            .child({
-                header_button_base(
-                    HeaderAction::Close,
-                    &id_suffix,
-                    ButtonSize::COMPACT,
-                    &t,
-                    Some(if standalone { "Close" } else { "Close Tab" }),
-                    terminal_id.as_ref().map(|_| {
-                        okena_ui::shortcuts::ActionShortcut::new(
-                            crate::actions::CloseTerminal,
-                            shortcut_guard(),
-                        )
-                    }),
-                )
-                .on_click(move |_, _window, cx| {
-                    if let Some(ref tid) = terminal_id_for_close
-                        && let Some(ref dispatcher) = ctx_close.action_dispatcher
-                    {
-                        dispatcher.dispatch(
-                            okena_core::api::ActionRequest::CloseTerminal {
-                                project_id: ctx_close.project_id.clone(),
-                                terminal_id: tid.clone(),
-                            },
-                            cx,
-                        );
-                    }
-                })
-            })
     }
 
     pub(super) fn render_tabs(
@@ -371,7 +193,7 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
         &mut self,
         _window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> Div {
+    ) -> HeaderActionBar {
         let node = {
             let ws = self.workspace.read(cx);
             self.get_layout(ws).cloned()
@@ -391,7 +213,7 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
         active_tab: usize,
         standalone: bool,
         cx: &mut Context<Self>,
-    ) -> Div {
+    ) -> HeaderActionBar {
         let t = theme(cx);
         let workspace = self.workspace.clone();
         let project_id = self.project_id.clone();
@@ -413,6 +235,7 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
                 f.project_id == self.project_id && f.layout_path.starts_with(&self.layout_path)
             });
 
+        let mut active_terminal_id = None;
         let tab_elements: Vec<_> = children.iter().enumerate().map(|(i, child)| {
             let is_active = i == active_tab;
             let workspace = workspace.clone();
@@ -482,8 +305,13 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
                 .map(|(_, p)| p)
                 .unwrap_or(0.0);
 
+            if is_active {
+                active_terminal_id = terminal_id.clone();
+            }
+
             div()
                 .id(ElementId::Name(format!("tab-{}-{:?}", i, layout_path).into()))
+                .debug_selector(|| format!("hover-source-{i}"))
                 .cursor_pointer()
                 .when_some(agent_tooltip.clone(), |d, text| {
                     d.tooltip(move |window, cx| Tooltip::new(text.clone()).build(window, cx))
@@ -878,53 +706,25 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
                 }));
         }
 
-        let action_ctx = TabActionContext {
-            project_id: self.project_id.clone(),
-            layout_path: self.layout_path.clone(),
-            active_tab,
-            standalone,
-            action_dispatcher: self.action_dispatcher.clone(),
-        };
-
-        let terminal_id_for_actions = if standalone {
-            match children.first() {
-                Some(LayoutNode::Terminal { terminal_id, .. }) => terminal_id.clone(),
-                _ => None,
-            }
-        } else {
-            self.get_active_terminal_id(active_tab, cx)
-        };
-
-        let action_buttons =
-            self.render_tab_action_buttons(action_ctx, terminal_id_for_actions.clone(), cx);
-
-        // Shell switching is routed through the daemon (SwitchTerminalShell) and
-        // the current shell comes from mirrored layout state, so the selector
-        // works for remote backends too — gate only on the user setting.
-        let show_shell = terminal_view_settings(cx).show_shell_selector;
-
         if self.last_scrolled_to_tab != Some(active_tab) {
             self.tab_scroll_handle.scroll_to_item(active_tab);
             self.last_scrolled_to_tab = Some(active_tab);
         }
 
-        div()
+        let header = div()
+            .id("tab-bar-row")
             .group("tab-bar-row")
             .h(px(28.0))
             .px(px(0.0))
             .flex()
             .items_center()
             .gap(px(0.0))
-            .bg(rgb(if is_pane_focused {
-                t.term_background_unfocused
-            } else {
-                t.bg_header
-            }))
             .child(
                 div()
                     .id(ElementId::Name(
                         format!("tab-scroll-{:?}", self.layout_path).into(),
                     ))
+                    .debug_selector(|| "hover-tab-scroll".into())
                     .flex_1()
                     .min_w_0()
                     .flex()
@@ -933,16 +733,41 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
                     .track_scroll(&self.tab_scroll_handle)
                     .children(tab_elements)
                     .child(end_drop_zone),
-            )
-            .child(
-                h_flex()
-                    .flex_shrink_0()
-                    .opacity(0.0)
-                    .group_hover("tab-bar-row", |s| s.opacity(1.0))
-                    .when(show_shell, |el| {
-                        el.child(self.render_shell_indicator(active_tab, cx))
-                    })
-                    .child(action_buttons),
-            )
+            );
+        let (mut extra, always) = render_action_buttons(
+            TabActionContext {
+                project_id: self.project_id.clone(),
+                layout_path: self.layout_path.clone(),
+                active_tab,
+                standalone,
+                action_dispatcher: self.action_dispatcher.clone(),
+            },
+            active_terminal_id,
+            self.request_broker.clone(),
+            self.backend.supports_buffer_capture(),
+            self.focus_manager.clone(),
+            self.workspace.clone(),
+            cx,
+        );
+        if terminal_view_settings(cx).show_shell_selector {
+            extra.insert(
+                0,
+                self.render_shell_indicator(active_tab, cx)
+                    .into_any_element(),
+            );
+        }
+        let measured_tabs = self.tab_scroll_handle.clone();
+        HeaderActionBar::new("tab-header-actions", header, extra, always, move || {
+            (0..num_children)
+                .filter_map(|i| measured_tabs.bounds_for_item(i))
+                .map(|b| b.size.width)
+                .sum::<Pixels>()
+                + px(20.0)
+        })
+        .background(rgb(if is_pane_focused {
+            t.term_background_unfocused
+        } else {
+            t.bg_header
+        }))
     }
 }

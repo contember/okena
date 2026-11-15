@@ -21,3 +21,7 @@ log = "0.4"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 smol = "2.0"
+
+[dev-dependencies]
+anyhow = "1.0"
+gpui = { git = "https://github.com/zed-industries/zed", package = "gpui", features = ["test-support"] }
