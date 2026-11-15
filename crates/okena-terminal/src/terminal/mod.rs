@@ -159,8 +159,8 @@ pub struct Terminal {
 
     /// Terminal title set by OSC 0/1/2 sequences. `Arc` shared with
     /// `ZedEventListener` (which lives inside `Term`): the listener writes
-    /// on title-change events during `process_output`, and the GPUI render
-    /// path reads via `get_title`. Both happen on the GPUI thread.
+    /// on title-change events during `process_output`; `title()` and
+    /// `title_stamp()` read it. Both happen on the GPUI thread.
     pub(super) title: Arc<SharedTitle>,
 
     /// Bell notification flag. `Arc` shared with `ZedEventListener`: set on

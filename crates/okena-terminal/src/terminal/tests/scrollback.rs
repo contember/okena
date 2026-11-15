@@ -141,9 +141,12 @@ fn resizing_scrollback_preserves_an_app_set_title() {
     // `Term::set_options` always re-emits a title event, which reaches our
     // shared title through the listener. It replays the term's own title, so
     // an OSC-set title must survive a real depth change too.
+    let stamp = terminal.title_stamp();
     terminal.set_scrollback_lines(100);
 
     assert_eq!(terminal.title(), Some("my title".to_string()));
+    // The replayed title is not a change, so hiding a project fires no repaint.
+    assert_eq!(terminal.title_stamp(), stamp);
 }
 
 #[test]

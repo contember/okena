@@ -187,7 +187,7 @@ impl ProjectColumn {
             .read(cx)
             .project(&self.project_id)
             .and_then(|project| project.layout.as_ref())
-            .is_some_and(|layout| layout.find_terminal_path(terminal_id).is_some())
+            .is_some_and(|layout| layout.find_terminal_node(terminal_id).is_some())
     }
 
     /// Titles are runtime terminal state, not workspace snapshots. Invalidate
