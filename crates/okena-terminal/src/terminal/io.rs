@@ -34,7 +34,7 @@ impl Terminal {
 
         // OSC 7 / OSC 9 / XTVERSION observer runs on the full chunk in one
         // pass — it never needs cursor-accurate positioning.
-        sidecar.advance(data);
+        let content_activity = sidecar.advance(data) || processor.sync_bytes_count() != 0;
 
         // OSC 133 requires the main processor and the prompt sidecar to
         // advance in lockstep so we can snapshot the cursor at the exact
@@ -67,6 +67,12 @@ impl Terminal {
 
         self.dirty.store(true, Ordering::Relaxed);
         self.content_generation.fetch_add(1, Ordering::Relaxed);
+        // Keep the conservative repaint while sync output was already buffered
+        // (it may be released now) or this chunk became buffered itself.
+        if !content_activity && processor.sync_bytes_count() == 0 {
+            self.non_content_output_generations
+                .fetch_add(1, Ordering::Relaxed);
+        }
         if sequence != 0 {
             self.processed_output_sequence
                 .store(sequence, Ordering::Release);
@@ -143,7 +149,7 @@ impl Terminal {
         let mut prompt_tracker = self.prompt_tracker.lock();
 
         let history_before = term.grid().history_size();
-        sidecar.advance(&data);
+        let content_activity = sidecar.advance(&data) || processor.sync_bytes_count() != 0;
         let command_finished = advance_with_prompt_marks(
             &mut *term,
             &mut processor,
@@ -161,6 +167,12 @@ impl Terminal {
             term.grid().topmost_line().0,
         );
         self.content_generation.fetch_add(1, Ordering::Relaxed);
+        // Keep the conservative repaint while sync output was already buffered
+        // (it may be released now) or this chunk became buffered itself.
+        if !content_activity && processor.sync_bytes_count() == 0 {
+            self.non_content_output_generations
+                .fetch_add(1, Ordering::Relaxed);
+        }
         self.processed_output_epoch
             .fetch_max(output_epoch, Ordering::Release);
     }
@@ -174,6 +186,15 @@ impl Terminal {
     /// Get the current content generation counter.
     pub fn content_generation(&self) -> u64 {
         self.content_generation.load(Ordering::Relaxed)
+    }
+
+    /// Generation for activity-driven content presentation. Unlike the activity
+    /// counter, title-only output does not advance it. Read only on the owning
+    /// reactor thread, never concurrently with parsing. Resize/scroll changes
+    /// still count, and every other parsed command is conservatively included.
+    pub fn content_repaint_generation(&self) -> u64 {
+        self.content_generation()
+            .wrapping_sub(self.non_content_output_generations.load(Ordering::Relaxed))
     }
 
     fn mark_user_input(&self, has_payload: bool) {

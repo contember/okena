@@ -29,6 +29,7 @@ pub enum TerminalContentEvent {
 /// Terminal content view handling display and mouse interactions.
 pub struct TerminalContent {
     terminal: Option<Arc<Terminal>>,
+    last_activity_repaint_generation: Option<u64>,
     resize_viewer_id: u64,
     render_cache: Arc<parking_lot::Mutex<TerminalRenderCache>>,
     focus_handle: FocusHandle,
@@ -82,6 +83,7 @@ impl TerminalContent {
 
         Self {
             terminal: None,
+            last_activity_repaint_generation: None,
             resize_viewer_id: next_resize_viewer_id(),
             render_cache: Arc::new(parking_lot::Mutex::new(TerminalRenderCache::default())),
             focus_handle,
@@ -114,17 +116,32 @@ impl TerminalContent {
         self.window_id
     }
 
+    /// Check before pacer admission so unchanged panes do not consume a frame
+    /// slot. The generation is recorded only after admission, keeping deferred
+    /// content eligible even when title-only output arrives in the meantime.
+    pub fn needs_activity_repaint(&self) -> bool {
+        self.terminal.as_ref().is_none_or(|terminal| {
+            self.last_activity_repaint_generation != Some(terminal.content_repaint_generation())
+        })
+    }
+
     /// Present the latest parsed terminal state. Calls are already coalesced by
     /// the app-wide activity frame, so visible non-key windows stay live without
     /// each terminal stream driving an independent repaint clock.
-    pub fn request_activity_repaint(&mut self, cx: &mut Context<Self>) {
+    pub fn request_activity_repaint(&mut self, cx: &mut Context<Self>) -> bool {
         if let Some(terminal) = &self.terminal {
+            let generation = terminal.content_repaint_generation();
+            if self.last_activity_repaint_generation == Some(generation) {
+                return false;
+            }
+            self.last_activity_repaint_generation = Some(generation);
             okena_core::latency_probe::client_notify_requested(
                 &terminal.terminal_id,
                 self.resize_viewer_id,
             );
         }
         cx.notify();
+        true
     }
 
     fn bind_window_activation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -240,6 +257,9 @@ impl TerminalContent {
     }
 
     pub fn set_terminal(&mut self, terminal: Option<Arc<Terminal>>, cx: &mut Context<Self>) {
+        if !matches!((&self.terminal, &terminal), (Some(old), Some(new)) if Arc::ptr_eq(old, new)) {
+            self.last_activity_repaint_generation = None;
+        }
         if let Some(old_terminal) = self.terminal.as_ref() {
             let next_id = terminal
                 .as_ref()

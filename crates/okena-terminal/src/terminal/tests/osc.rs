@@ -2214,3 +2214,108 @@ fn test_program_status_clear_uncovering_the_hook_status_does_not_notify() {
     );
     assert!(terminal.take_pending_notifications().is_empty());
 }
+
+#[test]
+fn title_only_output_preserves_repaint_generation_at_every_split() {
+    for bytes in [b"\x1b]0;spinner\x07".as_slice(), b"\x1b]2;spinner\x1b\\"] {
+        for split in 0..=bytes.len() {
+            for queued in [false, true] {
+                let terminal = null_terminal();
+                for chunk in [&bytes[..split], &bytes[split..]] {
+                    if queued {
+                        terminal.enqueue_output(chunk);
+                        terminal.process_pending_output();
+                    } else {
+                        terminal.process_output(chunk);
+                    }
+                    assert_eq!(
+                        terminal.content_repaint_generation(),
+                        0,
+                        "split {split}, queued {queued}"
+                    );
+                }
+                assert_eq!(terminal.title().as_deref(), Some("spinner"));
+                assert!(terminal.content_generation() > 0);
+                // A later ordinary output must still invalidate the content.
+                terminal.process_output(b"text");
+                assert!(terminal.content_repaint_generation() > 0);
+                assert!(terminal.visible_text().contains("text"));
+            }
+        }
+    }
+}
+
+#[test]
+fn content_repaint_generation_keeps_non_title_commands_and_local_changes() {
+    for bytes in [
+        b"\x1b]2;title\x07text".as_slice(),
+        b"text\x1b]2;title\x07",
+        b"\x07",
+        b"\x1b[2J",
+        b"\x1b[?25l",
+        b"\x1bc",
+        b"\x1b]10;#ff0000\x07",
+        b"\x1b]8;;https://example.org\x07",
+        b"\x1b]52;c;aGk=\x07",
+        b"\x1b]9;hello\x07",
+        b"\x1bP$qm\x1b\\",
+    ] {
+        let terminal = null_terminal();
+        terminal.enqueue_output(bytes);
+        terminal.process_pending_output();
+        assert!(terminal.content_repaint_generation() > 0, "{bytes:?}");
+    }
+    let terminal = null_terminal();
+    terminal.process_output(b"\x1b]2;title\x07");
+    terminal.scroll(1);
+    assert!(terminal.content_repaint_generation() > 0);
+}
+
+#[test]
+fn title_only_burst_keeps_activity_and_mixed_side_effects() {
+    let terminal = null_terminal();
+    for _ in 0..1000 {
+        terminal.enqueue_output(b"\x1b]2;spinner\x07");
+        terminal.process_pending_output();
+    }
+    assert_eq!(terminal.content_generation(), 1000);
+    assert_eq!(terminal.content_repaint_generation(), 0);
+    terminal.enqueue_output(b"\x1b]2;done\x07\x07\x1b]9;finished\x07");
+    terminal.process_pending_output();
+    assert_eq!(terminal.content_repaint_generation(), 1);
+    assert!(terminal.has_bell());
+    assert_eq!(terminal.take_pending_notifications().len(), 1);
+}
+
+#[test]
+fn title_during_synchronized_output_keeps_content_repaint_eligible() {
+    for queued in [false, true] {
+        let terminal = null_terminal();
+        let feed = |bytes: &[u8]| {
+            if queued {
+                terminal.enqueue_output(bytes);
+                terminal.process_pending_output();
+            } else {
+                terminal.process_output(bytes);
+            }
+        };
+        feed(b"\x1b[?2026hbuffered");
+        let before = terminal.content_repaint_generation();
+        feed(b"\x1b]2;spinner\x07");
+        assert!(terminal.content_repaint_generation() > before);
+        feed(b"\x1b[?2026l");
+        assert!(terminal.visible_text().contains("buffered"));
+        assert_eq!(terminal.title().as_deref(), Some("spinner"));
+    }
+}
+
+#[test]
+fn title_entering_empty_sync_buffer_keeps_content_repaint_eligible() {
+    let terminal = null_terminal();
+    terminal.process_output(b"\x1b[?2026h");
+    let before = terminal.content_repaint_generation();
+    terminal.process_output(b"\x1b]2;spinner\x07");
+    assert!(terminal.content_repaint_generation() > before);
+    terminal.process_output(b"\x1b[?2026l");
+    assert_eq!(terminal.title().as_deref(), Some("spinner"));
+}
