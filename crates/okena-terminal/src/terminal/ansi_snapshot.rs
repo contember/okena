@@ -318,10 +318,10 @@ mod tests {
         assert!(text.contains("\x1b[1;1H\x1b[0m\x1b[K\x1b[0;31mhi"));
     }
 
-    /// The owned path must stay byte-identical to what every other client
-    /// already replays: framing around the same body, plus the row erase.
+    /// Both targets share the same grid body. Only the owned snapshot restores
+    /// screen/mode framing and the title; the host path adds row erasure.
     #[test]
-    fn the_targets_differ_only_by_framing_and_the_row_erase() {
+    fn the_targets_differ_only_by_framing_title_and_row_erase() {
         let source = terminal("source");
         source.process_output(b"\x1b[?1002hplain content\r\nsecond line");
 
@@ -334,7 +334,7 @@ mod tests {
         assert_eq!(
             String::from_utf8_lossy(&owned_bytes),
             format!(
-                "\x1b[?1049l\x1b[?6l\x1b[2J\x1b[3J\x1b[H{body}{}",
+                "\x1b[?1049l\x1b[?6l\x1b[2J\x1b[3J\x1b[H{body}{}\x1b]2;\x1b\\",
                 String::from_utf8_lossy(&modes)
             )
         );
@@ -420,5 +420,35 @@ mod tests {
         assert!(!mirror.is_alt_screen());
         assert!(!mirror.is_mouse_mode());
         assert_eq!(first_row(&mirror), "remote output");
+    }
+
+    #[test]
+    fn owned_snapshot_restores_idle_title_without_new_output() {
+        let source = terminal("source");
+        source.process_output("\x1b]2;Agent — idle\x07text".as_bytes());
+        assert_eq!(source.title().as_deref(), Some("Agent — idle"));
+        let mirror = terminal("mirror");
+        mirror.process_output(&source.render_snapshot());
+        assert_eq!(mirror.title().as_deref(), Some("Agent — idle"));
+        assert_eq!(first_row(&mirror), "text");
+    }
+
+    #[test]
+    fn owned_snapshot_clears_stale_title_after_source_reset() {
+        let source = terminal("source");
+        let mirror = terminal("mirror");
+        mirror.process_output(b"\x1b]2;stale\x07");
+        mirror.process_output(&source.render_snapshot());
+        assert_eq!(mirror.title().unwrap_or_default(), "");
+    }
+
+    #[test]
+    fn host_snapshot_preserves_the_host_title() {
+        let source = terminal("source");
+        source.process_output(b"\x1b]2;remote\x07text");
+        let host = terminal("host");
+        host.process_output(b"\x1b]2;local\x07");
+        host.process_output(&source.render_snapshot_for_host_screen());
+        assert_eq!(host.title().as_deref(), Some("local"));
     }
 }

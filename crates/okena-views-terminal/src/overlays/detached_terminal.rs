@@ -113,7 +113,7 @@ impl DetachedTerminalView {
         // Compute terminal name dynamically: user-set custom name > OSC title > directory fallback
         {
             let ws = self.workspace.read(cx);
-            let osc_title = self.terminal.title();
+            let osc_title = self.terminal.title().filter(|title| !title.is_empty());
             ws.projects()
                 .iter()
                 .find(|p| {

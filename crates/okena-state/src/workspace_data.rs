@@ -352,7 +352,7 @@ pub fn is_bash_prompt_title(title: &str) -> bool {
 }
 
 fn is_generated_terminal_title(title: &str) -> bool {
-    is_bash_prompt_title(title) || title == "MainThread"
+    title.is_empty() || is_bash_prompt_title(title) || title == "MainThread"
 }
 
 fn default_workspace_version() -> u32 {
@@ -439,6 +439,15 @@ mod tests {
         );
         assert_eq!(
             project.terminal_display_name("t1", Some("root@server:/var/log".to_string())),
+            "myproject"
+        );
+    }
+
+    #[test]
+    fn terminal_display_name_uses_directory_for_cleared_osc_title() {
+        let project = make_project("/home/user/myproject");
+        assert_eq!(
+            project.terminal_display_name("t1", Some(String::new())),
             "myproject"
         );
     }
