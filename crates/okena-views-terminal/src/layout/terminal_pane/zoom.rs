@@ -173,7 +173,6 @@ impl<D: ActionDispatch + Send + Sync> TerminalPane<D> {
             .flex()
             .items_center()
             .justify_between()
-            .bg(rgb(t.term_background_unfocused))
             .child(
                 div()
                     .id("focus-title-viewport")
@@ -362,6 +361,7 @@ impl<D: ActionDispatch + Send + Sync> TerminalPane<D> {
                     .unwrap_or_default()
                 + px(16.0)
         })
+        .background(rgb(t.term_background_unfocused))
         .min_header_width(px(if has_multiple { 80.0 } else { 36.0 }))
     }
 }

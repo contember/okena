@@ -42,6 +42,7 @@ pub struct HeaderActionBar {
     always: AnyElement,
     header_width: Box<dyn Fn() -> Pixels>,
     min_header_width: Pixels,
+    background: Option<Hsla>,
 }
 
 impl HeaderActionBar {
@@ -59,7 +60,14 @@ impl HeaderActionBar {
             always: always.into_any_element(),
             header_width: Box::new(header_width),
             min_header_width: px(28.0),
+            background: None,
         }
+    }
+
+    /// Paint the original header surface beneath the transparent controls.
+    pub fn background(mut self, color: impl Into<Hsla>) -> Self {
+        self.background = Some(color.into());
+        self
     }
 
     pub fn min_header_width(mut self, width: Pixels) -> Self {
@@ -176,6 +184,7 @@ impl RenderOnce for HeaderActionBar {
             .items_center()
             .flex_shrink_0()
             .debug_selector(|| "terminal-action-header".into())
+            .when_some(self.background, |header, color| header.bg(color))
             .on_hover({
                 let state = state.clone();
                 move |hovered, _, cx| {

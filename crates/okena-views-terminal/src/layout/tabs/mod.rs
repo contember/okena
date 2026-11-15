@@ -719,11 +719,6 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
             .flex()
             .items_center()
             .gap(px(0.0))
-            .bg(rgb(if is_pane_focused {
-                t.term_background_unfocused
-            } else {
-                t.bg_header
-            }))
             .child(
                 div()
                     .id(ElementId::Name(
@@ -769,5 +764,10 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
                 .sum::<Pixels>()
                 + px(20.0)
         })
+        .background(rgb(if is_pane_focused {
+            t.term_background_unfocused
+        } else {
+            t.bg_header
+        }))
     }
 }
