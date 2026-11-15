@@ -181,16 +181,19 @@ pub struct ProjectColumn {
 }
 
 impl ProjectColumn {
-    /// Titles are runtime terminal state, not workspace snapshots. Invalidate
-    /// the cached column and its nested tab/pane headers when a title changes.
-    pub(crate) fn refresh_terminal_titles(&mut self, ids: &[String], cx: &mut Context<Self>) {
-        let affected = self
-            .workspace
+    /// Whether this column's layout holds `terminal_id`.
+    pub(crate) fn shows_terminal(&self, terminal_id: &str, cx: &App) -> bool {
+        self.workspace
             .read(cx)
             .project(&self.project_id)
             .and_then(|project| project.layout.as_ref())
-            .is_some_and(|layout| ids.iter().any(|id| layout.find_terminal_path(id).is_some()));
-        if !affected {
+            .is_some_and(|layout| layout.find_terminal_path(terminal_id).is_some())
+    }
+
+    /// Titles are runtime terminal state, not workspace snapshots. Invalidate
+    /// the cached column and its nested tab/pane headers when a title changes.
+    pub(crate) fn refresh_terminal_titles(&mut self, ids: &[String], cx: &mut Context<Self>) {
+        if !ids.iter().any(|id| self.shows_terminal(id, cx)) {
             return;
         }
         if let Some(container) = &self.layout_container {

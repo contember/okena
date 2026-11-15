@@ -645,6 +645,13 @@ impl WindowView {
         self.center_next_navigation = true;
     }
 
+    /// Whether a project column of this window holds `terminal_id`.
+    pub fn shows_terminal(&self, terminal_id: &str, cx: &App) -> bool {
+        self.project_columns
+            .values()
+            .any(|column| column.read(cx).shows_terminal(terminal_id, cx))
+    }
+
     /// Invalidate cached title-bearing views after the app admits this frame.
     pub fn refresh_terminal_titles(&mut self, ids: &[String], cx: &mut Context<Self>) {
         for column in self.project_columns.values() {

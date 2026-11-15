@@ -541,9 +541,20 @@ impl Okena {
 
         cx.subscribe(&remote_manager, |this, _rm, event, cx| match event {
             RemoteManagerEvent::TerminalTitlesChanged(ids) => {
-                let windows = std::iter::once(this.main_window.read(cx).window_id())
-                    .chain(this.extra_windows.keys().copied());
-                this.pending_title_repaints.queue(windows, ids);
+                // Only windows showing the terminal; others would spend a paced
+                // frame slot and a flush timer on nothing.
+                for view in std::iter::once(&this.main_window).chain(this.extra_windows.values()) {
+                    let view = view.read(cx);
+                    let shown: Vec<String> = ids
+                        .iter()
+                        .filter(|id| view.shows_terminal(id, cx))
+                        .cloned()
+                        .collect();
+                    if !shown.is_empty() {
+                        this.pending_title_repaints
+                            .queue([view.window_id()], &shown);
+                    }
+                }
                 // The pump emits TerminalActivity for these IDs immediately
                 // afterwards. Schedule only there to avoid a duplicate frame.
             }
