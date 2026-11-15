@@ -1885,7 +1885,12 @@ impl Render for WindowView {
             // App menu dropdown (renders on top of everything, not on macOS where native menu is used)
             .when(
                 !cfg!(target_os = "macos") && self.title_bar.read(cx).is_menu_open(),
-                |d| d.child(self.title_bar.update(cx, |tb, cx| tb.render_menu(cx))),
+                |d| {
+                    d.child(
+                        self.title_bar
+                            .update(cx, |tb, cx| tb.render_menu(window, cx)),
+                    )
+                },
             )
             // Color picker popover (positioned popup, rendered at root for full-window backdrop)
             .when(has_color_picker, |d| {

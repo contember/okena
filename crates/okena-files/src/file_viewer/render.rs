@@ -216,21 +216,67 @@ fn loading_row(depth: usize, t: &ThemeColors, cx: &App) -> Div {
         .child("Loading…")
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CancelTarget {
+    SelectionMenu,
+    TabMenu,
+    ContextMenu,
+    Rename,
+    Delete,
+    Search,
+    MarkdownSelection,
+    SourceSelection,
+    Navigation,
+}
+
 impl FileViewer {
-    /// Cancel first dismisses transient UI or clears selection. Only advertise it
-    /// for navigation when it reaches the same Back/Close event as the button.
-    fn cancel_navigates(&self, window: &Window) -> bool {
+    /// The single priority order used by Cancel and its navigation tooltips.
+    fn cancel_target(&self) -> CancelTarget {
         let tab = self.active_tab();
-        self.focus_handle.is_focused(window)
-            && self.selection_context_menu.is_none()
-            && self.tab_context_menu.is_none()
-            && self.context_menu.is_none()
-            && self.rename_state.is_none()
-            && self.delete_confirm.is_none()
-            && self.search_state.is_none()
-            && (tab.display_mode != DisplayMode::Preview
-                || tab.markdown_selection.normalized_non_empty().is_none())
-            && tab.selection.normalized_non_empty().is_none()
+        if self.selection_context_menu.is_some() {
+            CancelTarget::SelectionMenu
+        } else if self.tab_context_menu.is_some() {
+            CancelTarget::TabMenu
+        } else if self.context_menu.is_some() {
+            CancelTarget::ContextMenu
+        } else if self.rename_state.is_some() {
+            CancelTarget::Rename
+        } else if self.delete_confirm.is_some() {
+            CancelTarget::Delete
+        } else if self.search_state.is_some() {
+            CancelTarget::Search
+        } else if tab.display_mode == DisplayMode::Preview
+            && tab.markdown_selection.normalized_non_empty().is_some()
+        {
+            CancelTarget::MarkdownSelection
+        } else if tab.selection.normalized_non_empty().is_some() {
+            CancelTarget::SourceSelection
+        } else {
+            CancelTarget::Navigation
+        }
+    }
+
+    fn handle_cancel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        match self.cancel_target() {
+            CancelTarget::SelectionMenu => {
+                self.selection_context_menu = None;
+                cx.notify();
+            }
+            CancelTarget::TabMenu => {
+                self.tab_context_menu = None;
+                cx.notify();
+            }
+            CancelTarget::ContextMenu => self.close_context_menu(cx),
+            CancelTarget::Rename => self.cancel_rename(cx),
+            CancelTarget::Delete => self.cancel_delete(cx),
+            CancelTarget::Search => self.close_search(window, cx),
+            CancelTarget::MarkdownSelection => {
+                self.active_tab_mut().markdown_selection.clear();
+                cx.notify();
+            }
+            CancelTarget::SourceSelection => self.clear_source_selection(cx),
+            CancelTarget::Navigation => self.back_or_close(cx),
+        }
     }
 
     fn navigation_tooltip(
@@ -243,7 +289,9 @@ impl FileViewer {
         move |window, cx| {
             let matches = viewer.upgrade().is_some_and(|viewer| {
                 let viewer = viewer.read(cx);
-                viewer.can_go_back == back && viewer.cancel_navigates(window)
+                viewer.can_go_back == back
+                    && viewer.focus_handle.is_focused(window)
+                    && viewer.cancel_target() == CancelTarget::Navigation
             });
             okena_ui::shortcuts::action_tooltip(
                 label,
@@ -1506,44 +1554,7 @@ impl Render for FileViewer {
             .key_context("FileViewer")
             .when(show_source, |d| d.cursor(CursorStyle::IBeam))
             .on_action(cx.listener(|this, _: &Cancel, window, cx| {
-                // Dismiss overlays in priority order before default close behavior
-                if this.selection_context_menu.is_some() {
-                    this.selection_context_menu = None;
-                    cx.notify();
-                    return;
-                }
-                if this.tab_context_menu.is_some() {
-                    this.tab_context_menu = None;
-                    cx.notify();
-                    return;
-                }
-                if this.context_menu.is_some() {
-                    this.close_context_menu(cx);
-                    return;
-                }
-                if this.rename_state.is_some() {
-                    this.cancel_rename(cx);
-                    return;
-                }
-                if this.delete_confirm.is_some() {
-                    this.cancel_delete(cx);
-                    return;
-                }
-                if this.search_state.is_some() {
-                    this.close_search(window, cx);
-                    return;
-                }
-
-                let tab = this.active_tab();
-                let is_preview = tab.display_mode == DisplayMode::Preview;
-                if is_preview && tab.markdown_selection.normalized_non_empty().is_some() {
-                    this.active_tab_mut().markdown_selection.clear();
-                    cx.notify();
-                } else if this.active_tab().selection.normalized_non_empty().is_some() {
-                    this.clear_source_selection(cx);
-                } else {
-                    this.back_or_close(cx);
-                }
+                this.handle_cancel(window, cx);
             }))
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 // Don't intercept keys when search input is focused

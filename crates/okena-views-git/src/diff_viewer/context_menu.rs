@@ -128,38 +128,6 @@ impl DiffViewer {
         cx.notify();
     }
 
-    /// Close the topmost transient UI (confirm modal → menu → selection).
-    /// Returns `true` if something was dismissed, so the caller knows not to
-    /// close the whole diff viewer.
-    pub(super) fn dismiss_transient_ui(&mut self, cx: &mut Context<Self>) -> bool {
-        if self.delete_confirm.is_some() {
-            self.delete_confirm = None;
-            cx.notify();
-            return true;
-        }
-        if self.discard_confirm.is_some() {
-            self.discard_confirm = None;
-            cx.notify();
-            return true;
-        }
-        if self.context_menu.is_some() {
-            self.context_menu = None;
-            cx.notify();
-            return true;
-        }
-        if self.commit_hash_menu.is_some() {
-            self.commit_hash_menu = None;
-            cx.notify();
-            return true;
-        }
-        if self.selection_context_menu.is_some() {
-            self.selection_context_menu = None;
-            cx.notify();
-            return true;
-        }
-        false
-    }
-
     // ── Mutation helpers ────────────────────────────────────────────────────
 
     fn spawn_mutation<F>(&mut self, op: F, success_msg: String, cx: &mut Context<Self>)

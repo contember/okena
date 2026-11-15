@@ -1373,10 +1373,7 @@ impl ProjectColumn {
         let tip = crate::views::tips::tip_at(self.tip_index);
         // Live keybinding chip when the tip maps to an action; otherwise the
         // static trigger hint. `None` => no chip at all.
-        let chip = tip
-            .action
-            .and_then(crate::views::tips::shortcut_for_action)
-            .or_else(|| tip.hint.map(str::to_string));
+        let chip = tip.shortcut(cx).or_else(|| tip.hint.map(str::to_string));
 
         v_flex()
             .items_center()

@@ -680,9 +680,9 @@ impl Sidebar {
                                         .tooltip(move |window, cx| {
                                             okena_ui::shortcuts::named_action_tooltip(
                                                 if expand {
-                                                    "Expand active projects (Terminals)"
+                                                    "Expand terminals in active projects"
                                                 } else {
-                                                    "Collapse active projects (Terminals)"
+                                                    "Collapse terminals in active projects"
                                                 },
                                                 if expand {
                                                     "okena::ExpandActiveProjects"

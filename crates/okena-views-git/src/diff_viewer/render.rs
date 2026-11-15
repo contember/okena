@@ -39,7 +39,57 @@ fn binary_preview_message<T: 'static>(
         .into_any_element()
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CancelTarget {
+    Search,
+    Delete,
+    Discard,
+    ContextMenu,
+    CommitMenu,
+    SelectionMenu,
+    Selection,
+    Navigation,
+}
+
 impl DiffViewer {
+    /// Shared by keyboard dispatch and the Back tooltip; keep priority here only.
+    fn cancel_target(&self) -> CancelTarget {
+        if self.search.is_some() {
+            CancelTarget::Search
+        } else if self.delete_confirm.is_some() {
+            CancelTarget::Delete
+        } else if self.discard_confirm.is_some() {
+            CancelTarget::Discard
+        } else if self.context_menu.is_some() {
+            CancelTarget::ContextMenu
+        } else if self.commit_hash_menu.is_some() {
+            CancelTarget::CommitMenu
+        } else if self.selection_context_menu.is_some() {
+            CancelTarget::SelectionMenu
+        } else if self.selection.normalized_non_empty().is_some() {
+            CancelTarget::Selection
+        } else {
+            CancelTarget::Navigation
+        }
+    }
+
+    fn handle_cancel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        match self.cancel_target() {
+            CancelTarget::Search => return self.close_search(window, cx),
+            CancelTarget::Navigation => return self.back_or_close(cx),
+            CancelTarget::Delete => self.delete_confirm = None,
+            CancelTarget::Discard => self.discard_confirm = None,
+            CancelTarget::ContextMenu => self.context_menu = None,
+            CancelTarget::CommitMenu => self.commit_hash_menu = None,
+            CancelTarget::SelectionMenu => self.selection_context_menu = None,
+            CancelTarget::Selection => {
+                self.selection.clear();
+                self.selection_side = None;
+            }
+        }
+        cx.notify();
+    }
+
     // GPUI render helper: params are render inputs (theme, flags, callbacks).
     #[allow(clippy::too_many_arguments)]
     pub(super) fn render_header(
@@ -98,13 +148,7 @@ impl DiffViewer {
                                     let viewer = viewer.read(cx);
                                     viewer.focus_handle.is_focused(window)
                                         && viewer.can_go_back
-                                        && viewer.search.is_none()
-                                        && viewer.delete_confirm.is_none()
-                                        && viewer.discard_confirm.is_none()
-                                        && viewer.context_menu.is_none()
-                                        && viewer.commit_hash_menu.is_none()
-                                        && viewer.selection_context_menu.is_none()
-                                        && viewer.selection.normalized_non_empty().is_none()
+                                        && viewer.cancel_target() == CancelTarget::Navigation
                                 });
                                 okena_ui::shortcuts::action_tooltip(
                                     "Back",
@@ -1408,20 +1452,7 @@ impl Render for DiffViewer {
             .track_focus(&focus_handle)
             .key_context("DiffViewer")
             .on_action(cx.listener(|this, _: &Cancel, window, cx| {
-                if this.search.is_some() {
-                    this.close_search(window, cx);
-                    return;
-                }
-                if this.dismiss_transient_ui(cx) {
-                    return;
-                }
-                if this.selection.normalized_non_empty().is_some() {
-                    this.selection.clear();
-                    this.selection_side = None;
-                    cx.notify();
-                } else {
-                    this.back_or_close(cx);
-                }
+                this.handle_cancel(window, cx);
             }))
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 let key = event.keystroke.key.as_str();
