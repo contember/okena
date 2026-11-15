@@ -1,13 +1,16 @@
 //! Zoom (fullscreen) state and rendering for terminal panes.
 
 use crate::ActionDispatch;
+use crate::layout::header_actions::{TabActionContext, render_action_buttons};
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::h_flex;
 use okena_core::api::ActionRequest;
 use okena_files::theme::theme;
+use okena_ui::header_action_bar::HeaderActionBar;
 use okena_ui::header_buttons::{ButtonSize, HeaderAction, header_button_base};
 use okena_ui::tokens::{ui_text_md, ui_text_ms};
+use okena_workspace::state::LayoutNode;
 
 use super::TerminalPane;
 
@@ -119,7 +122,52 @@ impl<D: ActionDispatch + Send + Sync> TerminalPane<D> {
         let size = ButtonSize::COMPACT;
         let id_suffix = "zoom";
 
-        div()
+        let parent_path = &self.layout_path[..self.layout_path.len().saturating_sub(1)];
+        let in_tab_group = !self.layout_path.is_empty()
+            && ws
+                .project(&self.project_id)
+                .and_then(|p| p.layout.as_ref())
+                .and_then(|l| l.get_at_path(parent_path))
+                .is_some_and(|node| matches!(node, LayoutNode::Tabs { .. }));
+        let (mut extra, always) = render_action_buttons(
+            TabActionContext {
+                project_id: self.project_id.clone(),
+                layout_path: if in_tab_group {
+                    parent_path.to_vec()
+                } else {
+                    self.layout_path.clone()
+                },
+                active_tab: self.layout_path.last().copied().unwrap_or(0),
+                standalone: !in_tab_group,
+                action_dispatcher: self.action_dispatcher.clone(),
+            },
+            self.terminal_id.clone(),
+            self.request_broker.clone(),
+            self.backend.supports_buffer_capture(),
+            self.focus_manager.clone(),
+            self.workspace.clone(),
+            cx,
+        );
+        if crate::terminal_view_settings(cx).show_shell_selector {
+            extra.insert(
+                0,
+                crate::layout::tabs::shell_selector::render_shell_indicator(
+                    "zoom",
+                    self.shell_type.clone(),
+                    self.terminal_id.clone(),
+                    self.project_id.clone(),
+                    self.request_broker.clone(),
+                    cx,
+                )
+                .into_any_element(),
+            );
+        }
+
+        let header_measure = ScrollHandle::new();
+        let title_measure = ScrollHandle::new();
+        let header = div()
+            .id("focus-header-content")
+            .track_scroll(&header_measure)
             .h(px(28.0))
             .px(px(8.0))
             .flex()
@@ -127,36 +175,46 @@ impl<D: ActionDispatch + Send + Sync> TerminalPane<D> {
             .justify_between()
             .bg(rgb(t.term_background_unfocused))
             .child(
-                h_flex()
-                    .gap(px(6.0))
-                    .items_center()
+                div()
+                    .id("focus-title-viewport")
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .flex()
+                    .track_scroll(&title_measure)
                     .child(
-                        svg()
-                            .path("icons/terminal.svg")
-                            .size(px(12.0))
-                            .text_color(if is_hook {
-                                rgb(t.term_yellow)
-                            } else {
-                                rgb(t.success)
+                        h_flex()
+                            .flex_shrink_0()
+                            .gap(px(6.0))
+                            .items_center()
+                            .child(svg().path("icons/terminal.svg").size(px(12.0)).text_color(
+                                if is_hook {
+                                    rgb(t.term_yellow)
+                                } else {
+                                    rgb(t.success)
+                                },
+                            ))
+                            .child(
+                                div()
+                                    .flex_shrink_0()
+                                    .whitespace_nowrap()
+                                    .text_size(ui_text_md(cx))
+                                    .text_color(rgb(t.text_primary))
+                                    .child(terminal_name.clone()),
+                            )
+                            .when(has_multiple, |d| {
+                                d.child(
+                                    div()
+                                        .text_size(ui_text_ms(cx))
+                                        .text_color(rgb(t.text_muted))
+                                        .child(format!("{}/{}", current_index + 1, terminal_count)),
+                                )
                             }),
-                    )
-                    .child(
-                        div()
-                            .text_size(ui_text_md(cx))
-                            .text_color(rgb(t.text_primary))
-                            .child(terminal_name),
-                    )
-                    .when(has_multiple, |d| {
-                        d.child(
-                            div()
-                                .text_size(ui_text_ms(cx))
-                                .text_color(rgb(t.text_muted))
-                                .child(format!("{}/{}", current_index + 1, terminal_count)),
-                        )
-                    }),
+                    ),
             )
             .child(
                 h_flex()
+                    .flex_shrink_0()
                     .gap(px(2.0))
                     .items_center()
                     .when(has_multiple, |d| {
@@ -290,6 +348,20 @@ impl<D: ActionDispatch + Send + Sync> TerminalPane<D> {
                             }
                         }),
                     ),
-            )
+            );
+        HeaderActionBar::new("zoom-header-actions", header, extra, always, move || {
+            // Measure the non-shrinking title inside its clipped viewport.
+            // Using the viewport itself would treat a truncated title as fitting.
+            title_measure
+                .bounds_for_item(0)
+                .map(|b| b.size.width)
+                .unwrap_or_default()
+                + header_measure
+                    .bounds_for_item(1)
+                    .map(|b| b.size.width)
+                    .unwrap_or_default()
+                + px(16.0)
+        })
+        .min_header_width(px(if has_multiple { 80.0 } else { 36.0 }))
     }
 }

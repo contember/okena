@@ -69,6 +69,7 @@ pub fn terminal_actions_button(
     terminal_id: Option<String>,
     can_export_buffer: bool,
     include_primary_actions: bool,
+    split_layout_path: Option<Vec<usize>>,
     cx: &App,
 ) -> Stateful<Div> {
     use okena_ui::header_buttons::{ButtonSize, header_button_base};
@@ -91,6 +92,7 @@ pub fn terminal_actions_button(
                                     invocation:
                                         okena_workspace::requests::TerminalMenuInvocation::Header {
                                             include_primary_actions,
+                                            split_layout_path: split_layout_path.clone(),
                                         },
                                 },
                             },

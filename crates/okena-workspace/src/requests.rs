@@ -35,6 +35,8 @@ pub enum TerminalMenuInvocation {
     },
     Header {
         include_primary_actions: bool,
+        /// Header split buttons may target the tab group instead of its active leaf.
+        split_layout_path: Option<Vec<usize>>,
     },
 }
 
@@ -50,6 +52,7 @@ impl TerminalMenuInvocation {
             Self::Content { .. } => true,
             Self::Header {
                 include_primary_actions,
+                ..
             } => *include_primary_actions,
         }
     }

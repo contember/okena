@@ -6933,6 +6933,7 @@ name = "okena-views-terminal"
 version = "0.1.0"
 dependencies = [
  "alacritty_terminal",
+ "anyhow",
  "gpui",
  "gpui-component",
  "log",

@@ -1031,6 +1031,7 @@ impl ProjectColumn {
                 Some(target.terminal_id),
                 self.backend.supports_buffer_capture(),
                 true,
+                None,
                 cx,
             )
             .into_any_element()

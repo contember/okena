@@ -20,6 +20,7 @@ pub mod empty_state;
 pub mod expand;
 pub mod file_icon;
 mod focusable;
+pub mod header_action_bar;
 pub mod header_buttons;
 pub mod icon_action_button;
 pub mod icon_button;
