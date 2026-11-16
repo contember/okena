@@ -43,8 +43,9 @@ concurrency:
 jobs:
   archive:
     runs-on: macos-26
+    # 20, not 10: PR runs read main's caches only, and a cold ccache run takes ~15 min.
     # A TestFlight upload adds export and upload on top of the archive.
-    timeout-minutes: ${{ inputs.upload && 30 || 10 }}
+    timeout-minutes: ${{ inputs.upload && 30 || 20 }}
     defaults:
       run:
         working-directory: mobile/rn

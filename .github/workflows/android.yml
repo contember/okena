@@ -47,7 +47,8 @@ concurrency:
 jobs:
   bundle:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # 20, not 10: PR runs read main's caches only, and a cold ccache run takes ~15 min.
+    timeout-minutes: 20
     defaults:
       run:
         working-directory: mobile/rn
