@@ -2615,6 +2615,7 @@ impl Workspace {
         }
 
         self.reanchor_focus(focus_manager, anchor.as_ref());
+        self.refocus_off_project_without_terminals(focus_manager, window_id, last_seen);
         self.apply_requested_fullscreen(focus_manager, window_id, cx);
 
         // Notify UI without bumping data_version (remote changes shouldn't trigger auto-save)
@@ -2772,6 +2773,64 @@ impl Workspace {
         if path != current.layout_path && terminal_slot_at(layout, &path).is_some() {
             focus_manager.focus_terminal(current.project_id, path);
         }
+    }
+
+    /// With `hide_projects_without_terminals` on, a project that lost its last
+    /// terminal in this sync leaves the overview while this window's focus is
+    /// still on it. Move focus to a neighbour, as hiding a project by hand does.
+    ///
+    /// Only a project that still had a terminal on the tree this window last
+    /// saw (`last_seen`) qualifies, so focus deliberately placed on a project
+    /// that was already empty (a keyboard jump to a bookmark) is left alone.
+    fn refocus_off_project_without_terminals(
+        &mut self,
+        focus_manager: &mut FocusManager,
+        window_id: WindowId,
+        last_seen: Option<u64>,
+    ) {
+        if !self.hide_projects_without_terminals {
+            return;
+        }
+        let Some(project_id) = focus_manager
+            .focused_terminal_state()
+            .map(|state| state.project_id)
+            .filter(|id| self.focus_reference_layout(id, last_seen).is_some())
+        else {
+            return;
+        };
+        let window = self
+            .data
+            .window(window_id)
+            .unwrap_or(&self.data.main_window);
+        let visible_ids = |hide_projects_without_terminals: bool| -> Vec<String> {
+            compute_visible_projects(
+                &self.data,
+                focus_manager.focused_project_id(),
+                focus_manager.is_focus_individual(),
+                self.show_hidden_worktrees_when_focused,
+                hide_projects_without_terminals,
+                window,
+            )
+            .iter()
+            .map(|p| p.id.clone())
+            .collect()
+        };
+        let visible_after = visible_ids(true);
+        if visible_after.contains(&project_id) {
+            return;
+        }
+        // Not shown even without the setting: the window's hidden set or folder
+        // filter keeps it out, and those already redirect focus on their own.
+        let visible_before = visible_ids(false);
+        if !visible_before.contains(&project_id) {
+            return;
+        }
+        self.redirect_focus_off_hidden_project(
+            focus_manager,
+            &project_id,
+            &visible_before,
+            &visible_after,
+        );
     }
 
     /// Helper to mutate a layout node at a path, with automatic notify.
@@ -4626,6 +4685,12 @@ mod gpui_tests {
     /// hand the new layout in over the wire rather than mutating the mirror in
     /// place — a locally-edited row is not a state the client can be in.
     fn snapshot_of(layout: ApiLayoutNode) -> RemoteSnapshot {
+        snapshot_of_projects(&[("p1", Some(layout))])
+    }
+
+    /// A snapshot from connection `c1` reporting each `(id, layout)` project,
+    /// in this order.
+    fn snapshot_of_projects(projects: &[(&str, Option<ApiLayoutNode>)]) -> RemoteSnapshot {
         RemoteSnapshot {
             config: RemoteConnectionConfig {
                 id: "c1".to_string(),
@@ -4640,32 +4705,35 @@ mod gpui_tests {
             },
             state: Some(StateResponse {
                 state_version: 1,
-                projects: vec![ApiProject {
-                    id: "p1".to_string(),
-                    name: "proj-p1".to_string(),
-                    path: "/srv/p1".to_string(),
-                    show_in_overview: true,
-                    layout: Some(layout),
-                    terminal_names: HashMap::new(),
-                    status: None,
-                    git_status: None,
-                    terminal_agent_status: HashMap::new(),
-                    folder_color: FolderColor::Default,
-                    services: Vec::new(),
-                    worktree_info: None,
-                    worktree_ids: Vec::new(),
-                    pinned: false,
-                    last_activity_at: None,
-                    default_shell: None,
-                    hook_terminals: Vec::new(),
-                    hooks: Default::default(),
-                    is_creating: false,
-                    is_closing: false,
-                    creating_progress: None,
-                }],
+                projects: projects
+                    .iter()
+                    .map(|(id, layout)| ApiProject {
+                        id: id.to_string(),
+                        name: format!("proj-{id}"),
+                        path: format!("/srv/{id}"),
+                        show_in_overview: true,
+                        layout: layout.clone(),
+                        terminal_names: HashMap::new(),
+                        status: None,
+                        git_status: None,
+                        terminal_agent_status: HashMap::new(),
+                        folder_color: FolderColor::Default,
+                        services: Vec::new(),
+                        worktree_info: None,
+                        worktree_ids: Vec::new(),
+                        pinned: false,
+                        last_activity_at: None,
+                        default_shell: None,
+                        hook_terminals: Vec::new(),
+                        hooks: Default::default(),
+                        is_creating: false,
+                        is_closing: false,
+                        creating_progress: None,
+                    })
+                    .collect(),
                 focused_project_id: None,
                 fullscreen_terminal: None,
-                project_order: vec!["p1".to_string()],
+                project_order: projects.iter().map(|(id, _)| id.to_string()).collect(),
                 folders: Vec::new(),
                 windows: Vec::new(),
                 hooks: Vec::new(),
@@ -4711,6 +4779,168 @@ mod gpui_tests {
             ws.apply_remote_snapshot(&snapshots, WindowId::Main, fm, cx);
         });
         fm.focused_terminal_state().map(|f| f.layout_path)
+    }
+
+    /// Sync `projects` (id, layout) from connection `c1` into this window.
+    fn sync_projects(
+        workspace: &gpui::Entity<Workspace>,
+        fm: &mut crate::focus::FocusManager,
+        cx: &mut gpui::TestAppContext,
+        projects: &[(&str, Option<ApiLayoutNode>)],
+    ) {
+        let snapshots = [snapshot_of_projects(projects)];
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.apply_remote_snapshot(&snapshots, WindowId::Main, fm, cx);
+        });
+    }
+
+    fn workspace_hiding_projects_without_terminals(
+        cx: &mut gpui::TestAppContext,
+        hide: bool,
+    ) -> gpui::Entity<Workspace> {
+        cx.new(|_| {
+            let mut ws = Workspace::new(make_workspace_data(vec![], vec![]));
+            ws.set_hide_projects_without_terminals(hide);
+            ws
+        })
+    }
+
+    /// Mirror `p1` and every project in `others` with one terminal each, focus
+    /// `p1` (zoomed if asked), then close `p1`'s last terminal the way this
+    /// window does: queue the close focus, then sync the daemon's result.
+    /// Returns the project focus ends on.
+    fn focus_after_closing_last_terminal_of_p1(
+        cx: &mut gpui::TestAppContext,
+        hide: bool,
+        others: &[&str],
+        zoomed: bool,
+    ) -> Option<String> {
+        let workspace = workspace_hiding_projects_without_terminals(cx, hide);
+        let mut fm = crate::focus::FocusManager::new();
+        let with_p1 = |p1: Option<ApiLayoutNode>| -> Vec<(&str, Option<ApiLayoutNode>)> {
+            std::iter::once(("p1", p1))
+                .chain(
+                    others
+                        .iter()
+                        .map(|id| (*id, Some(api_terminal(&format!("t-{id}"))))),
+                )
+                .collect()
+        };
+        sync_projects(&workspace, &mut fm, cx, &with_p1(Some(api_terminal("t1"))));
+        fm.focus_terminal("remote:c1:p1".to_string(), vec![]);
+        if zoomed {
+            fm.set_focused_project_id(Some("remote:c1:p1".to_string()));
+        }
+        workspace.update(cx, |ws: &mut Workspace, _cx| {
+            ws.queue_focus_after_close(
+                WindowId::Main,
+                "remote:c1:p1",
+                &["remote:c1:t1".to_string()],
+                fm.focused_terminal_state().as_ref(),
+            );
+        });
+        sync_projects(&workspace, &mut fm, cx, &with_p1(None));
+        fm.focused_terminal_state().map(|f| f.project_id)
+    }
+
+    #[gpui::test]
+    fn focus_stays_on_a_project_after_its_last_terminal_closes_by_default(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        assert_eq!(
+            focus_after_closing_last_terminal_of_p1(cx, false, &["p2"], false).as_deref(),
+            Some("remote:c1:p1")
+        );
+    }
+
+    #[gpui::test]
+    fn focus_moves_to_a_neighbour_when_the_setting_hides_the_project(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        // p1 leaves the overview, so focus must not stay on a column that is
+        // gone; it moves as a manual hide would, to the next shown project.
+        assert_eq!(
+            focus_after_closing_last_terminal_of_p1(cx, true, &["p2"], false).as_deref(),
+            Some("remote:c1:p2")
+        );
+    }
+
+    #[gpui::test]
+    fn focus_clears_when_the_setting_hides_the_last_shown_project(cx: &mut gpui::TestAppContext) {
+        assert_eq!(
+            focus_after_closing_last_terminal_of_p1(cx, true, &[], false),
+            None
+        );
+    }
+
+    #[gpui::test]
+    fn a_zoomed_project_keeps_focus_after_its_last_terminal_closes(cx: &mut gpui::TestAppContext) {
+        // Zoomed, it stays on screen with Start Terminal, so focus stays too.
+        assert_eq!(
+            focus_after_closing_last_terminal_of_p1(cx, true, &["p2"], true).as_deref(),
+            Some("remote:c1:p1")
+        );
+    }
+
+    #[gpui::test]
+    fn focus_moves_in_every_window_showing_the_hidden_project(cx: &mut gpui::TestAppContext) {
+        // The app applies one sync per window. The second window must still see
+        // that p1 had a terminal before it, though the first already applied it.
+        let mut data = make_workspace_data(vec![], vec![]);
+        let extra = data.spawn_extra_window(None);
+        let workspace = cx.new(|_| {
+            let mut ws = Workspace::new(data);
+            ws.set_hide_projects_without_terminals(true);
+            ws
+        });
+        let mut main_fm = crate::focus::FocusManager::new();
+        let mut extra_fm = crate::focus::FocusManager::new();
+        let sync = |main_fm: &mut crate::focus::FocusManager,
+                    extra_fm: &mut crate::focus::FocusManager,
+                    cx: &mut gpui::TestAppContext,
+                    p1: Option<ApiLayoutNode>| {
+            let snapshots = [snapshot_of_projects(&[
+                ("p1", p1),
+                ("p2", Some(api_terminal("t2"))),
+            ])];
+            workspace.update(cx, |ws: &mut Workspace, cx| {
+                ws.apply_remote_snapshot(&snapshots, WindowId::Main, main_fm, cx);
+                ws.apply_remote_snapshot(&snapshots, extra, extra_fm, cx);
+            });
+        };
+        sync(&mut main_fm, &mut extra_fm, cx, Some(api_terminal("t1")));
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            for id in ["remote:c1:p1", "remote:c1:p2"] {
+                ws.set_project_overview_visibility(&mut extra_fm, extra, id, true, cx);
+            }
+        });
+        main_fm.focus_terminal("remote:c1:p1".to_string(), vec![]);
+        extra_fm.focus_terminal("remote:c1:p1".to_string(), vec![]);
+
+        sync(&mut main_fm, &mut extra_fm, cx, None);
+
+        for fm in [&main_fm, &extra_fm] {
+            assert_eq!(
+                fm.focused_terminal_state().map(|f| f.project_id).as_deref(),
+                Some("remote:c1:p2")
+            );
+        }
+    }
+
+    #[gpui::test]
+    fn focus_jumped_onto_an_empty_project_survives_later_syncs(cx: &mut gpui::TestAppContext) {
+        // A keyboard jump to a bookmark project anchors focus on it with an
+        // empty path; an unrelated sync must not take that away.
+        let workspace = workspace_hiding_projects_without_terminals(cx, true);
+        let mut fm = crate::focus::FocusManager::new();
+        let projects = [("p1", None), ("p2", Some(api_terminal("t2")))];
+        sync_projects(&workspace, &mut fm, cx, &projects);
+        fm.focus_terminal("remote:c1:p1".to_string(), vec![]);
+        sync_projects(&workspace, &mut fm, cx, &projects);
+        assert_eq!(
+            fm.focused_terminal_state().map(|f| f.project_id).as_deref(),
+            Some("remote:c1:p1")
+        );
     }
 
     /// Mirror `p1` as a split and focus its second pane, the state every test
