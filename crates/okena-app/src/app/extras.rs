@@ -159,7 +159,7 @@ impl Okena {
                 });
             }
             self.extra_windows.remove(&window_id);
-            self.unfocused_window_pacer.forget(window_id);
+            self.repaint_pacer.forget(window_id);
             self.pending_title_repaints.forget(window_id);
         }
 
@@ -235,7 +235,7 @@ impl Okena {
                 self.publish_windows(cx);
                 // A window that gained focus shows its deferred frame at once.
                 let activated = active.then(|| view.read(cx).window_id());
-                self.flush_unfocused_repaints(activated, cx);
+                self.flush_deferred_repaints(activated, cx);
             }
         }
     }

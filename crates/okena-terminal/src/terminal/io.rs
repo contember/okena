@@ -1,5 +1,6 @@
 use alacritty_terminal::grid::Dimensions;
-use alacritty_terminal::term::TermMode;
+use alacritty_terminal::index::{Column, Line};
+use alacritty_terminal::term::{LineDamageBounds, TermDamage, TermMode};
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
@@ -124,6 +125,52 @@ impl Terminal {
     /// current when the frame is built without per-pane polling. GPUI thread only.
     pub fn process_pending_output(&self) {
         self.drain_pending_output();
+    }
+
+    /// Whether the output parsed since the previous call rewrote one visible
+    /// line in place, as a spinner or progress line does: nothing scrolled, the
+    /// cursor ends where it was, and the same span of the same line changed as
+    /// in the previous call, keeping its number of non-blank cells. Streamed
+    /// text grows the span or that number, so it does not count. Resets the
+    /// emulator's damage; nothing else reads it.
+    pub fn take_single_line_rewrite(&self) -> bool {
+        let mut term = self.term.lock();
+        let cursor = term.grid().cursor.point;
+        let display_offset = term.grid().display_offset();
+        // `damage()` always marks the cursor cell, so a TUI that draws its
+        // spinner elsewhere and parks the cursor would count two lines.
+        let cursor_cell = LineDamageBounds::new(
+            cursor.line.0.max(0) as usize + display_offset,
+            cursor.column.0,
+            cursor.column.0,
+        );
+        let changed = match term.damage() {
+            TermDamage::Full => None,
+            TermDamage::Partial(lines) => {
+                let mut changed = lines.filter(|line| *line != cursor_cell);
+                match (changed.next(), changed.next()) {
+                    (line, None) => Some(line),
+                    _ => None,
+                }
+            }
+        };
+        // An erase-line damages the whole row whatever it holds, so the span
+        // alone can't tell a spinner from text streamed into a redrawn row.
+        let rewrite = changed.map(|line| {
+            let line = line.map(|line| {
+                let row = &term.grid()[Line(line.line.saturating_sub(display_offset) as i32)];
+                let non_blank = (0..term.columns())
+                    .filter(|column| row[Column(*column)].c != ' ')
+                    .count();
+                (line, non_blank)
+            });
+            (cursor, line)
+        });
+        term.reset_damage();
+        let mut previous = self.previous_rewrite.lock();
+        let single_line = rewrite.is_some() && *previous == rewrite;
+        *previous = rewrite;
+        single_line
     }
 
     /// Drain all pending output and feed it into the terminal emulator.
