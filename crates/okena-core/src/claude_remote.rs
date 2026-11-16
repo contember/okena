@@ -64,8 +64,23 @@ impl ApiClaudeStartupDialog {
     /// The dialog Claude shows on `screen` (a pane's visible text), if any.
     pub fn detect(screen: &str) -> Option<Self> {
         [Self::Trust, Self::Channels].into_iter().find(|dialog| {
-            screen.contains(dialog.marker()) && screen.contains(dialog.confirm_label())
+            (screen.contains(dialog.marker()) && screen.contains(dialog.confirm_label()))
+                || dialog.options_on_screen(screen)
         })
+    }
+
+    /// Whether the dialog's numbered options stand on their own lines. A short
+    /// pane scrolls the Channels title off while its options stay visible.
+    fn options_on_screen(self, screen: &str) -> bool {
+        let options: &[&str] = match self {
+            Self::Trust => return false,
+            Self::Channels => &["1. I am using this for local development", "2. Exit"],
+        };
+        let lines: Vec<&str> = screen
+            .lines()
+            .map(|line| line.trim().trim_start_matches('❯').trim_start())
+            .collect();
+        options.iter().all(|option| lines.contains(option))
     }
 
     /// The option that accepts the dialog.
@@ -362,6 +377,35 @@ mod tests {
         let channels = ApiClaudeStartupDialog::detect(CHANNELS_SCREEN);
         assert_eq!(channels, Some(ApiClaudeStartupDialog::Channels));
         assert!(ApiClaudeStartupDialog::Channels.confirm_selected(CHANNELS_SCREEN));
+    }
+
+    #[test]
+    fn the_channels_dialog_is_detected_from_its_options_without_the_title() {
+        // A short pane: the title and the channel list scrolled off.
+        let options_only = "  ❯ 1. I am using this for local development\n    2. Exit";
+        assert_eq!(
+            ApiClaudeStartupDialog::detect(options_only),
+            Some(ApiClaudeStartupDialog::Channels)
+        );
+        assert!(ApiClaudeStartupDialog::Channels.confirm_selected(options_only));
+        // Selection moved to Exit: still the dialog, confirm not selected.
+        let on_exit = "    1. I am using this for local development\n  ❯ 2. Exit";
+        assert_eq!(
+            ApiClaudeStartupDialog::detect(on_exit),
+            Some(ApiClaudeStartupDialog::Channels)
+        );
+        assert!(!ApiClaudeStartupDialog::Channels.confirm_selected(on_exit));
+    }
+
+    #[test]
+    fn the_channels_options_need_both_lines_on_their_own() {
+        for screen in [
+            "  ❯ 1. I am using this for local development",
+            "  2. Exit",
+            "> pick \"1. I am using this for local development\" or \"2. Exit\"",
+        ] {
+            assert_eq!(ApiClaudeStartupDialog::detect(screen), None, "{screen}");
+        }
     }
 
     #[test]
