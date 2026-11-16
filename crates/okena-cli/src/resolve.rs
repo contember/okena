@@ -156,7 +156,32 @@ pub fn resolve_terminal(state: &StateResponse, filter: &str) -> Result<(String, 
         }
     }
 
+    if is_live_terminal(state, filter) {
+        return Err(format!(
+            "Terminal {filter} is running, but no project layout lists it, so this command \
+             cannot address it. Commands that take only the terminal (read, send, run, key, \
+             claude show/log/prompt/answer/interrupt) still reach it."
+        ));
+    }
     Err(format!("Terminal not found: {filter}"))
+}
+
+/// Resolve a terminal address into a terminal id, for commands that address
+/// the terminal alone (no project or layout path).
+///
+/// Accepts every form [`resolve_terminal`] does, plus a bare id of a pane the
+/// daemon still runs although no project layout lists it (its project was
+/// removed, for example).
+pub fn resolve_terminal_id(state: &StateResponse, filter: &str) -> Result<String, String> {
+    match resolve_terminal(state, filter) {
+        Ok((_project_id, terminal_id)) => Ok(terminal_id),
+        Err(_) if is_live_terminal(state, filter) => Ok(filter.to_string()),
+        Err(e) => Err(e),
+    }
+}
+
+fn is_live_terminal(state: &StateResponse, terminal_id: &str) -> bool {
+    state.live_terminal_ids.iter().any(|id| id == terminal_id)
 }
 
 fn resolve_project_slash_name(
@@ -466,6 +491,7 @@ mod tests {
             claude_dialogs: Default::default(),
             claude_sessions: Vec::new(),
             claude_pr_links: Default::default(),
+            live_terminal_ids: Vec::new(),
         }
     }
 
@@ -575,6 +601,27 @@ mod tests {
         assert_eq!(tid, "t3");
 
         assert!(resolve_terminal(&state, "nope").is_err());
+    }
+
+    #[test]
+    fn a_live_terminal_outside_every_layout_resolves_by_id_alone() {
+        let p = project("p1", "Proj", "/tmp/p1", Some(nested_layout()));
+        let mut state = state_with(vec![p], vec![]);
+        state.live_terminal_ids = vec!["orphan".into(), "t1".into()];
+
+        assert_eq!(resolve_terminal_id(&state, "orphan").unwrap(), "orphan");
+        // Layout terminals and the other address forms still resolve.
+        assert_eq!(resolve_terminal_id(&state, "t3").unwrap(), "t3");
+        assert_eq!(resolve_terminal_id(&state, "Proj/logs").unwrap(), "t2");
+        assert_eq!(
+            resolve_terminal_id(&state, "nope").unwrap_err(),
+            "Terminal not found: nope"
+        );
+
+        // Project-scoped commands (rename, close, split) need a project and
+        // say why they cannot use the orphan.
+        let err = resolve_terminal(&state, "orphan").unwrap_err();
+        assert!(err.contains("no project layout lists it"), "{err}");
     }
 
     #[test]

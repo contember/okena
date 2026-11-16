@@ -1117,7 +1117,7 @@ impl RemoteConnectionManager {
                 state,
             } => {
                 if let Some(conn) = self.connections.get_mut(&connection_id) {
-                    conn.set_remote_state(Some(state));
+                    conn.set_remote_state(Some(*state));
                 }
                 cx.notify();
             }

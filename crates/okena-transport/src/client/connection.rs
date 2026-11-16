@@ -1584,7 +1584,7 @@ impl<H: ConnectionHandler> RemoteClient<H> {
         let _ = event_tx
             .send(ConnectionEvent::StateReceived {
                 connection_id: config.id.clone(),
-                state: state.clone(),
+                state: Box::new(state.clone()),
             })
             .await;
         match fetch_remote_settings(&client, &base_url, token).await {
@@ -2004,7 +2004,7 @@ impl<H: ConnectionHandler> RemoteClient<H> {
                                                 let _ = event_tx_clone
                                                     .send(ConnectionEvent::StateReceived {
                                                         connection_id: config_id.clone(),
-                                                        state: new_state,
+                                                        state: Box::new(new_state),
                                                     })
                                                     .await;
                                             }
@@ -2908,6 +2908,7 @@ mod tests {
             claude_dialogs: Default::default(),
             claude_sessions: Vec::new(),
             claude_pr_links: Default::default(),
+            live_terminal_ids: Vec::new(),
         }));
 
         client.reconnect();
