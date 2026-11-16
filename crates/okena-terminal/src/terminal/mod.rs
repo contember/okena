@@ -72,10 +72,11 @@ pub(super) struct InputRepaintRequest {
     expires_at: Instant,
 }
 
-/// The cursor and the one line changed besides the cursor cell, if any.
+/// The cursor and the one line changed besides the cursor cell, if any, with
+/// that row's number of non-blank cells.
 pub(super) type RewriteFrame = (
     alacritty_terminal::index::Point,
-    Option<alacritty_terminal::term::LineDamageBounds>,
+    Option<(alacritty_terminal::term::LineDamageBounds, usize)>,
 );
 
 /// A terminal instance wrapping alacritty_terminal

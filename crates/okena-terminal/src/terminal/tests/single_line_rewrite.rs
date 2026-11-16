@@ -58,6 +58,36 @@ fn text_streamed_into_a_tui_row_with_a_parked_cursor_is_not_a_rewrite() {
 }
 
 #[test]
+fn text_streamed_into_an_erased_tui_row_is_not_a_rewrite() {
+    // Erasing the row damages all of it every frame, so the span never grows.
+    for (before, after) in [("\x1b[2K", ""), ("", "\x1b[K")] {
+        let terminal = terminal();
+        let mut row = String::from("> answer:");
+        for token in ["", " streamed", " tokens", " keep", " coming"] {
+            row.push_str(token);
+            terminal.process_output(format!("\x1b[5;1H{before}{row}{after}\x1b[20;1H").as_bytes());
+            assert!(
+                !terminal.take_single_line_rewrite(),
+                "a growing row keeps the full frame rate: {before:?}{after:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn an_erased_tui_spinner_row_is_a_rewrite() {
+    let terminal = terminal();
+    for _ in 0..2 {
+        terminal.process_output(b"\x1b[5;1H\x1b[2K\\ Working\x1b[20;1H");
+        terminal.take_single_line_rewrite();
+    }
+    for glyph in ["|", "/", "-"] {
+        terminal.process_output(format!("\x1b[5;1H\x1b[2K{glyph} Working\x1b[20;1H").as_bytes());
+        assert!(terminal.take_single_line_rewrite());
+    }
+}
+
+#[test]
 fn a_rewrite_counts_only_from_its_second_identical_frame() {
     let terminal = terminal();
     terminal.process_output(b"| working");
