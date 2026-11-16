@@ -60,6 +60,16 @@ pub enum ApiClaudeStartupDialog {
     Channels,
 }
 
+/// Whether `line` is the option `label`, whole or cut short with `…`, as Claude
+/// Code truncates a label too wide for the pane.
+fn shows_option(line: &str, label: &str) -> bool {
+    line == label
+        || line
+            .strip_suffix('…')
+            .map(str::trim_end)
+            .is_some_and(|cut| cut.len() >= 10 && label.starts_with(cut))
+}
+
 impl ApiClaudeStartupDialog {
     /// The dialog Claude shows on `screen` (a pane's visible text), if any.
     pub fn detect(screen: &str) -> Option<Self> {
@@ -86,9 +96,11 @@ impl ApiClaudeStartupDialog {
             .lines()
             .map(|line| line.trim().trim_start_matches('❯').trim_start())
             .collect();
-        options
-            .iter()
-            .all(|spellings| spellings.iter().any(|option| lines.contains(option)))
+        options.iter().all(|spellings| {
+            spellings
+                .iter()
+                .any(|option| lines.iter().any(|line| shows_option(line, option)))
+        })
     }
 
     /// The option that accepts the dialog.
@@ -423,6 +435,20 @@ mod tests {
             Some(ApiClaudeStartupDialog::Trust)
         );
         assert!(ApiClaudeStartupDialog::Trust.confirm_selected(with_permissions));
+    }
+
+    #[test]
+    fn a_label_truncated_by_a_narrow_pane_still_counts() {
+        let narrow = " ❯ No, continue without…\n   Yes, I trust this folder";
+        assert_eq!(
+            ApiClaudeStartupDialog::detect(narrow),
+            Some(ApiClaudeStartupDialog::Trust)
+        );
+        // A cut too short to tell the label apart does not.
+        assert_eq!(
+            ApiClaudeStartupDialog::detect(" ❯ No…\n   Yes, I trust this folder"),
+            None
+        );
     }
 
     #[test]
