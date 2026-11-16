@@ -385,6 +385,9 @@ pub struct Workspace {
     /// focused parent project also brings along its hidden worktrees. Pushed
     /// in by the app so every `visible_projects` caller agrees on it.
     show_hidden_worktrees_when_focused: bool,
+    /// Mirror of the `hide_projects_without_terminals` setting, pushed in by
+    /// the app like the one above.
+    hide_projects_without_terminals: bool,
 }
 
 /// A terminal that was soft-closed and is waiting out its grace period.
@@ -601,6 +604,7 @@ impl Workspace {
             sync_layout_preimage: None,
             window_sync_generation: HashMap::new(),
             show_hidden_worktrees_when_focused: false,
+            hide_projects_without_terminals: false,
         }
     }
 
@@ -609,6 +613,14 @@ impl Workspace {
     pub fn set_show_hidden_worktrees_when_focused(&mut self, show: bool) -> bool {
         let changed = self.show_hidden_worktrees_when_focused != show;
         self.show_hidden_worktrees_when_focused = show;
+        changed
+    }
+
+    /// Mirror the `hide_projects_without_terminals` setting. Returns whether it
+    /// changed, so the caller knows to re-render.
+    pub fn set_hide_projects_without_terminals(&mut self, hide: bool) -> bool {
+        let changed = self.hide_projects_without_terminals != hide;
+        self.hide_projects_without_terminals = hide;
         changed
     }
 
@@ -2374,6 +2386,7 @@ impl Workspace {
             focused_project_id,
             focus_individual,
             self.show_hidden_worktrees_when_focused,
+            self.hide_projects_without_terminals,
             window_state,
         )
     }
@@ -2389,7 +2402,14 @@ impl Workspace {
         let mut ids = std::collections::HashSet::new();
         for window in std::iter::once(&self.data.main_window).chain(self.data.extra_windows.iter())
         {
-            for p in compute_visible_projects(&self.data, None, false, false, window) {
+            for p in compute_visible_projects(
+                &self.data,
+                None,
+                false,
+                false,
+                self.hide_projects_without_terminals,
+                window,
+            ) {
                 ids.insert(p.id.clone());
             }
         }
@@ -3584,6 +3604,66 @@ mod workspace_tests {
         assert_eq!(visible.len(), 2);
         assert_eq!(visible[0].id, "p1");
         assert_eq!(visible[1].id, "p3");
+    }
+
+    fn overview_ids(ws: &Workspace, focused: Option<&str>) -> Vec<String> {
+        let focused = focused.map(String::from);
+        ws.visible_projects(WindowId::Main, focused.as_ref(), false)
+            .iter()
+            .map(|p| p.id.clone())
+            .collect()
+    }
+
+    #[test]
+    fn closing_the_last_terminal_keeps_the_project_in_the_overview_by_default() {
+        let mut ws = Workspace::new(make_workspace_data(
+            vec![make_project("p1"), make_project("p2")],
+            vec!["p1", "p2"],
+        ));
+        let mut cx = RecordingCx::default();
+
+        ws.close_terminal("p1", &[], &mut cx);
+
+        assert!(ws.project("p1").unwrap().layout.is_none());
+        assert_eq!(overview_ids(&ws, None), vec!["p1", "p2"]);
+    }
+
+    #[test]
+    fn closing_the_last_terminal_hides_the_project_when_the_setting_is_on() {
+        let mut pinned = make_project("pinned");
+        pinned.pinned = true;
+        pinned.layout = None;
+        let mut data = make_workspace_data(
+            vec![
+                make_project("p1"),
+                make_project("p2"),
+                make_project("manual"),
+                pinned,
+            ],
+            vec!["p1", "p2", "manual", "pinned"],
+        );
+        data.main_window
+            .hidden_project_ids
+            .insert("manual".to_string());
+        let mut ws = Workspace::new(data);
+        assert!(ws.set_hide_projects_without_terminals(true));
+        let mut cx = RecordingCx::default();
+
+        ws.close_terminal("p1", &[], &mut cx);
+
+        // Gone from the overview, but not deleted, and the manual hidden set
+        // (the saved preference) is exactly what it was.
+        assert_eq!(overview_ids(&ws, None), vec!["p2", "pinned"]);
+        assert!(ws.project("p1").is_some());
+        assert_eq!(
+            ws.data().main_window.hidden_project_ids,
+            ["manual".to_string()].into_iter().collect()
+        );
+        // Selecting it zooms it into view, where Start Terminal is offered.
+        assert_eq!(overview_ids(&ws, Some("p1")), vec!["p1"]);
+        // Turning the setting off restores today's overview.
+        assert!(ws.set_hide_projects_without_terminals(false));
+        assert_eq!(overview_ids(&ws, None), vec!["p1", "p2", "pinned"]);
     }
 
     #[test]

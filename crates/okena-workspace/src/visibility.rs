@@ -22,12 +22,17 @@ use crate::state::{ProjectData, WindowState, WorkspaceData};
 /// - When the window has a folder filter, top-level projects are hidden and
 ///   only projects inside the filtered folder are shown. Focus override still
 ///   wins.
+/// - With `hide_projects_without_terminals`, the unfocused overview also drops
+///   projects with no terminal unless they are pinned or being created or
+///   closed. Each worktree is judged on its own. A focused project is shown
+///   regardless, so selecting it still offers Start Terminal.
 /// - Worktree children are grouped directly after their parent project.
 pub fn compute_visible_projects<'a>(
     data: &'a WorkspaceData,
     focused: Option<&String>,
     focus_individual: bool,
     show_hidden_worktrees: bool,
+    hide_projects_without_terminals: bool,
     window: &WindowState,
 ) -> Vec<&'a ProjectData> {
     let folder_filter = window.folder_filter.as_ref();
@@ -139,6 +144,12 @@ pub fn compute_visible_projects<'a>(
         }
     }
 
+    // Filtered before grouping so an orphaned worktree keeps its own
+    // position, as it does when its parent is in the hidden set.
+    if hide_projects_without_terminals && focused.is_none() {
+        result.retain(|p| has_overview_presence(p));
+    }
+
     // Group worktree children right after their parent project.
     // Only moves worktrees whose parent IS in the result; orphan worktrees
     // (parent not visible or in a folder) stay at their original position.
@@ -175,6 +186,12 @@ pub fn compute_visible_projects<'a>(
     }
 
     result
+}
+
+/// Whether a project earns an overview column when projects without terminals
+/// are hidden: it has a terminal, is pinned, or shows creation/close progress.
+fn has_overview_presence(p: &ProjectData) -> bool {
+    p.layout.is_some() || p.pinned || p.is_creating || p.is_closing
 }
 
 /// Push a project and its worktree children into the result list, respecting
@@ -320,7 +337,7 @@ mod tests {
             vec!["p1", "p2", "p3"],
             &["p2"],
         );
-        let visible = compute_visible_projects(&data, None, false, false, &data.main_window);
+        let visible = compute_visible_projects(&data, None, false, false, false, &data.main_window);
         assert_eq!(visible.len(), 2);
         assert_eq!(visible[0].id, "p1");
         assert_eq!(visible[1].id, "p3");
@@ -334,8 +351,14 @@ mod tests {
             &["p3"],
         );
         let focused = "p3".to_string();
-        let visible =
-            compute_visible_projects(&data, Some(&focused), false, false, &data.main_window);
+        let visible = compute_visible_projects(
+            &data,
+            Some(&focused),
+            false,
+            false,
+            false,
+            &data.main_window,
+        );
         assert_eq!(visible.len(), 1);
         assert_eq!(visible[0].id, "p3");
     }
@@ -353,7 +376,8 @@ mod tests {
             project_ids: vec!["p1".to_string(), "p2".to_string()],
             folder_color: FolderColor::default(),
         });
-        let visible = compute_visible_projects(&data, None, false, false, &WindowState::default());
+        let visible =
+            compute_visible_projects(&data, None, false, false, false, &WindowState::default());
         assert_eq!(visible.len(), 2);
     }
 
@@ -374,7 +398,7 @@ mod tests {
             folder_filter: Some("f1".to_string()),
             ..WindowState::default()
         };
-        let visible = compute_visible_projects(&data, None, false, false, &window);
+        let visible = compute_visible_projects(&data, None, false, false, false, &window);
         assert_eq!(visible.len(), 2);
         assert!(visible.iter().all(|p| p.id != "p3"));
     }
@@ -385,10 +409,31 @@ mod tests {
         parent.worktree_ids = vec!["wt1".to_string()];
         let wt1 = make_wt("wt1", "parent");
         let data = make_data(vec![parent, wt1], vec!["parent"], &[]);
-        let visible = compute_visible_projects(&data, None, false, false, &WindowState::default());
+        let visible =
+            compute_visible_projects(&data, None, false, false, false, &WindowState::default());
         assert_eq!(visible.len(), 2);
         assert_eq!(visible[0].id, "parent");
         assert_eq!(visible[1].id, "wt1");
+    }
+
+    #[test]
+    fn hiding_projects_without_terminals_judges_each_worktree_on_its_own() {
+        let mut parent = make_project("parent");
+        parent.layout = None;
+        parent.worktree_ids = vec!["wt-active".to_string(), "wt-empty".to_string()];
+        let mut empty = make_wt("wt-empty", "parent");
+        empty.layout = None;
+        let data = make_data(
+            vec![parent, make_wt("wt-active", "parent"), empty],
+            vec!["parent"],
+            &[],
+        );
+        let visible: Vec<&str> =
+            compute_visible_projects(&data, None, false, false, true, &WindowState::default())
+                .iter()
+                .map(|p| p.id.as_str())
+                .collect();
+        assert_eq!(visible, vec!["wt-active"]);
     }
 
     #[test]
@@ -398,8 +443,14 @@ mod tests {
         let wt1 = make_wt("wt1", "parent");
         let data = make_data(vec![parent, wt1], vec!["parent"], &[]);
         let focused = "wt1".to_string();
-        let visible =
-            compute_visible_projects(&data, Some(&focused), false, false, &WindowState::default());
+        let visible = compute_visible_projects(
+            &data,
+            Some(&focused),
+            false,
+            false,
+            false,
+            &WindowState::default(),
+        );
         assert_eq!(visible.len(), 1);
         assert_eq!(visible[0].id, "wt1");
     }
@@ -416,8 +467,14 @@ mod tests {
     fn focus_parent_skips_hidden_worktrees() {
         let data = parent_with_two_worktrees(&["wt2"]);
         let focused = "parent".to_string();
-        let visible =
-            compute_visible_projects(&data, Some(&focused), false, false, &data.main_window);
+        let visible = compute_visible_projects(
+            &data,
+            Some(&focused),
+            false,
+            false,
+            false,
+            &data.main_window,
+        );
         let ids: Vec<&str> = visible.iter().map(|p| p.id.as_str()).collect();
         assert_eq!(ids, vec!["parent", "wt1"]);
     }
@@ -427,7 +484,7 @@ mod tests {
         let data = parent_with_two_worktrees(&["wt2"]);
         let focused = "parent".to_string();
         let visible =
-            compute_visible_projects(&data, Some(&focused), false, true, &data.main_window);
+            compute_visible_projects(&data, Some(&focused), false, true, false, &data.main_window);
         let ids: Vec<&str> = visible.iter().map(|p| p.id.as_str()).collect();
         assert_eq!(ids, vec!["parent", "wt1", "wt2"]);
     }
@@ -436,8 +493,14 @@ mod tests {
     fn focus_hidden_parent_shows_only_its_visible_worktrees() {
         let data = parent_with_two_worktrees(&["parent", "wt1"]);
         let focused = "parent".to_string();
-        let visible =
-            compute_visible_projects(&data, Some(&focused), false, false, &data.main_window);
+        let visible = compute_visible_projects(
+            &data,
+            Some(&focused),
+            false,
+            false,
+            false,
+            &data.main_window,
+        );
         let ids: Vec<&str> = visible.iter().map(|p| p.id.as_str()).collect();
         assert_eq!(ids, vec!["wt2"]);
     }
@@ -446,8 +509,14 @@ mod tests {
     fn focus_fully_hidden_group_falls_back_to_the_project() {
         let data = parent_with_two_worktrees(&["parent", "wt1", "wt2"]);
         let focused = "parent".to_string();
-        let visible =
-            compute_visible_projects(&data, Some(&focused), false, false, &data.main_window);
+        let visible = compute_visible_projects(
+            &data,
+            Some(&focused),
+            false,
+            false,
+            false,
+            &data.main_window,
+        );
         let ids: Vec<&str> = visible.iter().map(|p| p.id.as_str()).collect();
         assert_eq!(ids, vec!["parent"]);
     }
@@ -457,7 +526,7 @@ mod tests {
         let data = parent_with_two_worktrees(&["parent", "wt1"]);
         let focused = "parent".to_string();
         let visible =
-            compute_visible_projects(&data, Some(&focused), false, true, &data.main_window);
+            compute_visible_projects(&data, Some(&focused), false, true, false, &data.main_window);
         let ids: Vec<&str> = visible.iter().map(|p| p.id.as_str()).collect();
         assert_eq!(ids, vec!["parent", "wt1", "wt2"]);
     }
@@ -467,7 +536,7 @@ mod tests {
         let data = parent_with_two_worktrees(&["parent"]);
         let focused = "parent".to_string();
         let visible =
-            compute_visible_projects(&data, Some(&focused), true, false, &data.main_window);
+            compute_visible_projects(&data, Some(&focused), true, false, false, &data.main_window);
         let ids: Vec<&str> = visible.iter().map(|p| p.id.as_str()).collect();
         assert_eq!(ids, vec!["parent"]);
     }
@@ -476,8 +545,14 @@ mod tests {
     fn focus_on_hidden_worktree_still_shows_it() {
         let data = parent_with_two_worktrees(&["wt2"]);
         let focused = "wt2".to_string();
-        let visible =
-            compute_visible_projects(&data, Some(&focused), false, false, &data.main_window);
+        let visible = compute_visible_projects(
+            &data,
+            Some(&focused),
+            false,
+            false,
+            false,
+            &data.main_window,
+        );
         let ids: Vec<&str> = visible.iter().map(|p| p.id.as_str()).collect();
         assert_eq!(ids, vec!["wt2"]);
     }
@@ -489,8 +564,14 @@ mod tests {
         let wt1 = make_wt("wt1", "parent");
         let data = make_data(vec![parent, wt1], vec!["parent"], &[]);
         let focused = "parent".to_string();
-        let visible =
-            compute_visible_projects(&data, Some(&focused), true, false, &WindowState::default());
+        let visible = compute_visible_projects(
+            &data,
+            Some(&focused),
+            true,
+            false,
+            false,
+            &WindowState::default(),
+        );
         assert_eq!(visible.len(), 1);
         assert_eq!(visible[0].id, "parent");
     }
@@ -502,7 +583,7 @@ mod tests {
         let parent = make_project("p1");
         let w1 = make_wt("w1", "p1");
         let data = make_data(vec![parent, w1], vec!["p1", "w1"], &["p1"]);
-        let visible = compute_visible_projects(&data, None, false, false, &data.main_window);
+        let visible = compute_visible_projects(&data, None, false, false, false, &data.main_window);
         assert_eq!(visible.len(), 1);
         assert_eq!(visible[0].id, "w1");
     }
@@ -519,7 +600,7 @@ mod tests {
         );
         let mut window = WindowState::default();
         window.hidden_project_ids.insert("p2".to_string());
-        let visible = compute_visible_projects(&data, None, false, false, &window);
+        let visible = compute_visible_projects(&data, None, false, false, false, &window);
         let ids: Vec<&str> = visible.iter().map(|p| p.id.as_str()).collect();
         assert_eq!(ids, vec!["p1", "p3"]);
     }
@@ -535,7 +616,7 @@ mod tests {
         let data = make_data(vec![parent, wt1], vec!["parent"], &[]);
         let mut window = WindowState::default();
         window.hidden_project_ids.insert("wt1".to_string());
-        let visible = compute_visible_projects(&data, None, false, false, &window);
+        let visible = compute_visible_projects(&data, None, false, false, false, &window);
         let ids: Vec<&str> = visible.iter().map(|p| p.id.as_str()).collect();
         assert_eq!(ids, vec!["parent"]);
     }
@@ -560,7 +641,7 @@ mod tests {
             folder_filter: Some("f1".to_string()),
             ..Default::default()
         };
-        let visible = compute_visible_projects(&data, None, false, false, &window);
+        let visible = compute_visible_projects(&data, None, false, false, false, &window);
         let ids: Vec<&str> = visible.iter().map(|p| p.id.as_str()).collect();
         assert_eq!(ids, vec!["p1", "p2"]);
     }
@@ -588,7 +669,7 @@ mod tests {
             ..WindowState::default()
         };
         let focused = "p3".to_string();
-        let visible = compute_visible_projects(&data, Some(&focused), false, false, &window);
+        let visible = compute_visible_projects(&data, Some(&focused), false, false, false, &window);
         let ids: Vec<&str> = visible.iter().map(|p| p.id.as_str()).collect();
         assert_eq!(ids, vec!["p3"]);
     }
@@ -621,7 +702,7 @@ mod tests {
             ..WindowState::default()
         };
         let focused = "b1".to_string();
-        let visible = compute_visible_projects(&data, Some(&focused), false, false, &window);
+        let visible = compute_visible_projects(&data, Some(&focused), false, false, false, &window);
         let ids: Vec<&str> = visible.iter().map(|p| p.id.as_str()).collect();
         assert_eq!(ids, vec!["b1"]);
     }
