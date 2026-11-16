@@ -34,7 +34,8 @@ impl KeybindingEntry {
         self.applies_to(platform)
             && !(platform == ShortcutPlatform::Windows
                 && self.keystroke.split_whitespace().any(|stroke| {
-                    gpui::Keystroke::parse(stroke).is_ok_and(|key| key.modifiers.platform)
+                    gpui::Keystroke::parse_with_os(stroke, platform.os())
+                        .is_ok_and(|key| key.modifiers.platform)
                 }))
     }
 

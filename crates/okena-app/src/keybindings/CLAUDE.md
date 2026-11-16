@@ -36,8 +36,8 @@ Defines all keyboard actions, default bindings, and user-configurable keybinding
   The Win-key prohibition is Windows-only; do not use platform filtering to drop
   existing macOS/Linux default assignments.
 - Confirm **Clean keybindings** with the existing `gpui-component::AlertDialog`
-  on all platforms. Its common window host must provide the dialog layer; Linux
-  keeps SimpleRoot's resize workaround inside a borderless component Root.
+  on all platforms. The component Root hosts the dialog layer; Linux keeps
+  SimpleRoot's resize workaround inside it.
 - Keep Cancel explicit, block background clicks, and save only from the positive
   callback. Do not restore the native Window::prompt / basic Linux fallback path.
 - Label the launcher **Clean keybindings…** because it opens a confirmation;

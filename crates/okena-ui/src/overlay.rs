@@ -82,7 +82,7 @@ macro_rules! toggle_overlay {
 /// `active_modal` slot.
 ///
 /// Builds the entity from `$factory`, subscribes to its event type closing the
-/// modal on `is_close()`, and opens it via `open_modal` (which notifies). Use
+/// modal on `is_close()` while the entity still owns the slot, and opens it via `open_modal` (which notifies). Use
 /// this for the non-toggle "show" path; pair it with an `is_modal` guard via
 /// [`toggle_overlay!`] for the toggle path.
 ///
@@ -96,9 +96,9 @@ macro_rules! toggle_overlay {
 macro_rules! open_overlay {
     ($self:ident, $cx:ident, $event_type:ty, $factory:expr) => {
         let entity = $cx.new($factory);
-        $cx.subscribe(&entity, |this, _, event: &$event_type, cx| {
+        $cx.subscribe(&entity, |this, emitter, event: &$event_type, cx| {
             if event.is_close() {
-                this.close_modal(cx);
+                this.close_modal_from(emitter.entity_id(), cx);
             }
         })
         .detach();

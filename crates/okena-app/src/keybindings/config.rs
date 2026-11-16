@@ -540,7 +540,7 @@ pub fn parse_keybindings(content: &str) -> anyhow::Result<KeybindingConfig> {
                 "Empty or unfinished shortcut"
             );
             for stroke in entry.keystroke.split_whitespace() {
-                gpui::Keystroke::parse(stroke)?;
+                gpui::Keystroke::parse_with_os(stroke, ShortcutPlatform::current().os())?;
             }
             if let Some(context) = &entry.context {
                 gpui::KeyBindingContextPredicate::parse(context)?;
@@ -900,12 +900,12 @@ mod tests {
                 .iter()
                 .filter(|e| e.applies_to(ShortcutPlatform::Windows))
             {
-                assert!(
-                    entry
-                        .keystroke
-                        .split_whitespace()
-                        .all(|s| !gpui::Keystroke::parse(s).unwrap().modifiers.platform)
-                );
+                assert!(entry.keystroke.split_whitespace().all(|s| {
+                    !gpui::Keystroke::parse_with_os(s, gpui::OperatingSystem::Windows)
+                        .unwrap()
+                        .modifiers
+                        .platform
+                }));
             }
         }
         let actions = [
@@ -1001,10 +1001,11 @@ mod tests {
         );
     }
 
-    /// A default binding whose action name isn't wired up is not a compile
-    /// error — `create_keybinding` logs a warning and the shortcut is simply
-    /// dead, while a missing description hides it from the command palette and
-    /// the keybindings overlay. Both are silent at runtime, so pin them here.
+    /// An unwired action name, or a keystroke or context that doesn't parse,
+    /// is not a compile error — the binding is dropped with a warning and the
+    /// shortcut is simply dead, while a missing description hides it from the
+    /// command palette and the keybindings overlay. All are silent at runtime,
+    /// so pin them here.
     #[test]
     fn every_default_action_is_bindable_and_described() {
         let config = KeybindingConfig::defaults();
@@ -1015,16 +1016,24 @@ mod tests {
                 descriptions.contains_key(action.as_str()),
                 "{action} has default bindings but no description"
             );
+            assert!(
+                crate::keybindings::action_for_name(action).is_some(),
+                "{action} is not wired into action_for_name — its shortcut would do nothing"
+            );
             for entry in entries {
-                assert!(
-                    crate::keybindings::create_keybinding(
-                        action,
-                        &entry.keystroke,
-                        entry.context.as_deref(),
-                    )
-                    .is_some(),
-                    "{action} is not wired into create_keybinding — its shortcut would do nothing"
-                );
+                for keystroke in entry.keystroke.split_whitespace() {
+                    assert!(
+                        gpui::Keystroke::parse_with_os(keystroke, gpui::OperatingSystem::Linux)
+                            .is_ok(),
+                        "{action}: default keystroke {keystroke:?} does not parse"
+                    );
+                }
+                if let Some(context) = entry.context.as_deref() {
+                    assert!(
+                        gpui::KeyBindingContextPredicate::parse(context).is_ok(),
+                        "{action}: default context {context:?} does not parse"
+                    );
+                }
             }
         }
     }
@@ -1039,12 +1048,7 @@ mod tests {
                 "{action} must be available in the command palette"
             );
             assert!(
-                crate::keybindings::create_keybinding(
-                    action,
-                    "ctrl-alt-shift-f12",
-                    Some("TerminalPane"),
-                )
-                .is_some(),
+                crate::keybindings::action_for_name(action).is_some(),
                 "{action} must remain bindable"
             );
         }

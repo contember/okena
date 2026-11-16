@@ -437,8 +437,6 @@ pub struct FileViewer {
     pub(super) active_tab: usize,
     /// Navigation history
     pub(super) history: NavigationHistory,
-    /// Last time we checked files for external modifications
-    last_change_check: std::time::Instant,
     /// True while a background freshness check (stat + possible reload) is in
     /// flight, so we don't spawn overlapping checks if a stat outlives the
     /// once-per-second throttle window (e.g. on a slow network mount).
@@ -695,7 +693,6 @@ impl FileViewer {
             tabs: vec![tab],
             active_tab: 0,
             history: NavigationHistory::new(),
-            last_change_check: std::time::Instant::now(),
             freshness_check_in_flight: false,
             show_ignored: false,
             filter_popover_open: false,
@@ -729,6 +726,7 @@ impl FileViewer {
         if viewer.blame_visible {
             viewer.spawn_blame_load_for_active(cx);
         }
+        Self::poll_active_tab_freshness(cx);
         viewer
     }
 
@@ -776,7 +774,6 @@ impl FileViewer {
             tabs: vec![FileViewerTab::new_empty()],
             active_tab: 0,
             history: NavigationHistory::new(),
-            last_change_check: std::time::Instant::now(),
             freshness_check_in_flight: false,
             show_ignored: false,
             filter_popover_open: false,
@@ -803,6 +800,7 @@ impl FileViewer {
         };
         viewer.fetch_scope_info(cx);
         viewer.fetch_initial_dirs(cx);
+        Self::poll_active_tab_freshness(cx);
         viewer
     }
 
@@ -1213,14 +1211,30 @@ impl FileViewer {
         .detach();
     }
 
+    /// Checks the active tab for external modifications once a second for as
+    /// long as the viewer lives.
+    fn poll_active_tab_freshness(cx: &mut Context<Self>) {
+        cx.spawn(async move |this: WeakEntity<Self>, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_secs(1))
+                    .await;
+                if this
+                    .update(cx, |this, cx| this.check_active_tab_freshness(cx))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
     /// Poll daemon metadata and reload the active tab when it changes.
-    pub(super) fn check_active_tab_freshness(&mut self, cx: &mut Context<Self>) {
-        if self.freshness_check_in_flight
-            || self.last_change_check.elapsed() < std::time::Duration::from_secs(1)
-        {
+    fn check_active_tab_freshness(&mut self, cx: &mut Context<Self>) {
+        if self.freshness_check_in_flight {
             return;
         }
-        self.last_change_check = std::time::Instant::now();
 
         let tab = &self.tabs[self.active_tab];
         let Some(version) = tab.freshness_version() else {

@@ -7,7 +7,8 @@ tokio reactor instead of GPUI's `Context`/`AsyncApp`.
 ## Critical invariants
 
 - **NEVER add a `gpui` dependency to this crate or anything below it.** The gate
-  is `cargo tree -i gpui -p okena-daemon` returning nothing. Enabling a gpui
+  is `cargo tree -p okena-daemon -e no-dev --prefix none -f '{p}' | grep '^gpui'`
+  printing nothing. Enabling a gpui
   feature anywhere in the daemon graph breaks headless server/CI/container
   deployment, not just a build.
 - **The daemon is the sole writer of `workspace.json`.** It takes

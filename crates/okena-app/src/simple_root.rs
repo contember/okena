@@ -162,12 +162,12 @@ fn detect_resize_edge(pos: Point<Pixels>, size: Size<Pixels>) -> Option<ResizeEd
     Some(edge)
 }
 
-/// Pins the GPUI view-caching behaviour the window is built on.
+/// Pins the GPUI view-retention behaviour the window is built on.
 ///
-/// A `cx.notify()` on a terminal's content view repaints only that pane. Its
-/// `.cached()` ancestors are dirty and re-render, but only a view that was
-/// notified itself refreshes its subtree, so sibling panes and sibling columns
-/// reuse their last frame.
+/// A `cx.notify()` re-renders the notified view and its ancestors. Every other
+/// view, the notified view's own cached descendants included, reuses its last
+/// frame until it is notified itself, so a view must be notified whenever
+/// state it reads outside an entity changes.
 #[cfg(test)]
 mod view_cache_cascade {
     use gpui::{
@@ -342,7 +342,7 @@ mod view_cache_cascade {
     }
 
     #[gpui::test]
-    fn a_column_notify_repaints_its_whole_subtree(cx: &mut TestAppContext) {
+    fn a_column_notify_repaints_only_that_column(cx: &mut TestAppContext) {
         let harness = Harness::new(cx);
         let column = harness.columns[1].clone();
 
@@ -351,8 +351,8 @@ mod view_cache_cascade {
         assert_eq!(harness.column_renders(), vec![0, 1]);
         assert_eq!(
             harness.pane_renders(),
-            vec![vec![0; PANES_PER_COLUMN], vec![1; PANES_PER_COLUMN]],
-            "a notified view refreshes its cached descendants; other columns stay cached"
+            vec![vec![0; PANES_PER_COLUMN], vec![0; PANES_PER_COLUMN]],
+            "a notified view's cached panes reuse their frame until they are notified themselves"
         );
     }
 }

@@ -13,7 +13,7 @@ pub(super) struct CaptureQuery {
 fn sequence(source: &str) -> Option<Vec<Keystroke>> {
     source
         .split_whitespace()
-        .map(|s| Keystroke::parse(s).ok())
+        .map(|s| Keystroke::parse_with_os(s, ShortcutPlatform::current().os()).ok())
         .collect()
 }
 
@@ -62,14 +62,14 @@ impl CaptureQuery {
         })
     }
 
-    pub(super) fn label(&self) -> String {
+    pub(super) fn label(&self, os: gpui::OperatingSystem) -> String {
         if self.strokes.is_empty() {
             return "Press a shortcut to search. Esc clears; Text search exits recording.".into();
         }
         let label = self
             .strokes
             .iter()
-            .map(|k| format_keystroke(&crate::keybindings::keystroke_to_config_string(k)))
+            .map(|k| format_keystroke(&crate::keybindings::keystroke_to_config_string(k, os)))
             .collect::<Vec<_>>()
             .join(", ");
         if self.waiting {
@@ -153,7 +153,7 @@ fn build_rows_for_platform(
     let customized = config.get_customized_actions();
     let mut names: Vec<_> = descriptions
         .keys()
-        .filter(|name| crate::keybindings::create_keybinding(name, "ctrl-f12", None).is_some())
+        .filter(|name| crate::keybindings::action_for_name(name).is_some())
         .map(|s| s.to_string())
         .chain(config.bindings.keys().cloned())
         .collect();
@@ -277,7 +277,7 @@ mod tests {
         let mut q = CaptureQuery::default();
         q.push(&Keystroke::parse("ctrl-k").unwrap(), &config, true);
         assert!(q.waiting);
-        assert!(q.label().contains("Waiting"));
+        assert!(q.label(gpui::OperatingSystem::Linux).contains("Waiting"));
         q.push(&Keystroke::parse("ctrl-s").unwrap(), &config, true);
         assert!(!q.waiting);
         let rows = build_rows(&config, "ignored text", Some(&q), false, true);

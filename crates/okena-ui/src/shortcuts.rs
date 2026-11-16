@@ -22,6 +22,15 @@ impl ShortcutPlatform {
             Self::Linux
         }
     }
+
+    /// The host OS GPUI resolves this platform's keystroke spelling for.
+    pub const fn os(self) -> gpui::OperatingSystem {
+        match self {
+            Self::Mac => gpui::OperatingSystem::Mac,
+            Self::Windows => gpui::OperatingSystem::Windows,
+            Self::Linux => gpui::OperatingSystem::Linux,
+        }
+    }
 }
 
 /// A missing platform restriction applies everywhere; an empty restriction applies nowhere.
@@ -42,7 +51,7 @@ pub fn format_keystroke_for_platform(source: &str, platform: ShortcutPlatform) -
     source
         .split_whitespace()
         .map(|source| {
-            Keystroke::parse(source)
+            Keystroke::parse_with_os(source, platform.os())
                 .map(|key| {
                     if key.key.is_empty() {
                         source.to_owned()
@@ -479,7 +488,7 @@ mod tests {
             other_focus: cx.focus_handle(),
         });
         cx.update(|window, cx| {
-            window.blur();
+            window.blur(cx);
             assert!(window.context_stack().is_empty());
             cx.bind_keys([
                 KeyBinding::new("ctrl-g", SampleAction, None),
