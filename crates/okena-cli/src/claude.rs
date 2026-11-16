@@ -1298,6 +1298,16 @@ mod tests {
     }
 
     #[test]
+    fn startup_dialog_key_answers_the_trust_dialog_without_its_title() {
+        use ApiClaudeStartupDialog::Trust;
+        // A short pane scrolled the title off; only the options remain.
+        let on_cancel = " ❯ No, exit\n   Yes, I trust this folder";
+        assert_eq!(startup_dialog_key(Trust, on_cancel), Some("ArrowDown"));
+        let on_confirm = "   No, exit\n ❯ Yes, I trust this folder";
+        assert_eq!(startup_dialog_key(Trust, on_confirm), Some("Enter"));
+    }
+
+    #[test]
     fn startup_dialog_key_skips_a_screen_showing_another_dialog() {
         use ApiClaudeStartupDialog::{Channels, Trust};
         assert_eq!(startup_dialog_key(Trust, CHANNELS_ON_EXIT), None);
