@@ -26,7 +26,7 @@ description: Drive a running Okena terminal multiplexer from the `okena` CLI —
 - **Terminal**: a bare id, `project/name`, or `project:index` (DFS order, 0-based).
   `project/name` also accepts a terminal id (the id `term ls` shows for unnamed ones).
   A bare id of a running pane that no layout lists (its project was removed) still
-  works for `read`, `send`, `run`, `key` and `claude show/log/prompt/answer/interrupt`;
+  works for `read`, `send`, `run`, `key` and `claude show/subagents/log/prompt/answer/interrupt`;
   project-scoped commands (`term rename/close/split`, …) refuse it.
 - **Window** (`--window`): `main`, a full id, or a unique id prefix.
 

@@ -69,9 +69,9 @@ pub struct StateResponse {
     #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
     pub claude_pr_links:
         std::collections::HashMap<String, Vec<crate::claude_remote::ApiClaudePrLink>>,
-    /// Terminals the daemon holds a PTY for (its terminal registry), sorted.
-    /// Includes panes no project layout lists any more, so clients can still
-    /// address them by id. Runtime-only.
+    /// Every terminal in the daemon's registry, sorted: layout panes, panes no
+    /// layout lists any more (still addressable by id), service and hook
+    /// terminals. Runtime-only.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub live_terminal_ids: Vec<String>,
 }

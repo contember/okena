@@ -4366,9 +4366,6 @@ pub async fn daemon_command_loop(
                 let git_statuses = git_status_tx.borrow().clone();
                 let data = ws.data();
 
-                let mut live_terminal_ids: Vec<String> = terminals.lock().keys().cloned().collect();
-                live_terminal_ids.sort();
-
                 // Build terminal size map from the registry.
                 let size_map: HashMap<String, (u16, u16)> = {
                     let registry = terminals.lock();
@@ -4380,6 +4377,8 @@ pub async fn daemon_command_loop(
                         })
                         .collect()
                 };
+                let mut live_terminal_ids: Vec<String> = size_map.keys().cloned().collect();
+                live_terminal_ids.sort();
 
                 // Agent status is runtime-only and lives on the terminal
                 // registry, so gather it alongside the terminal sizes.

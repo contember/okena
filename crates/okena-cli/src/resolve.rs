@@ -158,9 +158,9 @@ pub fn resolve_terminal(state: &StateResponse, filter: &str) -> Result<(String, 
 
     if is_live_terminal(state, filter) {
         return Err(format!(
-            "Terminal {filter} is running, but no project layout lists it, so this command \
+            "Terminal {filter} exists, but no project layout lists it, so this command \
              cannot address it. Commands that take only the terminal (read, send, run, key, \
-             claude show/log/prompt/answer/interrupt) still reach it."
+             claude show/subagents/log/prompt/answer/interrupt) still reach it."
         ));
     }
     Err(format!("Terminal not found: {filter}"))
