@@ -1,9 +1,12 @@
 //! Shared shortcut labels for tooltips, keybinding editors and command lists.
 use gpui::{Action, AnyView, App, AsKeystroke, KeyBinding, KeyContext, Keymap, Keystroke, Window};
 use gpui_component::tooltip::Tooltip;
+use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum ShortcutPlatform {
+    #[serde(rename = "macos")]
     Mac,
     Windows,
     Linux,
@@ -19,6 +22,14 @@ impl ShortcutPlatform {
             Self::Linux
         }
     }
+}
+
+/// A missing platform restriction applies everywhere; an empty restriction applies nowhere.
+pub fn applies_to_platform(
+    platforms: Option<&[ShortcutPlatform]>,
+    platform: ShortcutPlatform,
+) -> bool {
+    platforms.is_none_or(|platforms| platforms.contains(&platform))
 }
 
 /// Formats every stroke, preserving punctuation keys such as `ctrl--`.
@@ -163,9 +174,10 @@ pub fn shortcut_for_action_in(
     .map(format_binding)
 }
 
-/// Defaults register both a `cmd-…` and a Ctrl variant on every platform, so prefer
-/// the native one (Cmd on macOS, no Win/Super elsewhere); among equals the last wins.
-/// Other modifiers stay eligible as a fallback: custom Ctrl on macOS and Win/Super work.
+/// Legacy keymaps can contain both Cmd and Ctrl alternatives. Prefer the native
+/// effective binding; among equals the last wins. Application registration owns
+/// platform eligibility (Okena rejects Win-key assignments on Windows), while this
+/// formatter retains valid custom Ctrl on macOS and Super on Linux fallbacks.
 fn preferred_binding<'a>(
     bindings: impl DoubleEndedIterator<Item = &'a KeyBinding>,
     platform: ShortcutPlatform,

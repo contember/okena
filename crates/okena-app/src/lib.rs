@@ -36,3 +36,4 @@ pub mod terminal;
 pub mod theme;
 pub mod ui;
 pub mod views;
+pub mod window_root;

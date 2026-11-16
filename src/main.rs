@@ -18,11 +18,8 @@ mod smoke_tests;
 use okena_app::{settings, workspace};
 
 use gpui::*;
-#[cfg(not(target_os = "linux"))]
-use gpui_component::Root;
 use gpui_component::theme::{Theme as GpuiComponentTheme, ThemeMode as GpuiThemeMode};
-#[cfg(target_os = "linux")]
-use okena_app::simple_root::SimpleRoot as Root;
+use okena_app::window_root::new_root;
 
 use std::net::IpAddr;
 
@@ -933,7 +930,7 @@ fn main() {
                     true
                 });
 
-                cx.new(|cx| Root::new(okena, window, cx))
+                cx.new(|cx| new_root(okena, window, cx))
             },
         )
         .expect("Failed to create main window");

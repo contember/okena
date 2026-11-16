@@ -11,11 +11,11 @@ use super::{
     NewProject, NewWindow, OpenSettingsFile, Paste, Quit, ResetZoom, RestartDaemon, ReviewChanges,
     ScrollDown, ScrollUp, Search, SearchNext, SearchPrev, SendEscape, ShowAiProxyActivity,
     ShowBranchSwitcher, ShowCommandPalette, ShowContentSearch, ShowDiffViewer, ShowFileSearch,
-    ShowHookLog, ShowKeybindings, ShowLogConsole, ShowProfileManager, ShowProjectSwitcher,
-    ShowSessionManager, ShowSettings, ShowThemeSelector, ShowWhatsNew, SplitHorizontal,
-    SplitVertical, StartAllServices, StopAllServices, ToggleFullscreen, TogglePaneSwitcher,
-    ToggleProjectLayout, ToggleProjectVisibility, ToggleSidebar, ToggleSidebarAutoHide,
-    ToggleStatusLanes, ToggleUnread, ZoomIn, ZoomOut,
+    ShowHookLog, ShowKeybindings, ShowLogConsole, ShowPairingDialog, ShowProfileManager,
+    ShowProjectSwitcher, ShowSessionManager, ShowSettings, ShowThemeSelector, ShowWhatsNew,
+    SplitHorizontal, SplitVertical, StartAllServices, StopAllServices, ToggleFullscreen,
+    TogglePaneSwitcher, ToggleProjectLayout, ToggleProjectVisibility, ToggleSidebar,
+    ToggleSidebarAutoHide, ToggleStatusLanes, ToggleUnread, ZoomIn, ZoomOut,
 };
 
 /// Get human-readable descriptions for all actions
@@ -38,6 +38,15 @@ pub fn get_action_descriptions() -> HashMap<&'static str, ActionDescription> {
             description: "Collapse sidebar details for pinned, running and attention projects",
             category: "Global",
             factory: || Box::new(CollapseActiveProjects),
+        },
+    );
+    map.insert(
+        "ShowPairingDialog",
+        ActionDescription {
+            name: "Pair a Device",
+            description: "Open the device pairing dialog",
+            category: "Global",
+            factory: || Box::new(ShowPairingDialog),
         },
     );
     // Global actions

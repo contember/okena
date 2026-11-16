@@ -17,13 +17,10 @@
 //! caller spawns without bounds, or a slice 07 restore loads an entry with no
 //! recorded bounds), the OS picks a default position.
 
-#[cfg(target_os = "linux")]
-use crate::simple_root::SimpleRoot as Root;
 use crate::views::window::{WindowView, WindowViewEvent};
+use crate::window_root::new_root;
 use crate::workspace::state::{WindowBounds as PersistedWindowBounds, WindowId, WorkspaceData};
 use gpui::*;
-#[cfg(not(target_os = "linux"))]
-use gpui_component::Root;
 use std::collections::HashSet;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -457,7 +454,7 @@ impl Okena {
                     true
                 });
 
-                cx.new(|cx| Root::new(view, window, cx))
+                cx.new(|cx| new_root(view, window, cx))
             },
         );
 

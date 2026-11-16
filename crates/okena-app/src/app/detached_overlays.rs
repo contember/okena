@@ -7,10 +7,7 @@ use crate::views::overlays::detached_overlay::DetachedOverlayView;
 use gpui::*;
 use okena_ui::overlay::CloseEvent;
 
-#[cfg(target_os = "linux")]
-use crate::simple_root::SimpleRoot as Root;
-#[cfg(not(target_os = "linux"))]
-use gpui_component::Root;
+use crate::window_root::new_root;
 
 /// Open the given overlay entity in a fresh OS window with a thin chrome bar.
 ///
@@ -79,7 +76,7 @@ where
         move |window, cx| {
             let view =
                 cx.new(|cx| DetachedOverlayView::new(content.clone(), title.clone(), window, cx));
-            cx.new(|cx| Root::new(view, window, cx))
+            cx.new(|cx| new_root(view, window, cx))
         },
     )
     .ok();

@@ -6833,6 +6833,7 @@ dependencies = [
  "gpui-component",
  "okena-core",
  "okena-theme",
+ "serde",
  "smol",
 ]
 
