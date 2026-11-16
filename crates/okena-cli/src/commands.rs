@@ -1963,7 +1963,7 @@ pub fn cli_window_layout(
 pub fn cli_send(terminal: &str, text: &[String]) -> i32 {
     let text = text.join(" ");
     with_state_post(|state| {
-        let (_project_id, terminal_id) = resolve::resolve_terminal(state, terminal)?;
+        let terminal_id = resolve::resolve_terminal_id(state, terminal)?;
         Ok(serde_json::json!({
             "action": "send_text",
             "terminal_id": terminal_id,
@@ -1977,7 +1977,7 @@ pub fn cli_run(terminal: &str, command: &[String], wait: bool, timeout_secs: u64
     let command = command.join(" ");
     if !wait {
         return with_state_post(|state| {
-            let (_project_id, terminal_id) = resolve::resolve_terminal(state, terminal)?;
+            let terminal_id = resolve::resolve_terminal_id(state, terminal)?;
             Ok(serde_json::json!({
                 "action": "run_command",
                 "terminal_id": terminal_id,
@@ -2004,8 +2004,8 @@ pub fn cli_run(terminal: &str, command: &[String], wait: bool, timeout_secs: u64
             return 1;
         }
     };
-    let terminal_id = match resolve::resolve_terminal(&state, terminal) {
-        Ok((_project_id, tid)) => tid,
+    let terminal_id = match resolve::resolve_terminal_id(&state, terminal) {
+        Ok(tid) => tid,
         Err(e) => {
             eprintln!("{e}");
             return 1;
@@ -2823,7 +2823,7 @@ pub fn cli_key(terminal: &str, key: &str) -> i32 {
         }
     };
     with_state_post(|state| {
-        let (_project_id, terminal_id) = resolve::resolve_terminal(state, terminal)?;
+        let terminal_id = resolve::resolve_terminal_id(state, terminal)?;
         Ok(serde_json::json!({
             "action": "send_special_key",
             "terminal_id": terminal_id,
@@ -2848,8 +2848,8 @@ pub fn cli_read(terminal: &str, json_mode: bool) -> i32 {
             return 1;
         }
     };
-    let (_project_id, terminal_id) = match resolve::resolve_terminal(&state, terminal) {
-        Ok(v) => v,
+    let terminal_id = match resolve::resolve_terminal_id(&state, terminal) {
+        Ok(tid) => tid,
         Err(e) => {
             eprintln!("{e}");
             return 1;

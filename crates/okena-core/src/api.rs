@@ -69,6 +69,11 @@ pub struct StateResponse {
     #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
     pub claude_pr_links:
         std::collections::HashMap<String, Vec<crate::claude_remote::ApiClaudePrLink>>,
+    /// Every terminal in the daemon's registry, sorted: layout panes, panes no
+    /// layout lists any more (still addressable by id), service and hook
+    /// terminals. Runtime-only.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub live_terminal_ids: Vec<String>,
 }
 
 /// OS window bounds in screen pixels.
@@ -1818,6 +1823,7 @@ mod tests {
             claude_dialogs: Default::default(),
             claude_sessions: Vec::new(),
             claude_pr_links: Default::default(),
+            live_terminal_ids: Vec::new(),
         };
         let json = serde_json::to_string(&resp).unwrap();
         let parsed: StateResponse = serde_json::from_str(&json).unwrap();
@@ -1908,6 +1914,7 @@ mod tests {
 
         let empty = StateResponse {
             claude_pr_links: Default::default(),
+            live_terminal_ids: Vec::new(),
             ..state
         };
         let json = serde_json::to_value(&empty).unwrap();

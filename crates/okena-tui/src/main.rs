@@ -481,8 +481,8 @@ fn handle_connection_event(
         ConnectionEvent::StateReceived {
             state: new_state, ..
         } => {
-            client.set_remote_state(Some(new_state.clone()));
-            state.state = Some(new_state);
+            client.set_remote_state(Some((*new_state).clone()));
+            state.state = Some(*new_state);
         }
         ConnectionEvent::SettingsChanged { .. } => {}
         ConnectionEvent::SubscriptionMappings { mappings, .. } => {

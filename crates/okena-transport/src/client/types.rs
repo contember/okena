@@ -76,10 +76,11 @@ pub enum ConnectionEvent {
         connection_id: String,
         cert_fingerprint: Option<String>,
     },
-    /// Remote state snapshot received
+    /// Remote state snapshot received. Boxed: the snapshot dwarfs every
+    /// other variant (`clippy::large_enum_variant`).
     StateReceived {
         connection_id: String,
-        state: StateResponse,
+        state: Box<StateResponse>,
     },
     /// Daemon-authoritative settings snapshot changed.
     SettingsChanged {

@@ -86,7 +86,9 @@ absent after a daemon restart — and a change to it bumps `state_version`.
 `claude_dialogs` (terminal id → open dialog count), `claude_sessions`
 (terminals with a connected `claude`) and `claude_pr_links` (terminal id → the
 session's pull requests) are runtime-only too; see
-[Claude remote](claude-remote.md).
+[Claude remote](claude-remote.md). So is `live_terminal_ids`: every terminal in
+the daemon's registry, sorted (layout panes, panes no project layout lists any
+more, service and hook terminals); the CLI resolves a bare id against it.
 
 ```json
 {
