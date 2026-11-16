@@ -1288,6 +1288,16 @@ mod tests {
     }
 
     #[test]
+    fn startup_dialog_key_answers_the_channels_dialog_without_its_title() {
+        use ApiClaudeStartupDialog::Channels;
+        // A short pane scrolled the title off; only the options remain.
+        let on_confirm = "  ❯ 1. I am using this for local development\n    2. Exit";
+        assert_eq!(startup_dialog_key(Channels, on_confirm), Some("Enter"));
+        let on_exit = "    1. I am using this for local development\n  ❯ 2. Exit";
+        assert_eq!(startup_dialog_key(Channels, on_exit), Some("ArrowUp"));
+    }
+
+    #[test]
     fn startup_dialog_key_skips_a_screen_showing_another_dialog() {
         use ApiClaudeStartupDialog::{Channels, Trust};
         assert_eq!(startup_dialog_key(Trust, CHANNELS_ON_EXIT), None);
