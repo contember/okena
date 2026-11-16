@@ -39,6 +39,8 @@ description: Drive a running Okena terminal multiplexer from the `okena` CLI —
 - `okena key <term> <key>` — enter, esc, tab, up/down/left/right, home, end,
   pageup, pagedown, backspace, delete, or `ctrl-<a-z>` (e.g. ctrl-c, ctrl-l).
 - `okena read <term>` — the terminal's VISIBLE screen (not scrollback).
+- `okena read --scrollback <n> <term>` — the last n rows, scrollback included
+  (a prompt or dialog taller than the pane).
 
 ```bash
 okena run --wait okena:0 cargo test   # run, wait, exit with its status

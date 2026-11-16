@@ -6659,6 +6659,7 @@ mod tests {
                     &bridge_tx,
                     RemoteCommand::Action(ActionRequest::ReadContent {
                         terminal_id: "orphan".into(),
+                        scrollback: None,
                     }),
                     "ReadContent",
                 )
@@ -6667,6 +6668,55 @@ mod tests {
                     read,
                     CommandResult::Ok(Some(ref v)) if v["content"] == "still here"
                 ));
+
+                drop(bridge_tx);
+                handle.await.expect("loop task joins");
+            })
+            .await;
+    }
+
+    /// `read_content` with `scrollback` returns rows that scrolled off a
+    /// 24-row screen; without it only the screen.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn read_content_with_scrollback_reaches_rows_above_the_screen() {
+        let h = harness();
+        let terminal = Arc::new(Terminal::new(
+            "tall".to_string(),
+            TerminalSize::default(),
+            h.backend.transport(),
+            "/tmp".to_string(),
+        ));
+        let output: String = (1..=40).map(|n| format!("row {n}\r\n")).collect();
+        terminal.process_output(output.as_bytes());
+        h.terminals.lock().insert("tall".to_string(), terminal);
+        let (bridge_tx, bridge_rx) = bridge_channel();
+
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async move {
+                let handle = h.spawn_loop(bridge_rx);
+                let read = |scrollback| {
+                    request(
+                        &bridge_tx,
+                        RemoteCommand::Action(ActionRequest::ReadContent {
+                            terminal_id: "tall".into(),
+                            scrollback,
+                        }),
+                        "ReadContent",
+                    )
+                };
+                let content = |result: CommandResult| match result {
+                    CommandResult::Ok(Some(v)) => v["content"].as_str().unwrap().to_string(),
+                    other => panic!("expected Ok(Some), got {other:?}"),
+                };
+
+                let screen = content(read(None).await);
+                assert!(!screen.contains("row 10\n"), "{screen}");
+                assert!(screen.ends_with("row 40"), "{screen}");
+
+                let tail = content(read(Some(35)).await);
+                let expected: Vec<String> = (6..=40).map(|n| format!("row {n}")).collect();
+                assert_eq!(tail, expected.join("\n"));
 
                 drop(bridge_tx);
                 handle.await.expect("loop task joins");

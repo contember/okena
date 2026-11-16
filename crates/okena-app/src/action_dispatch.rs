@@ -646,8 +646,12 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
                 project_id: s(&project_id),
             }
         }
-        ActionRequest::ReadContent { terminal_id } => ActionRequest::ReadContent {
+        ActionRequest::ReadContent {
+            terminal_id,
+            scrollback,
+        } => ActionRequest::ReadContent {
             terminal_id: s(&terminal_id),
+            scrollback,
         },
         ActionRequest::UndoSoftClose { terminal_id } => ActionRequest::UndoSoftClose {
             terminal_id: s(&terminal_id),

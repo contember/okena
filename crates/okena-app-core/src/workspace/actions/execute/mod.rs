@@ -249,9 +249,10 @@ pub fn execute_action(
             project_id,
             terminal_id,
         } => project::dismiss_hook(ws, project_id, terminal_id, backend, terminals, cx),
-        ActionRequest::ReadContent { terminal_id } => {
-            terminal::read_content(ws, terminal_id, backend, terminals, settings)
-        }
+        ActionRequest::ReadContent {
+            terminal_id,
+            scrollback,
+        } => terminal::read_content(ws, terminal_id, scrollback, backend, terminals, settings),
         ActionRequest::ExportBuffer { terminal_id } => {
             terminal::export_buffer(terminal_id, backend)
         }

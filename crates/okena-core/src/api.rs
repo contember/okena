@@ -892,8 +892,12 @@ pub enum ActionRequest {
     RecordProjectActivity {
         project_id: String,
     },
+    /// The terminal's visible screen as `{"content": <string>}`, or with
+    /// `scrollback` its last that many rows of scrollback and screen.
     ReadContent {
         terminal_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scrollback: Option<u32>,
     },
     /// Capture a terminal's full scrollback buffer (tmux `capture-pane`). The
     /// daemon writes it to a temp file, reads it back, and returns the content
@@ -2063,6 +2067,7 @@ mod tests {
             },
             ActionRequest::ReadContent {
                 terminal_id: "t1".into(),
+                scrollback: Some(200),
             },
             ActionRequest::Resize {
                 terminal_id: "t1".into(),
