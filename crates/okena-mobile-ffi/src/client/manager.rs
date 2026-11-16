@@ -970,7 +970,7 @@ impl ConnectionManager {
                     } else {
                         state.fullscreen_terminal = None;
                     }
-                    *cache = Some(state);
+                    *cache = Some(*state);
                 }
                 ConnectionEvent::SettingsChanged { .. } => {}
                 ConnectionEvent::SubscriptionMappings { mappings, .. } => {
@@ -1060,6 +1060,7 @@ mod tests {
             claude_dialogs: Default::default(),
             claude_sessions: Vec::new(),
             claude_pr_links: Default::default(),
+            live_terminal_ids: Vec::new(),
         }
     }
 

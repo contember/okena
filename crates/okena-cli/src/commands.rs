@@ -1963,7 +1963,7 @@ pub fn cli_window_layout(
 pub fn cli_send(terminal: &str, text: &[String]) -> i32 {
     let text = text.join(" ");
     with_state_post(|state| {
-        let (_project_id, terminal_id) = resolve::resolve_terminal(state, terminal)?;
+        let terminal_id = resolve::resolve_terminal_id(state, terminal)?;
         Ok(serde_json::json!({
             "action": "send_text",
             "terminal_id": terminal_id,
@@ -1977,7 +1977,7 @@ pub fn cli_run(terminal: &str, command: &[String], wait: bool, timeout_secs: u64
     let command = command.join(" ");
     if !wait {
         return with_state_post(|state| {
-            let (_project_id, terminal_id) = resolve::resolve_terminal(state, terminal)?;
+            let terminal_id = resolve::resolve_terminal_id(state, terminal)?;
             Ok(serde_json::json!({
                 "action": "run_command",
                 "terminal_id": terminal_id,
@@ -2004,8 +2004,8 @@ pub fn cli_run(terminal: &str, command: &[String], wait: bool, timeout_secs: u64
             return 1;
         }
     };
-    let terminal_id = match resolve::resolve_terminal(&state, terminal) {
-        Ok((_project_id, tid)) => tid,
+    let terminal_id = match resolve::resolve_terminal_id(&state, terminal) {
+        Ok(tid) => tid,
         Err(e) => {
             eprintln!("{e}");
             return 1;
@@ -2823,7 +2823,7 @@ pub fn cli_key(terminal: &str, key: &str) -> i32 {
         }
     };
     with_state_post(|state| {
-        let (_project_id, terminal_id) = resolve::resolve_terminal(state, terminal)?;
+        let terminal_id = resolve::resolve_terminal_id(state, terminal)?;
         Ok(serde_json::json!({
             "action": "send_special_key",
             "terminal_id": terminal_id,
@@ -2832,8 +2832,8 @@ pub fn cli_key(terminal: &str, key: &str) -> i32 {
     })
 }
 
-/// `okena read <terminal> [--json]`
-pub fn cli_read(terminal: &str, json_mode: bool) -> i32 {
+/// `okena read <terminal> [--scrollback <n>] [--json]`
+pub fn cli_read(terminal: &str, scrollback: Option<std::num::NonZeroU32>, json_mode: bool) -> i32 {
     let token = match ensure_token() {
         Ok(t) => t,
         Err(e) => {
@@ -2848,14 +2848,18 @@ pub fn cli_read(terminal: &str, json_mode: bool) -> i32 {
             return 1;
         }
     };
-    let (_project_id, terminal_id) = match resolve::resolve_terminal(&state, terminal) {
-        Ok(v) => v,
+    let terminal_id = match resolve::resolve_terminal_id(&state, terminal) {
+        Ok(tid) => tid,
         Err(e) => {
             eprintln!("{e}");
             return 1;
         }
     };
-    let body = serde_json::json!({ "action": "read_content", "terminal_id": terminal_id });
+    let mut body = serde_json::json!({ "action": "read_content", "terminal_id": terminal_id });
+    // Only when asked: a daemon without the field rejects it, even as null.
+    if let Some(rows) = scrollback {
+        body["scrollback"] = rows.get().into();
+    }
     match api_action(&token, &body.to_string()) {
         Ok(resp) => {
             if json_mode {

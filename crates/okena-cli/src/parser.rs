@@ -168,10 +168,14 @@ pub enum Command {
         /// pagedown, backspace, delete, or a ctrl-<a-z> chord (e.g. ctrl-c, ctrl-l)
         key: String,
     },
-    /// Read the visible content of a terminal
+    /// Read the visible content of a terminal, or with --scrollback its last rows
     Read {
         /// Terminal address (id, project/name, or project:index)
         terminal: String,
+        /// Read the last N rows, scrollback included, instead of the visible
+        /// screen (for content taller than the pane)
+        #[arg(long, value_name = "N")]
+        scrollback: Option<std::num::NonZeroU32>,
         /// Output JSON instead of the default plain text
         #[arg(long)]
         json: bool,
@@ -977,6 +981,38 @@ mod tests {
             vec!["okena", "window", "layout", "grid", "--min-height", "tall"],
         ] {
             assert!(Cli::try_parse_from(&bad).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn read_takes_a_positive_scrollback_row_count() {
+        let cli = Cli::try_parse_from(["okena", "read", "--scrollback", "200", "p:0"]).unwrap();
+        let Command::Read {
+            terminal,
+            scrollback,
+            json,
+        } = cli.command
+        else {
+            panic!("expected read");
+        };
+        assert_eq!(
+            (terminal.as_str(), scrollback.map(|n| n.get()), json),
+            ("p:0", Some(200), false)
+        );
+
+        let Command::Read { scrollback, .. } = Cli::try_parse_from(["okena", "read", "p:0"])
+            .unwrap()
+            .command
+        else {
+            panic!("expected read");
+        };
+        assert_eq!(scrollback, None);
+
+        for bad in ["0", "-5", "many"] {
+            assert!(
+                Cli::try_parse_from(["okena", "read", "--scrollback", bad, "p:0"]).is_err(),
+                "{bad}"
+            );
         }
     }
 

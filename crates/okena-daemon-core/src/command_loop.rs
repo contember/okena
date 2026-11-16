@@ -4377,6 +4377,8 @@ pub async fn daemon_command_loop(
                         })
                         .collect()
                 };
+                let mut live_terminal_ids: Vec<String> = size_map.keys().cloned().collect();
+                live_terminal_ids.sort();
 
                 // Agent status is runtime-only and lives on the terminal
                 // registry, so gather it alongside the terminal sizes.
@@ -4457,6 +4459,7 @@ pub async fn daemon_command_loop(
                 resp.claude_dialogs = claude_dialogs;
                 resp.claude_sessions = claude_sessions;
                 resp.claude_pr_links = claude_pr_links;
+                resp.live_terminal_ids = live_terminal_ids;
 
                 // `match` (not `.expect`) so the daemon-core crate stays clean
                 // under `clippy::expect_used` had it been enabled — the serialize
@@ -6610,6 +6613,111 @@ mod tests {
                 assert!(resp.windows[0].active);
 
                 // Drop the sender so `recv` errors and the loop task joins.
+                drop(bridge_tx);
+                handle.await.expect("loop task joins");
+            })
+            .await;
+    }
+
+    /// A pane no project layout lists (its project was removed while the PTY
+    /// lived on) is still listed in the state and readable by id.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_terminal_outside_every_layout_is_listed_and_readable() {
+        let h = harness();
+        let terminal = Arc::new(Terminal::new(
+            "orphan".to_string(),
+            TerminalSize::default(),
+            h.backend.transport(),
+            "/tmp".to_string(),
+        ));
+        terminal.process_output(b"still here\r\n");
+        h.terminals.lock().insert("orphan".to_string(), terminal);
+        assert!(
+            h.workspace.lock().data().projects.iter().all(|p| p
+                .layout
+                .as_ref()
+                .and_then(|l| l.find_terminal_path("orphan"))
+                .is_none()),
+            "precondition: no layout lists the pane"
+        );
+        let (bridge_tx, bridge_rx) = bridge_channel();
+
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async move {
+                let handle = h.spawn_loop(bridge_rx);
+
+                let value = match request(&bridge_tx, RemoteCommand::GetState, "GetState").await {
+                    CommandResult::Ok(Some(v)) => v,
+                    other => panic!("expected Ok(Some), got {other:?}"),
+                };
+                let resp: StateResponse =
+                    serde_json::from_value(value).expect("deserialize StateResponse");
+                assert_eq!(resp.live_terminal_ids, vec!["orphan".to_string()]);
+
+                let read = request(
+                    &bridge_tx,
+                    RemoteCommand::Action(ActionRequest::ReadContent {
+                        terminal_id: "orphan".into(),
+                        scrollback: None,
+                    }),
+                    "ReadContent",
+                )
+                .await;
+                assert!(matches!(
+                    read,
+                    CommandResult::Ok(Some(ref v)) if v["content"] == "still here"
+                ));
+
+                drop(bridge_tx);
+                handle.await.expect("loop task joins");
+            })
+            .await;
+    }
+
+    /// `read_content` with `scrollback` returns rows that scrolled off a
+    /// 24-row screen; without it only the screen.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn read_content_with_scrollback_reaches_rows_above_the_screen() {
+        let h = harness();
+        let terminal = Arc::new(Terminal::new(
+            "tall".to_string(),
+            TerminalSize::default(),
+            h.backend.transport(),
+            "/tmp".to_string(),
+        ));
+        let output: String = (1..=40).map(|n| format!("row {n}\r\n")).collect();
+        terminal.process_output(output.as_bytes());
+        h.terminals.lock().insert("tall".to_string(), terminal);
+        let (bridge_tx, bridge_rx) = bridge_channel();
+
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async move {
+                let handle = h.spawn_loop(bridge_rx);
+                let read = |scrollback| {
+                    request(
+                        &bridge_tx,
+                        RemoteCommand::Action(ActionRequest::ReadContent {
+                            terminal_id: "tall".into(),
+                            scrollback,
+                        }),
+                        "ReadContent",
+                    )
+                };
+                let content = |result: CommandResult| match result {
+                    CommandResult::Ok(Some(v)) => v["content"].as_str().unwrap().to_string(),
+                    other => panic!("expected Ok(Some), got {other:?}"),
+                };
+
+                let screen = content(read(None).await);
+                assert!(!screen.contains("row 10\n"), "{screen}");
+                assert!(screen.ends_with("row 40"), "{screen}");
+
+                let tail = content(read(std::num::NonZeroU32::new(35)).await);
+                let expected: Vec<String> = (6..=40).map(|n| format!("row {n}")).collect();
+                assert_eq!(tail, expected.join("\n"));
+
                 drop(bridge_tx);
                 handle.await.expect("loop task joins");
             })

@@ -58,7 +58,7 @@ pub fn cli_ls(json_mode: bool) -> i32 {
 pub fn cli_show(terminal: &str, json_mode: bool) -> i32 {
     exit_code((|| {
         let (token, state) = connect()?;
-        let (_project_id, terminal_id) = resolve::resolve_terminal(&state, terminal)?;
+        let terminal_id = resolve::resolve_terminal_id(&state, terminal)?;
         let session = LabeledSession::new(&state, fetch_session(&token, &terminal_id)?);
         if json_mode {
             print_json(&session.to_json()?)
@@ -94,7 +94,7 @@ pub fn cli_find(session_id: &str, json_mode: bool) -> i32 {
 pub fn cli_subagents(terminal: &str, json_mode: bool) -> i32 {
     exit_code((|| {
         let (token, state) = connect()?;
-        let (_project_id, terminal_id) = resolve::resolve_terminal(&state, terminal)?;
+        let terminal_id = resolve::resolve_terminal_id(&state, terminal)?;
         let body = api_get(&terminal_path(&terminal_id, "/subagents"), &token)?;
         let list: ApiClaudeSubagentList =
             serde_json::from_str(&body).map_err(|e| format!("Invalid subagent list: {e}"))?;
@@ -127,7 +127,7 @@ pub fn cli_log(
         let cursor = cursor.map(LogCursor::parse).transpose()?;
         let before = before.map(LogCursor::parse).transpose()?;
         let (token, state) = connect()?;
-        let (_project_id, terminal_id) = resolve::resolve_terminal(&state, terminal)?;
+        let terminal_id = resolve::resolve_terminal_id(&state, terminal)?;
         let path = terminal_path(
             &terminal_id,
             &transcript_query(cursor.as_ref(), before.as_ref(), agent),
@@ -163,7 +163,7 @@ pub fn cli_log(
 pub fn cli_prompt(terminal: &str, session: Option<&str>, text: &[String]) -> i32 {
     exit_code((|| {
         let (token, state) = connect()?;
-        let (_project_id, terminal_id) = resolve::resolve_terminal(&state, terminal)?;
+        let terminal_id = resolve::resolve_terminal_id(&state, terminal)?;
         let delivery = send_prompt(&token, &terminal_id, text.join(" "), session)?;
         println!("{}", delivery_label(delivery));
         Ok(())
@@ -287,7 +287,7 @@ pub fn cli_answer(
     exit_code((|| {
         let decision = build_decision(decision, always, message, answers)?;
         let (token, state) = connect()?;
-        let (_project_id, terminal_id) = resolve::resolve_terminal(&state, terminal)?;
+        let terminal_id = resolve::resolve_terminal_id(&state, terminal)?;
         let path = terminal_path(&terminal_id, &format!("/dialogs/{}", encode(dialog)));
         api_post_json(&path, &token, &to_json(&decision)?)?;
         Ok(())
@@ -297,7 +297,7 @@ pub fn cli_answer(
 /// `okena claude interrupt <term>` — Escape, like the chat's Interrupt button.
 pub fn cli_interrupt(terminal: &str) -> i32 {
     with_state_post(|state| {
-        let (_project_id, terminal_id) = resolve::resolve_terminal(state, terminal)?;
+        let terminal_id = resolve::resolve_terminal_id(state, terminal)?;
         Ok(serde_json::json!({
             "action": "send_special_key",
             "terminal_id": terminal_id,

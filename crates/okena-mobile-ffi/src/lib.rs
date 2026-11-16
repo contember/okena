@@ -763,7 +763,13 @@ pub async fn run_command(
 #[uniffi::export(async_runtime = "tokio")]
 pub async fn read_content(conn_id: String, terminal_id: String) -> Result<String, MobileFfiError> {
     Ok(ConnectionManager::get()
-        .send_action_with_response(&conn_id, ActionRequest::ReadContent { terminal_id })
+        .send_action_with_response(
+            &conn_id,
+            ActionRequest::ReadContent {
+                terminal_id,
+                scrollback: None,
+            },
+        )
         .await?)
 }
 

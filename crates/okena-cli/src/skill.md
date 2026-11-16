@@ -25,6 +25,9 @@ description: Drive a running Okena terminal multiplexer from the `okena` CLI —
 - **Project**: id, case-insensitive name, or absolute path.
 - **Terminal**: a bare id, `project/name`, or `project:index` (DFS order, 0-based).
   `project/name` also accepts a terminal id (the id `term ls` shows for unnamed ones).
+  A bare id of a running pane that no layout lists (its project was removed) still
+  works for `read`, `send`, `run`, `key` and `claude show/subagents/log/prompt/answer/interrupt`;
+  project-scoped commands (`term rename/close/split`, …) refuse it.
 - **Window** (`--window`): `main`, a full id, or a unique id prefix.
 
 ## Drive a terminal (the loop)
@@ -36,6 +39,9 @@ description: Drive a running Okena terminal multiplexer from the `okena` CLI —
 - `okena key <term> <key>` — enter, esc, tab, up/down/left/right, home, end,
   pageup, pagedown, backspace, delete, or `ctrl-<a-z>` (e.g. ctrl-c, ctrl-l).
 - `okena read <term>` — the terminal's VISIBLE screen (not scrollback).
+- `okena read --scrollback <n> <term>` — the last n rows, scrollback included
+  (a prompt or dialog taller than the pane), counted from the last non-empty row.
+  A full-screen (alternate-screen) app has no scrollback: you get its screen.
 
 ```bash
 okena run --wait okena:0 cargo test   # run, wait, exit with its status

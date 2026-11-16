@@ -86,7 +86,9 @@ absent after a daemon restart — and a change to it bumps `state_version`.
 `claude_dialogs` (terminal id → open dialog count), `claude_sessions`
 (terminals with a connected `claude`) and `claude_pr_links` (terminal id → the
 session's pull requests) are runtime-only too; see
-[Claude remote](claude-remote.md).
+[Claude remote](claude-remote.md). So is `live_terminal_ids`: every terminal in
+the daemon's registry, sorted (layout panes, panes no project layout lists any
+more, service and hook terminals); the CLI resolves a bare id against it.
 
 ```json
 {
@@ -221,10 +223,15 @@ Split a pane at a layout path.
 
 #### `read_content`
 
-Get the visible terminal viewport as text.
+Get the visible terminal viewport as text. With `scrollback` (a row count,
+at least 1) it returns the last that many rows of scrollback and screen
+instead, counted from the last non-empty row; an alternate-screen app has no
+scrollback, so it returns that screen. Daemons that predate the field reject
+it with `422`.
 
 ```json
 { "action": "read_content", "terminal_id": "uuid" }
+{ "action": "read_content", "terminal_id": "uuid", "scrollback": 200 }
 ```
 
 **Response:**
