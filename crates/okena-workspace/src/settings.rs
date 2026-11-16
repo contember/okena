@@ -714,6 +714,12 @@ pub struct AppSettings {
     #[serde(default)]
     pub cap_unfocused_window_fps: bool,
 
+    /// When true, the overview drops unpinned projects that have no terminal
+    /// (e.g. after their last one closed). The sidebar still lists them, and
+    /// the per-window hidden set is left untouched.
+    #[serde(default)]
+    pub hide_projects_without_terminals: bool,
+
     /// Last bounds used by a detached overlay window. Restored on next open
     /// so the window doesn't reset to a small default each time.
     #[serde(default)]
@@ -868,6 +874,7 @@ impl Default for AppSettings {
             blame_visible: false,
             detached_overlays_by_default: false,
             cap_unfocused_window_fps: false,
+            hide_projects_without_terminals: false,
             detached_overlay_bounds: None,
             auto_update_enabled: default_auto_update_enabled(),
             enabled_extensions: HashSet::new(),
@@ -1672,6 +1679,19 @@ mod tests {
         let loaded: AppSettings =
             serde_json::from_str(r#"{"worktree":{"show_hidden_when_focused":true}}"#).unwrap();
         assert!(loaded.worktree.show_hidden_when_focused);
+    }
+
+    #[test]
+    fn hiding_projects_without_terminals_is_opt_in() {
+        assert!(!AppSettings::default().hide_projects_without_terminals);
+
+        // Older settings files have no key; they keep today's overview.
+        let loaded: AppSettings = serde_json::from_str("{}").unwrap();
+        assert!(!loaded.hide_projects_without_terminals);
+
+        let loaded: AppSettings =
+            serde_json::from_str(r#"{"hide_projects_without_terminals":true}"#).unwrap();
+        assert!(loaded.hide_projects_without_terminals);
     }
 
     #[test]

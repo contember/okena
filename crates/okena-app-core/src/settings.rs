@@ -182,6 +182,11 @@ impl SettingsState {
         bool
     );
     setting_setter!(set_cap_unfocused_window_fps, cap_unfocused_window_fps, bool);
+    setting_setter!(
+        set_hide_projects_without_terminals,
+        hide_projects_without_terminals,
+        bool
+    );
 
     /// Persist the most recent detached overlay window bounds.
     pub fn set_detached_overlay_bounds(
