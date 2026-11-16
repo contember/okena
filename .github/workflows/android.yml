@@ -47,7 +47,7 @@ concurrency:
 jobs:
   bundle:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 10
     defaults:
       run:
         working-directory: mobile/rn
@@ -92,9 +92,13 @@ jobs:
           printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/okena-upload.p12"
       - name: Install Rust targets
         run: rustup target add aarch64-linux-android x86_64-linux-android
+      # Saved from main only: branch copies pushed the repo past the 10 GB cache limit.
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: android-ndk28
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          # A cold run can hit the timeout after Rust is built; keep that work.
+          cache-on-failure: true
       - name: Install Android toolchain
         run: |
           sdkmanager 'platforms;android-36' 'build-tools;36.0.0' 'ndk;28.2.13676358' 'cmake;3.22.1'
@@ -102,19 +106,52 @@ jobs:
           cargo install cargo-ndk --version 4.1.2 --locked
       - name: Install JavaScript dependencies
         run: npm ci
-      - name: Check JavaScript
+      # The `ubrn` CLI compiles itself into node_modules on its first call (~2 min).
+      # Keep that target dir; `npm ci` stamps fresh mtimes, so pin the sources to
+      # an old date or cargo would rebuild the whole ubrn workspace anyway.
+      - name: Pin ubrn source mtimes
+        id: ubrn
         run: |
-          npm run typecheck
-          npm run lint
-          npm test -- --runInBand
+          find node_modules/uniffi-bindgen-react-native -path '*/target' -prune -o -exec touch -h -t 200001010000 {} +
+          echo "key=ubrn-${{ runner.os }}-$(node -p "require('./node_modules/uniffi-bindgen-react-native/package.json').version")-$(rustc -V | cut -d' ' -f2)" >> "$GITHUB_OUTPUT"
+      - name: Restore ubrn build
+        id: ubrn-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: mobile/rn/node_modules/uniffi-bindgen-react-native/target
+          key: ${{ steps.ubrn.outputs.key }}
+      # The NDK C++ builds (react-native-skia, the app, the FFI module) were most
+      # of the job. `job` eviction keeps only objects this run used.
+      - uses: hendrikmuhs/ccache-action@v1.2.25
+        with:
+          key: android-ndk28
+          max-size: 1G
+          evict-old-files: job
+          save: ${{ github.ref == 'refs/heads/main' }}
       - name: Build Rust and generate bindings
+        env:
+          # Smaller `ubrn` CLI build and cache. Step-level, so the rust-cache key stays put.
+          CARGO_PROFILE_DEV_DEBUG: "0"
         run: npm run ubrn:android
+      - name: Save ubrn build
+        if: ${{ github.ref == 'refs/heads/main' && steps.ubrn-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v4
+        with:
+          path: mobile/rn/node_modules/uniffi-bindgen-react-native/target
+          key: ${{ steps.ubrn.outputs.key }}
       - name: Build bundle and APK
         env:
           OKENA_UPLOAD_STORE_FILE: ${{ env.OKENA_SIGNED == 'true' && format('{0}/okena-upload.p12', runner.temp) || '' }}
           OKENA_UPLOAD_STORE_PASSWORD: ${{ env.OKENA_SIGNED == 'true' && secrets.ANDROID_UPLOAD_STORE_PASSWORD || '' }}
           OKENA_UPLOAD_KEY_ALIAS: ${{ env.OKENA_SIGNED == 'true' && secrets.ANDROID_UPLOAD_KEY_ALIAS || '' }}
           OKENA_UPLOAD_KEY_PASSWORD: ${{ env.OKENA_SIGNED == 'true' && secrets.ANDROID_UPLOAD_KEY_PASSWORD || '' }}
+          # CMake >= 3.17 reads these for every externalNativeBuild it configures.
+          CMAKE_C_COMPILER_LAUNCHER: ccache
+          CMAKE_CXX_COMPILER_LAUNCHER: ccache
+          # Gradle regenerates codegen headers right before compiling; keep direct mode on.
+          CCACHE_SLOPPINESS: include_file_mtime,include_file_ctime
+          # The NDK version pins the compiler; its file mtime is not stable across runners.
+          CCACHE_COMPILERCHECK: string:ndk-28.2.13676358
         run: |
           if [ -z "$OKENA_UPLOAD_STORE_FILE" ]; then
             unset OKENA_UPLOAD_STORE_FILE OKENA_UPLOAD_STORE_PASSWORD OKENA_UPLOAD_KEY_ALIAS OKENA_UPLOAD_KEY_PASSWORD

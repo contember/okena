@@ -43,7 +43,7 @@ concurrency:
 jobs:
   archive:
     runs-on: macos-26
-    timeout-minutes: 90
+    timeout-minutes: 10
     defaults:
       run:
         working-directory: mobile/rn
@@ -86,16 +86,53 @@ jobs:
           working-directory: mobile/rn
       - name: Install Rust target
         run: rustup target add aarch64-apple-ios
+      # Saved from main only: branch copies pushed the repo past the 10 GB cache limit.
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: ios
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          # A cold run can hit the timeout after Rust is built; keep that work.
+          cache-on-failure: true
       - name: Install JavaScript dependencies
         run: npm ci
+      # The `ubrn` CLI compiles itself into node_modules on its first call (~2.5 min).
+      # Keep that target dir; `npm ci` stamps fresh mtimes, so pin the sources to
+      # an old date or cargo would rebuild the whole ubrn workspace anyway.
+      - name: Pin ubrn source mtimes
+        id: ubrn
+        run: |
+          find node_modules/uniffi-bindgen-react-native -path '*/target' -prune -o -exec touch -h -t 200001010000 {} +
+          echo "key=ubrn-${{ runner.os }}-$(node -p "require('./node_modules/uniffi-bindgen-react-native/package.json').version")-$(rustc -V | cut -d' ' -f2)" >> "$GITHUB_OUTPUT"
+      - name: Restore ubrn build
+        id: ubrn-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: mobile/rn/node_modules/uniffi-bindgen-react-native/target
+          key: ${{ steps.ubrn.outputs.key }}
       - name: Build Rust and generate bindings
+        env:
+          # Smaller `ubrn` CLI build and cache. Step-level, so the rust-cache key stays put.
+          CARGO_PROFILE_DEV_DEBUG: "0"
         run: npm run ubrn:ios -- --no-sim
+      - name: Save ubrn build
+        if: ${{ github.ref == 'refs/heads/main' && steps.ubrn-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v4
+        with:
+          path: mobile/rn/node_modules/uniffi-bindgen-react-native/target
+          key: ${{ steps.ubrn.outputs.key }}
+      # The archive compiles React Native and its pods from source. React
+      # Native's own ccache hook (USE_CCACHE below) routes clang through ccache.
+      - uses: hendrikmuhs/ccache-action@v1.2.25
+        with:
+          key: ios
+          max-size: 1G
+          evict-old-files: job
+          save: ${{ github.ref == 'refs/heads/main' }}
       - name: Install pods
         id: pods
         working-directory: mobile/rn/ios
+        env:
+          USE_CCACHE: 1
         run: bundle exec pod install --deployment
       # A stale lock fails the job either way; this hands out the updated one to commit.
       - name: Regenerate stale Podfile.lock
@@ -110,6 +147,13 @@ jobs:
           path: mobile/rn/ios/Podfile.lock
       - name: Archive
         working-directory: mobile/rn/ios
+        env:
+          # React Native's clang wrapper points ccache at its own config file,
+          # which drops the cache_dir the ccache action configured.
+          CCACHE_DIR: ${{ github.workspace }}/.ccache
+          # The wrapper runs `$CCACHE_BINARY clang`; compiler invocations do not
+          # see the build setting of that name, so it must come from the env.
+          CCACHE_BINARY: ccache
         run: |
           xcodebuild archive -quiet \
             -workspace OkenaMobile.xcworkspace \
