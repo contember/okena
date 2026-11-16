@@ -137,11 +137,22 @@ pub struct WindowRepaintPacer<W, T> {
 #[derive(Debug)]
 pub struct PacedFrame<W, T> {
     now: Instant,
-    /// A flush presents only these pairs; a regular frame any pane.
-    only: Option<HashSet<(T, W)>>,
+    /// A flush presents only these pairs, each with the interval it was
+    /// deferred at; a regular frame any pane.
+    only: Option<HashMap<(T, W), Duration>>,
     presented_windows: HashSet<W>,
     presented: Vec<(T, W)>,
     deferred: Vec<((T, W), Duration)>,
+}
+
+impl<W: Eq + Hash, T: Eq + Hash> PacedFrame<W, T> {
+    /// In a flush, whether a pane of `terminal` was deferred at `interval`.
+    pub fn deferred_at(&self, terminal: &T, interval: Duration) -> bool {
+        self.only.as_ref().is_some_and(|only| {
+            only.iter()
+                .any(|((deferred, _), at)| deferred == terminal && *at == interval)
+        })
+    }
 }
 
 impl<W: Eq + Hash + Copy, T: Eq + Hash + Clone> WindowRepaintPacer<W, T> {
@@ -167,8 +178,8 @@ impl<W: Eq + Hash + Copy, T: Eq + Hash + Clone> WindowRepaintPacer<W, T> {
     /// A frame for the deferred pairs, and the terminals to present in it.
     pub fn start_flush(&mut self, now: Instant) -> (PacedFrame<W, T>, Vec<T>) {
         self.flush_deadline = None;
-        let only: HashSet<_> = std::mem::take(&mut self.deferred).into_keys().collect();
-        let terminals: HashSet<T> = only.iter().map(|(terminal, _)| terminal.clone()).collect();
+        let only = std::mem::take(&mut self.deferred);
+        let terminals: HashSet<T> = only.keys().map(|(terminal, _)| terminal.clone()).collect();
         let mut frame = self.frame(now);
         frame.only = Some(only);
         (frame, terminals.into_iter().collect())
@@ -186,7 +197,7 @@ impl<W: Eq + Hash + Copy, T: Eq + Hash + Clone> WindowRepaintPacer<W, T> {
     ) -> bool {
         if let Some(only) = &frame.only {
             match window {
-                Some(window) if only.contains(&(terminal.clone(), window)) => {}
+                Some(window) if only.contains_key(&(terminal.clone(), window)) => {}
                 _ => return false,
             }
         }
@@ -543,5 +554,34 @@ mod tests {
         );
         // Output that is no longer a one-line rewrite presents in every frame.
         assert_eq!(admit(&mut pacer, ms(start, 60), None), (true, None));
+    }
+
+    #[test]
+    fn a_flush_keeps_a_rewrite_at_its_interval_and_records_the_frame() {
+        const REWRITE: Duration = Duration::from_millis(40);
+        let mut pacer: WindowRepaintPacer<&'static str, &'static str> = WindowRepaintPacer::new();
+        let start = Instant::now();
+        let mut admit = |now: Instant, interval: Option<Duration>| {
+            let mut frame = pacer.frame(now);
+            let shown = pacer.admit(&mut frame, &"spinner", Some("w"), interval);
+            (shown, pacer.finish_frame(frame))
+        };
+        admit(start, Some(REWRITE));
+        assert_eq!(
+            admit(ms(start, 20), Some(REWRITE)),
+            (false, Some(ms(start, 40)))
+        );
+
+        let (mut frame, terminals) = pacer.start_flush(ms(start, 40));
+        assert_eq!(terminals, vec!["spinner"]);
+        assert!(frame.deferred_at(&"spinner", REWRITE));
+        assert!(!frame.deferred_at(&"spinner", INTERVAL));
+        assert!(pacer.admit(&mut frame, &"spinner", Some("w"), Some(REWRITE)));
+        assert_eq!(pacer.finish_frame(frame), None);
+
+        // The next tick measures from the flushed frame, not the one before it.
+        let mut frame = pacer.frame(ms(start, 41));
+        assert!(!pacer.admit(&mut frame, &"spinner", Some("w"), Some(REWRITE)));
+        assert_eq!(pacer.finish_frame(frame), Some(ms(start, 80)));
     }
 }

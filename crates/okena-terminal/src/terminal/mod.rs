@@ -293,6 +293,10 @@ pub struct Terminal {
     /// GPUI thread only.
     pub(super) prompt_jump_index: Mutex<Option<usize>>,
 
+    /// Cursor position at the previous `take_single_line_rewrite`. A rewrite
+    /// in place leaves the cursor where it was. Host reactor thread only.
+    pub(super) rewrite_cursor: Mutex<Option<alacritty_terminal::index::Point>>,
+
     /// Reverse index into the current list of prompts that produced a
     /// non-zero exit code (0 = newest failure). `Some` while the user is
     /// walking through failed commands with
@@ -557,6 +561,7 @@ impl Terminal {
             prompt_tracker: Mutex::new(PromptTracker::new()),
             command_finished_pending: AtomicBool::new(false),
             prompt_jump_index: Mutex::new(None),
+            rewrite_cursor: Mutex::new(None),
             failed_jump_index: Mutex::new(None),
             last_output_time: Arc::new(Mutex::new(Instant::now())),
             shell_pid: Mutex::new(None),

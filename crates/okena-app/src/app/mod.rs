@@ -1213,7 +1213,14 @@ impl Okena {
     fn flush_deferred_repaints(&mut self, activated: Option<WindowId>, cx: &mut Context<Self>) {
         let (frame, terminal_ids) = self.repaint_pacer.start_flush(Instant::now());
         if !terminal_ids.is_empty() {
-            self.present_paced_repaints(&terminal_ids, frame, activated, &HashSet::new(), cx);
+            // A rewrite deferred to its 25 FPS slot stays paced at it, so the
+            // flush records the frame and a later tick measures from it.
+            let rewrites = terminal_ids
+                .iter()
+                .filter(|id| frame.deferred_at(id, SINGLE_LINE_REWRITE_REPAINT_INTERVAL))
+                .cloned()
+                .collect();
+            self.present_paced_repaints(&terminal_ids, frame, activated, &rewrites, cx);
         }
     }
 

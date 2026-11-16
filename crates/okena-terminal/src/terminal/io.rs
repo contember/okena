@@ -1,5 +1,5 @@
 use alacritty_terminal::grid::Dimensions;
-use alacritty_terminal::term::{TermDamage, TermMode};
+use alacritty_terminal::term::{LineDamageBounds, TermDamage, TermMode};
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
@@ -126,14 +126,29 @@ impl Terminal {
         self.drain_pending_output();
     }
 
-    /// Whether the output parsed since the previous call changed at most one
-    /// visible line and did not scroll, as a spinner or progress line does.
-    /// Resets the emulator's damage; nothing else reads it.
+    /// Whether the output parsed since the previous call rewrote at most one
+    /// visible line in place, as a spinner or progress line does: nothing
+    /// scrolled and the cursor ends where it was. Text appended to a line moves
+    /// the cursor, so it does not count. Resets the emulator's damage; nothing
+    /// else reads it.
     pub fn take_single_line_rewrite(&self) -> bool {
         let mut term = self.term.lock();
+        let cursor = term.grid().cursor.point;
+        let previous = self.rewrite_cursor.lock().replace(cursor);
+        let display_offset = term.grid().display_offset();
+        // `damage()` always marks the cursor cell, so a TUI that draws its
+        // spinner elsewhere and parks the cursor would count two lines.
+        let cursor_cell = LineDamageBounds::new(
+            cursor.line.0.max(0) as usize + display_offset,
+            cursor.column.0,
+            cursor.column.0,
+        );
         let single_line = match term.damage() {
             TermDamage::Full => false,
-            TermDamage::Partial(lines) => lines.take(2).count() <= 1,
+            TermDamage::Partial(lines) => {
+                previous == Some(cursor)
+                    && lines.filter(|line| *line != cursor_cell).take(2).count() <= 1
+            }
         };
         term.reset_damage();
         single_line
