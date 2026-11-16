@@ -313,15 +313,18 @@ impl Okena {
         // Create workspace entity. The GUI is always a thin daemon client: the
         // daemon owns persistence + the instance lock and is the single writer,
         // so the GUI's `Workspace` is a pure mirror with no autosave.
-        let show_hidden_worktrees_when_focused = crate::settings::settings_entity(cx)
-            .read(cx)
-            .settings
-            .worktree
-            .show_hidden_when_focused;
+        let (show_hidden_worktrees_when_focused, hide_projects_without_terminals) = {
+            let settings = &crate::settings::settings_entity(cx).read(cx).settings;
+            (
+                settings.worktree.show_hidden_when_focused,
+                settings.hide_projects_without_terminals,
+            )
+        };
         let workspace = cx.new(|_cx| {
             let mut workspace = Workspace::new(workspace_data);
             workspace.seed_client_project_layouts(client_project_layouts);
             workspace.set_show_hidden_worktrees_when_focused(show_hidden_worktrees_when_focused);
+            workspace.set_hide_projects_without_terminals(hide_projects_without_terminals);
             workspace
         });
         cx.set_global(GlobalWorkspace(workspace.clone()));
@@ -451,16 +454,21 @@ impl Okena {
         })
         .detach();
 
-        // Keep the workspace's copy of `worktree.show_hidden_when_focused` in
-        // step with settings — both local edits and ones the daemon pushes —
-        // so every window's visible-project set follows the toggle live.
+        // Keep the workspace's copies of `worktree.show_hidden_when_focused`
+        // and `hide_projects_without_terminals` in step with settings — both
+        // local edits and ones the daemon pushes — so every window's
+        // visible-project set follows the toggles live.
         {
             let workspace = workspace.clone();
             let settings = crate::settings::settings_entity(cx);
             cx.observe(&settings, move |_this, settings, cx| {
-                let show = settings.read(cx).settings.worktree.show_hidden_when_focused;
+                let settings = &settings.read(cx).settings;
+                let show = settings.worktree.show_hidden_when_focused;
+                let hide_empty = settings.hide_projects_without_terminals;
                 workspace.update(cx, |ws, cx| {
-                    if ws.set_show_hidden_worktrees_when_focused(show) {
+                    let show_changed = ws.set_show_hidden_worktrees_when_focused(show);
+                    let hide_changed = ws.set_hide_projects_without_terminals(hide_empty);
+                    if show_changed || hide_changed {
                         cx.notify();
                     }
                 });

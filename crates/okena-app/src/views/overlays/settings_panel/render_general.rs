@@ -54,6 +54,12 @@ impl SettingsPanel {
                 "sidebar-show-agents", "Show Agents in Sidebar", s.sidebar.show_agents, true,
                 |state, val, cx| state.set_sidebar_show_agents(val, cx), cx,
             ))
+            .child(Self::render_toggle_with_desc(
+                "hide-projects-without-terminals", "Hide Projects Without Terminals",
+                "Unpinned projects leave the overview when their last terminal closes. The sidebar still lists them.",
+                s.hide_projects_without_terminals, true,
+                |state, val, cx| state.set_hide_projects_without_terminals(val, cx), cx,
+            ))
             .child(self.render_toggle(
                 "status-board", "Status Board", s.status_board.enabled, true,
                 |state, val, cx| state.set_status_board_enabled(val, cx), cx,

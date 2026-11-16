@@ -156,6 +156,7 @@ If the file contains invalid JSON, Okena recovers as many fields as possible and
 | `file_font_size` | float | `12.0` | Font size for file/diff viewer (8.0 - 24.0) |
 | `line_height` | float | `1.3` | Line height multiplier (1.0 - 3.0) |
 | `show_focused_border` | bool | `false` | Show a border around the focused terminal |
+| `hide_projects_without_terminals` | bool | `false` | Leave unpinned projects with no terminal out of the overview, e.g. once their last terminal closes. The sidebar still lists them, selecting one shows it with Start Terminal, and the per-window hidden set is unchanged. Desktop overview only |
 | `show_whats_new_after_update` | bool | `true` | On the first start after an update, post a one-time toast whose button opens What's New (also in the View menu on macOS, the title-bar menu, the About dialog and the command palette: *What's New*) |
 | `whats_new_seen_version` | string | *(absent)* | The last version the app recorded as seen. Written by the app on the first start, when it posts the toast after an update, and whenever What's New opens; omitted until then |
 
