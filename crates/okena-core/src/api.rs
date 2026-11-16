@@ -892,8 +892,13 @@ pub enum ActionRequest {
     RecordProjectActivity {
         project_id: String,
     },
+    /// The terminal's visible screen as `{"content": <string>}`, or with
+    /// `scrollback` its last that many rows of scrollback and screen.
     ReadContent {
         terminal_id: String,
+        /// Omitted when `None`: daemons that predate it reject the field.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scrollback: Option<std::num::NonZeroU32>,
     },
     /// Capture a terminal's full scrollback buffer (tmux `capture-pane`). The
     /// daemon writes it to a temp file, reads it back, and returns the content
@@ -2063,6 +2068,7 @@ mod tests {
             },
             ActionRequest::ReadContent {
                 terminal_id: "t1".into(),
+                scrollback: std::num::NonZeroU32::new(200),
             },
             ActionRequest::Resize {
                 terminal_id: "t1".into(),
@@ -2455,6 +2461,20 @@ mod tests {
             panic!("expected terminal");
         };
         assert_eq!(shell_type, ShellType::Default);
+    }
+
+    #[test]
+    fn read_content_omits_an_unset_scrollback_and_rejects_zero() {
+        let plain = ActionRequest::ReadContent {
+            terminal_id: "t1".into(),
+            scrollback: None,
+        };
+        assert_eq!(
+            serde_json::to_value(&plain).unwrap(),
+            serde_json::json!({ "action": "read_content", "terminal_id": "t1" })
+        );
+        let zero = r#"{"action":"read_content","terminal_id":"t1","scrollback":0}"#;
+        assert!(serde_json::from_str::<ActionRequest>(zero).is_err());
     }
 
     #[test]

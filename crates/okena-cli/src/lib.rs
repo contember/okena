@@ -371,7 +371,11 @@ fn dispatch(cli: Cli) -> i32 {
             command,
         } => commands::cli_run(&terminal, &command, wait, timeout),
         Command::Key { terminal, key } => commands::cli_key(&terminal, &key),
-        Command::Read { terminal, json } => commands::cli_read(&terminal, json),
+        Command::Read {
+            terminal,
+            scrollback,
+            json,
+        } => commands::cli_read(&terminal, scrollback, json),
 
         Command::Skill { cmd } => match cmd {
             SkillCmd::Show => commands::cli_skill_show(),

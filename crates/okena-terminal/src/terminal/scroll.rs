@@ -34,6 +34,12 @@ impl Terminal {
         self.with_content(screen_text)
     }
 
+    /// The last `count` rows of scrollback and screen as text, so content
+    /// taller than the pane reads in full. Trailing empty rows are cut first.
+    pub fn tail_text(&self, count: usize) -> String {
+        self.with_content(|term| tail_text(term, count))
+    }
+
     /// Scroll the terminal
     pub fn scroll(&self, delta: i32) {
         let mut term = self.term.lock();
@@ -98,21 +104,10 @@ impl Terminal {
 /// alacritty keeps a cell's zero-width marks beside `cell.c`, so the base char
 /// alone loses the accent of decomposed text.
 fn screen_text<T: EventListener>(term: &Term<T>) -> String {
-    let grid = term.grid();
-    let screen_lines = grid.screen_lines();
-    let cols = grid.columns();
-    let mut lines = Vec::with_capacity(screen_lines);
-
-    for row in 0..screen_lines as i32 {
-        let mut line = String::with_capacity(cols);
-        for col in 0..cols {
-            let cell = &grid[Point::new(Line(row), Column(col))];
-            line.push(cell.c);
-            line.extend(cell.zerowidth().into_iter().flatten());
-        }
-        let trimmed = line.trim_end().to_string();
-        lines.push(trimmed);
-    }
+    let screen_lines = term.grid().screen_lines();
+    let mut lines: Vec<String> = (0..screen_lines as i32)
+        .map(|row| row_text(term, Line(row)))
+        .collect();
 
     while lines.last().is_some_and(|l| l.is_empty()) {
         lines.pop();
@@ -121,9 +116,40 @@ fn screen_text<T: EventListener>(term: &Term<T>) -> String {
     lines.join("\n")
 }
 
+/// The last `count` rows of scrollback plus screen, ending at the last
+/// non-empty row.
+fn tail_text<T: EventListener>(term: &Term<T>, count: usize) -> String {
+    let top = term.grid().topmost_line();
+    let mut row = term.grid().bottommost_line();
+    let mut lines = Vec::new();
+    while row >= top && lines.len() < count {
+        let line = row_text(term, row);
+        if !(lines.is_empty() && line.is_empty()) {
+            lines.push(line);
+        }
+        row -= 1;
+    }
+    lines.reverse();
+    lines.join("\n")
+}
+
+/// One grid row as text, trailing blanks cut. Negative lines are scrollback.
+fn row_text<T: EventListener>(term: &Term<T>, row: Line) -> String {
+    let grid = term.grid();
+    let cols = grid.columns();
+    let mut line = String::with_capacity(cols);
+    for col in 0..cols {
+        let cell = &grid[Point::new(row, Column(col))];
+        line.push(cell.c);
+        line.extend(cell.zerowidth().into_iter().flatten());
+    }
+    line.truncate(line.trim_end().len());
+    line
+}
+
 #[cfg(test)]
 mod tests {
-    use super::screen_text;
+    use super::{screen_text, tail_text};
     use alacritty_terminal::event::{Event, EventListener};
     use alacritty_terminal::term::test::TermSize;
     use alacritty_terminal::term::{Config, Term};
@@ -135,11 +161,32 @@ mod tests {
         fn send_event(&self, _event: Event) {}
     }
 
-    fn screen(output: &str) -> String {
+    fn term_with(output: &str) -> Term<NoopListener> {
         let mut term = Term::new(Config::default(), &TermSize::new(10, 3), NoopListener);
         let mut processor: Processor = Processor::new();
         processor.advance(&mut term, output.as_bytes());
-        screen_text(&term)
+        term
+    }
+
+    fn screen(output: &str) -> String {
+        screen_text(&term_with(output))
+    }
+
+    #[test]
+    fn a_tail_read_reaches_rows_scrolled_off_the_screen() {
+        // Six rows through a three-row screen: 1-3 sit in scrollback.
+        let term = term_with("1\r\n2\r\n3\r\n4\r\n5\r\n6");
+        assert_eq!(screen_text(&term), "4\n5\n6");
+        assert_eq!(tail_text(&term, 5), "2\n3\n4\n5\n6");
+        // Asking for more than exists returns everything.
+        assert_eq!(tail_text(&term, 100), "1\n2\n3\n4\n5\n6");
+    }
+
+    #[test]
+    fn a_tail_read_counts_from_the_last_non_empty_row() {
+        // The cursor sits on an empty row below the output.
+        let term = term_with("1\r\n2\r\n3\r\n4\r\n");
+        assert_eq!(tail_text(&term, 2), "3\n4");
     }
 
     #[test]

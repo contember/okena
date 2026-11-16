@@ -325,12 +325,16 @@ pub(super) fn rename(
 pub(super) fn read_content(
     ws: &mut Workspace,
     terminal_id: String,
+    scrollback: Option<std::num::NonZeroU32>,
     backend: &dyn TerminalBackend,
     terminals: &TerminalsRegistry,
     settings: &AppSettings,
 ) -> ActionResult {
     with_ensured_terminal(ws, &terminal_id, backend, terminals, settings, |term| {
-        let content = term.visible_text();
+        let content = match scrollback {
+            Some(rows) => term.tail_text(usize::try_from(rows.get()).unwrap_or(usize::MAX)),
+            None => term.visible_text(),
+        };
         ActionResult::Ok(Some(serde_json::json!({"content": content})))
     })
 }

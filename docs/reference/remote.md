@@ -223,10 +223,15 @@ Split a pane at a layout path.
 
 #### `read_content`
 
-Get the visible terminal viewport as text.
+Get the visible terminal viewport as text. With `scrollback` (a row count,
+at least 1) it returns the last that many rows of scrollback and screen
+instead, counted from the last non-empty row; an alternate-screen app has no
+scrollback, so it returns that screen. Daemons that predate the field reject
+it with `422`.
 
 ```json
 { "action": "read_content", "terminal_id": "uuid" }
+{ "action": "read_content", "terminal_id": "uuid", "scrollback": 200 }
 ```
 
 **Response:**
