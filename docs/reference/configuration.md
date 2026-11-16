@@ -367,8 +367,10 @@ capture; **Text search** exits capture mode. Captured shortcuts never execute ac
 OS-reserved shortcuts may be intercepted by the operating system before Okena sees them.
 
 **Edit in keybindings.json** opens the active profile's file and closes the dialog.
-Reopen the dialog or use **Reload from disk** to apply external changes. These actions
-do not write the configuration. Use **Clean keybindings…**, then confirm **Clean keybindings** in the modal dialog, to
+If the file is missing, this explicit action creates it from the current custom
+overrides; opening an existing file does not rewrite it. Reopen the dialog or use
+**Reload from disk** to apply external changes. Loading and reloading are read-only.
+Use **Clean keybindings…**, then confirm **Clean keybindings** in the modal dialog, to
 remove redundant default entries and reformat the file explicitly. As with other
 saves, unrecognized JSON fields are omitted. Clean does not create a missing file.
 Cancel or closing the modal prompt leaves the file untouched. The same `gpui-component::AlertDialog` confirmation is used on Windows, macOS and

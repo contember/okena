@@ -602,7 +602,8 @@ pub fn load_keybindings() -> KeybindingConfig {
 }
 
 /// Persist only complete action overrides; empty arrays intentionally suppress defaults.
-pub fn save_keybindings_to_path(config: &KeybindingConfig, path: &Path) -> anyhow::Result<String> {
+#[cfg(test)]
+fn save_keybindings_to_path(config: &KeybindingConfig, path: &Path) -> anyhow::Result<String> {
     let content = serde_json::to_string_pretty(&config.overrides())?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -612,6 +613,7 @@ pub fn save_keybindings_to_path(config: &KeybindingConfig, path: &Path) -> anyho
 }
 
 /// Replace only after the complete new JSON has been written successfully.
+#[cfg(test)]
 fn write_keybindings_atomically(
     path: &Path,
     content: &str,
@@ -665,10 +667,6 @@ pub fn save_keybindings_if_unchanged(
     }
     write_conditionally(&path, &content, Some(expected.map(str::as_bytes)))?;
     Ok(content)
-}
-
-pub fn save_keybindings(config: &KeybindingConfig) -> anyhow::Result<String> {
-    save_keybindings_to_path(config, &get_keybindings_path())
 }
 
 #[cfg(test)]

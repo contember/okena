@@ -6,7 +6,7 @@ use gpui::*;
 use parking_lot::RwLock;
 
 pub use config::{
-    KeybindingConfig, get_keybindings_path, load_keybindings, parse_keybindings, save_keybindings,
+    KeybindingConfig, get_keybindings_path, load_keybindings, parse_keybindings,
     save_keybindings_if_unchanged,
 };
 pub use descriptions::get_action_descriptions;
@@ -114,7 +114,7 @@ pub fn keystroke_to_config_string(keystroke: &gpui::Keystroke) -> String {
     unparsed.replace("super-", "cmd-").replace("win-", "cmd-")
 }
 
-/// Reload a valid on-disk configuration and clean redundant default arrays.
+/// Reload a valid on-disk configuration without writing or reformatting the file.
 /// Failures preserve the current configuration and live keymap.
 pub fn refresh_keybindings_from_disk(cx: &mut App) -> anyhow::Result<Option<String>> {
     let path = get_keybindings_path();

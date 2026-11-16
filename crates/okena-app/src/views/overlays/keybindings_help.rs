@@ -63,7 +63,10 @@ pub struct KeybindingsHelp {
     activation_subscription: Option<Subscription>,
     held_keys: std::collections::HashSet<String>,
     disk_snapshot: Option<String>,
+    /// Configuration errors persist until a successful reload or save.
     file_error: Option<String>,
+    /// Transient shortcut validation must not replace configuration errors.
+    recording_error: Option<String>,
     rollback: Option<crate::keybindings::KeybindingConfig>,
 }
 
@@ -107,6 +110,7 @@ impl KeybindingsHelp {
             held_keys: Default::default(),
             disk_snapshot,
             file_error,
+            recording_error: None,
             rollback: None,
         }
     }
@@ -215,6 +219,7 @@ impl KeybindingsHelp {
     /// Start recording a keystroke for a specific binding
     fn start_recording(&mut self, action: String, entry_index: usize, cx: &mut Context<Self>) {
         self.clean_dialog_open = false;
+        self.recording_error = None;
         self.stop_search(cx);
         self.recording_generation += 1;
         self.editing = Some(EditingState {
@@ -392,6 +397,7 @@ impl KeybindingsHelp {
     fn cancel_recording(&mut self, cx: &mut Context<Self>) {
         self.recording_generation += 1;
         self.editing = None;
+        self.recording_error = None;
         self._chord_timer = None;
         self._interceptor = None;
         self.pending_conflict = None;
@@ -426,12 +432,12 @@ impl KeybindingsHelp {
                 editing.first_chord = None;
                 editing.waiting_for_chord = false;
             }
-            self.file_error =
+            self.recording_error =
                 Some("The Win key is reserved by Windows. Choose a shortcut without Win.".into());
             cx.notify();
             return;
         }
-        self.file_error = None;
+        self.recording_error = None;
 
         if editing.waiting_for_chord {
             // This is the second keystroke of a chord
@@ -1260,14 +1266,17 @@ impl Render for KeybindingsHelp {
                             ),
                         )
                     })
-                    .when(self.file_error.is_some(), |d| {
-                        d.child(
-                            div()
-                                .px(px(16.0))
-                                .text_color(rgb(t.error))
-                                .child(self.file_error.clone().unwrap_or_default()),
-                        )
-                    })
+                    .when_some(
+                        self.file_error.as_ref().or(self.recording_error.as_ref()),
+                        |d, error| {
+                            d.child(
+                                div()
+                                    .px(px(16.0))
+                                    .text_color(rgb(t.error))
+                                    .child(error.clone()),
+                            )
+                        },
+                    )
                     // Conflict/info banners
                     .child(div().when(!conflicts.is_empty(), |d| {
                         d.px(px(16.0))
@@ -1512,11 +1521,36 @@ mod capture_tests {
         }
     }
 
+    #[gpui::test]
+    fn recording_keeps_existing_file_errors(cx: &mut TestAppContext) {
+        let error = "Configuration changed on disk or is invalid. Reload from disk before editing.";
+        let window = cx.open_window(size(px(650.), px(700.)), |_, cx| Harness {
+            dialog: cx.new(|cx| KeybindingsHelp::with_snapshot(cx, None, Some(error.into()))),
+            actions: Default::default(),
+        });
+        window
+            .update(cx, |this, window, cx| {
+                this.dialog.update(cx, |dialog, cx| {
+                    dialog.start_recording("Quit".into(), 0, cx);
+                    dialog.handle_recorded_keystroke(
+                        &Keystroke::parse("ctrl-k").unwrap(),
+                        window,
+                        cx,
+                    );
+                    assert_eq!(dialog.file_error.as_deref(), Some(error));
+                    dialog.cancel_recording(cx);
+                    assert_eq!(dialog.file_error.as_deref(), Some(error));
+                });
+            })
+            .unwrap();
+    }
+
     #[cfg(target_os = "windows")]
     #[gpui::test]
     fn windows_recorder_rejects_win_without_saving(cx: &mut TestAppContext) {
+        let file_error = "Configuration changed on disk";
         let window = cx.open_window(size(px(650.), px(700.)), |_, cx| Harness {
-            dialog: cx.new(|cx| KeybindingsHelp::with_snapshot(cx, None, None)),
+            dialog: cx.new(|cx| KeybindingsHelp::with_snapshot(cx, None, Some(file_error.into()))),
             actions: Default::default(),
         });
         window
@@ -1530,7 +1564,7 @@ mod capture_tests {
                     );
                     assert!(
                         dialog
-                            .file_error
+                            .recording_error
                             .as_ref()
                             .unwrap()
                             .contains("Win key is reserved")
@@ -1549,6 +1583,15 @@ mod capture_tests {
                     assert!(dialog.editing.as_ref().unwrap().first_chord.is_none());
                     assert!(!dialog.editing.as_ref().unwrap().waiting_for_chord);
                     assert!(dialog.recording_generation > generation);
+                    assert_eq!(dialog.file_error.as_deref(), Some(file_error));
+
+                    dialog.handle_recorded_keystroke(
+                        &Keystroke::parse("ctrl-k").unwrap(),
+                        window,
+                        cx,
+                    );
+                    assert!(dialog.recording_error.is_none());
+                    assert_eq!(dialog.file_error.as_deref(), Some(file_error));
 
                     dialog.cancel_recording(cx);
                 });
