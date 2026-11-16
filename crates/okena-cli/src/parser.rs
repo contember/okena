@@ -168,14 +168,14 @@ pub enum Command {
         /// pagedown, backspace, delete, or a ctrl-<a-z> chord (e.g. ctrl-c, ctrl-l)
         key: String,
     },
-    /// Read the visible content of a terminal
+    /// Read the visible content of a terminal, or with --scrollback its last rows
     Read {
         /// Terminal address (id, project/name, or project:index)
         terminal: String,
         /// Read the last N rows, scrollback included, instead of the visible
         /// screen (for content taller than the pane)
-        #[arg(long, value_name = "N", value_parser = clap::value_parser!(u32).range(1..))]
-        scrollback: Option<u32>,
+        #[arg(long, value_name = "N")]
+        scrollback: Option<std::num::NonZeroU32>,
         /// Output JSON instead of the default plain text
         #[arg(long)]
         json: bool,
@@ -996,7 +996,7 @@ mod tests {
             panic!("expected read");
         };
         assert_eq!(
-            (terminal.as_str(), scrollback, json),
+            (terminal.as_str(), scrollback.map(|n| n.get()), json),
             ("p:0", Some(200), false)
         );
 

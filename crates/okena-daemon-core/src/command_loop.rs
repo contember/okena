@@ -6714,7 +6714,7 @@ mod tests {
                 assert!(!screen.contains("row 10\n"), "{screen}");
                 assert!(screen.ends_with("row 40"), "{screen}");
 
-                let tail = content(read(Some(35)).await);
+                let tail = content(read(std::num::NonZeroU32::new(35)).await);
                 let expected: Vec<String> = (6..=40).map(|n| format!("row {n}")).collect();
                 assert_eq!(tail, expected.join("\n"));
 

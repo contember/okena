@@ -2833,7 +2833,7 @@ pub fn cli_key(terminal: &str, key: &str) -> i32 {
 }
 
 /// `okena read <terminal> [--scrollback <n>] [--json]`
-pub fn cli_read(terminal: &str, scrollback: Option<u32>, json_mode: bool) -> i32 {
+pub fn cli_read(terminal: &str, scrollback: Option<std::num::NonZeroU32>, json_mode: bool) -> i32 {
     let token = match ensure_token() {
         Ok(t) => t,
         Err(e) => {
@@ -2858,7 +2858,7 @@ pub fn cli_read(terminal: &str, scrollback: Option<u32>, json_mode: bool) -> i32
     let mut body = serde_json::json!({ "action": "read_content", "terminal_id": terminal_id });
     // Only when asked: a daemon without the field rejects it, even as null.
     if let Some(rows) = scrollback {
-        body["scrollback"] = rows.into();
+        body["scrollback"] = rows.get().into();
     }
     match api_action(&token, &body.to_string()) {
         Ok(resp) => {
