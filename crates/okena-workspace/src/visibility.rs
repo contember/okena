@@ -22,10 +22,10 @@ use crate::state::{ProjectData, WindowState, WorkspaceData};
 /// - When the window has a folder filter, top-level projects are hidden and
 ///   only projects inside the filtered folder are shown. Focus override still
 ///   wins.
-/// - With `hide_projects_without_terminals`, the unfocused overview also drops
-///   projects with no terminal unless they are pinned or being created or
-///   closed. Each worktree is judged on its own. A focused project is shown
-///   regardless, so selecting it still offers Start Terminal.
+/// - With `hide_projects_without_terminals`, projects with no terminal are
+///   dropped unless they are pinned or being created. Each worktree is judged
+///   on its own. The focused project itself is always kept, so selecting it
+///   still offers Start Terminal; its empty siblings in a zoomed group are not.
 /// - Worktree children are grouped directly after their parent project.
 pub fn compute_visible_projects<'a>(
     data: &'a WorkspaceData,
@@ -146,8 +146,8 @@ pub fn compute_visible_projects<'a>(
 
     // Filtered before grouping so an orphaned worktree keeps its own
     // position, as it does when its parent is in the hidden set.
-    if hide_projects_without_terminals && focused.is_none() {
-        result.retain(|p| has_overview_presence(p));
+    if hide_projects_without_terminals {
+        result.retain(|p| has_overview_presence(p) || focused == Some(&p.id));
     }
 
     // Group worktree children right after their parent project.
@@ -189,9 +189,10 @@ pub fn compute_visible_projects<'a>(
 }
 
 /// Whether a project earns an overview column when projects without terminals
-/// are hidden: it has a terminal, is pinned, or shows creation/close progress.
+/// are hidden: it has a terminal, is pinned, or shows creation progress.
+/// Closing is not counted, so closing a hidden empty worktree does not pop it in.
 fn has_overview_presence(p: &ProjectData) -> bool {
-    p.layout.is_some() || p.pinned || p.is_creating || p.is_closing
+    p.layout.is_some() || p.pinned || p.is_creating
 }
 
 /// Push a project and its worktree children into the result list, respecting
@@ -434,6 +435,55 @@ mod tests {
                 .map(|p| p.id.as_str())
                 .collect();
         assert_eq!(visible, vec!["wt-active"]);
+    }
+
+    #[test]
+    fn hiding_projects_without_terminals_keeps_creation_progress() {
+        let mut creating = make_project("creating");
+        creating.layout = None;
+        creating.is_creating = true;
+        creating.creating_progress = Some("Checking out files 42%".to_string());
+        let mut closing = make_project("closing");
+        closing.layout = None;
+        closing.is_closing = true;
+        let data = make_data(vec![creating, closing], vec!["creating", "closing"], &[]);
+        let visible: Vec<&str> =
+            compute_visible_projects(&data, None, false, false, true, &WindowState::default())
+                .iter()
+                .map(|p| p.id.as_str())
+                .collect();
+        assert_eq!(visible, vec!["creating"]);
+    }
+
+    #[test]
+    fn zoomed_group_drops_empty_siblings_but_keeps_the_focused_project() {
+        let mut parent = make_project("parent");
+        parent.layout = None;
+        parent.worktree_ids = vec!["wt-active".to_string(), "wt-empty".to_string()];
+        let mut empty = make_wt("wt-empty", "parent");
+        empty.layout = None;
+        let data = make_data(
+            vec![parent, make_wt("wt-active", "parent"), empty],
+            vec!["parent"],
+            &[],
+        );
+        let focused = "parent".to_string();
+        let ids = |focused: &String, individual: bool| -> Vec<String> {
+            compute_visible_projects(
+                &data,
+                Some(focused),
+                individual,
+                false,
+                true,
+                &WindowState::default(),
+            )
+            .iter()
+            .map(|p| p.id.clone())
+            .collect()
+        };
+        assert_eq!(ids(&focused, false), vec!["parent", "wt-active"]);
+        assert_eq!(ids(&focused, true), vec!["parent"]);
+        assert_eq!(ids(&"wt-empty".to_string(), false), vec!["wt-empty"]);
     }
 
     #[test]
