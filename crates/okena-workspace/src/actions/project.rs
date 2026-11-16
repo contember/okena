@@ -313,32 +313,50 @@ impl Workspace {
                 .iter()
                 .map(|p| p.id.clone())
                 .collect();
-            let replacement = pick_focus_replacement(&visible_before, &visible_after, project_id);
-            if focus_manager.is_modal() {
-                // The toggle is driven from an open modal (the project
-                // switcher): the modal — not a terminal — holds keyboard
-                // focus. Refocusing a terminal now via focus_first_terminal_in
-                // /clear_focus would drop the Modal context, letting terminal
-                // panes steal keyboard focus from the switcher mid-navigation
-                // (the user then has to click to keep moving). Instead, rewrite
-                // the focus the modal restores when it closes.
-                match replacement {
-                    Some(next_id) => {
-                        if let Some(target) = self.first_terminal_target_in(&next_id) {
-                            focus_manager.redirect_modal_focus(Some(target));
-                        }
-                        // Replacement project has no terminal: leave the saved
-                        // focus as-is (matches focus_first_terminal_in's no-op).
-                    }
-                    None => focus_manager.redirect_modal_focus(None),
-                }
-            } else {
-                match replacement {
-                    Some(next_id) => self.focus_first_terminal_in(focus_manager, &next_id),
-                    None => focus_manager.clear_focus(),
-                }
-            }
+            self.redirect_focus_off_hidden_project(
+                focus_manager,
+                project_id,
+                &visible_before,
+                &visible_after,
+            );
             cx.notify();
+        }
+    }
+
+    /// Move focus off `project_id`, which just left the window's overview, to
+    /// its nearest neighbour that is still shown, or clear it when none is.
+    /// Otherwise keyboard shortcuts keep targeting a column that is gone.
+    pub(crate) fn redirect_focus_off_hidden_project(
+        &mut self,
+        focus_manager: &mut FocusManager,
+        project_id: &str,
+        visible_before: &[String],
+        visible_after: &[String],
+    ) {
+        let replacement = pick_focus_replacement(visible_before, visible_after, project_id);
+        if focus_manager.is_modal() {
+            // A modal is open (e.g. the project switcher driving the
+            // toggle): the modal — not a terminal — holds keyboard
+            // focus. Refocusing a terminal now via focus_first_terminal_in
+            // /clear_focus would drop the Modal context, letting terminal
+            // panes steal keyboard focus from the switcher mid-navigation
+            // (the user then has to click to keep moving). Instead, rewrite
+            // the focus the modal restores when it closes.
+            match replacement {
+                Some(next_id) => {
+                    if let Some(target) = self.first_terminal_target_in(&next_id) {
+                        focus_manager.redirect_modal_focus(Some(target));
+                    }
+                    // Replacement project has no terminal: leave the saved
+                    // focus as-is (matches focus_first_terminal_in's no-op).
+                }
+                None => focus_manager.redirect_modal_focus(None),
+            }
+        } else {
+            match replacement {
+                Some(next_id) => self.focus_first_terminal_in(focus_manager, &next_id),
+                None => focus_manager.clear_focus(),
+            }
         }
     }
 
