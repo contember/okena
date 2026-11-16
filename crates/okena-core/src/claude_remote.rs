@@ -69,18 +69,26 @@ impl ApiClaudeStartupDialog {
         })
     }
 
-    /// Whether the dialog's numbered options stand on their own lines. A short
-    /// pane scrolls the Channels title off while its options stay visible.
+    /// Whether each of the dialog's options stands on a line of its own (any
+    /// one spelling per option). A short pane scrolls the title off while the
+    /// options stay visible.
     fn options_on_screen(self, screen: &str) -> bool {
-        let options: &[&str] = match self {
-            Self::Trust => return false,
-            Self::Channels => &["1. I am using this for local development", "2. Exit"],
+        let options: &[&[&str]] = match self {
+            // Claude Code labels the cancel option by whether the folder's
+            // settings ask for permissions.
+            Self::Trust => &[
+                &["Yes, I trust this folder"],
+                &["No, exit", "No, continue without these permissions"],
+            ],
+            Self::Channels => &[&["1. I am using this for local development"], &["2. Exit"]],
         };
         let lines: Vec<&str> = screen
             .lines()
             .map(|line| line.trim().trim_start_matches('❯').trim_start())
             .collect();
-        options.iter().all(|option| lines.contains(option))
+        options
+            .iter()
+            .all(|spellings| spellings.iter().any(|option| lines.contains(option)))
     }
 
     /// The option that accepts the dialog.
@@ -395,6 +403,37 @@ mod tests {
             Some(ApiClaudeStartupDialog::Channels)
         );
         assert!(!ApiClaudeStartupDialog::Channels.confirm_selected(on_exit));
+    }
+
+    #[test]
+    fn the_trust_dialog_is_detected_from_its_options_without_the_title() {
+        // A short pane: the title and the folder path scrolled off.
+        let options_only =
+            " ❯ No, exit\n   Yes, I trust this folder\n\n Enter to confirm · Esc to cancel";
+        assert_eq!(
+            ApiClaudeStartupDialog::detect(options_only),
+            Some(ApiClaudeStartupDialog::Trust)
+        );
+        assert!(!ApiClaudeStartupDialog::Trust.confirm_selected(options_only));
+        // The cancel label when the folder's settings ask for permissions.
+        let with_permissions =
+            "   No, continue without these permissions\n ❯ Yes, I trust this folder";
+        assert_eq!(
+            ApiClaudeStartupDialog::detect(with_permissions),
+            Some(ApiClaudeStartupDialog::Trust)
+        );
+        assert!(ApiClaudeStartupDialog::Trust.confirm_selected(with_permissions));
+    }
+
+    #[test]
+    fn the_trust_options_need_both_lines_on_their_own() {
+        for screen in [
+            " ❯ No, exit",
+            "   Yes, I trust this folder",
+            "> answer \"Yes, I trust this folder\" or \"No, exit\"",
+        ] {
+            assert_eq!(ApiClaudeStartupDialog::detect(screen), None, "{screen}");
+        }
     }
 
     #[test]
