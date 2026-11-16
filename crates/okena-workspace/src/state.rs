@@ -2547,12 +2547,6 @@ impl Workspace {
         // the tree — see `reanchor_focus`.
         let last_seen = self.window_sync_generation.get(&window_id).copied();
         let anchor = self.capture_focus_anchor(focus_manager, last_seen);
-        // The focused project, if it still had a terminal on the tree this
-        // window last saw — see `refocus_off_project_without_terminals`.
-        let focused_project_with_terminal = focus_manager
-            .focused_terminal_state()
-            .map(|state| state.project_id)
-            .filter(|id| self.focus_reference_layout(id, last_seen).is_some());
 
         let before = self.project_layouts();
         let presentation_before = self.project_presentation();
@@ -2621,11 +2615,7 @@ impl Workspace {
         }
 
         self.reanchor_focus(focus_manager, anchor.as_ref());
-        self.refocus_off_project_without_terminals(
-            focus_manager,
-            window_id,
-            focused_project_with_terminal.as_deref(),
-        );
+        self.refocus_off_project_without_terminals(focus_manager, window_id, last_seen);
         self.apply_requested_fullscreen(focus_manager, window_id, cx);
 
         // Notify UI without bumping data_version (remote changes shouldn't trigger auto-save)
@@ -2789,14 +2779,14 @@ impl Workspace {
     /// terminal in this sync leaves the overview while this window's focus is
     /// still on it. Move focus to a neighbour, as hiding a project by hand does.
     ///
-    /// `had_terminal` is the focused project from before the sync, if it had a
-    /// terminal then. Focus deliberately placed on a project that was already
-    /// empty (a keyboard jump to a bookmark project) is left alone.
+    /// Only a project that still had a terminal on the tree this window last
+    /// saw (`last_seen`) qualifies, so focus deliberately placed on a project
+    /// that was already empty (a keyboard jump to a bookmark) is left alone.
     fn refocus_off_project_without_terminals(
         &mut self,
         focus_manager: &mut FocusManager,
         window_id: WindowId,
-        had_terminal: Option<&str>,
+        last_seen: Option<u64>,
     ) {
         if !self.hide_projects_without_terminals {
             return;
@@ -2804,7 +2794,7 @@ impl Workspace {
         let Some(project_id) = focus_manager
             .focused_terminal_state()
             .map(|state| state.project_id)
-            .filter(|id| Some(id.as_str()) == had_terminal)
+            .filter(|id| self.focus_reference_layout(id, last_seen).is_some())
         else {
             return;
         };
@@ -4890,6 +4880,51 @@ mod gpui_tests {
             focus_after_closing_last_terminal_of_p1(cx, true, &["p2"], true).as_deref(),
             Some("remote:c1:p1")
         );
+    }
+
+    #[gpui::test]
+    fn focus_moves_in_every_window_showing_the_hidden_project(cx: &mut gpui::TestAppContext) {
+        // The app applies one sync per window. The second window must still see
+        // that p1 had a terminal before it, though the first already applied it.
+        let mut data = make_workspace_data(vec![], vec![]);
+        let extra = data.spawn_extra_window(None);
+        let workspace = cx.new(|_| {
+            let mut ws = Workspace::new(data);
+            ws.set_hide_projects_without_terminals(true);
+            ws
+        });
+        let mut main_fm = crate::focus::FocusManager::new();
+        let mut extra_fm = crate::focus::FocusManager::new();
+        let sync = |main_fm: &mut crate::focus::FocusManager,
+                    extra_fm: &mut crate::focus::FocusManager,
+                    cx: &mut gpui::TestAppContext,
+                    p1: Option<ApiLayoutNode>| {
+            let snapshots = [snapshot_of_projects(&[
+                ("p1", p1),
+                ("p2", Some(api_terminal("t2"))),
+            ])];
+            workspace.update(cx, |ws: &mut Workspace, cx| {
+                ws.apply_remote_snapshot(&snapshots, WindowId::Main, main_fm, cx);
+                ws.apply_remote_snapshot(&snapshots, extra, extra_fm, cx);
+            });
+        };
+        sync(&mut main_fm, &mut extra_fm, cx, Some(api_terminal("t1")));
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            for id in ["remote:c1:p1", "remote:c1:p2"] {
+                ws.set_project_overview_visibility(&mut extra_fm, extra, id, true, cx);
+            }
+        });
+        main_fm.focus_terminal("remote:c1:p1".to_string(), vec![]);
+        extra_fm.focus_terminal("remote:c1:p1".to_string(), vec![]);
+
+        sync(&mut main_fm, &mut extra_fm, cx, None);
+
+        for fm in [&main_fm, &extra_fm] {
+            assert_eq!(
+                fm.focused_terminal_state().map(|f| f.project_id).as_deref(),
+                Some("remote:c1:p2")
+            );
+        }
     }
 
     #[gpui::test]
