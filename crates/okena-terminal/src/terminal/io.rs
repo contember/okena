@@ -1,5 +1,5 @@
 use alacritty_terminal::grid::Dimensions;
-use alacritty_terminal::term::TermMode;
+use alacritty_terminal::term::{TermDamage, TermMode};
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
@@ -124,6 +124,19 @@ impl Terminal {
     /// current when the frame is built without per-pane polling. GPUI thread only.
     pub fn process_pending_output(&self) {
         self.drain_pending_output();
+    }
+
+    /// Whether the output parsed since the previous call changed at most one
+    /// visible line and did not scroll, as a spinner or progress line does.
+    /// Resets the emulator's damage; nothing else reads it.
+    pub fn take_single_line_rewrite(&self) -> bool {
+        let mut term = self.term.lock();
+        let single_line = match term.damage() {
+            TermDamage::Full => false,
+            TermDamage::Partial(lines) => lines.take(2).count() <= 1,
+        };
+        term.reset_damage();
+        single_line
     }
 
     /// Drain all pending output and feed it into the terminal emulator.

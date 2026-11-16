@@ -120,21 +120,20 @@ impl<T: Eq + Hash> ActivityRepaintBatch<T> {
     }
 }
 
-/// Paces activity repaints of windows without OS focus to one frame per
-/// `interval`. A pane of a paced window that is not due is deferred as a
-/// `(terminal, window)` pair. The flush started at the returned deadline
-/// presents exactly those pairs, so a burst's last frame lands and no other
-/// pane repaints for it.
+/// Paces activity repaints of a window to one frame per interval, given per
+/// pane: an unfocused window under the FPS cap, or a pane that only rewrites
+/// one line. A pane that is not due is deferred as a `(terminal, window)`
+/// pair. The flush started at the returned deadline presents exactly those
+/// pairs, so a burst's last frame lands and no other pane repaints for it.
 #[derive(Debug)]
-pub struct UnfocusedWindowPacer<W, T> {
-    interval: Duration,
+pub struct WindowRepaintPacer<W, T> {
     last_presented: HashMap<W, Instant>,
-    deferred: HashSet<(T, W)>,
+    deferred: HashMap<(T, W), Duration>,
     flush_deadline: Option<Instant>,
 }
 
 /// The decisions of one activity frame, applied by
-/// [`UnfocusedWindowPacer::finish_frame`].
+/// [`WindowRepaintPacer::finish_frame`].
 #[derive(Debug)]
 pub struct PacedFrame<W, T> {
     now: Instant,
@@ -142,15 +141,14 @@ pub struct PacedFrame<W, T> {
     only: Option<HashSet<(T, W)>>,
     presented_windows: HashSet<W>,
     presented: Vec<(T, W)>,
-    deferred: Vec<(T, W)>,
+    deferred: Vec<((T, W), Duration)>,
 }
 
-impl<W: Eq + Hash + Copy, T: Eq + Hash + Clone> UnfocusedWindowPacer<W, T> {
-    pub fn new(interval: Duration) -> Self {
+impl<W: Eq + Hash + Copy, T: Eq + Hash + Clone> WindowRepaintPacer<W, T> {
+    pub fn new() -> Self {
         Self {
-            interval,
             last_presented: HashMap::new(),
-            deferred: HashSet::new(),
+            deferred: HashMap::new(),
             flush_deadline: None,
         }
     }
@@ -169,7 +167,7 @@ impl<W: Eq + Hash + Copy, T: Eq + Hash + Clone> UnfocusedWindowPacer<W, T> {
     /// A frame for the deferred pairs, and the terminals to present in it.
     pub fn start_flush(&mut self, now: Instant) -> (PacedFrame<W, T>, Vec<T>) {
         self.flush_deadline = None;
-        let only = std::mem::take(&mut self.deferred);
+        let only: HashSet<_> = std::mem::take(&mut self.deferred).into_keys().collect();
         let terminals: HashSet<T> = only.iter().map(|(terminal, _)| terminal.clone()).collect();
         let mut frame = self.frame(now);
         frame.only = Some(only);
@@ -177,13 +175,14 @@ impl<W: Eq + Hash + Copy, T: Eq + Hash + Clone> UnfocusedWindowPacer<W, T> {
     }
 
     /// Whether a pane of `terminal` shown in `window` repaints in `frame`.
-    /// `paced`: the window has no OS focus and the cap is on.
+    /// `interval`: the pane's window presents at most once per it; `None`
+    /// presents the pane in every frame.
     pub fn admit(
         &self,
         frame: &mut PacedFrame<W, T>,
         terminal: &T,
         window: Option<W>,
-        paced: bool,
+        interval: Option<Duration>,
     ) -> bool {
         if let Some(only) = &frame.only {
             match window {
@@ -194,11 +193,14 @@ impl<W: Eq + Hash + Copy, T: Eq + Hash + Clone> UnfocusedWindowPacer<W, T> {
         let Some(window) = window else {
             return true;
         };
-        if paced && !frame.presented_windows.contains(&window) && !self.is_due(window, frame.now) {
-            frame.deferred.push((terminal.clone(), window));
+        if let Some(interval) = interval
+            && !frame.presented_windows.contains(&window)
+            && !self.is_due(window, frame.now, interval)
+        {
+            frame.deferred.push(((terminal.clone(), window), interval));
             return false;
         }
-        if paced {
+        if interval.is_some() {
             frame.presented_windows.insert(window);
         }
         if !self.deferred.is_empty() {
@@ -220,10 +222,10 @@ impl<W: Eq + Hash + Copy, T: Eq + Hash + Clone> UnfocusedWindowPacer<W, T> {
         let due = self
             .deferred
             .iter()
-            .map(|(_, window)| {
+            .map(|((_, window), interval)| {
                 self.last_presented
                     .get(window)
-                    .map_or(frame.now, |last| *last + self.interval)
+                    .map_or(frame.now, |last| *last + *interval)
             })
             .min()?;
         if self.flush_deadline.is_some_and(|deadline| deadline <= due) {
@@ -240,19 +242,25 @@ impl<W: Eq + Hash + Copy, T: Eq + Hash + Clone> UnfocusedWindowPacer<W, T> {
 
     pub fn forget(&mut self, window: W) {
         self.last_presented.remove(&window);
-        self.deferred.retain(|(_, deferred)| *deferred != window);
+        self.deferred.retain(|(_, deferred), _| *deferred != window);
     }
 
-    fn is_due(&self, window: W, now: Instant) -> bool {
+    fn is_due(&self, window: W, now: Instant, interval: Duration) -> bool {
         self.last_presented
             .get(&window)
-            .is_none_or(|last| now.saturating_duration_since(*last) >= self.interval)
+            .is_none_or(|last| now.saturating_duration_since(*last) >= interval)
+    }
+}
+
+impl<W: Eq + Hash + Copy, T: Eq + Hash + Clone> Default for WindowRepaintPacer<W, T> {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{ActivityRepaintBatch, ActivityRepaintThrottle, UnfocusedWindowPacer};
+    use super::{ActivityRepaintBatch, ActivityRepaintThrottle, WindowRepaintPacer};
     use std::collections::HashSet;
     use std::time::{Duration, Instant};
 
@@ -338,7 +346,7 @@ mod tests {
     /// Run one regular frame over `panes` (terminal, window, paced); returns
     /// the panes that repainted and the flush deadline to arm.
     fn frame(
-        pacer: &mut UnfocusedWindowPacer<&'static str, &'static str>,
+        pacer: &mut WindowRepaintPacer<&'static str, &'static str>,
         now: Instant,
         panes: &[(&'static str, &'static str, bool)],
     ) -> (Vec<(&'static str, &'static str)>, Option<Instant>) {
@@ -346,7 +354,12 @@ mod tests {
         let shown = panes
             .iter()
             .filter(|(terminal, window, paced)| {
-                pacer.admit(&mut frame, terminal, Some(*window), *paced)
+                pacer.admit(
+                    &mut frame,
+                    terminal,
+                    Some(*window),
+                    paced.then_some(INTERVAL),
+                )
             })
             .map(|(terminal, window, _)| (*terminal, *window))
             .collect();
@@ -355,7 +368,7 @@ mod tests {
 
     /// Run the flush over every pane of the deferred terminals.
     fn flush(
-        pacer: &mut UnfocusedWindowPacer<&'static str, &'static str>,
+        pacer: &mut WindowRepaintPacer<&'static str, &'static str>,
         now: Instant,
         panes: &[(&'static str, &'static str, bool)],
     ) -> (Vec<(&'static str, &'static str)>, Option<Instant>) {
@@ -364,7 +377,12 @@ mod tests {
             .iter()
             .filter(|(terminal, _, _)| terminals.contains(terminal))
             .filter(|(terminal, window, paced)| {
-                pacer.admit(&mut frame, terminal, Some(*window), *paced)
+                pacer.admit(
+                    &mut frame,
+                    terminal,
+                    Some(*window),
+                    paced.then_some(INTERVAL),
+                )
             })
             .map(|(terminal, window, _)| (*terminal, *window))
             .collect();
@@ -373,7 +391,7 @@ mod tests {
 
     #[test]
     fn a_paced_window_presents_once_per_interval_and_its_last_frame_lands() {
-        let mut pacer = UnfocusedWindowPacer::new(INTERVAL);
+        let mut pacer = WindowRepaintPacer::new();
         let start = Instant::now();
         let pane = [("t", "a", true)];
 
@@ -402,7 +420,7 @@ mod tests {
 
     #[test]
     fn unpaced_panes_always_present_and_windows_pace_independently() {
-        let mut pacer = UnfocusedWindowPacer::new(INTERVAL);
+        let mut pacer = WindowRepaintPacer::new();
         let start = Instant::now();
         frame(&mut pacer, start, &[("t", "a", true)]);
 
@@ -417,7 +435,7 @@ mod tests {
 
     #[test]
     fn a_terminal_in_two_paced_windows_stops_repainting_once_its_frames_land() {
-        let mut pacer = UnfocusedWindowPacer::new(INTERVAL);
+        let mut pacer = WindowRepaintPacer::new();
         let start = Instant::now();
         let panes = [("t", "a", true), ("t", "b", true), ("t", "focused", false)];
         frame(&mut pacer, start, &[("other", "a", true)]);
@@ -437,7 +455,7 @@ mod tests {
 
     #[test]
     fn a_regular_frame_that_presents_a_deferred_pane_cancels_its_flush() {
-        let mut pacer = UnfocusedWindowPacer::new(INTERVAL);
+        let mut pacer = WindowRepaintPacer::new();
         let start = Instant::now();
         let pane = [("t", "a", true)];
         frame(&mut pacer, start, &pane);
@@ -453,7 +471,7 @@ mod tests {
 
     #[test]
     fn a_deferred_pane_presents_at_once_when_it_is_no_longer_paced() {
-        let mut pacer = UnfocusedWindowPacer::new(INTERVAL);
+        let mut pacer = WindowRepaintPacer::new();
         let start = Instant::now();
         frame(&mut pacer, start, &[("t", "a", true)]);
         frame(&mut pacer, ms(start, 20), &[("t", "a", true)]);
@@ -468,7 +486,7 @@ mod tests {
 
     #[test]
     fn an_earlier_deadline_supersedes_the_armed_flush() {
-        let mut pacer = UnfocusedWindowPacer::new(INTERVAL);
+        let mut pacer = WindowRepaintPacer::new();
         let start = Instant::now();
         frame(&mut pacer, ms(start, 50), &[("t", "late", true)]);
         frame(&mut pacer, start, &[("u", "early", true)]);
@@ -488,7 +506,7 @@ mod tests {
 
     #[test]
     fn a_forgotten_window_drops_its_deferred_panes() {
-        let mut pacer = UnfocusedWindowPacer::new(INTERVAL);
+        let mut pacer = WindowRepaintPacer::new();
         let start = Instant::now();
         frame(&mut pacer, start, &[("t", "a", true)]);
         frame(&mut pacer, ms(start, 20), &[("t", "a", true)]);
@@ -499,5 +517,31 @@ mod tests {
             flush(&mut pacer, ms(start, 100), &[("t", "a", true)]),
             (vec![], None)
         );
+    }
+
+    #[test]
+    fn each_pane_paces_its_window_at_its_own_interval() {
+        const REWRITE: Duration = Duration::from_millis(40);
+        let mut pacer = WindowRepaintPacer::new();
+        let start = Instant::now();
+        let admit = |pacer: &mut WindowRepaintPacer<&'static str, &'static str>,
+                     now: Instant,
+                     interval: Option<Duration>| {
+            let mut frame = pacer.frame(now);
+            let shown = pacer.admit(&mut frame, &"spinner", Some("focused"), interval);
+            (shown, pacer.finish_frame(frame))
+        };
+
+        assert_eq!(admit(&mut pacer, start, Some(REWRITE)), (true, None));
+        assert_eq!(
+            admit(&mut pacer, ms(start, 20), Some(REWRITE)),
+            (false, Some(ms(start, 40)))
+        );
+        assert_eq!(
+            admit(&mut pacer, ms(start, 40), Some(REWRITE)),
+            (true, None)
+        );
+        // Output that is no longer a one-line rewrite presents in every frame.
+        assert_eq!(admit(&mut pacer, ms(start, 60), None), (true, None));
     }
 }

@@ -8,6 +8,7 @@ mod osc;
 mod prompt_jump;
 mod resize_authority;
 mod scrollback;
+mod single_line_rewrite;
 mod snapshot_watermark;
 mod unread;
 mod url_detect;

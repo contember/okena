@@ -16,7 +16,7 @@ use crate::views::window::{
 use crate::workspace::state::{GlobalWorkspace, WindowId, Workspace, WorkspaceData};
 use gpui::*;
 use okena_ui::activity_repaint::{
-    ActivityRepaintBatch, ActivityRepaintThrottle, PacedFrame, UnfocusedWindowPacer,
+    ActivityRepaintBatch, ActivityRepaintThrottle, PacedFrame, WindowRepaintPacer,
 };
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -26,7 +26,7 @@ use std::time::{Duration, Instant};
 /// What every okena window is opened with before its own options.
 ///
 /// Okena paces frames itself: terminal activity in `present_paced_repaints`,
-/// unfocused windows through `UnfocusedWindowPacer`. GPUI Fast's own caps for
+/// unfocused windows and one-line rewrites through `WindowRepaintPacer`. GPUI Fast's own caps for
 /// inactive windows, low-power mode and thermal pressure are turned off, so a
 /// focused window keeps the cadence terminal output arrives at.
 pub fn base_window_options() -> WindowOptions {
@@ -49,6 +49,10 @@ const SIDEBAR_ACTIVITY_REPAINT_INTERVAL: Duration = Duration::from_millis(250);
 /// Terminal frame interval for windows without OS focus while
 /// `cap_unfocused_window_fps` is on (10 FPS).
 const UNFOCUSED_WINDOW_REPAINT_INTERVAL: Duration = Duration::from_millis(100);
+/// Terminal frame interval while a pane's output only rewrites one line in
+/// place, as a spinner or progress line does (25 FPS). The first frame of a
+/// burst and the echo of user input are not delayed.
+const SINGLE_LINE_REWRITE_REPAINT_INTERVAL: Duration = Duration::from_millis(40);
 
 #[derive(Default)]
 struct WindowLayoutSaveTracker {
@@ -238,8 +242,9 @@ pub struct Okena {
     /// indicators and activity ordering. Terminal panes retain their 20 ms path.
     sidebar_activity_repaints: ActivityRepaintThrottle,
     /// Paces terminal repaints of windows without OS focus while
-    /// `cap_unfocused_window_fps` is on, and holds the panes it deferred.
-    unfocused_window_pacer: UnfocusedWindowPacer<WindowId, String>,
+    /// `cap_unfocused_window_fps` is on and of panes that only rewrite one
+    /// line, and holds the panes it deferred.
+    repaint_pacer: WindowRepaintPacer<WindowId, String>,
     pending_title_repaints: title_repaints::PendingTitleRepaints<WindowId>,
     /// Sender handed to desktop-notification threads. When a user clicks an
     /// XDG notification, the thread sends a `NotificationJump` here and the
@@ -439,7 +444,7 @@ impl Okena {
             last_settings_sent: mirrored_settings(&crate::settings::settings(cx)),
             terminal_activity_repaints: ActivityRepaintBatch::default(),
             sidebar_activity_repaints: ActivityRepaintThrottle::default(),
-            unfocused_window_pacer: UnfocusedWindowPacer::new(UNFOCUSED_WINDOW_REPAINT_INTERVAL),
+            repaint_pacer: WindowRepaintPacer::new(),
             pending_title_repaints: Default::default(),
             notification_jump_tx,
             spawned_daemon,
@@ -1048,7 +1053,7 @@ impl Okena {
             .queue_activity(terminal_ids.iter().cloned(), input_response_ids);
         if !decision.immediate.is_empty() {
             let immediate_ids: Vec<_> = decision.immediate.into_iter().collect();
-            self.present_terminal_activity_repaints(&immediate_ids, cx);
+            self.present_terminal_activity_repaints(&immediate_ids, false, cx);
         }
         if !decision.start_timer {
             return;
@@ -1066,7 +1071,7 @@ impl Okena {
                             return false;
                         };
                         let terminal_ids: Vec<_> = terminal_ids.into_iter().collect();
-                        this.present_terminal_activity_repaints(&terminal_ids, cx);
+                        this.present_terminal_activity_repaints(&terminal_ids, true, cx);
                         true
                     })
                     .unwrap_or(false);
@@ -1078,22 +1083,41 @@ impl Okena {
         .detach();
     }
 
+    /// `pace_rewrites`: a sustained-activity frame, where panes that only
+    /// rewrite one line present at 25 FPS. Leading edges and input echoes don't.
     fn present_terminal_activity_repaints(
         &mut self,
         terminal_ids: &[String],
+        pace_rewrites: bool,
         cx: &mut Context<Self>,
     ) {
-        let frame = self.unfocused_window_pacer.frame(Instant::now());
-        self.present_paced_repaints(terminal_ids, frame, None, cx);
+        let rewrites: HashSet<String> = {
+            let registry = self.terminals.lock();
+            terminal_ids
+                .iter()
+                .filter(|terminal_id| {
+                    // Always taken, so the next frame sees only newer output.
+                    registry
+                        .get(*terminal_id)
+                        .is_some_and(|terminal| terminal.take_single_line_rewrite())
+                        && pace_rewrites
+                })
+                .cloned()
+                .collect()
+        };
+        let frame = self.repaint_pacer.frame(Instant::now());
+        self.present_paced_repaints(terminal_ids, frame, None, &rewrites, cx);
         self.queue_sidebar_activity_repaint(cx);
     }
 
-    /// `activated` names a window that just gained focus.
+    /// `activated` names a window that just gained focus. `rewrites`: terminals
+    /// whose output in this frame only rewrote one line.
     fn present_paced_repaints(
         &mut self,
         terminal_ids: &[String],
         mut frame: PacedFrame<WindowId, String>,
         activated: Option<WindowId>,
+        rewrites: &HashSet<String>,
         cx: &mut Context<Self>,
     ) {
         for terminal_id in terminal_ids {
@@ -1101,7 +1125,8 @@ impl Okena {
         }
 
         // Terminal content keeps the ~50 FPS activity cadence for interactive
-        // output, except in unfocused windows while the 10 FPS cap is on.
+        // output, except in unfocused windows while the 10 FPS cap is on and
+        // for one-line rewrites (25 FPS).
         let cap_unfocused = crate::settings::settings_entity(cx)
             .read(cx)
             .settings
@@ -1113,7 +1138,16 @@ impl Okena {
         } else {
             None
         };
-        let pacer = &self.unfocused_window_pacer;
+        let interval = |terminal_id: &String, window: Option<WindowId>| {
+            if cap_unfocused && window.is_some_and(|w| Some(w) != active_window) {
+                Some(UNFOCUSED_WINDOW_REPAINT_INTERVAL)
+            } else if rewrites.contains(terminal_id) {
+                Some(SINGLE_LINE_REWRITE_REPAINT_INTERVAL)
+            } else {
+                None
+            }
+        };
+        let pacer = &self.repaint_pacer;
         let repaint_stats = {
             let mut registry = content_pane_registry().lock();
             request_registered_content_pane_repaints(
@@ -1121,8 +1155,12 @@ impl Okena {
                 terminal_ids,
                 cx,
                 |terminal_id, window| {
-                    let paced = cap_unfocused && window.is_some_and(|w| Some(w) != active_window);
-                    pacer.admit(&mut frame, terminal_id, window, paced)
+                    pacer.admit(
+                        &mut frame,
+                        terminal_id,
+                        window,
+                        interval(terminal_id, window),
+                    )
                 },
             )
         };
@@ -1130,18 +1168,22 @@ impl Okena {
         // updates for inactive tabs that have no registered content pane.
         for view in std::iter::once(&self.main_window).chain(self.extra_windows.values()) {
             let window_id = view.read(cx).window_id();
-            let paced = cap_unfocused && Some(window_id) != active_window;
             let titles = self
                 .pending_title_repaints
                 .take_admitted(window_id, terminal_ids, |id| {
-                    pacer.admit(&mut frame, id, Some(window_id), paced)
+                    pacer.admit(
+                        &mut frame,
+                        id,
+                        Some(window_id),
+                        interval(id, Some(window_id)),
+                    )
                 });
             if !titles.is_empty() {
                 view.update(cx, |view, cx| view.refresh_terminal_titles(&titles, cx));
             }
         }
-        if let Some(deadline) = self.unfocused_window_pacer.finish_frame(frame) {
-            self.arm_unfocused_flush(deadline, cx);
+        if let Some(deadline) = self.repaint_pacer.finish_frame(frame) {
+            self.arm_deferred_flush(deadline, cx);
         }
         okena_core::render_probe::terminal_activity_frame(
             terminal_ids.len(),
@@ -1150,28 +1192,28 @@ impl Okena {
         );
     }
 
-    /// Present the deferred unfocused-window panes at `deadline`, unless a
+    /// Present the deferred panes at `deadline`, unless a
     /// timer with an earlier deadline or an activation flush took over.
-    fn arm_unfocused_flush(&mut self, deadline: Instant, cx: &mut Context<Self>) {
+    fn arm_deferred_flush(&mut self, deadline: Instant, cx: &mut Context<Self>) {
         cx.spawn(async move |this: WeakEntity<Self>, cx| {
             cx.background_executor()
                 .timer(deadline.saturating_duration_since(Instant::now()))
                 .await;
             let _ = this.update(cx, |this, cx| {
-                if this.unfocused_window_pacer.is_flush_current(deadline) {
-                    this.flush_unfocused_repaints(None, cx);
+                if this.repaint_pacer.is_flush_current(deadline) {
+                    this.flush_deferred_repaints(None, cx);
                 }
             });
         })
         .detach();
     }
 
-    /// Present every deferred unfocused-window pane now; one whose window is
+    /// Present every deferred pane now; one whose window is
     /// still not due is deferred again.
-    fn flush_unfocused_repaints(&mut self, activated: Option<WindowId>, cx: &mut Context<Self>) {
-        let (frame, terminal_ids) = self.unfocused_window_pacer.start_flush(Instant::now());
+    fn flush_deferred_repaints(&mut self, activated: Option<WindowId>, cx: &mut Context<Self>) {
+        let (frame, terminal_ids) = self.repaint_pacer.start_flush(Instant::now());
         if !terminal_ids.is_empty() {
-            self.present_paced_repaints(&terminal_ids, frame, activated, cx);
+            self.present_paced_repaints(&terminal_ids, frame, activated, &HashSet::new(), cx);
         }
     }
 

@@ -52,14 +52,16 @@ impl<W: Eq + Hash> PendingTitleRepaints<W> {
 #[cfg(test)]
 mod tests {
     use super::PendingTitleRepaints;
-    use okena_ui::activity_repaint::{ActivityRepaintBatch, UnfocusedWindowPacer};
+    use okena_ui::activity_repaint::{ActivityRepaintBatch, WindowRepaintPacer};
     use std::time::{Duration, Instant};
+
+    const UNFOCUSED: Duration = Duration::from_millis(100);
 
     #[test]
     fn title_only_burst_is_coalesced_and_background_trailing_update_lands() {
         let mut pending = PendingTitleRepaints::default();
         let mut batch = ActivityRepaintBatch::default();
-        let mut pacer = UnfocusedWindowPacer::new(Duration::from_millis(100));
+        let mut pacer = WindowRepaintPacer::new();
         let start = Instant::now();
         let ids = vec!["spinner".to_owned()];
         pending.queue([1, 2], &ids);
@@ -69,7 +71,12 @@ mod tests {
         for window in [1, 2] {
             assert_eq!(
                 pending.take_admitted(window, &ids, |id| {
-                    pacer.admit(&mut frame, id, Some(window), window == 2)
+                    pacer.admit(
+                        &mut frame,
+                        id,
+                        Some(window),
+                        (window == 2).then_some(UNFOCUSED),
+                    )
                 }),
                 ids
             );
@@ -88,14 +95,14 @@ mod tests {
         let mut frame = pacer.frame(start + Duration::from_millis(20));
         assert_eq!(
             pending.take_admitted(1, &scheduled, |id| {
-                pacer.admit(&mut frame, id, Some(1), false)
+                pacer.admit(&mut frame, id, Some(1), None)
             }),
             ids
         );
         assert!(
             pending
                 .take_admitted(2, &scheduled, |id| {
-                    pacer.admit(&mut frame, id, Some(2), true)
+                    pacer.admit(&mut frame, id, Some(2), Some(UNFOCUSED))
                 })
                 .is_empty()
         );
@@ -112,7 +119,7 @@ mod tests {
         );
         assert_eq!(
             pending.take_admitted(2, &trailing, |id| {
-                pacer.admit(&mut frame, id, Some(2), true)
+                pacer.admit(&mut frame, id, Some(2), Some(UNFOCUSED))
             }),
             ids
         );
@@ -142,16 +149,18 @@ mod tests {
     #[test]
     fn shared_content_frame_and_unpaced_flush_admit_pending_titles() {
         let mut pending = PendingTitleRepaints::default();
-        let mut pacer = UnfocusedWindowPacer::new(Duration::from_millis(100));
+        let mut pacer = WindowRepaintPacer::new();
         let start = Instant::now();
         let ids = vec!["spinner".to_owned()];
         let mut frame = pacer.frame(start);
         // Content already consumed this window's frame, but its title is allowed
         // in that same frame instead of being delayed by another interval.
-        assert!(pacer.admit(&mut frame, &ids[0], Some(1), true));
+        assert!(pacer.admit(&mut frame, &ids[0], Some(1), Some(UNFOCUSED)));
         pending.queue([1], &ids);
         assert_eq!(
-            pending.take_admitted(1, &ids, |id| { pacer.admit(&mut frame, id, Some(1), true) }),
+            pending.take_admitted(1, &ids, |id| {
+                pacer.admit(&mut frame, id, Some(1), Some(UNFOCUSED))
+            }),
             ids
         );
         assert!(pacer.finish_frame(frame).is_none());
@@ -159,7 +168,9 @@ mod tests {
         let mut frame = pacer.frame(start + Duration::from_millis(20));
         assert!(
             pending
-                .take_admitted(1, &ids, |id| { pacer.admit(&mut frame, id, Some(1), true) })
+                .take_admitted(1, &ids, |id| {
+                    pacer.admit(&mut frame, id, Some(1), Some(UNFOCUSED))
+                })
                 .is_empty()
         );
         assert!(pacer.finish_frame(frame).is_some());
@@ -167,7 +178,7 @@ mod tests {
         // Both activation and disabling the cap make this window unpaced.
         assert_eq!(
             pending.take_admitted(1, &deferred, |id| {
-                pacer.admit(&mut frame, id, Some(1), false)
+                pacer.admit(&mut frame, id, Some(1), None)
             }),
             ids
         );
