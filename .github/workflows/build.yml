@@ -19,7 +19,7 @@ env:
 
 jobs:
   # Runs on every push: Linux clippy + split gates. Tests run in `test`, in
-  # parallel: clippy metadata and test codegen share no build artifacts.
+  # parallel: clippy metadata and test codegen share few build artifacts.
   #
   # Rust caches are saved from main only. Branch copies of the multi-GB Linux
   # cache pushed the repo past GitHub's 10 GB cache limit, which evicted main's

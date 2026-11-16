@@ -43,7 +43,8 @@ concurrency:
 jobs:
   archive:
     runs-on: macos-26
-    timeout-minutes: 10
+    # A TestFlight upload adds export and upload on top of the archive.
+    timeout-minutes: ${{ inputs.upload && 30 || 10 }}
     defaults:
       run:
         working-directory: mobile/rn
@@ -91,8 +92,6 @@ jobs:
         with:
           shared-key: ios
           save-if: ${{ github.ref == 'refs/heads/main' }}
-          # A cold run can hit the timeout after Rust is built; keep that work.
-          cache-on-failure: true
       - name: Install JavaScript dependencies
         run: npm ci
       # The `ubrn` CLI compiles itself into node_modules on its first call (~2.5 min).
@@ -154,6 +153,9 @@ jobs:
           # The wrapper runs `$CCACHE_BINARY clang`; compiler invocations do not
           # see the build setting of that name, so it must come from the env.
           CCACHE_BINARY: ccache
+          # That config file also drops the action's compiler check; key on the
+          # selected Xcode's clang, not on the mtime of the /usr/bin shim.
+          CCACHE_COMPILERCHECK: "%compiler% --version"
         run: |
           xcodebuild archive -quiet \
             -workspace OkenaMobile.xcworkspace \

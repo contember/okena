@@ -97,8 +97,6 @@ jobs:
         with:
           shared-key: android-ndk28
           save-if: ${{ github.ref == 'refs/heads/main' }}
-          # A cold run can hit the timeout after Rust is built; keep that work.
-          cache-on-failure: true
       - name: Install Android toolchain
         run: |
           sdkmanager 'platforms;android-36' 'build-tools;36.0.0' 'ndk;28.2.13676358' 'cmake;3.22.1'
@@ -150,8 +148,9 @@ jobs:
           CMAKE_CXX_COMPILER_LAUNCHER: ccache
           # Gradle regenerates codegen headers right before compiling; keep direct mode on.
           CCACHE_SLOPPINESS: include_file_mtime,include_file_ctime
-          # The NDK version pins the compiler; its file mtime is not stable across runners.
-          CCACHE_COMPILERCHECK: string:ndk-28.2.13676358
+          # The NDK compiler's file mtime differs between runs, which made every call
+          # miss; hash its version output instead.
+          CCACHE_COMPILERCHECK: "%compiler% --version"
         run: |
           if [ -z "$OKENA_UPLOAD_STORE_FILE" ]; then
             unset OKENA_UPLOAD_STORE_FILE OKENA_UPLOAD_STORE_PASSWORD OKENA_UPLOAD_KEY_ALIAS OKENA_UPLOAD_KEY_PASSWORD
