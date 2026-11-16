@@ -62,8 +62,9 @@ workflow into the default branch before its manual dispatch is available in GitH
 For a signed release, run it manually on the branch to release, enable `signed`, and supply
 a `version_code` greater than every previous Play upload and automatic `main` build.
 Download the artifact named `okena-android-signed-<application_id>-<version_code>`.
-CI cross-compiles Rust, generates the native module, runs TypeScript/lint/Jest, builds the
-AAB/APK, runs Android lint, verifies 16 KB ELF/APK alignment, and checks the AAB signature.
+CI cross-compiles Rust, generates the native module, builds the AAB/APK, runs Android lint,
+verifies 16 KB ELF/APK alignment, and checks the AAB signature. TypeScript, lint and Jest run
+in the `mobile-rn` job of `.github/workflows/build.yml` on every push.
 
 Configure these repository secrets before requesting a signed build:
 
