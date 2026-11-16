@@ -72,6 +72,12 @@ pub(super) struct InputRepaintRequest {
     expires_at: Instant,
 }
 
+/// The cursor and the one line changed besides the cursor cell, if any.
+pub(super) type RewriteFrame = (
+    alacritty_terminal::index::Point,
+    Option<alacritty_terminal::term::LineDamageBounds>,
+);
+
 /// A terminal instance wrapping alacritty_terminal
 /// Terminal emulator state.
 ///
@@ -293,9 +299,10 @@ pub struct Terminal {
     /// GPUI thread only.
     pub(super) prompt_jump_index: Mutex<Option<usize>>,
 
-    /// Cursor position at the previous `take_single_line_rewrite`. A rewrite
-    /// in place leaves the cursor where it was. Host reactor thread only.
-    pub(super) rewrite_cursor: Mutex<Option<alacritty_terminal::index::Point>>,
+    /// The cursor and the one changed line at the previous
+    /// `take_single_line_rewrite`, or `None` when that output was not a
+    /// candidate rewrite. Host reactor thread only.
+    pub(super) previous_rewrite: Mutex<Option<RewriteFrame>>,
 
     /// Reverse index into the current list of prompts that produced a
     /// non-zero exit code (0 = newest failure). `Some` while the user is
@@ -561,7 +568,7 @@ impl Terminal {
             prompt_tracker: Mutex::new(PromptTracker::new()),
             command_finished_pending: AtomicBool::new(false),
             prompt_jump_index: Mutex::new(None),
-            rewrite_cursor: Mutex::new(None),
+            previous_rewrite: Mutex::new(None),
             failed_jump_index: Mutex::new(None),
             last_output_time: Arc::new(Mutex::new(Instant::now())),
             shell_pid: Mutex::new(None),

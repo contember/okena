@@ -145,13 +145,15 @@ pub struct PacedFrame<W, T> {
     deferred: Vec<((T, W), Duration)>,
 }
 
-impl<W: Eq + Hash, T: Eq + Hash> PacedFrame<W, T> {
-    /// In a flush, whether a pane of `terminal` was deferred at `interval`.
-    pub fn deferred_at(&self, terminal: &T, interval: Duration) -> bool {
-        self.only.as_ref().is_some_and(|only| {
-            only.iter()
-                .any(|((deferred, _), at)| deferred == terminal && *at == interval)
-        })
+impl<W: Eq + Hash + Copy, T: Eq + Hash + Clone> PacedFrame<W, T> {
+    /// In a flush, the panes that were deferred at `interval`.
+    pub fn deferred_at(&self, interval: Duration) -> HashSet<(T, W)> {
+        self.only
+            .iter()
+            .flatten()
+            .filter(|(_, at)| **at == interval)
+            .map(|(pair, _)| pair.clone())
+            .collect()
     }
 }
 
@@ -574,8 +576,11 @@ mod tests {
 
         let (mut frame, terminals) = pacer.start_flush(ms(start, 40));
         assert_eq!(terminals, vec!["spinner"]);
-        assert!(frame.deferred_at(&"spinner", REWRITE));
-        assert!(!frame.deferred_at(&"spinner", INTERVAL));
+        assert_eq!(
+            frame.deferred_at(REWRITE),
+            HashSet::from([("spinner", "w")])
+        );
+        assert!(frame.deferred_at(INTERVAL).is_empty());
         assert!(pacer.admit(&mut frame, &"spinner", Some("w"), Some(REWRITE)));
         assert_eq!(pacer.finish_frame(frame), None);
 

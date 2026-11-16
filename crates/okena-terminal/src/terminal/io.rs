@@ -126,15 +126,14 @@ impl Terminal {
         self.drain_pending_output();
     }
 
-    /// Whether the output parsed since the previous call rewrote at most one
-    /// visible line in place, as a spinner or progress line does: nothing
-    /// scrolled and the cursor ends where it was. Text appended to a line moves
-    /// the cursor, so it does not count. Resets the emulator's damage; nothing
-    /// else reads it.
+    /// Whether the output parsed since the previous call rewrote one visible
+    /// line in place, as a spinner or progress line does: nothing scrolled, the
+    /// cursor ends where it was, and the same span of the same line changed as
+    /// in the previous call. Streamed text changes a growing span, so it does
+    /// not count. Resets the emulator's damage; nothing else reads it.
     pub fn take_single_line_rewrite(&self) -> bool {
         let mut term = self.term.lock();
         let cursor = term.grid().cursor.point;
-        let previous = self.rewrite_cursor.lock().replace(cursor);
         let display_offset = term.grid().display_offset();
         // `damage()` always marks the cursor cell, so a TUI that draws its
         // spinner elsewhere and parks the cursor would count two lines.
@@ -143,14 +142,20 @@ impl Terminal {
             cursor.column.0,
             cursor.column.0,
         );
-        let single_line = match term.damage() {
-            TermDamage::Full => false,
+        let rewrite = match term.damage() {
+            TermDamage::Full => None,
             TermDamage::Partial(lines) => {
-                previous == Some(cursor)
-                    && lines.filter(|line| *line != cursor_cell).take(2).count() <= 1
+                let mut changed = lines.filter(|line| *line != cursor_cell);
+                match (changed.next(), changed.next()) {
+                    (line, None) => Some((cursor, line)),
+                    _ => None,
+                }
             }
         };
         term.reset_damage();
+        let mut previous = self.previous_rewrite.lock();
+        let single_line = rewrite.is_some() && *previous == rewrite;
+        *previous = rewrite;
         single_line
     }
 

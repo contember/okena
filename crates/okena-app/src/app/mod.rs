@@ -54,6 +54,25 @@ const UNFOCUSED_WINDOW_REPAINT_INTERVAL: Duration = Duration::from_millis(100);
 /// burst and the echo of user input are not delayed.
 const SINGLE_LINE_REWRITE_REPAINT_INTERVAL: Duration = Duration::from_millis(40);
 
+/// Panes paced as one-line rewrites in a frame.
+enum Rewrites {
+    /// A regular frame: terminals whose output since their last frame was one.
+    Terminals(HashSet<String>),
+    /// A flush: the panes that were deferred as one.
+    Panes(HashSet<(String, WindowId)>),
+}
+
+impl Rewrites {
+    fn contains(&self, terminal_id: &String, window: Option<WindowId>) -> bool {
+        match self {
+            Self::Terminals(terminals) => terminals.contains(terminal_id),
+            Self::Panes(panes) => {
+                window.is_some_and(|window| panes.contains(&(terminal_id.clone(), window)))
+            }
+        }
+    }
+}
+
 #[derive(Default)]
 struct WindowLayoutSaveTracker {
     pending: parking_lot::Mutex<usize>,
@@ -1106,18 +1125,24 @@ impl Okena {
                 .collect()
         };
         let frame = self.repaint_pacer.frame(Instant::now());
-        self.present_paced_repaints(terminal_ids, frame, None, &rewrites, cx);
+        self.present_paced_repaints(
+            terminal_ids,
+            frame,
+            None,
+            &Rewrites::Terminals(rewrites),
+            cx,
+        );
         self.queue_sidebar_activity_repaint(cx);
     }
 
-    /// `activated` names a window that just gained focus. `rewrites`: terminals
-    /// whose output in this frame only rewrote one line.
+    /// `activated` names a window that just gained focus. `rewrites`: panes
+    /// paced as one-line rewrites in this frame.
     fn present_paced_repaints(
         &mut self,
         terminal_ids: &[String],
         mut frame: PacedFrame<WindowId, String>,
         activated: Option<WindowId>,
-        rewrites: &HashSet<String>,
+        rewrites: &Rewrites,
         cx: &mut Context<Self>,
     ) {
         for terminal_id in terminal_ids {
@@ -1141,7 +1166,7 @@ impl Okena {
         let interval = |terminal_id: &String, window: Option<WindowId>| {
             if cap_unfocused && window.is_some_and(|w| Some(w) != active_window) {
                 Some(UNFOCUSED_WINDOW_REPAINT_INTERVAL)
-            } else if rewrites.contains(terminal_id) {
+            } else if rewrites.contains(terminal_id, window) {
                 Some(SINGLE_LINE_REWRITE_REPAINT_INTERVAL)
             } else {
                 None
@@ -1215,11 +1240,7 @@ impl Okena {
         if !terminal_ids.is_empty() {
             // A rewrite deferred to its 25 FPS slot stays paced at it, so the
             // flush records the frame and a later tick measures from it.
-            let rewrites = terminal_ids
-                .iter()
-                .filter(|id| frame.deferred_at(id, SINGLE_LINE_REWRITE_REPAINT_INTERVAL))
-                .cloned()
-                .collect();
+            let rewrites = Rewrites::Panes(frame.deferred_at(SINGLE_LINE_REWRITE_REPAINT_INTERVAL));
             self.present_paced_repaints(&terminal_ids, frame, activated, &rewrites, cx);
         }
     }
