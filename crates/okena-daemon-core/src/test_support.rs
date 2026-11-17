@@ -5,6 +5,7 @@ use okena_terminal::backend::TerminalBackend;
 use okena_terminal::shell_config::ShellType;
 use okena_terminal::terminal::TerminalTransport;
 use okena_workspace::persistence::AppSettings;
+use parking_lot::Mutex;
 
 pub(crate) struct StubTransport;
 
@@ -37,6 +38,55 @@ impl TerminalBackend for StubBackend {
     }
 
     fn kill(&self, _terminal_id: &str) {}
+
+    fn capture_buffer(&self, _terminal_id: &str) -> Option<std::path::PathBuf> {
+        None
+    }
+
+    fn supports_buffer_capture(&self) -> bool {
+        false
+    }
+
+    fn is_remote(&self) -> bool {
+        false
+    }
+
+    fn get_shell_pid(&self, _terminal_id: &str) -> Option<u32> {
+        None
+    }
+
+    fn get_service_pids(&self, _terminal_id: &str) -> Vec<u32> {
+        Vec::new()
+    }
+}
+
+/// `TerminalBackend` that records every `kill`ed id so a test can assert a
+/// removed project's PTYs are torn down.
+pub(crate) struct RecordingBackend {
+    pub(crate) killed: Arc<Mutex<Vec<String>>>,
+}
+
+impl TerminalBackend for RecordingBackend {
+    fn transport(&self) -> Arc<dyn TerminalTransport> {
+        Arc::new(StubTransport)
+    }
+
+    fn create_terminal(&self, _cwd: &str, _shell: Option<&ShellType>) -> anyhow::Result<String> {
+        anyhow::bail!("recording backend: create_terminal not supported")
+    }
+
+    fn reconnect_terminal(
+        &self,
+        _terminal_id: &str,
+        _cwd: &str,
+        _shell: Option<&ShellType>,
+    ) -> anyhow::Result<String> {
+        anyhow::bail!("recording backend: reconnect_terminal not supported")
+    }
+
+    fn kill(&self, terminal_id: &str) {
+        self.killed.lock().push(terminal_id.to_string());
+    }
 
     fn capture_buffer(&self, _terminal_id: &str) -> Option<std::path::PathBuf> {
         None

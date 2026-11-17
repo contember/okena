@@ -1008,9 +1008,10 @@ impl Workspace {
         }
     }
 
-    /// Remove a stale worktree project whose directory no longer exists.
+    /// Remove a stale worktree project whose directory no longer exists, and
+    /// queue its terminals for killing as `delete_project` does.
     /// Does NOT fire hooks or call git worktree remove (the directory is already gone).
-    pub fn remove_stale_worktree(&mut self, project_id: &str) {
+    pub fn remove_stale_worktree(&mut self, project_id: &str, cx: &mut impl WorkspaceCx) {
         // Skip projects that are being actively managed (hook running, being created, etc.)
         if self.lifecycle.is_closing(project_id) || self.lifecycle.is_creating(project_id) {
             return;
@@ -1026,6 +1027,7 @@ impl Workspace {
             return;
         }
 
+        self.queue_project_terminal_kills(project_id, cx);
         self.data.projects.retain(|p| p.id != project_id);
         self.data.project_order.retain(|id| id != project_id);
         for folder in &mut self.data.folders {
@@ -1042,7 +1044,8 @@ impl Workspace {
         // (hidden set + widths map on main + every extra). Same fan-out as
         // the primary `delete_project` path.
         self.data.delete_project_scrub_all_windows(project_id);
-        // Note: caller is responsible for calling notify_data
+        // Note: caller is responsible for calling notify_data and draining
+        // the queued terminal kills.
     }
 
     /// Gather the data needed for quick worktree creation without blocking.
