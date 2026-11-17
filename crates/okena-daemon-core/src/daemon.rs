@@ -730,6 +730,8 @@ impl DaemonCore {
             // to run in the GUI, which no longer owns any of these projects.
             tokio::task::spawn_local(crate::worktree_stale_sweep::run_worktree_stale_sweep(
                 reactor.workspace.clone(),
+                backend.clone(),
+                terminals.clone(),
                 reactor.workspace_tick.clone(),
                 reactor.hook_runner.clone(),
                 reactor.hook_monitor.clone(),

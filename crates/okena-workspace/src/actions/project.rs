@@ -1253,31 +1253,7 @@ impl Workspace {
         global_hooks: Option<&HooksConfig>,
         cx: &mut impl WorkspaceCx,
     ) {
-        // Queue all project terminals for killing before removing state.
-        // Okena (which owns PtyManager) drains this queue via observer.
-        if let Some(project) = self.project(project_id) {
-            let hook_terminal_ids: Vec<String> = project.hook_terminals.keys().cloned().collect();
-            if let Some(monitor) = cx.hook_monitor() {
-                for terminal_id in &hook_terminal_ids {
-                    monitor.cancel_by_terminal_id(terminal_id);
-                }
-            }
-            let mut kill_ids: Vec<String> = Vec::new();
-            if let Some(layout) = &project.layout {
-                kill_ids.extend(layout.collect_terminal_ids());
-            }
-            kill_ids.extend(hook_terminal_ids);
-            kill_ids.extend(project.service_terminals.values().cloned());
-            self.queue_terminal_kills(kill_ids);
-        }
-
-        // Soft-closed terminals are no longer in the layout but their PTY is
-        // still alive waiting out the grace window — kill them too and drop the
-        // pending records so the grace timer can't fire against a deleted project.
-        let soft_closed = self.drain_pending_closes_for_project(project_id);
-        if !soft_closed.is_empty() {
-            self.queue_terminal_kills(soft_closed);
-        }
+        self.queue_project_terminal_kills(project_id, cx);
 
         // Capture project info before removal for the hook
         let folder = self.folder_for_project_or_parent(project_id);
@@ -1354,6 +1330,39 @@ impl Workspace {
                 global_hooks,
                 monitor.as_ref(),
             );
+        }
+    }
+
+    /// Queue every terminal the project owns for killing, before its row is
+    /// removed. The PTY owner (the daemon, or the GUI's observer) drains the
+    /// queue; a row removed without this leaves its PTYs running unreachable.
+    pub(crate) fn queue_project_terminal_kills(
+        &mut self,
+        project_id: &str,
+        cx: &mut impl WorkspaceCx,
+    ) {
+        if let Some(project) = self.project(project_id) {
+            let hook_terminal_ids: Vec<String> = project.hook_terminals.keys().cloned().collect();
+            if let Some(monitor) = cx.hook_monitor() {
+                for terminal_id in &hook_terminal_ids {
+                    monitor.cancel_by_terminal_id(terminal_id);
+                }
+            }
+            let mut kill_ids: Vec<String> = Vec::new();
+            if let Some(layout) = &project.layout {
+                kill_ids.extend(layout.collect_terminal_ids());
+            }
+            kill_ids.extend(hook_terminal_ids);
+            kill_ids.extend(project.service_terminals.values().cloned());
+            self.queue_terminal_kills(kill_ids);
+        }
+
+        // Soft-closed terminals are no longer in the layout but their PTY is
+        // still alive waiting out the grace window — kill them too and drop the
+        // pending records so the grace timer can't fire against a deleted project.
+        let soft_closed = self.drain_pending_closes_for_project(project_id);
+        if !soft_closed.is_empty() {
+            self.queue_terminal_kills(soft_closed);
         }
     }
 
@@ -1655,7 +1664,7 @@ mod tests {
     use okena_hooks::{HookMonitor, HookRunner};
     use std::collections::HashMap;
 
-    struct TestCx;
+    pub(super) struct TestCx;
 
     impl WorkspaceCx for TestCx {
         fn notify(&mut self) {}
@@ -1984,6 +1993,7 @@ mod tests {
 
 #[cfg(all(test, feature = "gpui"))]
 mod gpui_tests {
+    use super::tests::TestCx;
     use crate::focus::FocusManager;
     use crate::settings::HooksConfig;
     use crate::state::{LayoutNode, ProjectData, WindowId, WindowState, Workspace, WorkspaceData};
@@ -2967,8 +2977,8 @@ mod gpui_tests {
         data.extra_windows.push(extra);
         let workspace = cx.new(|_cx| Workspace::new(data));
 
-        workspace.update(cx, |ws: &mut Workspace, _cx| {
-            ws.remove_stale_worktree("wt1");
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.remove_stale_worktree("wt1", cx);
         });
 
         workspace.read_with(cx, |ws: &Workspace, _cx| {
@@ -3774,7 +3784,7 @@ mod gpui_tests {
         let mut ws = Workspace::new(data);
         ws.lifecycle.mark_closing("wt1");
 
-        ws.remove_stale_worktree("wt1");
+        ws.remove_stale_worktree("wt1", &mut TestCx);
 
         assert!(
             ws.project("wt1").is_some(),
@@ -3791,11 +3801,42 @@ mod gpui_tests {
         let mut ws = Workspace::new(data);
         ws.lifecycle.mark_creating("wt1");
 
-        ws.remove_stale_worktree("wt1");
+        ws.remove_stale_worktree("wt1", &mut TestCx);
 
         assert!(
             ws.project("wt1").is_some(),
             "creating project should not be removed"
+        );
+    }
+
+    #[test]
+    fn remove_stale_worktree_queues_only_its_own_terminals_for_killing() {
+        fn with_terminal(mut project: ProjectData, terminal_id: &str) -> ProjectData {
+            let mut layout = LayoutNode::new_terminal();
+            if let LayoutNode::Terminal {
+                terminal_id: id, ..
+            } = &mut layout
+            {
+                *id = Some(terminal_id.to_string());
+            }
+            project.layout = Some(layout);
+            project
+        }
+        let mut data = make_workspace_data();
+        let mut wt = with_terminal(make_worktree_project("wt1", "parent"), "wt-shell");
+        wt.service_terminals
+            .insert("web".to_string(), "wt-service".to_string());
+        data.projects = vec![with_terminal(make_project("parent"), "parent-shell"), wt];
+        data.project_order = vec!["parent".to_string()];
+        let mut ws = Workspace::new(data);
+
+        ws.remove_stale_worktree("wt1", &mut TestCx);
+
+        let mut killed = ws.drain_pending_terminal_kills();
+        killed.sort();
+        assert_eq!(
+            killed,
+            vec!["wt-service".to_string(), "wt-shell".to_string()]
         );
     }
 
@@ -3807,7 +3848,7 @@ mod gpui_tests {
         data.project_order = vec!["parent".to_string()];
         let mut ws = Workspace::new(data);
 
-        ws.remove_stale_worktree("wt1");
+        ws.remove_stale_worktree("wt1", &mut TestCx);
 
         assert!(
             ws.project("wt1").is_none(),

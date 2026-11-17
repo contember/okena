@@ -3835,7 +3835,7 @@ pub async fn daemon_command_loop(
                                                     // Roll the optimistic row back. Clear creating
                                                     // FIRST — remove_stale_worktree skips creating
                                                     // projects.
-                                                    {
+                                                    let terminal_ids = {
                                                         let mut cx = DaemonWorkspaceCx::new(
                                                             &workspace_tick,
                                                             &hook_runner,
@@ -3843,8 +3843,16 @@ pub async fn daemon_command_loop(
                                                         );
                                                         let mut ws = workspace.lock();
                                                         ws.finish_creating_project(&new_id_task);
-                                                        ws.remove_stale_worktree(&new_id_task);
+                                                        ws.remove_stale_worktree(
+                                                            &new_id_task,
+                                                            &mut cx,
+                                                        );
                                                         ws.notify_data(&mut cx);
+                                                        ws.drain_pending_terminal_kills()
+                                                    };
+                                                    for terminal_id in terminal_ids {
+                                                        backend.kill(&terminal_id);
+                                                        terminals.lock().remove(&terminal_id);
                                                     }
                                                     log::error!(
                                                         "worktree-create: {branch} failed: {msg}"
@@ -5180,7 +5188,8 @@ fn finalize_soft_close_now(
 mod tests {
     use super::*;
     use crate::test_support::{
-        StubBackend, StubTransport, default_settings, empty_workspace_data, plain_project,
+        RecordingBackend, StubBackend, StubTransport, default_settings, empty_workspace_data,
+        plain_project,
     };
     use okena_core::api::StateResponse;
     use okena_terminal::session_backend::SessionBackend;
@@ -8507,55 +8516,10 @@ mod tests {
         assert_eq!(history[0].hook_type, "on_project_open");
     }
 
-    /// `TerminalBackend` that records every `kill`ed id so a test can assert a
-    /// deleted project's PTYs are torn down.
-    struct RecordingBackend {
-        killed: Arc<Mutex<Vec<String>>>,
-    }
-
     struct KillBarrierBackend {
         killed: Arc<Mutex<Vec<String>>>,
         started: std::sync::mpsc::Sender<String>,
         release: Mutex<std::sync::mpsc::Receiver<()>>,
-    }
-
-    impl TerminalBackend for RecordingBackend {
-        fn transport(&self) -> Arc<dyn TerminalTransport> {
-            Arc::new(StubTransport)
-        }
-        fn create_terminal(
-            &self,
-            _cwd: &str,
-            _shell: Option<&ShellType>,
-        ) -> anyhow::Result<String> {
-            anyhow::bail!("recording backend: create_terminal not supported")
-        }
-        fn reconnect_terminal(
-            &self,
-            _terminal_id: &str,
-            _cwd: &str,
-            _shell: Option<&ShellType>,
-        ) -> anyhow::Result<String> {
-            anyhow::bail!("recording backend: reconnect_terminal not supported")
-        }
-        fn kill(&self, terminal_id: &str) {
-            self.killed.lock().push(terminal_id.to_string());
-        }
-        fn capture_buffer(&self, _terminal_id: &str) -> Option<std::path::PathBuf> {
-            None
-        }
-        fn supports_buffer_capture(&self) -> bool {
-            false
-        }
-        fn is_remote(&self) -> bool {
-            false
-        }
-        fn get_shell_pid(&self, _terminal_id: &str) -> Option<u32> {
-            None
-        }
-        fn get_service_pids(&self, _terminal_id: &str) -> Vec<u32> {
-            Vec::new()
-        }
     }
 
     impl TerminalBackend for KillBarrierBackend {
