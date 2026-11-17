@@ -6658,6 +6658,7 @@ dependencies = [
  "tokio",
  "unicode-segmentation",
  "uuid",
+ "windows-registry 0.6.1",
 ]
 
 [[package]]
