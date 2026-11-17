@@ -58,6 +58,26 @@ fn choose_notification_window(candidates: &[NotificationWindowCandidate]) -> Win
         .unwrap_or(WindowId::Main)
 }
 
+/// Okena's toast AppUserModelID (same as `WindowOptions::app_id`). Unpackaged
+/// apps must register it under `HKCU\...\AppUserModelId` once per process.
+#[cfg(windows)]
+fn windows_app_id() -> Option<&'static str> {
+    const APP_ID: &str = "okena";
+    static REGISTERED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let registered = *REGISTERED.get_or_init(|| {
+        let result = windows_registry::CURRENT_USER
+            .create(format!(r"Software\Classes\AppUserModelId\{APP_ID}"))
+            .and_then(|key| key.set_string("DisplayName", "Okena"));
+        if let Err(error) = &result {
+            // Without the entry Windows drops toasts sent under our ID, so keep
+            // notify-rust's PowerShell fallback instead.
+            log::warn!("cannot register the Windows notification identity: {error}");
+        }
+        result.is_ok()
+    });
+    registered.then_some(APP_ID)
+}
+
 /// Fire a single native OS notification on a dedicated thread.
 ///
 /// `notify-rust`'s `show()` (and, on XDG, `wait_for_action`) block, so each
@@ -73,6 +93,13 @@ pub(crate) fn show_notification(
     std::thread::spawn(move || {
         let mut builder = Notification::new();
         builder.summary(&title).body(&body).appname("Okena");
+
+        // Windows ignores appname; without a registered AUMID, notify-rust
+        // attributes the toast to Windows PowerShell.
+        #[cfg(windows)]
+        if let Some(app_id) = windows_app_id() {
+            builder.app_id(app_id);
+        }
 
         // A "default" action makes the whole bubble clickable on XDG; only add
         // it when we actually have somewhere to jump.
