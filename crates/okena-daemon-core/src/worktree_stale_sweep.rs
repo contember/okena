@@ -69,7 +69,9 @@ async fn sweep_once(
     let Ok(stale) = tokio::task::spawn_blocking(move || {
         candidates
             .into_iter()
-            .filter(|(_, path)| !path.exists())
+            // Only a confirmed "not found" counts: an unreadable or briefly
+            // unmounted checkout must not cost the terminals running in it.
+            .filter(|(_, path)| matches!(path.try_exists(), Ok(false)))
             .map(|(id, _)| id)
             .collect::<Vec<_>>()
     })
@@ -250,5 +252,52 @@ mod tests {
         assert!(ws.project("gone-wt").is_none());
         assert!(ws.project("live-wt").is_some());
         assert!(ws.project("plain").is_some());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_unreadable_checkout_is_not_treated_as_vanished() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let parent = tempfile::tempdir().expect("parent dir");
+        let checkout = parent.path().join("wt");
+        std::fs::create_dir(&checkout).expect("checkout dir");
+        let checkout = checkout.to_str().expect("utf-8 path").to_string();
+        let set_mode = |mode| {
+            std::fs::set_permissions(parent.path(), std::fs::Permissions::from_mode(mode))
+                .expect("chmod parent");
+        };
+        set_mode(0o000);
+        if std::path::Path::new(&checkout).try_exists().is_ok() {
+            // Running as root: permissions do not block the stat.
+            set_mode(0o755);
+            return;
+        }
+
+        let workspace = Arc::new(Mutex::new(workspace_with(vec![with_terminal(
+            worktree_project("wt", &checkout),
+            "wt-shell",
+        )])));
+        let killed = Arc::new(Mutex::new(Vec::new()));
+        let backend: Arc<dyn TerminalBackend> = Arc::new(RecordingBackend {
+            killed: killed.clone(),
+        });
+        let terminals: TerminalsRegistry = Arc::new(Mutex::new(Default::default()));
+        let (workspace_tick, _tick_rx) = watch::channel(0u64);
+
+        let removed = sweep_once(
+            &workspace,
+            &backend,
+            &terminals,
+            &workspace_tick,
+            &None,
+            &None,
+        )
+        .await;
+        set_mode(0o755);
+
+        assert_eq!(removed, 0);
+        assert!(killed.lock().is_empty());
+        assert!(workspace.lock().project("wt").is_some());
     }
 }
