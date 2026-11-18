@@ -59,6 +59,7 @@ describe("injection", () => {
       "SessionStart",
       "UserPromptSubmit",
       "Stop",
+      "StopFailure",
       "SessionEnd",
       "SubagentStart",
       "SubagentStop",
@@ -68,7 +69,7 @@ describe("injection", () => {
     for (const event of ["PreToolUse", "PostToolUse", "PostToolUseFailure"]) {
       expect(settings.hooks[event]).toEqual([{ matcher: "*", hooks: [eventHook] }]);
     }
-    expect(Object.keys(settings.hooks)).toHaveLength(10);
+    expect(Object.keys(settings.hooks)).toHaveLength(11);
   });
 
   test("quotes OKENA_BIN for sh", () => {
