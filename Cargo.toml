@@ -9,7 +9,7 @@ gpui_platform = { package = "gpui-fast-platform", version = "0.1.13" }
 gpui-component = { version = "0.9.0", features = ["gpui-fast"] }
 
 [workspace.package]
-version = "0.40.0"
+version = "0.41.0"
 
 [package]
 name = "okena"
