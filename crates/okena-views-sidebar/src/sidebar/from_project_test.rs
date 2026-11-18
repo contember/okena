@@ -159,5 +159,8 @@ fn display_name_follows_branch_until_worktree_is_renamed() {
 #[test]
 fn display_name_ignores_branch_for_plain_projects() {
     let p = make_project("p");
-    assert_eq!(SidebarProjectInfo::display_name(&p, Some("main")), "Project p");
+    assert_eq!(
+        SidebarProjectInfo::display_name(&p, Some("main")),
+        "Project p"
+    );
 }

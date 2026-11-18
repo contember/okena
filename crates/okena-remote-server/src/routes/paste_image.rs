@@ -67,7 +67,7 @@ pub async fn post_upload_file(headers: HeaderMap, body: Bytes) -> Response {
             path: path.to_string_lossy().into_owned(),
         })
         .into_response(),
-        Err(response) => response,
+        Err(response) => *response,
     }
 }
 
@@ -76,13 +76,15 @@ async fn materialize(
     body: &Bytes,
     extension: &str,
     kind: &str,
-) -> Result<std::path::PathBuf, Response> {
+) -> Result<std::path::PathBuf, Box<Response>> {
     if body.is_empty() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": format!("empty {kind} body")})),
-        )
-            .into_response());
+        return Err(Box::new(
+            (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": format!("empty {kind} body")})),
+            )
+                .into_response(),
+        ));
     }
 
     let filename = format!("okena-remote-paste-{}.{}", next_token(), extension);
@@ -90,11 +92,13 @@ async fn materialize(
 
     if let Err(e) = tokio::fs::write(&path, body).await {
         log::error!("paste upload: failed to write {}: {}", path.display(), e);
-        return Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": format!("failed to write {kind}: {e}")})),
-        )
-            .into_response());
+        return Err(Box::new(
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": format!("failed to write {kind}: {e}")})),
+            )
+                .into_response(),
+        ));
     }
     Ok(path)
 }
@@ -109,7 +113,7 @@ async fn materialize_and_paste(
 ) -> Response {
     let path = match materialize(&body, extension, kind).await {
         Ok(path) => path,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
 
     let path_str = path.to_string_lossy().into_owned();

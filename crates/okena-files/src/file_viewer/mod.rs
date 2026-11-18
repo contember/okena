@@ -1457,10 +1457,10 @@ impl FileViewer {
     pub(super) fn close_other_tabs(&mut self, index: usize, cx: &mut Context<Self>) {
         if index < self.tabs.len() {
             let kept = self.tabs.remove(index);
-            let mut dropped: Vec<FileViewerTab> = self.tabs.drain(..).collect();
+            let dropped = std::mem::take(&mut self.tabs);
             self.tabs.push(kept);
             self.active_tab = 0;
-            for mut tab in dropped.drain(..) {
+            for mut tab in dropped {
                 release_tab_renderer(&mut tab, cx);
             }
             cx.notify();
@@ -1469,10 +1469,10 @@ impl FileViewer {
 
     /// Close all tabs, leaving an empty viewer state.
     pub(super) fn close_all_tabs(&mut self, cx: &mut Context<Self>) {
-        let mut dropped: Vec<FileViewerTab> = self.tabs.drain(..).collect();
+        let dropped = std::mem::take(&mut self.tabs);
         self.tabs.push(FileViewerTab::new_empty());
         self.active_tab = 0;
-        for mut tab in dropped.drain(..) {
+        for mut tab in dropped {
             release_tab_renderer(&mut tab, cx);
         }
         cx.notify();

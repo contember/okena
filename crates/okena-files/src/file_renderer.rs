@@ -846,7 +846,7 @@ fn decode_gif_frames(bytes: &[u8], budget: u64) -> Result<Vec<image::Frame>, Str
             );
             break;
         }
-        for pixel in buffer.chunks_exact_mut(4) {
+        for pixel in buffer.as_chunks_mut::<4>().0 {
             pixel.swap(0, 2);
         }
         frames.push(frame);

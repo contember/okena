@@ -922,7 +922,11 @@ mod tests {
         let first = h.client.command(&start("a")).await.unwrap();
         h.client.command(&start("b")).await.unwrap();
         let status = h.client.command(&start(" a ")).await.unwrap();
-        let labels: Vec<_> = status.logins.iter().map(|login| login.label.as_str()).collect();
+        let labels: Vec<_> = status
+            .logins
+            .iter()
+            .map(|login| login.label.as_str())
+            .collect();
         assert_eq!(labels, ["b", "a"]);
         assert_ne!(status.logins[1].id, first.logins[0].id);
     }
