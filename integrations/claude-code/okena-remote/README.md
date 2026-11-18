@@ -54,12 +54,13 @@ For an interactive run of the `claude` binary only, the preload appends:
 
 `claude` restarting itself (`/restart`, `/update`) keeps `--settings` and
 `--mcp-config` but drops the development channel. The preload removes the
-flags it added earlier and adds them all again, so the restarted session
-reconnects, after the channel confirmation.
+flags an earlier run added (recognized by shape, so an older Okena's hook list
+counts too) and adds them all again, so the restarted session reconnects,
+after the channel confirmation.
 
-It leaves argv unchanged for other Bun programs (see above), for `claude` started by
-`claude` (`CLAUDECODE` set), for subcommands (`claude mcp …`; any argument
-before `--` that is a subcommand name counts), and for runs with
+It leaves argv unchanged for other Bun programs (see above), for `claude`
+started by `claude` (`CLAUDECODE` set), for subcommands (`claude mcp …`; any
+argument before `--` that is a subcommand name counts), and for runs with
 `-p`/`--print`, `--version`, `--help`, `--bg`, `--desktop`, `--cloud`,
 `--environment`, `--tmux`, or the user's own `--settings`. A user's own
 `--mcp-config` is kept and ours is added next to it.

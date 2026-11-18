@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-const { okenaClaudeArgs, withoutOkenaPreload } = require("./preload.js");
+const { okenaClaudeArgs, run, withoutOkenaPreload } = require("./preload.js");
 
 const EXEC_PATH = "/home/u/.local/share/claude/versions/2.1.301";
 const OKENA_BIN = "/opt/okena/okena";
@@ -154,6 +154,53 @@ describe("injection", () => {
     }
   });
 
+  test("flags carried from an older preload are replaced", () => {
+    const first = okenaClaudeArgs(claudeArgv(), ENV, EXEC_PATH);
+    const older = JSON.parse(flagValue(first, "--settings"));
+    delete older.hooks.StopFailure;
+    const restart = claudeArgv("--resume", "abc", "--settings", JSON.stringify(older));
+
+    expect(okenaClaudeArgs(restart, ENV, EXEC_PATH)).toEqual([...claudeArgv("--resume", "abc"), ...first.slice(2)]);
+  });
+
+  test("a restart with the channel now off drops our carried MCP config", () => {
+    const first = okenaClaudeArgs(claudeArgv(), ENV, EXEC_PATH);
+    const restart = claudeArgv(
+      "--resume",
+      "abc",
+      "--settings",
+      flagValue(first, "--settings"),
+      "--mcp-config",
+      flagValue(first, "--mcp-config"),
+    );
+    const env = { ...ENV, OKENA_CLAUDE_REMOTE_CHANNEL: "0" };
+
+    expect(okenaClaudeArgs(restart, env, EXEC_PATH)).toEqual([
+      ...claudeArgv("--resume", "abc"),
+      "--settings",
+      flagValue(first, "--settings"),
+    ]);
+  });
+
+  test("settings or MCP config with anything else in it are the user's own", () => {
+    const first = okenaClaudeArgs(claudeArgv(), ENV, EXEC_PATH);
+    const settings = JSON.parse(flagValue(first, "--settings"));
+    const mcpConfig = JSON.parse(flagValue(first, "--mcp-config"));
+    const userSettings = [
+      { ...settings, model: "opus" },
+      { hooks: { ...settings.hooks, Stop: [{ hooks: [{ type: "command", command: "notify-send done" }] }] } },
+      { hooks: {} },
+    ];
+    for (const user of userSettings) {
+      expect(okenaClaudeArgs(claudeArgv("--settings", JSON.stringify(user)), ENV, EXEC_PATH)).toBeNull();
+    }
+
+    const userMcp = { mcpServers: { ...mcpConfig.mcpServers, github: { command: "gh-mcp" } } };
+    const next = okenaClaudeArgs(claudeArgv("--mcp-config", JSON.stringify(userMcp)), ENV, EXEC_PATH);
+    expect(next.slice(2, 4)).toEqual(["--mcp-config", JSON.stringify(userMcp)]);
+    expect(next.filter((arg) => arg === "--mcp-config")).toHaveLength(2);
+  });
+
   test("injecting twice adds nothing", () => {
     const first = okenaClaudeArgs(claudeArgv("-c"), ENV, EXEC_PATH);
 
@@ -265,16 +312,21 @@ describe("guards", () => {
 describe("withoutOkenaPreload", () => {
   const PRELOAD = "--preload=/home/u/.config/okena/profiles/default/claude-remote/preload.js";
 
-  test("removes the preload and keeps inherited options", () => {
+  test("removes the preload and keeps inherited options as written", () => {
     expect(withoutOkenaPreload(`${PRELOAD} --smol`)).toBe("--smol");
-    expect(withoutOkenaPreload(`--smol  ${PRELOAD}\t--inspect`)).toBe("--smol --inspect");
+    expect(withoutOkenaPreload(`--smol ${PRELOAD} --inspect`)).toBe("--smol --inspect");
+    expect(withoutOkenaPreload(`${PRELOAD} --title="a   b"`)).toBe('--title="a   b"');
+  });
+
+  test("options without the preload are returned unchanged", () => {
+    expect(withoutOkenaPreload("--smol   --inspect")).toBe("--smol   --inspect");
+    expect(withoutOkenaPreload("")).toBe("");
   });
 
   test("nothing left is undefined", () => {
     expect(withoutOkenaPreload(PRELOAD)).toBeUndefined();
-    expect(withoutOkenaPreload(`${PRELOAD} ${PRELOAD}`)).toBeUndefined();
+    expect(withoutOkenaPreload(` ${PRELOAD}  ${PRELOAD} `)).toBeUndefined();
     expect(withoutOkenaPreload(undefined)).toBeUndefined();
-    expect(withoutOkenaPreload("")).toBeUndefined();
   });
 
   test("matches any location of the daemon's file, Windows paths included", () => {
@@ -351,5 +403,40 @@ console.log(JSON.stringify({
     expect(out.envCopy).toEqual({ execArgv: ["--smol"], bunOptions: "--smol" });
     expect(out.inherited).toEqual({ execArgv: ["--smol"], bunOptions: "--smol" });
     expect(out.execArgvCopy.execArgv).toEqual(["--smol", "--smol"]);
+  });
+});
+
+describe("run", () => {
+  const PRELOAD = "--preload=/home/u/.config/okena/profiles/default/claude-remote/preload.js";
+
+  function fakeProcess(argv, execPath) {
+    return { argv, execPath, execArgv: [PRELOAD, "--smol"], env: { ...ENV, BUN_OPTIONS: `${PRELOAD} --smol` } };
+  }
+
+  test("claude keeps the preload for its restart and gets the flags", () => {
+    const proc = fakeProcess(claudeArgv("--model", "opus"), EXEC_PATH);
+    run(proc);
+
+    expect(proc.argv).toEqual(okenaClaudeArgs(claudeArgv("--model", "opus"), ENV, EXEC_PATH));
+    expect(proc.env.BUN_OPTIONS).toBe(`${PRELOAD} --smol`);
+    expect(proc.execArgv).toEqual([PRELOAD, "--smol"]);
+  });
+
+  test("claude spawned by claude keeps the preload too", () => {
+    const proc = fakeProcess(claudeArgv(), EXEC_PATH);
+    proc.env.CLAUDECODE = "1";
+    run(proc);
+
+    expect(proc.argv).toEqual(claudeArgv());
+    expect(proc.env.BUN_OPTIONS).toBe(`${PRELOAD} --smol`);
+  });
+
+  test("another Bun program drops it", () => {
+    const proc = fakeProcess(["bun", "/home/u/app/index.ts"], "/home/u/.bun/bin/bun");
+    run(proc);
+
+    expect(proc.argv).toEqual(["bun", "/home/u/app/index.ts"]);
+    expect(proc.env.BUN_OPTIONS).toBe("--smol");
+    expect(proc.execArgv).toEqual(["--smol"]);
   });
 });
