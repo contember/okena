@@ -771,7 +771,7 @@ impl Perform for SidecarPerform {
         // XTVERSION query: `CSI > Ps q`. Per xterm ctlseqs, only Ps=0 (or
         // omitted) asks for the terminal name+version; other Ps values
         // belong to unrelated private CSI sequences we must not answer.
-        if action != 'q' || intermediates != [b'>'] {
+        if action != 'q' || intermediates != *b">" {
             return;
         }
         let ps = params

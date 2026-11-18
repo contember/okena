@@ -12,7 +12,7 @@ use tokio_util::io::ReaderStream;
 async fn resolve_file(
     state: &AppState,
     request: FileDownloadRequest,
-) -> Result<ResolvedPath, Response> {
+) -> Result<ResolvedPath, Box<Response>> {
     let action = match request {
         FileDownloadRequest::Project {
             project_id,
@@ -40,22 +40,32 @@ async fn resolve_file(
             reply: Some(reply_tx),
         })
         .await
-        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "bridge unavailable").into_response())?;
+        .map_err(|_| {
+            Box::new((StatusCode::INTERNAL_SERVER_ERROR, "bridge unavailable").into_response())
+        })?;
     match reply_rx.await {
         Ok(CommandResult::Ok(Some(value))) => serde_json::from_value(value).map_err(|error| {
+            Box::new(
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("invalid file response: {error}"),
+                )
+                    .into_response(),
+            )
+        }),
+        Ok(CommandResult::Err(error)) => {
+            Err(Box::new((StatusCode::BAD_REQUEST, error).into_response()))
+        }
+        Ok(_) => Err(Box::new(
+            (StatusCode::INTERNAL_SERVER_ERROR, "missing file response").into_response(),
+        )),
+        Err(_) => Err(Box::new(
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                format!("invalid file response: {error}"),
+                "command processing failed",
             )
-                .into_response()
-        }),
-        Ok(CommandResult::Err(error)) => Err((StatusCode::BAD_REQUEST, error).into_response()),
-        Ok(_) => Err((StatusCode::INTERNAL_SERVER_ERROR, "missing file response").into_response()),
-        Err(_) => Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "command processing failed",
-        )
-            .into_response()),
+                .into_response(),
+        )),
     }
 }
 
@@ -80,7 +90,7 @@ pub async fn post_download(
 ) -> Response {
     let file = match resolve_file(&state, request).await {
         Ok(file) => file,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     if file.kind != ResolvedPathKind::File {
         return (StatusCode::BAD_REQUEST, "path is not a regular file").into_response();

@@ -135,7 +135,7 @@ fn rasterize(document: &Pdf, request: RenderRequest) -> Result<PdfRaster, String
     );
     let mut pixels = pixmap.data_as_u8_slice().to_vec();
     // GPUI consumes BGRA; the white paper makes every pixel opaque.
-    for pixel in pixels.chunks_exact_mut(4) {
+    for pixel in pixels.as_chunks_mut::<4>().0 {
         pixel.swap(0, 2);
     }
     let buffer =

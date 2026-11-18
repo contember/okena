@@ -88,8 +88,10 @@ fn rasterizes_pages_with_rotation_white_paper_and_bgra_channels() {
             .image
             .as_bytes(0)
             .unwrap()
-            .chunks_exact(4)
-            .all(|p| p == [255, 0, 0, 255])
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .all(|p| *p == [255, 0, 0, 255])
     );
 }
 
