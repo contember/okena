@@ -1,6 +1,9 @@
-import { describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 
-const { okenaClaudeArgs } = require("./preload.js");
+const { okenaClaudeArgs, withoutOkenaPreload } = require("./preload.js");
 
 const EXEC_PATH = "/home/u/.local/share/claude/versions/2.1.301";
 const OKENA_BIN = "/opt/okena/okena";
@@ -223,5 +226,97 @@ describe("guards", () => {
 
   test("guarded flags after `--` are prompt text", () => {
     expect(okenaClaudeArgs(claudeArgv("--", "--help"), ENV, EXEC_PATH)).not.toBeNull();
+  });
+});
+
+describe("withoutOkenaPreload", () => {
+  const PRELOAD = "--preload=/home/u/.config/okena/profiles/default/claude-remote/preload.js";
+
+  test("removes the preload and keeps inherited options", () => {
+    expect(withoutOkenaPreload(`${PRELOAD} --smol`)).toBe("--smol");
+    expect(withoutOkenaPreload(`--smol  ${PRELOAD}\t--inspect`)).toBe("--smol --inspect");
+  });
+
+  test("nothing left is undefined", () => {
+    expect(withoutOkenaPreload(PRELOAD)).toBeUndefined();
+    expect(withoutOkenaPreload(`${PRELOAD} ${PRELOAD}`)).toBeUndefined();
+    expect(withoutOkenaPreload(undefined)).toBeUndefined();
+    expect(withoutOkenaPreload("")).toBeUndefined();
+  });
+
+  test("matches any location of the daemon's file, Windows paths included", () => {
+    expect(withoutOkenaPreload("--preload=/run/user/1000/okena/work/claude-remote/preload.js")).toBeUndefined();
+    expect(withoutOkenaPreload("--preload=C:\\Users\\u\\okena\\claude-remote\\preload.js")).toBeUndefined();
+  });
+
+  test("keeps other preloads", () => {
+    for (const other of ["--preload=/app/preload.js", "--preload=/app/claude-remote/preload.ts", "-r", "./setup.js"]) {
+      expect(withoutOkenaPreload(`${PRELOAD} ${other}`)).toBe(other);
+    }
+  });
+});
+
+// Bun loads the preload from BUN_OPTIONS here exactly as in an Okena pane.
+describe("children of a Bun program in a pane", () => {
+  let dir;
+  let parentScript;
+  let preloadArg;
+
+  const CHILD = "console.log(JSON.stringify({ execArgv: process.execArgv, bunOptions: process.env.BUN_OPTIONS ?? null }));";
+
+  // How programs start Bun children: env built from process.env, the default
+  // child_process env, and a supervisor that copies its own execArgv.
+  const PARENT = `
+const { spawnSync } = require("node:child_process");
+const child = process.argv[2];
+const run = (args, options) => JSON.parse(spawnSync(process.execPath, [...args, child], { encoding: "utf8", ...options }).stdout);
+console.log(JSON.stringify({
+  self: process.execArgv,
+  envCopy: run([], { env: { ...process.env } }),
+  inherited: run([]),
+  execArgvCopy: run(process.execArgv, { env: { ...process.env } }),
+}));
+`;
+
+  beforeAll(() => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), "okena-preload-"));
+    const preload = path.join(dir, "claude-remote", "preload.js");
+    fs.mkdirSync(path.dirname(preload));
+    fs.copyFileSync(path.join(import.meta.dir, "preload.js"), preload);
+    fs.writeFileSync(path.join(dir, "child.js"), CHILD);
+    parentScript = path.join(dir, "parent.js");
+    fs.writeFileSync(parentScript, PARENT);
+    preloadArg = `--preload=${preload}`;
+  });
+
+  afterAll(() => {
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  function runParent(bunOptions) {
+    const result = Bun.spawnSync([process.execPath, parentScript, path.join(dir, "child.js")], {
+      env: { ...process.env, BUN_OPTIONS: bunOptions, OKENA_BIN: "/opt/okena/okena", OKENA_TERMINAL_ID: "term-1" },
+      cwd: dir,
+    });
+    expect(result.stderr.toString()).toBe("");
+    return JSON.parse(result.stdout.toString());
+  }
+
+  test("children get neither the preload nor an empty BUN_OPTIONS", () => {
+    const out = runParent(preloadArg);
+
+    expect(out.self).toEqual([]);
+    for (const child of [out.envCopy, out.inherited, out.execArgvCopy]) {
+      expect(child).toEqual({ execArgv: [], bunOptions: null });
+    }
+  });
+
+  test("inherited runtime flags still reach the children", () => {
+    const out = runParent(`${preloadArg} --smol`);
+
+    expect(out.self).toEqual(["--smol"]);
+    expect(out.envCopy).toEqual({ execArgv: ["--smol"], bunOptions: "--smol" });
+    expect(out.inherited).toEqual({ execArgv: ["--smol"], bunOptions: "--smol" });
+    expect(out.execArgvCopy.execArgv).toEqual(["--smol", "--smol"]);
   });
 });

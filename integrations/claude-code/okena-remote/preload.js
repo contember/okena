@@ -2,12 +2,17 @@
 // as BUN_OPTIONS="--preload=<this file>", so it runs before any Bun program in
 // that pane. For an interactive Claude Code session it appends the flags that
 // connect the session to Okena: hooks that report to the daemon, and the MCP
-// channel server that delivers remote prompts. Every other program is left
-// alone. See README.md next to this file.
+// channel server that delivers remote prompts. Any other Bun program only
+// drops the preload from what its children inherit. See README.md next to
+// this file.
 "use strict";
 
 // Entry module of the Bun-compiled `claude` binary.
 const CLAUDE_ENTRY = "/$bunfs/root/cli";
+
+// The daemon writes this file as `.../claude-remote/preload.js`; the suffix
+// also matches a copy reached through another path or an older daemon.
+const OKENA_PRELOAD = /^--preload=.*[\\/]claude-remote[\\/]preload\.js$/;
 
 // Flags that leave argv unchanged:
 // - no interactive session in this pane: print mode, version, help, and the
@@ -151,12 +156,44 @@ function channelMcpConfig(okenaBin) {
   };
 }
 
+function isClaudeBinary(argv, execPath) {
+  return argv[1] === CLAUDE_ENTRY && String(execPath).includes("claude");
+}
+
+/**
+ * `BUN_OPTIONS` without this preload: the remaining options, or undefined
+ * when none remain. Bun splits the variable on whitespace, without quoting.
+ */
+function withoutOkenaPreload(bunOptions) {
+  const rest = String(bunOptions ?? "")
+    .split(/\s+/)
+    .filter((arg) => arg !== "" && !OKENA_PRELOAD.test(arg));
+  return rest.length === 0 ? undefined : rest.join(" ");
+}
+
+/**
+ * Stops this process from passing the preload on. Bun copies `BUN_OPTIONS`
+ * into `process.execArgv`, and programs copy either one to their children.
+ */
+function dropOkenaPreload(proc) {
+  const bunOptions = withoutOkenaPreload(proc.env.BUN_OPTIONS);
+  if (bunOptions === undefined) {
+    delete proc.env.BUN_OPTIONS;
+  } else {
+    proc.env.BUN_OPTIONS = bunOptions;
+  }
+  const execArgv = proc.execArgv.filter((arg) => !OKENA_PRELOAD.test(arg));
+  if (execArgv.length !== proc.execArgv.length) {
+    proc.execArgv = execArgv;
+  }
+}
+
 /**
  * The argv an interactive Claude Code session in an Okena pane should run
  * with, or null to leave `argv` unchanged.
  */
 function okenaClaudeArgs(argv, env, execPath) {
-  if (argv[1] !== CLAUDE_ENTRY || !String(execPath).includes("claude")) {
+  if (!isClaudeBinary(argv, execPath)) {
     return null;
   }
   const okenaBin = env.OKENA_BIN;
@@ -190,17 +227,23 @@ function okenaClaudeArgs(argv, env, execPath) {
 }
 
 try {
-  const next = okenaClaudeArgs(process.argv, process.env, process.execPath);
-  if (next) {
-    process.argv.splice(0, process.argv.length, ...next);
-    if (process.env.OKENA_CLAUDE_REMOTE_DEBUG === "1") {
-      process.stderr.write(`okena-remote: argv ${JSON.stringify(process.argv)}\n`);
+  if (isClaudeBinary(process.argv, process.execPath)) {
+    // `claude` keeps the preload: it restarts itself (`--resume` relaunch,
+    // update) with its own environment and must reconnect.
+    const next = okenaClaudeArgs(process.argv, process.env, process.execPath);
+    if (next) {
+      process.argv.splice(0, process.argv.length, ...next);
+      if (process.env.OKENA_CLAUDE_REMOTE_DEBUG === "1") {
+        process.stderr.write(`okena-remote: argv ${JSON.stringify(process.argv)}\n`);
+      }
     }
+  } else {
+    dropOkenaPreload(process);
   }
 } catch {
   // A failing preload would break every Bun program in the pane.
 }
 
 if (typeof module !== "undefined") {
-  module.exports = { okenaClaudeArgs };
+  module.exports = { okenaClaudeArgs, withoutOkenaPreload };
 }
