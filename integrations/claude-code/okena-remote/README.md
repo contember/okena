@@ -52,6 +52,11 @@ For an interactive run of the `claude` binary only, the preload appends:
   MCP server and `--dangerously-load-development-channels server:okena-remote`.
   Claude asks for confirmation of the development channel at every start.
 
+`claude` restarting itself (`/restart`, `/update`) keeps `--settings` and
+`--mcp-config` but drops the development channel. The preload removes the
+flags it added earlier and adds them all again, so the restarted session
+reconnects, after the channel confirmation.
+
 It leaves argv unchanged for other Bun programs (see above), for `claude` started by
 `claude` (`CLAUDECODE` set), for subcommands (`claude mcp …`; any argument
 before `--` that is a subcommand name counts), and for runs with

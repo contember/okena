@@ -156,6 +156,42 @@ function channelMcpConfig(okenaBin) {
   };
 }
 
+function sameJson(value, expected) {
+  try {
+    return JSON.stringify(JSON.parse(value)) === expected;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * `args` without the flags an earlier run of this preload added. `claude`
+ * restarts itself (`/restart`) with `--settings` and `--mcp-config` carried
+ * over but without the development channel, so they are added again in full.
+ */
+function withoutOwnFlags(args, okenaBin) {
+  const own = new Map([
+    ["--settings", (value) => sameJson(value, JSON.stringify(hooksSettings(okenaBin)))],
+    ["--mcp-config", (value) => sameJson(value, JSON.stringify(channelMcpConfig(okenaBin)))],
+    ["--dangerously-load-development-channels", (value) => value === `server:${CHANNEL_SERVER}`],
+  ]);
+  const rest = [];
+  for (let i = 0; i < args.length; i++) {
+    const eq = args[i].indexOf("=");
+    const flag = eq === -1 ? args[i] : args[i].slice(0, eq);
+    const isOwn = own.get(flag);
+    if (isOwn && eq !== -1 && isOwn(args[i].slice(eq + 1))) {
+      continue;
+    }
+    if (isOwn && eq === -1 && i + 1 < args.length && isOwn(args[i + 1])) {
+      i++;
+      continue;
+    }
+    rest.push(args[i]);
+  }
+  return rest;
+}
+
 function isClaudeBinary(argv, execPath) {
   return argv[1] === CLAUDE_ENTRY && String(execPath).includes("claude");
 }
@@ -203,7 +239,7 @@ function okenaClaudeArgs(argv, env, execPath) {
 
   const separator = argv.indexOf("--", 2);
   const optionsEnd = separator === -1 ? argv.length : separator;
-  const userArgs = argv.slice(2, optionsEnd);
+  const userArgs = withoutOwnFlags(argv.slice(2, optionsEnd), okenaBin);
   if (userArgs.some(isGuardedFlag)) {
     return null;
   }
@@ -223,7 +259,7 @@ function okenaClaudeArgs(argv, env, execPath) {
       `server:${CHANNEL_SERVER}`,
     );
   }
-  return [...argv.slice(0, optionsEnd), ...added, ...argv.slice(optionsEnd)];
+  return [...argv.slice(0, 2), ...userArgs, ...added, ...argv.slice(optionsEnd)];
 }
 
 try {

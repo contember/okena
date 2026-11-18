@@ -133,6 +133,39 @@ describe("injection", () => {
     expect(okenaClaudeArgs(claudeArgv("--", "doctor"), ENV, EXEC_PATH)).not.toBeNull();
   });
 
+  // `/restart` carries our --settings and --mcp-config but drops the channel.
+  test("a restart that carried some of our flags gets all of them once", () => {
+    const first = okenaClaudeArgs(claudeArgv("--model", "haiku"), ENV, EXEC_PATH);
+    const ours = first.slice(4);
+    const settings = flagValue(first, "--settings");
+    const mcpConfig = flagValue(first, "--mcp-config");
+
+    for (const carried of [
+      ["--settings", settings, "--mcp-config", mcpConfig],
+      [`--settings=${settings}`, `--mcp-config=${mcpConfig}`],
+      ours,
+    ]) {
+      const restart = claudeArgv("--resume", "abc", ...carried, "--model", "haiku");
+
+      expect(okenaClaudeArgs(restart, ENV, EXEC_PATH)).toEqual([
+        ...claudeArgv("--resume", "abc", "--model", "haiku"),
+        ...ours,
+      ]);
+    }
+  });
+
+  test("injecting twice adds nothing", () => {
+    const first = okenaClaudeArgs(claudeArgv("-c"), ENV, EXEC_PATH);
+
+    expect(okenaClaudeArgs(first, ENV, EXEC_PATH)).toEqual(first);
+  });
+
+  test("settings for another okena binary are the user's own", () => {
+    const other = okenaClaudeArgs(claudeArgv(), { ...ENV, OKENA_BIN: "/other/okena" }, EXEC_PATH);
+
+    expect(okenaClaudeArgs(other, ENV, EXEC_PATH)).toBeNull();
+  });
+
   test("does not mutate the input", () => {
     const argv = claudeArgv("--model", "opus");
     okenaClaudeArgs(argv, ENV, EXEC_PATH);
