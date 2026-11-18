@@ -30,6 +30,17 @@ removed or changed. It then gives every new pane:
 `claude` is a Bun-compiled binary, so Bun runs the preload before Claude Code
 starts. Panes created before the setting was turned on are not affected.
 
+Every other Bun program removes the preload from its own `BUN_OPTIONS` (and
+deletes the variable when nothing else is left) and from `process.execArgv`,
+so its children start without it: a test that checks a child's runtime flags
+sees only its own. The `claude` binary keeps both, because it restarts itself
+(`/restart`, `/update`) with its own environment. Two limits follow:
+
+- `Bun.spawn` without an `env` option passes the environment the process
+  started with, so those children still load the preload (and drop it in turn).
+- A Bun wrapper script that starts an interactive `claude` passes it no
+  preload, so that session is not connected to Okena.
+
 ## What it adds
 
 For an interactive run of the `claude` binary only, the preload appends:
@@ -41,9 +52,15 @@ For an interactive run of the `claude` binary only, the preload appends:
   MCP server and `--dangerously-load-development-channels server:okena-remote`.
   Claude asks for confirmation of the development channel at every start.
 
-It leaves argv unchanged for other Bun programs, for `claude` started by
-`claude` (`CLAUDECODE` set), for subcommands (`claude mcp …`; any argument
-before `--` that is a subcommand name counts), and for runs with
+`claude` restarting itself (`/restart`, `/update`) keeps `--settings` and
+`--mcp-config` but drops the development channel. The preload removes the
+flags an earlier run added (recognized by shape, so an older Okena's hook list
+counts too) and adds them all again, so the restarted session reconnects,
+after the channel confirmation.
+
+It leaves argv unchanged for other Bun programs (see above), for `claude`
+started by `claude` (`CLAUDECODE` set), for subcommands (`claude mcp …`; any
+argument before `--` that is a subcommand name counts), and for runs with
 `-p`/`--print`, `--version`, `--help`, `--bg`, `--desktop`, `--cloud`,
 `--environment`, `--tmux`, or the user's own `--settings`. A user's own
 `--mcp-config` is kept and ours is added next to it.

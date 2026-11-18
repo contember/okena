@@ -2,12 +2,18 @@
 // as BUN_OPTIONS="--preload=<this file>", so it runs before any Bun program in
 // that pane. For an interactive Claude Code session it appends the flags that
 // connect the session to Okena: hooks that report to the daemon, and the MCP
-// channel server that delivers remote prompts. Every other program is left
-// alone. See README.md next to this file.
+// channel server that delivers remote prompts. Any other Bun program only
+// drops the preload from what its children inherit. See README.md next to
+// this file.
 "use strict";
 
 // Entry module of the Bun-compiled `claude` binary.
 const CLAUDE_ENTRY = "/$bunfs/root/cli";
+
+// The daemon writes this file as `.../claude-remote/preload.js` to a path
+// without whitespace; the suffix also matches a copy at another location.
+const OKENA_PRELOAD = /^--preload=.*[\\/]claude-remote[\\/]preload\.js$/;
+const OKENA_PRELOAD_OPTION = /(^|\s)--preload=\S*[\\/]claude-remote[\\/]preload\.js(?=\s|$)/g;
 
 // Flags that leave argv unchanged:
 // - no interactive session in this pane: print mode, version, help, and the
@@ -151,12 +157,119 @@ function channelMcpConfig(okenaBin) {
   };
 }
 
+function parseJson(value) {
+  try {
+    return JSON.parse(value);
+  } catch {
+    return undefined;
+  }
+}
+
+function isObject(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+// By shape, not by today's JSON: a claude started by an older preload
+// carries an older hook list.
+function isOwnSettings(value, okenaBin) {
+  const settings = parseJson(value);
+  if (!isObject(settings) || Object.keys(settings).join() !== "hooks" || !isObject(settings.hooks)) {
+    return false;
+  }
+  const prefix = `${shellQuote(okenaBin)} claude-remote hook `;
+  const commands = [];
+  for (const entries of Object.values(settings.hooks)) {
+    for (const entry of Array.isArray(entries) ? entries : [null]) {
+      for (const hook of Array.isArray(entry?.hooks) ? entry.hooks : [null]) {
+        commands.push(hook?.command);
+      }
+    }
+  }
+  return (
+    commands.length > 0 &&
+    commands.every((command) => typeof command === "string" && command.startsWith(prefix))
+  );
+}
+
+function isOwnMcpConfig(value, okenaBin) {
+  const config = parseJson(value);
+  if (!isObject(config) || Object.keys(config).join() !== "mcpServers" || !isObject(config.mcpServers)) {
+    return false;
+  }
+  const servers = config.mcpServers;
+  return Object.keys(servers).join() === CHANNEL_SERVER && servers[CHANNEL_SERVER]?.command === okenaBin;
+}
+
+/**
+ * `args` without the flags an earlier run of this preload added. `claude`
+ * restarts itself (`/restart`) with `--settings` and `--mcp-config` carried
+ * over but without the development channel, so they are added again in full.
+ */
+function withoutOwnFlags(args, okenaBin) {
+  const own = new Map([
+    ["--settings", (value) => isOwnSettings(value, okenaBin)],
+    ["--mcp-config", (value) => isOwnMcpConfig(value, okenaBin)],
+    ["--dangerously-load-development-channels", (value) => value === `server:${CHANNEL_SERVER}`],
+  ]);
+  const rest = [];
+  for (let i = 0; i < args.length; i++) {
+    const eq = args[i].indexOf("=");
+    const flag = eq === -1 ? args[i] : args[i].slice(0, eq);
+    const isOwn = own.get(flag);
+    if (isOwn && eq !== -1 && isOwn(args[i].slice(eq + 1))) {
+      continue;
+    }
+    if (isOwn && eq === -1 && i + 1 < args.length && isOwn(args[i + 1])) {
+      i++;
+      continue;
+    }
+    rest.push(args[i]);
+  }
+  return rest;
+}
+
+function isClaudeBinary(argv, execPath) {
+  return argv[1] === CLAUDE_ENTRY && String(execPath).includes("claude");
+}
+
+/**
+ * `BUN_OPTIONS` without this preload, the rest kept as written (Bun honours
+ * quoted values), or undefined when nothing else remains.
+ */
+function withoutOkenaPreload(bunOptions) {
+  if (bunOptions === undefined) {
+    return undefined;
+  }
+  const rest = bunOptions.replace(OKENA_PRELOAD_OPTION, "");
+  if (rest === bunOptions) {
+    return bunOptions;
+  }
+  return rest.trim() === "" ? undefined : rest.trim();
+}
+
+/**
+ * Stops this process from passing the preload on. Bun copies `BUN_OPTIONS`
+ * into `process.execArgv`, and programs copy either one to their children.
+ */
+function dropOkenaPreload(proc) {
+  const bunOptions = withoutOkenaPreload(proc.env.BUN_OPTIONS);
+  if (bunOptions === undefined) {
+    delete proc.env.BUN_OPTIONS;
+  } else if (bunOptions !== proc.env.BUN_OPTIONS) {
+    proc.env.BUN_OPTIONS = bunOptions;
+  }
+  const execArgv = proc.execArgv.filter((arg) => !OKENA_PRELOAD.test(arg));
+  if (execArgv.length !== proc.execArgv.length) {
+    proc.execArgv = execArgv;
+  }
+}
+
 /**
  * The argv an interactive Claude Code session in an Okena pane should run
  * with, or null to leave `argv` unchanged.
  */
 function okenaClaudeArgs(argv, env, execPath) {
-  if (argv[1] !== CLAUDE_ENTRY || !String(execPath).includes("claude")) {
+  if (!isClaudeBinary(argv, execPath)) {
     return null;
   }
   const okenaBin = env.OKENA_BIN;
@@ -166,7 +279,7 @@ function okenaClaudeArgs(argv, env, execPath) {
 
   const separator = argv.indexOf("--", 2);
   const optionsEnd = separator === -1 ? argv.length : separator;
-  const userArgs = argv.slice(2, optionsEnd);
+  const userArgs = withoutOwnFlags(argv.slice(2, optionsEnd), okenaBin);
   if (userArgs.some(isGuardedFlag)) {
     return null;
   }
@@ -186,21 +299,31 @@ function okenaClaudeArgs(argv, env, execPath) {
       `server:${CHANNEL_SERVER}`,
     );
   }
-  return [...argv.slice(0, optionsEnd), ...added, ...argv.slice(optionsEnd)];
+  return [...argv.slice(0, 2), ...userArgs, ...added, ...argv.slice(optionsEnd)];
+}
+
+function run(proc) {
+  if (!isClaudeBinary(proc.argv, proc.execPath)) {
+    dropOkenaPreload(proc);
+    return;
+  }
+  // `claude` keeps the preload: it restarts itself (`/restart`, `/update`)
+  // with its own environment and must reconnect.
+  const next = okenaClaudeArgs(proc.argv, proc.env, proc.execPath);
+  if (next) {
+    proc.argv.splice(0, proc.argv.length, ...next);
+    if (proc.env.OKENA_CLAUDE_REMOTE_DEBUG === "1") {
+      proc.stderr.write(`okena-remote: argv ${JSON.stringify(proc.argv)}\n`);
+    }
+  }
 }
 
 try {
-  const next = okenaClaudeArgs(process.argv, process.env, process.execPath);
-  if (next) {
-    process.argv.splice(0, process.argv.length, ...next);
-    if (process.env.OKENA_CLAUDE_REMOTE_DEBUG === "1") {
-      process.stderr.write(`okena-remote: argv ${JSON.stringify(process.argv)}\n`);
-    }
-  }
+  run(process);
 } catch {
   // A failing preload would break every Bun program in the pane.
 }
 
 if (typeof module !== "undefined") {
-  module.exports = { okenaClaudeArgs };
+  module.exports = { okenaClaudeArgs, run, withoutOkenaPreload };
 }
