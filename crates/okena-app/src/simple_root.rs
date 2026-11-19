@@ -164,11 +164,12 @@ fn detect_resize_edge(pos: Point<Pixels>, size: Size<Pixels>) -> Option<ResizeEd
 
 /// Pins the GPUI view-retention behaviour the window is built on.
 ///
-/// A `cx.notify()` re-renders only the notified view. A cached ancestor whose
-/// own reads did not change is drawn around it from its last frame. Every
-/// other view, the notified view's own cached descendants included, reuses its
-/// last frame until it is notified itself, so a view must be notified whenever
-/// state it reads outside an entity changes.
+/// A `cx.notify()` re-renders the notified view. A cached ancestor whose
+/// tracked entity reads did not change may be drawn around it from its last
+/// frame. Every other view, the notified view's own cached descendants
+/// included, reuses its last frame until it is notified itself. State read
+/// outside an entity (`Arc`, atomics) is not tracked, so a view must be
+/// notified whenever such state changes.
 #[cfg(test)]
 mod view_cache_cascade {
     use gpui::{
