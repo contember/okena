@@ -534,10 +534,8 @@ pub fn create_worktree_with_start_point(
     let target_str = path_str(target_path)?;
 
     if local_branch_exists(repo_path, branch) {
-        let output = safe_output(
-            command("git").args(["-C", repo_str, "worktree", "add", target_str, branch]),
-        )?;
-        return require_success(output).map(|()| WorktreeBranch::Existing);
+        return create_worktree(repo_path, branch, target_path, false)
+            .map(|()| WorktreeBranch::Existing);
     }
 
     let start_point = start_branch.and_then(|sb| resolve_start_ref(repo_path, sb));

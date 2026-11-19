@@ -10884,6 +10884,67 @@ mod tests {
             .await;
     }
 
+    /// `--new-branch` on a branch that already exists checks it out where it
+    /// is: the freshen that follows a create must not fast-forward it to
+    /// `origin/main`, even when it is a strict ancestor of it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn create_worktree_with_new_branch_leaves_an_existing_branch_where_it_is() {
+        use okena_terminal::backend::LocalBackend;
+        use okena_terminal::pty_manager::PtyManager;
+        use okena_terminal::session_backend::SessionBackend;
+
+        let repo = TempRepo::new();
+        let remote = tempfile::tempdir().expect("create remote dir");
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&repo.0)
+                .output()
+                .expect("run git");
+            assert!(out.status.success(), "git {args:?} failed");
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        let remote_path = remote.path().to_str().expect("utf-8 path");
+        git(&["init", "-q", "--bare", remote_path]);
+        git(&["remote", "add", "origin", remote_path]);
+        git(&["branch", "existing"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "ahead"]);
+        git(&["push", "-q", "origin", "main"]);
+        let existing_tip = git(&["rev-parse", "existing"]);
+        assert_ne!(existing_tip, git(&["rev-parse", "origin/main"]));
+
+        let mut h = harness();
+        let (pty_manager, _pty_events) = PtyManager::new(SessionBackend::None);
+        h.backend = Arc::new(LocalBackend::new(Arc::new(pty_manager)));
+        *h.workspace.lock() = Workspace::new(split_parent_workspace(&repo, None));
+        let (bridge_tx, bridge_rx) = bridge_channel();
+
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async move {
+                let handle = h.spawn_loop(bridge_rx);
+                let create = RemoteCommand::Action(ActionRequest::CreateWorktree {
+                    project_id: "p1".to_string(),
+                    branch: "existing".to_string(),
+                    create_branch: true,
+                    window: None,
+                    layout: Some(WorktreeLayout::Single),
+                    terminal_name: None,
+                    wait: true,
+                });
+                let created = request(&bridge_tx, create, "create").await;
+                assert!(
+                    matches!(created, CommandResult::Ok(Some(_))),
+                    "expected the existing branch checked out, got {created:?}"
+                );
+                drop(bridge_tx);
+                handle.await.expect("loop task joins");
+            })
+            .await;
+
+        assert_eq!(git(&["rev-parse", "existing"]), existing_tip);
+    }
+
     // ── PROOF: does the DAEMON side of quick-create-worktree work? ────────────
     //
     // Drives the REAL CreateWorktree action end-to-end through `execute_action`
