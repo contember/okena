@@ -403,6 +403,19 @@ fn fetch_and_resolve_start_ref(repo_path: &Path, repo_str: &str) -> Option<Strin
     resolve_start_ref(repo_path, &default_branch)
 }
 
+/// Whether a local branch of this exact name exists.
+fn local_branch_exists(repo_path: &Path, branch: &str) -> bool {
+    crate::gix_helpers::open(repo_path)
+        .is_some_and(|repo| repo.find_reference(&format!("refs/heads/{branch}")).is_ok())
+}
+
+/// Whether a new worktree's branch was made for it or already existed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorktreeBranch {
+    Created,
+    Existing,
+}
+
 /// How `git worktree add` attaches the new checkout.
 enum BranchAttachment {
     /// Create `-b <branch>`, optionally from a resolved start ref.
@@ -442,7 +455,8 @@ fn resolve_existing_branch(repo_path: &Path, branch: &str) -> GitResult<BranchAt
     })
 }
 
-/// Create a new worktree.
+/// Create a new worktree. `create_branch` creates the branch only when no
+/// local branch of that name exists; an existing one is checked out as is.
 pub fn create_worktree(
     repo_path: &Path,
     branch: &str,
@@ -455,7 +469,7 @@ pub fn create_worktree(
     let repo_str = path_str(repo_path)?;
     let target_str = path_str(target_path)?;
 
-    let attachment = if create_branch {
+    let attachment = if create_branch && !local_branch_exists(repo_path, branch) {
         BranchAttachment::NewBranch(fetch_and_resolve_start_ref(repo_path, repo_str))
     } else {
         resolve_existing_branch(repo_path, branch)?
@@ -503,12 +517,13 @@ pub fn create_worktree(
 /// If `start_branch` is Some, creates `-b <branch> <target> <resolved start>`
 /// without re-fetching (caller is expected to have fetched already); the start
 /// ref resolves to `origin/<start_branch>` or, failing that, the local branch.
+/// An existing local `branch` is checked out as is, ignoring the start point.
 pub fn create_worktree_with_start_point(
     repo_path: &Path,
     branch: &str,
     target_path: &Path,
     start_branch: Option<&str>,
-) -> GitResult<()> {
+) -> GitResult<WorktreeBranch> {
     crate::validate_git_ref(branch)?;
     if let Some(sb) = start_branch {
         crate::validate_git_ref(sb)?;
@@ -517,6 +532,13 @@ pub fn create_worktree_with_start_point(
 
     let repo_str = path_str(repo_path)?;
     let target_str = path_str(target_path)?;
+
+    if local_branch_exists(repo_path, branch) {
+        let output = safe_output(
+            command("git").args(["-C", repo_str, "worktree", "add", target_str, branch]),
+        )?;
+        return require_success(output).map(|()| WorktreeBranch::Existing);
+    }
 
     let start_point = start_branch.and_then(|sb| resolve_start_ref(repo_path, sb));
 
@@ -532,7 +554,7 @@ pub fn create_worktree_with_start_point(
     }
 
     let output = safe_output(command("git").args(&args))?;
-    require_success(output)
+    require_success(output).map(|()| WorktreeBranch::Created)
 }
 
 /// Best-effort freshen a just-created worktree to the latest remote default:
@@ -1111,8 +1133,11 @@ mod tests {
         let target_parent = tempfile::tempdir().expect("create target parent");
         let target = target_parent.path().join("wt-feat");
 
-        create_worktree_with_start_point(&repo, "feat/y", &target, Some("main"))
-            .expect("create worktree");
+        assert_eq!(
+            create_worktree_with_start_point(&repo, "feat/y", &target, Some("main"))
+                .expect("create worktree"),
+            WorktreeBranch::Created
+        );
 
         assert_eq!(
             git_out(&target, &["symbolic-ref", "--short", "HEAD"]),
@@ -1489,6 +1514,50 @@ mod tests {
         assert_eq!(
             git_out(&target, &["rev-parse", "HEAD"]),
             git_out(&repo, &["rev-parse", "main"])
+        );
+    }
+
+    /// `--new-branch` on a branch that already exists checks it out where it
+    /// is instead of failing on `-b`, through both entry points.
+    #[test]
+    fn creating_an_existing_local_branch_checks_it_out() {
+        let (_tmp, repo, _remote) = repo_with_origin();
+        git_in(&repo, &["checkout", "-q", "-b", "feature"]);
+        commit_in(&repo, "feature.txt");
+        git_in(&repo, &["checkout", "-q", "main"]);
+        let feature_tip = git_out(&repo, &["rev-parse", "feature"]);
+        let target_parent = tempfile::tempdir().expect("create target parent");
+
+        let daemon_target = target_parent.path().join("wt-daemon");
+        assert_eq!(
+            create_worktree_with_start_point(&repo, "feature", &daemon_target, Some("main"))
+                .expect("attach the existing branch"),
+            WorktreeBranch::Existing
+        );
+        assert_eq!(
+            git_out(&daemon_target, &["symbolic-ref", "--short", "HEAD"]),
+            "feature"
+        );
+        assert_eq!(git_out(&daemon_target, &["rev-parse", "HEAD"]), feature_tip);
+        git_in(
+            &repo,
+            &[
+                "worktree",
+                "remove",
+                daemon_target.to_str().expect("utf-8 path"),
+            ],
+        );
+
+        let workspace_target = target_parent.path().join("wt-workspace");
+        create_worktree(&repo, "feature", &workspace_target, true)
+            .expect("attach the existing branch");
+        assert_eq!(
+            git_out(&workspace_target, &["symbolic-ref", "--short", "HEAD"]),
+            "feature"
+        );
+        assert_eq!(
+            git_out(&workspace_target, &["rev-parse", "HEAD"]),
+            feature_tip
         );
     }
 

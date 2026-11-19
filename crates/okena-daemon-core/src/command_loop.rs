@@ -3705,32 +3705,36 @@ pub async fn daemon_command_loop(
                                                 let target =
                                                     std::path::PathBuf::from(&worktree_path);
                                                 tokio::task::spawn_blocking(move || {
-                                                let (result, default_branch) = if create_branch {
-                                                    let default = okena_git::get_default_branch(&git_root);
-                                                    (
+                                                    if !create_branch {
+                                                        return okena_git::create_worktree(
+                                                            &git_root, &branch, &target, false,
+                                                        );
+                                                    }
+                                                    let default =
+                                                        okena_git::get_default_branch(&git_root);
+                                                    let created =
                                                         okena_git::create_worktree_with_start_point(
-                                                            &git_root, &branch, &target, default.as_deref(),
-                                                        ),
-                                                        default,
-                                                    )
-                                                } else {
-                                                    (
-                                                        okena_git::create_worktree(&git_root, &branch, &target, false),
-                                                        None,
-                                                    )
-                                                };
-                                                if result.is_ok()
-                                                    && let Some(default_branch) = default_branch
-                                                {
-                                                    okena_git::fetch_and_fast_forward(
-                                                        &git_root,
-                                                        &target,
-                                                        &default_branch,
-                                                    );
-                                                }
-                                                result
-                                            })
-                                            .await
+                                                            &git_root,
+                                                            &branch,
+                                                            &target,
+                                                            default.as_deref(),
+                                                        );
+                                                    // Only a branch made here is freshened: fast-forwarding
+                                                    // an existing one would move the user's branch.
+                                                    if matches!(
+                                                        created,
+                                                        Ok(okena_git::WorktreeBranch::Created)
+                                                    ) && let Some(default_branch) = default
+                                                    {
+                                                        okena_git::fetch_and_fast_forward(
+                                                            &git_root,
+                                                            &target,
+                                                            &default_branch,
+                                                        );
+                                                    }
+                                                    created.map(drop)
+                                                })
+                                                .await
                                             };
                                             let stale = workspace.lock().data_replacement_epoch()
                                                 != operation_epoch;

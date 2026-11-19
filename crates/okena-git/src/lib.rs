@@ -20,10 +20,10 @@ pub use error::{GitError, GitResult};
 pub use file_history::{FileHistoryEntry, get_file_history};
 pub use repository::{
     BranchDetail, BranchList, CloneProgress, DirtyCheck, HeadSnapshot, IndexStamp,
-    OrphanedWorktree, RepoPollSnapshot, UpstreamState, VerifiedWorktree, checkout_local_branch,
-    checkout_remote_branch, clone_dir_name, clone_repository, compute_target_paths,
-    count_ahead_behind, count_unpushed_commits, create_and_checkout_branch, create_worktree,
-    create_worktree_with_start_point, delete_local_branch, delete_remote_branch,
+    OrphanedWorktree, RepoPollSnapshot, UpstreamState, VerifiedWorktree, WorktreeBranch,
+    checkout_local_branch, checkout_remote_branch, clone_dir_name, clone_repository,
+    compute_target_paths, count_ahead_behind, count_unpushed_commits, create_and_checkout_branch,
+    create_worktree, create_worktree_with_start_point, delete_local_branch, delete_remote_branch,
     discard_file_changes, fetch_all, fetch_and_fast_forward, finish_clone_repository,
     get_available_branches_for_worktree, get_current_branch, get_default_branch, get_head_snapshot,
     get_repo_common_dir, get_repo_poll_snapshot, get_repo_root, has_uncommitted_changes,
