@@ -97,14 +97,6 @@ struct Geometry {
     radius: Pixels,
 }
 
-impl IntoElement for VerticalScrollbar {
-    type Element = Self;
-
-    fn into_element(self) -> Self::Element {
-        self
-    }
-}
-
 impl Element for VerticalScrollbar {
     type RequestLayoutState = ();
     type PrepaintState = ScrollbarPrepaint;

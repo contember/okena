@@ -45,14 +45,6 @@ impl ResizeHandle {
     }
 }
 
-impl IntoElement for ResizeHandle {
-    type Element = Self;
-
-    fn into_element(self) -> Self::Element {
-        self
-    }
-}
-
 impl Element for ResizeHandle {
     type RequestLayoutState = ();
     type PrepaintState = Hitbox;

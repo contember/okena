@@ -4,9 +4,9 @@ resolver = "2"
 
 [workspace.dependencies]
 # GPUI Fast, the retained-mode GPUI, with GPUI Kit's component layer built on it.
-gpui = { package = "gpui-fast", version = "0.1.13" }
-gpui_platform = { package = "gpui-fast-platform", version = "0.1.13" }
-gpui-component = { version = "0.9.0", features = ["gpui-fast"] }
+gpui = { package = "gpui-fast", version = "0.1.17" }
+gpui_platform = { package = "gpui-fast-platform", version = "0.1.17" }
+gpui-component = { version = "0.10.0", features = ["gpui-fast"] }
 
 [workspace.package]
 version = "0.41.1"
