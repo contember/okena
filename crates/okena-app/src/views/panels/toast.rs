@@ -78,7 +78,9 @@ impl ToastOverlay {
         // Start async tick loop for animations and expiry
         cx.spawn(async move |this: WeakEntity<ToastOverlay>, cx| {
             loop {
-                smol::Timer::after(TICK_INTERVAL).await;
+                // GPUI's timer, not smol's: a smol timer wakes this foreground task from
+                // async-io's thread, which the test scheduler aborts on.
+                cx.background_executor().timer(TICK_INTERVAL).await;
 
                 let result = this.update(cx, |this, cx| {
                     // Drain pending toasts from HookMonitor into ToastManager
@@ -454,5 +456,18 @@ mod repaint_tests {
 
         update_settings(cx, |s, cx| s.set_ui_font_size(16.0, cx));
         assert_eq!(notifies.get(), 2, "ui font size");
+    }
+
+    #[gpui::test]
+    fn tick_loop_outliving_a_real_tick_stays_on_the_test_scheduler(cx: &mut TestAppContext) {
+        init_appearance_globals(cx);
+        cx.update(|cx| cx.set_global(ToastManager::new()));
+        let _overlay = cx.update(|cx| cx.new(ToastOverlay::new));
+
+        // The first poll arms the tick timer; a real-time one would then fire on
+        // async-io's thread during the sleep and abort the test process.
+        cx.run_until_parked();
+        std::thread::sleep(super::TICK_INTERVAL * 3);
+        cx.run_until_parked();
     }
 }
