@@ -3705,32 +3705,36 @@ pub async fn daemon_command_loop(
                                                 let target =
                                                     std::path::PathBuf::from(&worktree_path);
                                                 tokio::task::spawn_blocking(move || {
-                                                let (result, default_branch) = if create_branch {
-                                                    let default = okena_git::get_default_branch(&git_root);
-                                                    (
+                                                    if !create_branch {
+                                                        return okena_git::create_worktree(
+                                                            &git_root, &branch, &target, false,
+                                                        );
+                                                    }
+                                                    let default =
+                                                        okena_git::get_default_branch(&git_root);
+                                                    let created =
                                                         okena_git::create_worktree_with_start_point(
-                                                            &git_root, &branch, &target, default.as_deref(),
-                                                        ),
-                                                        default,
-                                                    )
-                                                } else {
-                                                    (
-                                                        okena_git::create_worktree(&git_root, &branch, &target, false),
-                                                        None,
-                                                    )
-                                                };
-                                                if result.is_ok()
-                                                    && let Some(default_branch) = default_branch
-                                                {
-                                                    okena_git::fetch_and_fast_forward(
-                                                        &git_root,
-                                                        &target,
-                                                        &default_branch,
-                                                    );
-                                                }
-                                                result
-                                            })
-                                            .await
+                                                            &git_root,
+                                                            &branch,
+                                                            &target,
+                                                            default.as_deref(),
+                                                        );
+                                                    // Only a branch made here is freshened: fast-forwarding
+                                                    // an existing one would move the user's branch.
+                                                    if matches!(
+                                                        created,
+                                                        Ok(okena_git::WorktreeBranch::Created)
+                                                    ) && let Some(default_branch) = default
+                                                    {
+                                                        okena_git::fetch_and_fast_forward(
+                                                            &git_root,
+                                                            &target,
+                                                            &default_branch,
+                                                        );
+                                                    }
+                                                    created.map(drop)
+                                                })
+                                                .await
                                             };
                                             let stale = workspace.lock().data_replacement_epoch()
                                                 != operation_epoch;
@@ -10878,6 +10882,67 @@ mod tests {
                 handle.await.expect("loop task joins");
             })
             .await;
+    }
+
+    /// `--new-branch` on a branch that already exists checks it out where it
+    /// is: the freshen that follows a create must not fast-forward it to
+    /// `origin/main`, even when it is a strict ancestor of it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn create_worktree_with_new_branch_leaves_an_existing_branch_where_it_is() {
+        use okena_terminal::backend::LocalBackend;
+        use okena_terminal::pty_manager::PtyManager;
+        use okena_terminal::session_backend::SessionBackend;
+
+        let repo = TempRepo::new();
+        let remote = tempfile::tempdir().expect("create remote dir");
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&repo.0)
+                .output()
+                .expect("run git");
+            assert!(out.status.success(), "git {args:?} failed");
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        let remote_path = remote.path().to_str().expect("utf-8 path");
+        git(&["init", "-q", "--bare", remote_path]);
+        git(&["remote", "add", "origin", remote_path]);
+        git(&["branch", "existing"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "ahead"]);
+        git(&["push", "-q", "origin", "main"]);
+        let existing_tip = git(&["rev-parse", "existing"]);
+        assert_ne!(existing_tip, git(&["rev-parse", "origin/main"]));
+
+        let mut h = harness();
+        let (pty_manager, _pty_events) = PtyManager::new(SessionBackend::None);
+        h.backend = Arc::new(LocalBackend::new(Arc::new(pty_manager)));
+        *h.workspace.lock() = Workspace::new(split_parent_workspace(&repo, None));
+        let (bridge_tx, bridge_rx) = bridge_channel();
+
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async move {
+                let handle = h.spawn_loop(bridge_rx);
+                let create = RemoteCommand::Action(ActionRequest::CreateWorktree {
+                    project_id: "p1".to_string(),
+                    branch: "existing".to_string(),
+                    create_branch: true,
+                    window: None,
+                    layout: Some(WorktreeLayout::Single),
+                    terminal_name: None,
+                    wait: true,
+                });
+                let created = request(&bridge_tx, create, "create").await;
+                assert!(
+                    matches!(created, CommandResult::Ok(Some(_))),
+                    "expected the existing branch checked out, got {created:?}"
+                );
+                drop(bridge_tx);
+                handle.await.expect("loop task joins");
+            })
+            .await;
+
+        assert_eq!(git(&["rev-parse", "existing"]), existing_tip);
     }
 
     // ── PROOF: does the DAEMON side of quick-create-worktree work? ────────────
