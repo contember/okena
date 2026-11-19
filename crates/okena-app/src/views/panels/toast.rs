@@ -432,7 +432,7 @@ mod tests {
 
 #[cfg(test)]
 mod repaint_tests {
-    use super::{ToastManager, ToastOverlay};
+    use super::{TICK_INTERVAL, Toast, ToastManager, ToastOverlay};
     use crate::theme::ThemeMode;
     use crate::views::chrome::repaint::test_support::{
         NotifyCount, init_appearance_globals, notify_theme_unchanged, set_theme_mode,
@@ -459,15 +459,28 @@ mod repaint_tests {
     }
 
     #[gpui::test]
-    fn tick_loop_outliving_a_real_tick_stays_on_the_test_scheduler(cx: &mut TestAppContext) {
+    fn tick_loop_runs_on_the_test_clock_not_wall_time(cx: &mut TestAppContext) {
         init_appearance_globals(cx);
         cx.update(|cx| cx.set_global(ToastManager::new()));
-        let _overlay = cx.update(|cx| cx.new(ToastOverlay::new));
+        let overlay = cx.update(|cx| cx.new(ToastOverlay::new));
+        cx.update(|cx| ToastManager::post(Toast::success("saved"), cx));
 
         // The first poll arms the tick timer; a real-time one would then fire on
-        // async-io's thread during the sleep and abort the test process.
+        // async-io's thread during the sleep, which the test scheduler rejects.
         cx.run_until_parked();
-        std::thread::sleep(super::TICK_INTERVAL * 3);
+        std::thread::sleep(TICK_INTERVAL * 3);
         cx.run_until_parked();
+        assert!(
+            overlay.read_with(cx, |o, _| o.toasts.is_empty()),
+            "wall time alone does not tick"
+        );
+
+        cx.executor().advance_clock(TICK_INTERVAL);
+        cx.run_until_parked();
+        assert_eq!(
+            overlay.read_with(cx, |o, _| o.toasts.len()),
+            1,
+            "one test-clock tick drains the posted toast"
+        );
     }
 }
