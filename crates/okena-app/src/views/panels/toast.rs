@@ -78,7 +78,9 @@ impl ToastOverlay {
         // Start async tick loop for animations and expiry
         cx.spawn(async move |this: WeakEntity<ToastOverlay>, cx| {
             loop {
-                smol::Timer::after(TICK_INTERVAL).await;
+                // GPUI's timer, not smol's: a smol timer wakes this foreground task from
+                // async-io's thread, which the test scheduler aborts on.
+                cx.background_executor().timer(TICK_INTERVAL).await;
 
                 let result = this.update(cx, |this, cx| {
                     // Drain pending toasts from HookMonitor into ToastManager
@@ -430,7 +432,7 @@ mod tests {
 
 #[cfg(test)]
 mod repaint_tests {
-    use super::{ToastManager, ToastOverlay};
+    use super::{TICK_INTERVAL, Toast, ToastManager, ToastOverlay};
     use crate::theme::ThemeMode;
     use crate::views::chrome::repaint::test_support::{
         NotifyCount, init_appearance_globals, notify_theme_unchanged, set_theme_mode,
@@ -454,5 +456,31 @@ mod repaint_tests {
 
         update_settings(cx, |s, cx| s.set_ui_font_size(16.0, cx));
         assert_eq!(notifies.get(), 2, "ui font size");
+    }
+
+    #[gpui::test]
+    fn tick_loop_runs_on_the_test_clock_not_wall_time(cx: &mut TestAppContext) {
+        init_appearance_globals(cx);
+        cx.update(|cx| cx.set_global(ToastManager::new()));
+        let overlay = cx.update(|cx| cx.new(ToastOverlay::new));
+        cx.update(|cx| ToastManager::post(Toast::success("saved"), cx));
+
+        // The first poll arms the tick timer; a real-time one would then fire on
+        // async-io's thread during the sleep, which the test scheduler rejects.
+        cx.run_until_parked();
+        std::thread::sleep(TICK_INTERVAL * 3);
+        cx.run_until_parked();
+        assert!(
+            overlay.read_with(cx, |o, _| o.toasts.is_empty()),
+            "wall time alone does not tick"
+        );
+
+        cx.executor().advance_clock(TICK_INTERVAL);
+        cx.run_until_parked();
+        assert_eq!(
+            overlay.read_with(cx, |o, _| o.toasts.len()),
+            1,
+            "one test-clock tick drains the posted toast"
+        );
     }
 }
