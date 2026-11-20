@@ -685,7 +685,8 @@ pub enum WorktreeCmd {
         project: String,
         /// Branch name
         branch: String,
-        /// Create the branch if it doesn't exist
+        /// Create the branch if it doesn't exist; a branch only on origin
+        /// becomes a local branch tracking it
         #[arg(long)]
         new_branch: bool,
         /// Block until the checkout and its terminals exist; print the first

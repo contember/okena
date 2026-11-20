@@ -403,17 +403,41 @@ fn fetch_and_resolve_start_ref(repo_path: &Path, repo_str: &str) -> Option<Strin
     resolve_start_ref(repo_path, &default_branch)
 }
 
-/// Whether a local branch of this exact name exists.
-fn local_branch_exists(repo_path: &Path, branch: &str) -> bool {
-    crate::gix_helpers::open(repo_path)
-        .is_some_and(|repo| repo.find_reference(&format!("refs/heads/{branch}")).is_ok())
+/// The branch `--new-branch <branch>` should attach instead of creating one:
+/// the local branch when it exists, else a new local branch tracking
+/// `origin/<branch>` when only that exists. `None` when neither exists.
+fn existing_branch_for_new(
+    repo_path: &Path,
+    branch: &str,
+) -> Option<(BranchAttachment, WorktreeBranch)> {
+    let repo = crate::gix_helpers::open(repo_path)?;
+    let is_ref = |full: String| repo.find_reference(&full).is_ok();
+    if is_ref(format!("refs/heads/{branch}")) {
+        return Some((
+            BranchAttachment::Existing(branch.to_string()),
+            WorktreeBranch::Existing,
+        ));
+    }
+    is_ref(format!("refs/remotes/origin/{branch}")).then(|| {
+        (
+            BranchAttachment::TrackRemote {
+                local: branch.to_string(),
+                remote: format!("origin/{branch}"),
+            },
+            WorktreeBranch::TrackingRemote,
+        )
+    })
 }
 
-/// Whether a new worktree's branch was made for it or already existed.
+/// How a new worktree's branch was obtained.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WorktreeBranch {
+    /// A new branch from the start point.
     Created,
+    /// The existing local branch, as it is.
     Existing,
+    /// A new local branch tracking the existing `origin/<branch>`.
+    TrackingRemote,
 }
 
 /// How `git worktree add` attaches the new checkout.
@@ -455,8 +479,9 @@ fn resolve_existing_branch(repo_path: &Path, branch: &str) -> GitResult<BranchAt
     })
 }
 
-/// Create a new worktree. `create_branch` creates the branch only when no
-/// local branch of that name exists; an existing one is checked out as is.
+/// Create a new worktree. `create_branch` creates the branch only when it
+/// does not exist: an existing local branch is checked out as is, and a branch
+/// that exists only as `origin/<branch>` becomes a local branch tracking it.
 pub fn create_worktree(
     repo_path: &Path,
     branch: &str,
@@ -469,17 +494,29 @@ pub fn create_worktree(
     let repo_str = path_str(repo_path)?;
     let target_str = path_str(target_path)?;
 
-    let attachment = if create_branch && !local_branch_exists(repo_path, branch) {
-        BranchAttachment::NewBranch(fetch_and_resolve_start_ref(repo_path, repo_str))
+    let attachment = if create_branch {
+        existing_branch_for_new(repo_path, branch).map_or_else(
+            || BranchAttachment::NewBranch(fetch_and_resolve_start_ref(repo_path, repo_str)),
+            |(attachment, _)| attachment,
+        )
     } else {
         resolve_existing_branch(repo_path, branch)?
     };
+    add_worktree(repo_str, branch, target_str, &attachment)
+}
 
+/// Run `git worktree add` for `branch` resolved to `attachment`.
+fn add_worktree(
+    repo_str: &str,
+    branch: &str,
+    target_str: &str,
+    attachment: &BranchAttachment,
+) -> GitResult<()> {
     let mut args = vec!["-C", repo_str, "worktree", "add"];
-    match &attachment {
+    match attachment {
         BranchAttachment::NewBranch(start_point) => {
-            // The start point is `origin/<default>`, and git records a
-            // remote-tracking start point as the new branch's upstream
+            // The start point is usually `origin/<default>`, and git records
+            // a remote-tracking start point as the new branch's upstream
             // (`branch.autoSetupMerge`). Nothing has been pushed yet, so that
             // upstream would be the default branch: every lookup for "this
             // branch's pushed commit" would answer with the default branch's,
@@ -517,7 +554,8 @@ pub fn create_worktree(
 /// If `start_branch` is Some, creates `-b <branch> <target> <resolved start>`
 /// without re-fetching (caller is expected to have fetched already); the start
 /// ref resolves to `origin/<start_branch>` or, failing that, the local branch.
-/// An existing local `branch` is checked out as is, ignoring the start point.
+/// An existing `branch` ignores the start point: a local one is checked out as
+/// is, one only on `origin` becomes a local branch tracking it.
 pub fn create_worktree_with_start_point(
     repo_path: &Path,
     branch: &str,
@@ -533,26 +571,15 @@ pub fn create_worktree_with_start_point(
     let repo_str = path_str(repo_path)?;
     let target_str = path_str(target_path)?;
 
-    if local_branch_exists(repo_path, branch) {
-        return create_worktree(repo_path, branch, target_path, false)
-            .map(|()| WorktreeBranch::Existing);
-    }
-
-    let start_point = start_branch.and_then(|sb| resolve_start_ref(repo_path, sb));
-
-    let mut args = vec!["-C", repo_str, "worktree", "add"];
-    // See `create_worktree`: a branch that has never been pushed must not claim
-    // the branch it started from as its upstream.
-    if start_point.is_some() {
-        args.push("--no-track");
-    }
-    args.extend(["-b", branch, target_str]);
-    if let Some(start_point) = &start_point {
-        args.push(start_point);
-    }
-
-    let output = safe_output(command("git").args(&args))?;
-    require_success(output).map(|()| WorktreeBranch::Created)
+    let (attachment, kind) = existing_branch_for_new(repo_path, branch).unwrap_or_else(|| {
+        (
+            BranchAttachment::NewBranch(
+                start_branch.and_then(|sb| resolve_start_ref(repo_path, sb)),
+            ),
+            WorktreeBranch::Created,
+        )
+    });
+    add_worktree(repo_str, branch, target_str, &attachment).map(|()| kind)
 }
 
 /// Best-effort freshen a just-created worktree to the latest remote default:
@@ -1557,6 +1584,84 @@ mod tests {
             git_out(&workspace_target, &["rev-parse", "HEAD"]),
             feature_tip
         );
+    }
+
+    /// `--new-branch` on a branch that exists only as `origin/feature` makes a
+    /// local branch tracking it at the remote tip, through both entry points.
+    #[test]
+    fn creating_a_remote_only_branch_tracks_it() {
+        let (_tmp, repo, _remote) = repo_with_origin();
+        git_in(&repo, &["checkout", "-q", "-b", "feature"]);
+        commit_in(&repo, "feature.txt");
+        git_in(&repo, &["checkout", "-q", "main"]);
+        git_in(&repo, &["push", "-q", "origin", "feature"]);
+        git_in(&repo, &["branch", "-D", "feature"]);
+        let remote_tip = git_out(&repo, &["rev-parse", "origin/feature"]);
+        assert_ne!(remote_tip, git_out(&repo, &["rev-parse", "main"]));
+        let target_parent = tempfile::tempdir().expect("create target parent");
+        let assert_tracks = |target: &Path| {
+            assert_eq!(
+                git_out(target, &["symbolic-ref", "--short", "HEAD"]),
+                "feature"
+            );
+            assert_eq!(git_out(target, &["rev-parse", "HEAD"]), remote_tip);
+            assert_eq!(
+                git_out(target, &["rev-parse", "--abbrev-ref", "@{upstream}"]),
+                "origin/feature"
+            );
+        };
+
+        let daemon_target = target_parent.path().join("wt-daemon");
+        assert_eq!(
+            create_worktree_with_start_point(&repo, "feature", &daemon_target, Some("main"))
+                .expect("track the remote branch"),
+            WorktreeBranch::TrackingRemote
+        );
+        assert_tracks(&daemon_target);
+        git_in(
+            &repo,
+            &[
+                "worktree",
+                "remove",
+                daemon_target.to_str().expect("utf-8 path"),
+            ],
+        );
+        git_in(&repo, &["branch", "-D", "feature"]);
+
+        let workspace_target = target_parent.path().join("wt-workspace");
+        create_worktree(&repo, "feature", &workspace_target, true)
+            .expect("track the remote branch");
+        assert_tracks(&workspace_target);
+    }
+
+    /// With both a local `feature` and `origin/feature`, `--new-branch` takes
+    /// the local branch as it is and adds no upstream.
+    #[test]
+    fn creating_a_branch_that_is_local_and_on_origin_keeps_the_local_one() {
+        let (_tmp, repo, _remote) = repo_with_origin();
+        git_in(&repo, &["checkout", "-q", "-b", "feature"]);
+        commit_in(&repo, "remote.txt");
+        git_in(&repo, &["push", "-q", "origin", "feature"]);
+        git_in(&repo, &["reset", "-q", "--hard", "main"]);
+        commit_in(&repo, "local.txt");
+        git_in(&repo, &["checkout", "-q", "main"]);
+        let local_tip = git_out(&repo, &["rev-parse", "feature"]);
+        assert_ne!(local_tip, git_out(&repo, &["rev-parse", "origin/feature"]));
+        let target_parent = tempfile::tempdir().expect("create target parent");
+
+        let target = target_parent.path().join("wt-feature");
+        assert_eq!(
+            create_worktree_with_start_point(&repo, "feature", &target, Some("main"))
+                .expect("attach the local branch"),
+            WorktreeBranch::Existing
+        );
+        assert_eq!(git_out(&target, &["rev-parse", "HEAD"]), local_tip);
+        let upstream = std::process::Command::new("git")
+            .args(["rev-parse", "--abbrev-ref", "feature@{upstream}"])
+            .current_dir(&repo)
+            .output()
+            .expect("run git");
+        assert!(!upstream.status.success(), "no upstream may be added");
     }
 
     /// Handing `origin/feature` to `git worktree add` detaches HEAD; the pick

@@ -29,6 +29,15 @@ Right-click a project in the sidebar and select **Create Worktree**, or use the 
 - Switch to the **From PR** tab to list open pull requests from GitHub (requires the `gh` CLI)
 - Select a PR to check out its branch as a worktree
 
+### New Branch Names
+
+A typed new branch name (in the dialog, or with `--new-branch` from the CLI) is
+created from the default branch only when the branch does not exist. An existing
+local branch is checked out as it is; a branch that exists only as
+`origin/<branch>` becomes a local branch tracking it. Okena does not fetch for
+this check, so it goes by the `origin/*` refs of the last fetch. A suggested
+branch name never matches an existing local or `origin/*` branch.
+
 ### Custom Path
 
 Check **Use custom path** to override where the worktree is created on disk. The field is pre-filled with the auto-generated path based on your path template.
