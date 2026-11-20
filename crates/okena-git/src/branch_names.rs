@@ -348,7 +348,14 @@ fn collect_taken_branches(repo_path: &Path) -> HashSet<String> {
             w.join().expect("worktree branch listing thread panicked"),
         )
     });
-    let mut taken: HashSet<String> = branches.into_iter().collect();
+    // `--new-branch` attaches a branch that exists only as `origin/<name>`, so
+    // a generated name must not be one of those either.
+    let mut taken: HashSet<String> = branches
+        .iter()
+        .filter_map(|branch| branch.strip_prefix("origin/"))
+        .map(str::to_string)
+        .collect();
+    taken.extend(branches);
     taken.extend(wt_branches);
     taken
 }
@@ -422,6 +429,22 @@ mod tests {
         assert_eq!(sanitize_username("日本-語"), "");
         assert_eq!(sanitize_username("---"), "");
         assert_eq!(sanitize_username("日本 John Doe 日本"), "john-doe");
+    }
+
+    /// A name that exists only on origin is taken: `--new-branch` would attach
+    /// that remote branch instead of creating a fresh one.
+    #[test]
+    fn a_remote_only_branch_name_is_taken() {
+        use crate::repository::test_support::{git_in, repo_with_origin};
+        let (_tmp, repo, _remote) = repo_with_origin();
+        git_in(&repo, &["branch", "user/rohlik"]);
+        git_in(&repo, &["push", "-q", "origin", "user/rohlik"]);
+        git_in(&repo, &["branch", "-D", "user/rohlik"]);
+
+        let taken = collect_taken_branches(&repo);
+
+        assert!(taken.contains("user/rohlik"), "taken: {taken:?}");
+        assert!(taken.contains("main"));
     }
 
     #[test]
