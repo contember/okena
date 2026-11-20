@@ -138,7 +138,14 @@ fn write_history(buf: &mut Vec<u8>, grid: &Grid<Cell>, current: &mut SgrState) {
                 .flags
                 .contains(Flags::WRAPLINE);
         let end = if wraps {
-            cols
+            // A wide char that did not fit left a spacer in the last cell;
+            // without it the client wraps the same way and sets its own.
+            let last = &grid[Point::new(line, Column(cols - 1))];
+            if last.flags.contains(Flags::LEADING_WIDE_CHAR_SPACER) {
+                cols - 1
+            } else {
+                cols
+            }
         } else {
             // The blank tail costs bytes and nothing else.
             let end = (0..cols)
@@ -180,12 +187,8 @@ fn write_row(buf: &mut Vec<u8>, grid: &Grid<Cell>, line: Line, current: &mut Sgr
     for col_idx in 0..end {
         let cell = &grid[Point::new(line, Column(col_idx))];
 
-        // Skip wide char spacers. A leading one ends a row the wide char did
-        // not fit; leaving it out lets the client wrap the same way.
-        if cell
-            .flags
-            .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER)
-        {
+        // Skip wide char spacer cells
+        if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
             continue;
         }
 
@@ -728,8 +731,11 @@ mod tests {
         };
         let source = terminal("source");
         let cols = source.with_content(|term| term.grid().columns());
-        source.process_output(format!("{}\u{6f22}\r\n", "x".repeat(cols - 1)).as_bytes());
+        let wrapped_wide = format!("{}\x1b[45m\u{6f22}\x1b[0m\r\n", "x".repeat(cols - 1));
+        source.process_output(wrapped_wide.as_bytes());
         print_lines(&source, 40);
+        // The same on the visible grid, where rows are drawn in place.
+        source.process_output(wrapped_wide.as_bytes());
         assert_eq!(leading_spacers(&source), 1);
         let mirror = terminal("mirror");
 
@@ -738,6 +744,7 @@ mod tests {
         assert_eq!(leading_spacers(&mirror), 1);
         assert_eq!(history_wraps(&mirror), history_wraps(&source));
         assert_eq!(history_cells(&mirror), history_cells(&source));
+        assert_eq!(screen_cells(&mirror), screen_cells(&source));
     }
 
     #[test]
