@@ -47,8 +47,6 @@ jobs:
           SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
-          echo "tag=nightly-$(date -u +%Y%m%d)-${SHA:0:7}" >> "$GITHUB_OUTPUT"
-
           gh api "repos/$REPO/actions/workflows/build.yml/runs?head_sha=$SHA&per_page=100" > runs.json
           decision=$(scripts/nightly-gate.sh "$REF" "$SHA" < runs.json)
           if [[ "$decision" != build ]]; then
@@ -64,6 +62,7 @@ jobs:
             echo "skip=true" >> "$GITHUB_OUTPUT"
           else
             echo "skip=false" >> "$GITHUB_OUTPUT"
+            echo "tag=nightly-$(date -u +%Y%m%d)-${SHA:0:7}" >> "$GITHUB_OUTPUT"
           fi
 
   build:

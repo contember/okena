@@ -22,12 +22,13 @@ runs() {
 
 # expect <name> <ref> <expected prefix> < runs.json
 expect() {
-  local name=$1 ref=$2 want=$3 got
-  got=$("$gate" "$ref" "$sha" 2>&1)
-  if [[ "$got" == "$want"* ]]; then
+  local name=$1 ref=$2 want=$3 got status
+  got=$("$gate" "$ref" "$sha")
+  status=$?
+  if [[ $status -eq 0 && "$got" == "$want"* ]]; then
     echo "ok   $name"
   else
-    echo "FAIL $name: want '$want…', got '$got'"
+    echo "FAIL $name: want '$want…' and exit 0, got '$got' and exit $status"
     failures=$((failures + 1))
   fi
 }

@@ -71,6 +71,9 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+      - name: Nightly gate tests
+        run: scripts/nightly-gate-test.sh
+
       - name: Daemon/client split gates
         run: |
           scripts/audit-daemon-client-gaps.sh
