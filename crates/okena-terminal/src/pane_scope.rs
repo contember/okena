@@ -191,6 +191,21 @@ struct ScopeRunner {
     systemd_run: String,
     /// Scopes take `OOMPolicy=` from systemd 253 on; older ones reject it.
     oom_policy: bool,
+    /// `--expand-environment=no`, known from systemd 254 on. Later releases
+    /// expand `$VAR` in a scope's argv by default, which rewrites `$$` and
+    /// `${…}` in a pane's command.
+    no_expand_environment: bool,
+}
+
+impl ScopeRunner {
+    fn for_systemd_version(env_prefix: Vec<String>, systemd_run: String, version: u32) -> Self {
+        Self {
+            env_prefix,
+            systemd_run,
+            oom_policy: version >= 253,
+            no_expand_environment: version >= 254,
+        }
+    }
 }
 
 /// `systemd-run --scope` keeps the program's pid, environment, cwd and
@@ -213,6 +228,9 @@ fn scope_argv(
         format!("--unit={unit}"),
         format!("--description={}", description(terminal_id)),
     ]);
+    if runner.no_expand_environment {
+        argv.push("--expand-environment=no".to_string());
+    }
     for property in scope_properties(limits, runner.oom_policy) {
         argv.extend(["-p".to_string(), property]);
     }
@@ -312,50 +330,51 @@ fn probe_scope_runner() -> Option<ScopeRunner> {
         }
         None => Vec::new(),
     };
-    let probe = |oom_policy: bool| {
-        let runner = ScopeRunner {
-            env_prefix: env_prefix.clone(),
-            systemd_run: systemd_run.clone(),
-            oom_policy,
-        };
-        let limits = PaneMemoryLimits {
-            enabled: true,
-            memory_high: MemoryLimit::Infinity,
-            memory_max: MemoryLimit::Infinity,
-        };
-        let mut argv = scope_argv(&runner, &limits, &unit_name("probe"), "probe");
-        argv.push("true".to_string());
-        let (program, args) = argv.split_first()?;
-        let output = okena_core::process::safe_output_with_timeout(
-            crate::process::command(program).args(args),
-            std::time::Duration::from_secs(5),
-        );
-        match output {
-            Ok(output) if output.status.success() => Some(Ok(runner)),
-            Ok(output) => Some(Err(String::from_utf8_lossy(&output.stderr)
-                .trim()
-                .to_string())),
-            Err(error) => Some(Err(error.to_string())),
-        }
+    let Some(version) = systemd_version(&systemd_run) else {
+        return unavailable("could not read the systemd version");
     };
-    let result = match probe(true)? {
-        Ok(runner) => Ok(runner),
-        Err(_) => probe(false)?,
+    let runner = ScopeRunner::for_systemd_version(env_prefix, systemd_run, version);
+    // The launcher's own argv, so a property the manager rejects shows here
+    // and not as a pane that never starts.
+    let limits = PaneMemoryLimits {
+        enabled: true,
+        memory_high: MemoryLimit::Infinity,
+        memory_max: MemoryLimit::Infinity,
     };
-    match result {
-        Ok(runner) => {
-            log::info!(
-                "panes run in systemd user scopes with memory limits{}",
-                if runner.oom_policy {
-                    ""
-                } else {
-                    " (no OOMPolicy: systemd older than 253)"
-                }
-            );
+    let mut argv = scope_argv(&runner, &limits, &unit_name("probe"), "probe");
+    argv.push("true".to_string());
+    let output = okena_core::process::safe_output_with_timeout(
+        crate::process::command(&argv[0]).args(&argv[1..]),
+        std::time::Duration::from_secs(5),
+    );
+    match output {
+        Ok(output) if output.status.success() => {
+            log::info!("panes run in systemd {version} user scopes with memory limits");
             Some(runner)
         }
-        Err(reason) => unavailable(&reason),
+        Ok(output) => unavailable(String::from_utf8_lossy(&output.stderr).trim()),
+        Err(error) => unavailable(&error.to_string()),
     }
+}
+
+#[cfg(target_os = "linux")]
+fn systemd_version(systemd_run: &str) -> Option<u32> {
+    let output = okena_core::process::safe_output_with_timeout(
+        crate::process::command(systemd_run).arg("--version"),
+        std::time::Duration::from_secs(5),
+    )
+    .ok()?;
+    parse_systemd_version(&String::from_utf8_lossy(&output.stdout))
+}
+
+/// Parses `systemd-run --version`, whose first line is `systemd 257 (…)`.
+#[cfg(any(target_os = "linux", test))]
+fn parse_systemd_version(output: &str) -> Option<u32> {
+    let mut words = output.lines().next()?.split_whitespace();
+    if words.next()? != "systemd" {
+        return None;
+    }
+    words.next()?.parse().ok()
 }
 
 /// Scopes are units of the user manager, which logind stops when the user's
@@ -604,14 +623,14 @@ mod tests {
             memory_high: MemoryLimit::Bytes(GIB),
             memory_max: MemoryLimit::Infinity,
         };
-        let runner = ScopeRunner {
-            env_prefix: vec![
+        let runner = ScopeRunner::for_systemd_version(
+            vec![
                 "/usr/bin/env".to_string(),
                 "XDG_RUNTIME_DIR=/run/user/7".to_string(),
             ],
-            systemd_run: "/usr/bin/systemd-run".to_string(),
-            oom_policy: true,
-        };
+            "/usr/bin/systemd-run".to_string(),
+            257,
+        );
         let argv = scope_argv(&runner, &limits, "okena-pane-x.scope", "t-1");
         assert_eq!(
             argv[..7],
@@ -630,20 +649,38 @@ mod tests {
         assert!(argv.contains(&format!("MemoryHigh={GIB}")));
         assert!(argv.contains(&"MemoryMax=infinity".to_string()));
         assert!(argv.contains(&"OOMPolicy=continue".to_string()));
+        assert!(argv.contains(&"--expand-environment=no".to_string()));
         assert_eq!(argv.last().map(String::as_str), Some("--"));
     }
 
     #[test]
-    fn systemd_older_than_253_gets_no_oom_policy() {
-        let runner = ScopeRunner {
-            env_prefix: Vec::new(),
-            systemd_run: "systemd-run".to_string(),
-            oom_policy: false,
+    fn scope_options_follow_the_systemd_version() {
+        let argv = |version| {
+            let runner =
+                ScopeRunner::for_systemd_version(Vec::new(), "systemd-run".to_string(), version);
+            scope_argv(&runner, &PaneMemoryLimits::default(), "u.scope", "t")
         };
-        let argv = scope_argv(&runner, &PaneMemoryLimits::default(), "u.scope", "t");
-        assert_eq!(argv[0], "systemd-run");
-        assert!(!argv.iter().any(|arg| arg.starts_with("OOMPolicy")));
-        assert!(argv.contains(&format!("MemoryMax={}", 16 * GIB)));
+        let has = |argv: &[String], arg: &str| argv.iter().any(|a| a == arg);
+        let v252 = argv(252);
+        assert_eq!(v252[0], "systemd-run");
+        assert!(!has(&v252, "OOMPolicy=continue"));
+        assert!(!has(&v252, "--expand-environment=no"));
+        assert!(has(&v252, &format!("MemoryMax={}", 16 * GIB)));
+        let v253 = argv(253);
+        assert!(has(&v253, "OOMPolicy=continue"));
+        assert!(!has(&v253, "--expand-environment=no"));
+        assert!(has(&argv(254), "--expand-environment=no"));
+    }
+
+    #[test]
+    fn systemd_versions_parse_from_the_first_line() {
+        assert_eq!(
+            parse_systemd_version("systemd 257 (257.9-0ubuntu2.5)\n+PAM +AUDIT\n"),
+            Some(257)
+        );
+        assert_eq!(parse_systemd_version("systemd 249\n"), Some(249));
+        assert_eq!(parse_systemd_version("something 257\n"), None);
+        assert_eq!(parse_systemd_version(""), None);
     }
 
     #[test]

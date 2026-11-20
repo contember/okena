@@ -2862,9 +2862,8 @@ mod tests {
         manager.set_launch_environment(Arc::new(|_| {
             vec![("OKENA_SCOPE_MARKER".to_string(), Some("kept".to_string()))]
         }));
-        // The pane reads its limits through its own view of the cgroup tree
-        // (a cgroup namespace may root it at the scope) and stays alive so the
-        // test can look its cgroup up from outside.
+        // `$$` and `${…}` are canaries: systemd-run must not expand them.
+        // The pane stays alive so the test can look its cgroup up from outside.
         let plan = TerminalLaunchPlan {
             route: ShellType::Default,
             initial_command: Some(crate::backend::TerminalLaunchCommand {
@@ -2872,8 +2871,8 @@ mod tests {
                 args: vec![
                     "-c".to_string(),
                     "cg=$(sed -n 's/^0:://p' /proc/self/cgroup); \
-                     { echo \"$OKENA_SCOPE_MARKER\"; echo $$; \
-                       cat \"/sys/fs/cgroup${cg%/}/memory.high\" \"/sys/fs/cgroup${cg%/}/memory.max\" 2>/dev/null; \
+                     { echo \"$OKENA_SCOPE_MARKER\"; echo $$; echo \"${OKENA_SCOPE_MARKER#k}\"; \
+                       cat \"/sys/fs/cgroup$cg/memory.high\" \"/sys/fs/cgroup$cg/memory.max\" 2>/dev/null; \
                      } > \"$1.tmp\"; mv \"$1.tmp\" \"$1\"; exec sleep 30"
                         .to_string(),
                     "okena-test".to_string(),
@@ -2905,6 +2904,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&fixture);
 
         assert_eq!(lines.first(), Some(&"kept"), "report: {report:?}");
+        assert_eq!(lines.get(2), Some(&"ept"), "report: {report:?}");
         let scoped = crate::pane_scope::scope_command_prefix(&limits, &terminal_id).is_some();
         assert_eq!(
             cgroup.contains(crate::pane_scope::PANE_SCOPE_PREFIX),
@@ -2913,7 +2913,7 @@ mod tests {
         );
         if scoped {
             assert_eq!(
-                lines[2..],
+                lines[3..],
                 [(1u64 << 30).to_string(), (2u64 << 30).to_string()],
                 "report: {report:?}"
             );
