@@ -197,6 +197,7 @@ struct ScopeRunner {
     no_expand_environment: bool,
 }
 
+#[cfg(any(target_os = "linux", test))]
 impl ScopeRunner {
     fn for_systemd_version(env_prefix: Vec<String>, systemd_run: String, version: u32) -> Self {
         Self {
@@ -360,7 +361,9 @@ fn probe_scope_runner() -> Option<ScopeRunner> {
 #[cfg(target_os = "linux")]
 fn systemd_version(systemd_run: &str) -> Option<u32> {
     let output = okena_core::process::safe_output_with_timeout(
-        crate::process::command(systemd_run).arg("--version"),
+        crate::process::command(systemd_run)
+            .env("SYSTEMD_COLORS", "0")
+            .arg("--version"),
         std::time::Duration::from_secs(5),
     )
     .ok()?;
