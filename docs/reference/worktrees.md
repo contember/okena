@@ -39,6 +39,10 @@ Check **Use custom path** to override where the worktree is created on disk. The
 row exists (`pending: true`) and checks out in the background; a failed checkout
 removes the row again and shows a toast.
 
+`--new-branch` creates `<branch>` from the default branch only when it does not
+exist. An existing local branch is checked out as it is; a branch that exists
+only as `origin/<branch>` becomes a local branch tracking it.
+
 - `--wait` returns once the checkout exists and its terminals run, and prints
   the project id, path and first terminal id. A failed checkout exits 1 with
   Git's reason. The `create_worktree` action takes it as `wait: true` and then
