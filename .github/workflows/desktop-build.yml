@@ -213,7 +213,8 @@ jobs:
           exit "$failed"
 
       # The in-app updater looks for an asset named exactly `SHA256SUMS` and
-      # silently skips verification when it is absent (checker.rs:204).
+      # silently skips verification when it is absent (`platform_asset` in
+      # crates/okena-ext-updater/src/checker.rs).
       - name: Generate SHA256SUMS
         run: |
           shopt -s nullglob
