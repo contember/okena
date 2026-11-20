@@ -113,10 +113,10 @@ the app is in the background or polling stopped. The filter lives in the transpo
 subscriptions on every filter change and `state_changed`. A terminal that streams again gets a
 fresh snapshot from the server, so switching terminals costs one snapshot.
 
-The snapshot holds only the visible grid and erases the local scrollback first, so the phone's
-scrollback of a terminal reaches back only to when it was last opened: switching A → B → A drops
-A's earlier history. Output that scrolled out of a terminal's grid while it was off screen never
-reaches the phone.
+The snapshot erases the local scrollback, then replays the newest 200 lines of the terminal's
+history (primary screen only) before the visible grid, so switching A → B → A keeps A's recent
+history, including output it printed while off screen. Anything older than those 200 lines is
+not on the phone.
 
 Consequence: the output-based "running" signal comes only from the streamed terminal. Bells and
 OSC 9/777 notifications of the others come with the state: the daemon stamps each terminal's last
