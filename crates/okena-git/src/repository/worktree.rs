@@ -429,7 +429,7 @@ fn existing_branch_for_new(
     })
 }
 
-/// Whether a new worktree's branch was made for it or already existed.
+/// How a new worktree's branch was obtained.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WorktreeBranch {
     /// A new branch from the start point.
@@ -515,8 +515,8 @@ fn add_worktree(
     let mut args = vec!["-C", repo_str, "worktree", "add"];
     match attachment {
         BranchAttachment::NewBranch(start_point) => {
-            // The start point is `origin/<default>`, and git records a
-            // remote-tracking start point as the new branch's upstream
+            // The start point is usually `origin/<default>`, and git records
+            // a remote-tracking start point as the new branch's upstream
             // (`branch.autoSetupMerge`). Nothing has been pushed yet, so that
             // upstream would be the default branch: every lookup for "this
             // branch's pushed commit" would answer with the default branch's,
@@ -1632,6 +1632,36 @@ mod tests {
         create_worktree(&repo, "feature", &workspace_target, true)
             .expect("track the remote branch");
         assert_tracks(&workspace_target);
+    }
+
+    /// With both a local `feature` and `origin/feature`, `--new-branch` takes
+    /// the local branch as it is and adds no upstream.
+    #[test]
+    fn creating_a_branch_that_is_local_and_on_origin_keeps_the_local_one() {
+        let (_tmp, repo, _remote) = repo_with_origin();
+        git_in(&repo, &["checkout", "-q", "-b", "feature"]);
+        commit_in(&repo, "remote.txt");
+        git_in(&repo, &["push", "-q", "origin", "feature"]);
+        git_in(&repo, &["reset", "-q", "--hard", "main"]);
+        commit_in(&repo, "local.txt");
+        git_in(&repo, &["checkout", "-q", "main"]);
+        let local_tip = git_out(&repo, &["rev-parse", "feature"]);
+        assert_ne!(local_tip, git_out(&repo, &["rev-parse", "origin/feature"]));
+        let target_parent = tempfile::tempdir().expect("create target parent");
+
+        let target = target_parent.path().join("wt-feature");
+        assert_eq!(
+            create_worktree_with_start_point(&repo, "feature", &target, Some("main"))
+                .expect("attach the local branch"),
+            WorktreeBranch::Existing
+        );
+        assert_eq!(git_out(&target, &["rev-parse", "HEAD"]), local_tip);
+        let upstream = std::process::Command::new("git")
+            .args(["rev-parse", "--abbrev-ref", "feature@{upstream}"])
+            .current_dir(&repo)
+            .output()
+            .expect("run git");
+        assert!(!upstream.status.success(), "no upstream may be added");
     }
 
     /// Handing `origin/feature` to `git worktree add` detaches HEAD; the pick
