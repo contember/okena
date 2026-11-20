@@ -164,10 +164,12 @@ fn detect_resize_edge(pos: Point<Pixels>, size: Size<Pixels>) -> Option<ResizeEd
 
 /// Pins the GPUI view-retention behaviour the window is built on.
 ///
-/// A `cx.notify()` re-renders the notified view and its ancestors. Every other
-/// view, the notified view's own cached descendants included, reuses its last
-/// frame until it is notified itself, so a view must be notified whenever
-/// state it reads outside an entity changes.
+/// A `cx.notify()` re-renders the notified view. A cached ancestor whose
+/// tracked entity reads did not change may be drawn around it from its last
+/// frame. Every other view, the notified view's own cached descendants
+/// included, reuses its last frame until it is notified itself. State read
+/// outside an entity (`Arc`, atomics) is not tracked, so a view must be
+/// notified whenever such state changes.
 #[cfg(test)]
 mod view_cache_cascade {
     use gpui::{
@@ -334,8 +336,8 @@ mod view_cache_cascade {
             );
             assert_eq!(
                 harness.column_renders(),
-                vec![1, 0],
-                "frame {frame}: the dirty ancestor column re-renders, the sibling column stays cached"
+                vec![0, 0],
+                "frame {frame}: the ancestor column is drawn around the pane, the sibling column stays cached"
             );
             harness.reset();
         }

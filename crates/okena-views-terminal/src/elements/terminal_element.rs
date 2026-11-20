@@ -787,14 +787,6 @@ impl TerminalElement {
     }
 }
 
-impl IntoElement for TerminalElement {
-    type Element = Self;
-
-    fn into_element(self) -> Self::Element {
-        self
-    }
-}
-
 /// State for terminal element layout
 pub struct TerminalElementState {
     cell_width: Pixels,
