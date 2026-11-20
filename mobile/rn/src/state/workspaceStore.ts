@@ -502,7 +502,6 @@ function resolveSelectedProject(
   );
 }
 
-/** One poll tick — refresh remote state + run auto-selection. Mirrors `_pollState`. */
 /**
  * Tell the native side which terminals to stream: the one on screen, or none
  * on the dashboard and in the background. Sent only when the set changes.
@@ -521,6 +520,7 @@ function syncStreams(get: StoreApi<WorkspaceState>['getState']): void {
   deps().native.setStreamedTerminals(connId, ids);
 }
 
+/** One poll tick — refresh remote state + run auto-selection. Mirrors `_pollState`. */
 function pollState(
   get: StoreApi<WorkspaceState>['getState'],
   set: StoreApi<WorkspaceState>['setState'],

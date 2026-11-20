@@ -484,7 +484,7 @@ fn process_activity_edges(
     // Drain edges first (cheap atomic swaps); collect the terminals that saw any
     // meaningful activity. The lock is dropped before touching the workspace.
     //
-    // Drain ALL THREE edges with `|=` (never `||`): each is a one-shot that must
+    // Drain ALL THREE edges before combining them: each is a one-shot that must
     // be consumed to clear it, so short-circuiting would leak the notification
     // queue (and miss a bell that follows a command-finish in the same batch).
     //
