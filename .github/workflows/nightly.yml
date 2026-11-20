@@ -1,10 +1,13 @@
 name: Nightly
 
-# Builds the newest main commit with a green Build run and publishes it as a
-# GitHub prerelease tagged `nightly-YYYYMMDD-<sha7>`. Prereleases never reach
-# users on their own: the in-app updater and both install scripts read
-# /releases/latest and skip prereleases, and the Homebrew cask is bumped only
-# by build.yml's stable release job.
+# Builds the commit the run starts on (main HEAD) and publishes it as a GitHub
+# prerelease tagged `nightly-YYYYMMDD-<sha7>`, but only when that commit's
+# Build run on main completed green; otherwise the night is skipped. An older
+# commit is never built: its tag would need the `workflows` permission the
+# workflow token cannot hold. Prereleases never reach users on their own: the
+# in-app updater and both install scripts read /releases/latest and skip
+# prereleases, and the Homebrew cask is bumped only by build.yml's stable
+# release job.
 
 on:
   schedule:
@@ -26,50 +29,47 @@ jobs:
       contents: read
       actions: read
     outputs:
-      sha: ${{ steps.pick.outputs.sha }}
       tag: ${{ steps.pick.outputs.tag }}
       skip: ${{ steps.pick.outputs.skip }}
 
     steps:
-      - name: Pick the newest green main commit
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: scripts/nightly-gate.sh
+          sparse-checkout-cone-mode: false
+
+      - name: Check that main HEAD has a green Build run
         id: pick
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
+          REF: ${{ github.ref }}
+          SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
-          # Walk main newest-first and take the first commit whose push run of
-          # build.yml succeeded. Run order alone is not enough: a re-run of an
-          # old commit would sort above newer ones.
-          gh api "repos/$REPO/actions/workflows/build.yml/runs?branch=main&event=push&status=success&per_page=100" \
-            --jq '.workflow_runs[].head_sha' > green.txt
-          gh api "repos/$REPO/commits?sha=main&per_page=100" --jq '.[].sha' > main.txt
-          sha=$(grep -Fxf green.txt main.txt | head -n 1 || true)
-          if [[ -z "$sha" ]]; then
-            echo "::error::none of the last 100 main commits has a green Build run"
-            exit 1
+          echo "tag=nightly-$(date -u +%Y%m%d)-${SHA:0:7}" >> "$GITHUB_OUTPUT"
+
+          gh api "repos/$REPO/actions/workflows/build.yml/runs?head_sha=$SHA&per_page=100" > runs.json
+          decision=$(scripts/nightly-gate.sh "$REF" "$SHA" < runs.json)
+          if [[ "$decision" != build ]]; then
+            echo "::notice::No nightly tonight, ${decision#skip: }"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
-          sha7=${sha:0:7}
 
           existing=$(gh api --paginate "repos/$REPO/releases?per_page=100" \
-            --jq ".[] | select(.tag_name | startswith(\"nightly-\") and endswith(\"-$sha7\")) | .tag_name")
+            --jq ".[] | select(.tag_name | startswith(\"nightly-\") and endswith(\"-${SHA:0:7}\")) | .tag_name")
           if [[ -n "$existing" ]]; then
-            echo "$sha already has a nightly: $existing"
+            echo "::notice::No nightly tonight, $SHA already has one: $existing"
             echo "skip=true" >> "$GITHUB_OUTPUT"
           else
             echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
-          echo "sha=$sha" >> "$GITHUB_OUTPUT"
-          echo "tag=nightly-$(date -u +%Y%m%d)-$sha7" >> "$GITHUB_OUTPUT"
 
-  # The build steps come from the commit this run starts on (main HEAD), the
-  # source from the resolved green commit; a red main may pair them wrongly.
   build:
     needs: [resolve]
     if: needs.resolve.outputs.skip == 'false'
     uses: ./.github/workflows/desktop-build.yml
-    with:
-      ref: ${{ needs.resolve.outputs.sha }}
 
   publish:
     needs: [resolve, build]
@@ -91,7 +91,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
-          SHA: ${{ needs.resolve.outputs.sha }}
+          SHA: ${{ github.sha }}
           TAG: ${{ needs.resolve.outputs.tag }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
