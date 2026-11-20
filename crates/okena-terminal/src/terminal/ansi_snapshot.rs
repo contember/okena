@@ -1,7 +1,7 @@
-use alacritty_terminal::grid::Dimensions;
+use alacritty_terminal::grid::{Dimensions, Grid, GridCell};
 use alacritty_terminal::index::{Column, Line, Point};
-use alacritty_terminal::term::Term;
-use alacritty_terminal::term::cell::Flags;
+use alacritty_terminal::term::cell::{Cell, Flags};
+use alacritty_terminal::term::{Term, TermMode};
 use alacritty_terminal::vte::ansi::{Color, NamedColor};
 
 use super::Terminal;
@@ -20,6 +20,10 @@ struct SgrState {
     fg: Option<Color>,
     bg: Option<Color>,
 }
+
+/// Lines of scrollback an owned snapshot carries, so a client that streams a
+/// terminal again (the phone switching back to it) keeps its recent history.
+const SNAPSHOT_HISTORY_LINES: usize = 200;
 
 /// Which screen the snapshot bytes are replayed into.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -74,10 +78,11 @@ fn write_grid(term: &Term<ZedEventListener>, target: SnapshotTarget) -> Vec<u8> 
         buf.extend_from_slice(b"\x1b[2J\x1b[3J\x1b[H");
     }
 
-    let default_fg = Color::Named(NamedColor::Foreground);
-    let default_bg = Color::Named(NamedColor::Background);
-
     let mut current = SgrState::default();
+
+    if owns_screen && !term.mode().contains(TermMode::ALT_SCREEN) {
+        write_history(&mut buf, grid, &mut current);
+    }
 
     for row in 0..screen_lines as i32 {
         // Position cursor at start of row
@@ -90,52 +95,7 @@ fn write_grid(term: &Term<ZedEventListener>, target: SnapshotTarget) -> Vec<u8> 
             current = SgrState::default();
         }
 
-        let mut col_idx = 0usize;
-        while col_idx < cols {
-            let cell = &grid[Point::new(Line(row), Column(col_idx))];
-
-            // Skip wide char spacer cells
-            if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
-                col_idx += 1;
-                continue;
-            }
-
-            // Determine desired SGR state
-            let desired = SgrState {
-                bold: cell.flags.contains(Flags::BOLD),
-                dim: cell.flags.contains(Flags::DIM),
-                italic: cell.flags.contains(Flags::ITALIC),
-                underline: cell.flags.intersects(Flags::ALL_UNDERLINES),
-                inverse: cell.flags.contains(Flags::INVERSE),
-                strikeout: cell.flags.contains(Flags::STRIKEOUT),
-                fg: if cell.fg == default_fg {
-                    None
-                } else {
-                    Some(cell.fg)
-                },
-                bg: if cell.bg == default_bg {
-                    None
-                } else {
-                    Some(cell.bg)
-                },
-            };
-
-            if desired != current {
-                emit_sgr(&mut buf, &desired);
-                current = desired;
-            }
-
-            // Write the cell's glyph: base char, then the zero-width marks
-            // stacked on it. The marks advance no column on the replaying end.
-            let mut utf8_buf = [0u8; 4];
-            let base = if cell.c == '\0' { ' ' } else { cell.c };
-            buf.extend_from_slice(base.encode_utf8(&mut utf8_buf).as_bytes());
-            for mark in cell.zerowidth().into_iter().flatten() {
-                buf.extend_from_slice(mark.encode_utf8(&mut utf8_buf).as_bytes());
-            }
-
-            col_idx += 1;
-        }
+        write_row(&mut buf, grid, Line(row), &mut current, cols);
     }
 
     // Reset attributes
@@ -150,6 +110,86 @@ fn write_grid(term: &Term<ZedEventListener>, target: SnapshotTarget) -> Vec<u8> 
     }
 
     buf
+}
+
+/// Replay the newest [`SNAPSHOT_HISTORY_LINES`] of scrollback as lines that
+/// scroll off the top, leaving them in the client's history above a blank
+/// screen for the grid body to draw on.
+fn write_history(buf: &mut Vec<u8>, grid: &Grid<Cell>, current: &mut SgrState) {
+    let lines = grid.history_size().min(SNAPSHOT_HISTORY_LINES);
+    if lines == 0 {
+        return;
+    }
+    // The line feeds must scroll the whole screen: a scroll region the client
+    // kept from earlier output would hold the lines back from its history.
+    buf.extend_from_slice(b"\x1b[r");
+    for back in (1..=lines).rev() {
+        let line = Line(-(back as i32));
+        // The blank tail costs bytes and nothing else; a wrapped row keeps it.
+        let end = (0..grid.columns())
+            .rposition(|col| !grid[Point::new(line, Column(col))].is_empty())
+            .map_or(0, |last| last + 1);
+        write_row(buf, grid, line, current, end);
+        // Lines scrolled in take the current background, so end it first.
+        if *current != SgrState::default() {
+            buf.extend_from_slice(b"\x1b[0m");
+            *current = SgrState::default();
+        }
+        buf.extend_from_slice(b"\r\n");
+    }
+    // At most `screen_lines - 1` rows are still on screen; scroll them off.
+    for _ in 1..grid.screen_lines() {
+        buf.push(b'\n');
+    }
+}
+
+/// Write the first `end` cells of a row, switching SGR only where it changes.
+fn write_row(buf: &mut Vec<u8>, grid: &Grid<Cell>, line: Line, current: &mut SgrState, end: usize) {
+    let default_fg = Color::Named(NamedColor::Foreground);
+    let default_bg = Color::Named(NamedColor::Background);
+
+    for col_idx in 0..end {
+        let cell = &grid[Point::new(line, Column(col_idx))];
+
+        // Skip wide char spacer cells
+        if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
+            continue;
+        }
+
+        // Determine desired SGR state
+        let desired = SgrState {
+            bold: cell.flags.contains(Flags::BOLD),
+            dim: cell.flags.contains(Flags::DIM),
+            italic: cell.flags.contains(Flags::ITALIC),
+            underline: cell.flags.intersects(Flags::ALL_UNDERLINES),
+            inverse: cell.flags.contains(Flags::INVERSE),
+            strikeout: cell.flags.contains(Flags::STRIKEOUT),
+            fg: if cell.fg == default_fg {
+                None
+            } else {
+                Some(cell.fg)
+            },
+            bg: if cell.bg == default_bg {
+                None
+            } else {
+                Some(cell.bg)
+            },
+        };
+
+        if desired != *current {
+            emit_sgr(buf, &desired);
+            *current = desired;
+        }
+
+        // Write the cell's glyph: base char, then the zero-width marks
+        // stacked on it. The marks advance no column on the replaying end.
+        let mut utf8_buf = [0u8; 4];
+        let base = if cell.c == '\0' { ' ' } else { cell.c };
+        buf.extend_from_slice(base.encode_utf8(&mut utf8_buf).as_bytes());
+        for mark in cell.zerowidth().into_iter().flatten() {
+            buf.extend_from_slice(mark.encode_utf8(&mut utf8_buf).as_bytes());
+        }
+    }
 }
 
 /// Write CSI cursor position: `\x1b[{row};{col}H`
@@ -252,6 +292,8 @@ fn named_color_sgr_code(color: &NamedColor, is_fg: bool) -> Option<u8> {
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+
+    use super::SNAPSHOT_HISTORY_LINES;
 
     use crate::terminal::tests::NullTransport;
     use crate::terminal::{Terminal, TerminalModeState, TerminalSize};
@@ -440,6 +482,127 @@ mod tests {
         mirror.process_output(b"\x1b]2;stale\x07");
         mirror.process_output(&source.render_snapshot());
         assert_eq!(mirror.title().unwrap_or_default(), "");
+    }
+
+    /// Glyph and colours of every history row, oldest first.
+    fn history_cells(
+        terminal: &Terminal,
+    ) -> Vec<Vec<(char, alacritty_terminal::vte::ansi::Color)>> {
+        use alacritty_terminal::grid::Dimensions;
+        use alacritty_terminal::index::{Column, Line, Point};
+
+        terminal.with_content(|term| {
+            let grid = term.grid();
+            (1..=grid.history_size() as i32)
+                .rev()
+                .map(|back| {
+                    (0..grid.columns())
+                        .map(|col| {
+                            let cell = &grid[Point::new(Line(-back), Column(col))];
+                            (cell.c, cell.bg)
+                        })
+                        .collect()
+                })
+                .collect()
+        })
+    }
+
+    fn screen_text(terminal: &Terminal) -> Vec<String> {
+        use alacritty_terminal::grid::Dimensions;
+        use alacritty_terminal::index::{Column, Line, Point};
+
+        terminal.with_content(|term| {
+            let grid = term.grid();
+            (0..grid.screen_lines() as i32)
+                .map(|row| {
+                    (0..grid.columns())
+                        .map(|col| grid[Point::new(Line(row), Column(col))].c)
+                        .collect::<String>()
+                        .trim_end()
+                        .to_string()
+                })
+                .collect()
+        })
+    }
+
+    fn print_lines(terminal: &Terminal, count: usize) {
+        for i in 0..count {
+            terminal.process_output(format!("line {i}\r\n").as_bytes());
+        }
+    }
+
+    #[test]
+    fn an_owned_snapshot_replaces_stale_history_with_the_newest_lines() {
+        let source = terminal("source");
+        print_lines(&source, 300);
+        let mirror = terminal("mirror");
+        // What the client kept from streaming the terminal earlier.
+        mirror.process_output(b"stale 1\r\nstale 2\r\n");
+        print_lines(&mirror, 40);
+
+        mirror.process_output(&source.render_snapshot());
+
+        let source_history = history_cells(&source);
+        assert!(source_history.len() > SNAPSHOT_HISTORY_LINES);
+        assert_eq!(
+            history_cells(&mirror),
+            source_history[source_history.len() - SNAPSHOT_HISTORY_LINES..]
+        );
+        assert_eq!(screen_text(&mirror), screen_text(&source));
+    }
+
+    #[test]
+    fn an_owned_snapshot_carries_a_short_history_whole() {
+        let source = terminal("source");
+        print_lines(&source, 30);
+        let mirror = terminal("mirror");
+
+        mirror.process_output(&source.render_snapshot());
+
+        assert_eq!(history_cells(&mirror), history_cells(&source));
+        assert_eq!(screen_text(&mirror), screen_text(&source));
+    }
+
+    #[test]
+    fn history_colours_stay_on_their_own_rows() {
+        let source = terminal("source");
+        print_lines(&source, 10);
+        // A row painted blue to its end, then plain rows after it.
+        source.process_output(b"\x1b[44mblue\x1b[K\r\n");
+        source.process_output(b"\x1b[0m");
+        print_lines(&source, 40);
+        let mirror = terminal("mirror");
+
+        mirror.process_output(&source.render_snapshot());
+
+        assert_eq!(history_cells(&mirror), history_cells(&source));
+    }
+
+    #[test]
+    fn a_stale_scroll_region_on_the_client_does_not_hold_history_back() {
+        let source = terminal("source");
+        print_lines(&source, 60);
+        let mirror = terminal("mirror");
+        mirror.process_output(b"\x1b[3;6r");
+
+        mirror.process_output(&source.render_snapshot());
+
+        assert_eq!(history_cells(&mirror), history_cells(&source));
+        assert_eq!(screen_text(&mirror), screen_text(&source));
+    }
+
+    #[test]
+    fn an_alternate_screen_snapshot_carries_no_history() {
+        let source = terminal("source");
+        print_lines(&source, 60);
+        source.process_output(b"\x1b[?1049h\x1b[Hfull screen app");
+
+        let bytes = source.render_snapshot();
+
+        assert!(!String::from_utf8_lossy(&bytes).contains("line 1"));
+        let mirror = terminal("mirror");
+        mirror.process_output(&bytes);
+        assert_eq!(first_row(&mirror), "full screen app");
     }
 
     #[test]
