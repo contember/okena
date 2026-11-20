@@ -151,30 +151,59 @@ impl fmt::Display for MemoryLimit {
 
 /// The argv that runs a pane's program in a fresh scope with `limits`: the
 /// program's own argv goes after it. `None` when scopes are disabled or this
-/// machine has no reachable systemd user manager.
+/// machine cannot run them (see [`ScopeRunner`]).
 pub fn scope_command_prefix(limits: &PaneMemoryLimits, terminal_id: &str) -> Option<Vec<String>> {
     if !limits.enabled {
         return None;
     }
-    let systemd_run = systemd_run()?;
+    let runner = scope_runner()?;
     Some(scope_argv(
-        systemd_run,
+        runner,
         limits,
         &unit_name(terminal_id),
         terminal_id,
     ))
 }
 
+/// Run the one-time probe off the caller's thread, so the first pane does not
+/// wait on the user manager.
+pub fn warm_up(limits: &PaneMemoryLimits) {
+    if !limits.enabled {
+        return;
+    }
+    let spawned = std::thread::Builder::new()
+        .name("pane-scope-probe".to_string())
+        .spawn(|| {
+            scope_runner();
+        });
+    if let Err(error) = spawned {
+        log::warn!("could not start the pane scope probe: {error}");
+    }
+}
+
+/// How this machine starts pane scopes, found once per process.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ScopeRunner {
+    /// `env NAME=value…` naming the user manager. A tmux or screen server
+    /// started without them (`su -`, cron) would leave `systemd-run` unable to
+    /// connect, and a pane that runs nothing.
+    env_prefix: Vec<String>,
+    systemd_run: String,
+    /// Scopes take `OOMPolicy=` from systemd 253 on; older ones reject it.
+    oom_policy: bool,
+}
+
 /// `systemd-run --scope` keeps the program's pid, environment, cwd and
 /// controlling terminal: it moves itself into the scope and execs the program.
 fn scope_argv(
-    systemd_run: &str,
+    runner: &ScopeRunner,
     limits: &PaneMemoryLimits,
     unit: &str,
     terminal_id: &str,
 ) -> Vec<String> {
-    vec![
-        systemd_run.to_string(),
+    let mut argv = runner.env_prefix.clone();
+    argv.extend([
+        runner.systemd_run.clone(),
         "--user".to_string(),
         "--scope".to_string(),
         // Without it, systemd-run prints "Running scope as unit …" into the pane.
@@ -183,15 +212,24 @@ fn scope_argv(
         "--collect".to_string(),
         format!("--unit={unit}"),
         format!("--description={}", description(terminal_id)),
-        "-p".to_string(),
+    ]);
+    for property in scope_properties(limits, runner.oom_policy) {
+        argv.extend(["-p".to_string(), property]);
+    }
+    argv.push("--".to_string());
+    argv
+}
+
+fn scope_properties(limits: &PaneMemoryLimits, oom_policy: bool) -> Vec<String> {
+    let mut properties = vec![
         format!("MemoryHigh={}", limits.memory_high.systemd_value()),
-        "-p".to_string(),
         format!("MemoryMax={}", limits.memory_max.systemd_value()),
-        // The kernel kills the largest process; the pane's shell keeps running.
-        "-p".to_string(),
-        "OOMPolicy=continue".to_string(),
-        "--".to_string(),
-    ]
+    ];
+    // The kernel kills the largest process; the pane's shell keeps running.
+    if oom_policy {
+        properties.push("OOMPolicy=continue".to_string());
+    }
+    properties
 }
 
 fn description(terminal_id: &str) -> String {
@@ -221,60 +259,138 @@ fn unit_name(terminal_id: &str) -> String {
     format!("{PANE_SCOPE_PREFIX}{id}-{nanos:x}{sequence:x}.scope")
 }
 
-/// Absolute path of a `systemd-run` that can start user scopes here, probed
-/// once per process.
 #[cfg(target_os = "linux")]
-fn systemd_run() -> Option<&'static str> {
-    static PROBE: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
-    PROBE.get_or_init(probe_systemd_run).as_deref()
+fn scope_runner() -> Option<&'static ScopeRunner> {
+    static PROBE: std::sync::OnceLock<Option<ScopeRunner>> = std::sync::OnceLock::new();
+    PROBE.get_or_init(probe_scope_runner).as_ref()
 }
 
 #[cfg(not(target_os = "linux"))]
-fn systemd_run() -> Option<&'static str> {
+fn scope_runner() -> Option<&'static ScopeRunner> {
+    static LOGGED: std::sync::Once = std::sync::Once::new();
+    LOGGED.call_once(|| {
+        log::info!("pane memory limits need systemd (Linux); panes start without them");
+    });
     None
 }
 
 #[cfg(target_os = "linux")]
-fn probe_systemd_run() -> Option<String> {
-    let path = crate::session_backend::get_extended_path();
-    let Some(systemd_run) = std::env::split_paths(&path)
-        .map(|dir| dir.join("systemd-run"))
-        .find(|candidate| candidate.is_file())
-    else {
-        log::info!("systemd-run not found; panes start without memory limits");
-        return None;
+fn probe_scope_runner() -> Option<ScopeRunner> {
+    let unavailable = |reason: &str| {
+        log::warn!(
+            "systemd user scopes are unavailable ({reason}); panes start without memory limits"
+        );
+        None
     };
-    let systemd_run = systemd_run.to_string_lossy().into_owned();
-    let probe = okena_core::process::safe_output_with_timeout(
-        crate::process::command(&systemd_run).args([
-            "--user",
-            "--scope",
-            "--quiet",
-            "--collect",
-            "--",
-            "true",
-        ]),
-        std::time::Duration::from_secs(5),
-    );
-    match probe {
-        Ok(output) if output.status.success() => {
-            log::info!("panes run in systemd user scopes with memory limits");
-            Some(systemd_run)
-        }
-        Ok(output) => {
-            log::warn!(
-                "systemd user scopes are unavailable ({}); panes start without memory limits",
-                String::from_utf8_lossy(&output.stderr).trim()
-            );
-            None
-        }
-        Err(error) => {
-            log::warn!(
-                "systemd user scopes are unavailable ({error}); panes start without memory limits"
-            );
-            None
-        }
+    let path = crate::session_backend::get_extended_path();
+    let find = |name: &str| {
+        std::env::split_paths(&path)
+            .map(|dir| dir.join(name))
+            .find(|candidate| candidate.is_file())
+            .map(|found| found.to_string_lossy().into_owned())
+    };
+    let Some(systemd_run) = find("systemd-run") else {
+        return unavailable("systemd-run not found");
+    };
+    if !scopes_survive_logout() {
+        return unavailable(
+            "the user manager stops at logout and would take every pane with it; \
+             run Okena from the graphical session or enable lingering (loginctl enable-linger)",
+        );
     }
+    let env_prefix = match find("env") {
+        Some(env) => {
+            let vars: Vec<String> = ["XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS"]
+                .into_iter()
+                .filter_map(|name| Some(format!("{name}={}", std::env::var(name).ok()?)))
+                .collect();
+            if vars.is_empty() {
+                Vec::new()
+            } else {
+                std::iter::once(env).chain(vars).collect()
+            }
+        }
+        None => Vec::new(),
+    };
+    let probe = |oom_policy: bool| {
+        let runner = ScopeRunner {
+            env_prefix: env_prefix.clone(),
+            systemd_run: systemd_run.clone(),
+            oom_policy,
+        };
+        let limits = PaneMemoryLimits {
+            enabled: true,
+            memory_high: MemoryLimit::Infinity,
+            memory_max: MemoryLimit::Infinity,
+        };
+        let mut argv = scope_argv(&runner, &limits, &unit_name("probe"), "probe");
+        argv.push("true".to_string());
+        let (program, args) = argv.split_first()?;
+        let output = okena_core::process::safe_output_with_timeout(
+            crate::process::command(program).args(args),
+            std::time::Duration::from_secs(5),
+        );
+        match output {
+            Ok(output) if output.status.success() => Some(Ok(runner)),
+            Ok(output) => Some(Err(String::from_utf8_lossy(&output.stderr)
+                .trim()
+                .to_string())),
+            Err(error) => Some(Err(error.to_string())),
+        }
+    };
+    let result = match probe(true)? {
+        Ok(runner) => Ok(runner),
+        Err(_) => probe(false)?,
+    };
+    match result {
+        Ok(runner) => {
+            log::info!(
+                "panes run in systemd user scopes with memory limits{}",
+                if runner.oom_policy {
+                    ""
+                } else {
+                    " (no OOMPolicy: systemd older than 253)"
+                }
+            );
+            Some(runner)
+        }
+        Err(reason) => unavailable(&reason),
+    }
+}
+
+/// Scopes are units of the user manager, which logind stops when the user's
+/// last session ends unless lingering is on. A daemon that runs under that
+/// manager stops with it anyway; any other daemon would outlive its panes.
+#[cfg(target_os = "linux")]
+fn scopes_survive_logout() -> bool {
+    // SAFETY: getuid has no preconditions and cannot fail.
+    let uid = unsafe { libc::getuid() };
+    let own_cgroup = std::fs::read_to_string("/proc/self/cgroup").unwrap_or_default();
+    if runs_under_user_manager(&own_cgroup, uid) {
+        return true;
+    }
+    okena_core::process::safe_output_with_timeout(
+        crate::process::command("loginctl")
+            .env("PATH", crate::session_backend::get_extended_path())
+            .args([
+                "show-user",
+                &uid.to_string(),
+                "--property=Linger",
+                "--value",
+            ]),
+        std::time::Duration::from_secs(5),
+    )
+    .is_ok_and(|output| output.status.success() && output.stdout.trim_ascii() == b"yes")
+}
+
+/// Parses `/proc/self/cgroup`.
+#[cfg(any(target_os = "linux", test))]
+fn runs_under_user_manager(cgroup: &str, uid: u32) -> bool {
+    let manager = format!("/user@{uid}.service/");
+    cgroup
+        .lines()
+        .filter_map(|line| line.strip_prefix("0::"))
+        .any(|path| path.contains(&manager))
 }
 
 /// Move the processes of a session that started outside any pane scope (a
@@ -283,20 +399,33 @@ fn probe_systemd_run() -> Option<String> {
 /// was; what they allocate from now on counts against the limits.
 #[cfg(target_os = "linux")]
 pub fn adopt_session(roots: &[i32], limits: &PaneMemoryLimits, terminal_id: &str) {
-    if !limits.enabled || systemd_run().is_none() {
+    if !limits.enabled {
         return;
     }
-    if roots.iter().any(|&pid| runs_in_pane_scope(pid)) {
+    let Some(runner) = scope_runner() else {
+        return;
+    };
+    let cgroup_of = |pid: i32| std::fs::read_to_string(format!("/proc/{pid}/cgroup")).ok();
+    let root_cgroups: Vec<String> = roots.iter().filter_map(|&pid| cgroup_of(pid)).collect();
+    if root_cgroups
+        .iter()
+        .any(|cgroup| is_pane_scope_cgroup(cgroup))
+    {
         return;
     }
     // A process can exit between the snapshot and the call; one fresh retry.
     for attempt in 0..2 {
-        let pids = crate::session_backend::process_and_descendants(roots);
+        // A descendant in a scope of its own (a nested `systemd-run`, a snap)
+        // keeps it and its limits.
+        let pids: Vec<i32> = crate::session_backend::process_and_descendants(roots)
+            .into_iter()
+            .filter(|&pid| cgroup_of(pid).is_some_and(|cgroup| root_cgroups.contains(&cgroup)))
+            .collect();
         if pids.is_empty() {
             return;
         }
         let unit = unit_name(terminal_id);
-        match start_scope_with_pids(&unit, &pids, limits, terminal_id) {
+        match start_scope_with_pids(&unit, &pids, limits, runner.oom_policy, terminal_id) {
             Ok(()) => {
                 log::info!(
                     "moved {} process(es) of terminal {terminal_id} into {unit}",
@@ -316,15 +445,8 @@ pub fn adopt_session(roots: &[i32], limits: &PaneMemoryLimits, terminal_id: &str
     }
 }
 
-/// Whether `pid` already runs in a scope Okena started for a pane.
-#[cfg(target_os = "linux")]
-fn runs_in_pane_scope(pid: i32) -> bool {
-    std::fs::read_to_string(format!("/proc/{pid}/cgroup"))
-        .map(|cgroup| is_pane_scope_cgroup(&cgroup))
-        .unwrap_or(false)
-}
-
-/// Parses `/proc/<pid>/cgroup` (cgroup v2: a single `0::<path>` line).
+/// Whether a `/proc/<pid>/cgroup` (cgroup v2: a single `0::<path>` line)
+/// names a scope Okena started for a pane.
 #[cfg(any(target_os = "linux", test))]
 fn is_pane_scope_cgroup(cgroup: &str) -> bool {
     cgroup
@@ -341,12 +463,19 @@ fn start_scope_with_pids(
     unit: &str,
     pids: &[i32],
     limits: &PaneMemoryLimits,
+    oom_policy: bool,
     terminal_id: &str,
 ) -> Result<(), String> {
     let output = okena_core::process::safe_output_with_timeout(
         crate::process::command("busctl")
             .env("PATH", crate::session_backend::get_extended_path())
-            .args(start_transient_unit_args(unit, pids, limits, terminal_id)),
+            .args(start_transient_unit_args(
+                unit,
+                pids,
+                limits,
+                oom_policy,
+                terminal_id,
+            )),
         std::time::Duration::from_secs(5),
     )
     .map_err(|error| error.to_string())?;
@@ -362,6 +491,7 @@ fn start_transient_unit_args(
     unit: &str,
     pids: &[i32],
     limits: &PaneMemoryLimits,
+    oom_policy: bool,
     terminal_id: &str,
 ) -> Vec<String> {
     let mut args: Vec<String> = [
@@ -376,7 +506,12 @@ fn start_transient_unit_args(
     .into_iter()
     .map(str::to_string)
     .collect();
-    args.extend([unit.to_string(), "fail".to_string(), "6".to_string()]);
+    let property_count = if oom_policy { 6 } else { 5 };
+    args.extend([
+        unit.to_string(),
+        "fail".to_string(),
+        property_count.to_string(),
+    ]);
     args.extend([
         "Description".to_string(),
         "s".to_string(),
@@ -391,15 +526,19 @@ fn start_transient_unit_args(
         "MemoryMax".to_string(),
         "t".to_string(),
         limits.memory_max.dbus_value().to_string(),
-        "OOMPolicy".to_string(),
-        "s".to_string(),
-        "continue".to_string(),
         "CollectMode".to_string(),
         "s".to_string(),
         "inactive-or-failed".to_string(),
-        // No auxiliary units.
-        "0".to_string(),
     ]);
+    if oom_policy {
+        args.extend([
+            "OOMPolicy".to_string(),
+            "s".to_string(),
+            "continue".to_string(),
+        ]);
+    }
+    // No auxiliary units.
+    args.push("0".to_string());
     args
 }
 
@@ -465,10 +604,20 @@ mod tests {
             memory_high: MemoryLimit::Bytes(GIB),
             memory_max: MemoryLimit::Infinity,
         };
-        let argv = scope_argv("/usr/bin/systemd-run", &limits, "okena-pane-x.scope", "t-1");
+        let runner = ScopeRunner {
+            env_prefix: vec![
+                "/usr/bin/env".to_string(),
+                "XDG_RUNTIME_DIR=/run/user/7".to_string(),
+            ],
+            systemd_run: "/usr/bin/systemd-run".to_string(),
+            oom_policy: true,
+        };
+        let argv = scope_argv(&runner, &limits, "okena-pane-x.scope", "t-1");
         assert_eq!(
-            argv[..5],
+            argv[..7],
             [
+                "/usr/bin/env",
+                "XDG_RUNTIME_DIR=/run/user/7",
                 "/usr/bin/systemd-run",
                 "--user",
                 "--scope",
@@ -480,7 +629,32 @@ mod tests {
         assert!(argv.contains(&"--description=Okena pane t-1".to_string()));
         assert!(argv.contains(&format!("MemoryHigh={GIB}")));
         assert!(argv.contains(&"MemoryMax=infinity".to_string()));
+        assert!(argv.contains(&"OOMPolicy=continue".to_string()));
         assert_eq!(argv.last().map(String::as_str), Some("--"));
+    }
+
+    #[test]
+    fn systemd_older_than_253_gets_no_oom_policy() {
+        let runner = ScopeRunner {
+            env_prefix: Vec::new(),
+            systemd_run: "systemd-run".to_string(),
+            oom_policy: false,
+        };
+        let argv = scope_argv(&runner, &PaneMemoryLimits::default(), "u.scope", "t");
+        assert_eq!(argv[0], "systemd-run");
+        assert!(!argv.iter().any(|arg| arg.starts_with("OOMPolicy")));
+        assert!(argv.contains(&format!("MemoryMax={}", 16 * GIB)));
+    }
+
+    #[test]
+    fn user_manager_cgroups_are_recognized() {
+        let cgroup = "0::/user.slice/user-1000.slice/user@1000.service/app.slice/x.scope\n";
+        assert!(runs_under_user_manager(cgroup, 1000));
+        assert!(!runs_under_user_manager(cgroup, 1001));
+        assert!(!runs_under_user_manager(
+            "0::/user.slice/user-1000.slice/session-3.scope\n",
+            1000
+        ));
     }
 
     #[test]
@@ -521,7 +695,7 @@ mod tests {
     #[test]
     fn start_transient_unit_passes_pids_and_limits() {
         let limits = PaneMemoryLimits::default();
-        let args = start_transient_unit_args("okena-pane-x.scope", &[10, 20], &limits, "t-1");
+        let args = start_transient_unit_args("okena-pane-x.scope", &[10, 20], &limits, true, "t-1");
         let joined = args.join(" ");
         assert!(
             joined
@@ -529,6 +703,10 @@ mod tests {
         );
         assert!(joined.contains(&format!("MemoryHigh t {}", 12 * GIB)));
         assert!(joined.contains(&format!("MemoryMax t {}", 16 * GIB)));
-        assert!(joined.ends_with("CollectMode s inactive-or-failed 0"));
+        assert!(joined.ends_with("CollectMode s inactive-or-failed OOMPolicy s continue 0"));
+
+        let old = start_transient_unit_args("u.scope", &[10], &limits, false, "t-1").join(" ");
+        assert!(old.contains("u.scope fail 5 Description"));
+        assert!(old.ends_with("CollectMode s inactive-or-failed 0"));
     }
 }

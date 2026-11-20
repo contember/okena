@@ -815,6 +815,7 @@ impl PtyManager {
     pub fn set_pane_memory_limits(&self, limits: PaneMemoryLimits) {
         #[cfg(unix)]
         {
+            crate::pane_scope::warm_up(&limits);
             *self.pane_memory.lock() = limits;
         }
         // Panes on Windows have no scope.
@@ -1305,8 +1306,9 @@ impl PtyManager {
             },
         );
 
-        let scope_launcher =
-            crate::pane_scope::scope_command_prefix(&self.pane_memory.lock(), terminal_id);
+        // Cloned out: the first call probes the user manager.
+        let pane_memory = self.pane_memory.lock().clone();
+        let scope_launcher = crate::pane_scope::scope_command_prefix(&pane_memory, terminal_id);
         // A new session's program starts in the pane's scope, not the session
         // client: a tmux server or dtach master serves other panes or outlives
         // this spawn, and a reattach starts no program.
@@ -2860,6 +2862,9 @@ mod tests {
         manager.set_launch_environment(Arc::new(|_| {
             vec![("OKENA_SCOPE_MARKER".to_string(), Some("kept".to_string()))]
         }));
+        // The pane reads its limits through its own view of the cgroup tree
+        // (a cgroup namespace may root it at the scope) and stays alive so the
+        // test can look its cgroup up from outside.
         let plan = TerminalLaunchPlan {
             route: ShellType::Default,
             initial_command: Some(crate::backend::TerminalLaunchCommand {
@@ -2867,9 +2872,9 @@ mod tests {
                 args: vec![
                     "-c".to_string(),
                     "cg=$(sed -n 's/^0:://p' /proc/self/cgroup); \
-                     { echo \"$OKENA_SCOPE_MARKER\"; echo \"${cg##*/}\"; \
-                       cat \"/sys/fs/cgroup$cg/memory.high\" \"/sys/fs/cgroup$cg/memory.max\" 2>/dev/null; \
-                     } > \"$1.tmp\"; mv \"$1.tmp\" \"$1\""
+                     { echo \"$OKENA_SCOPE_MARKER\"; echo $$; \
+                       cat \"/sys/fs/cgroup${cg%/}/memory.high\" \"/sys/fs/cgroup${cg%/}/memory.max\" 2>/dev/null; \
+                     } > \"$1.tmp\"; mv \"$1.tmp\" \"$1\"; exec sleep 30"
                         .to_string(),
                     "okena-test".to_string(),
                     out.to_string_lossy().into_owned(),
@@ -2886,26 +2891,30 @@ mod tests {
             assert!(std::time::Instant::now() < deadline, "pane wrote nothing");
             std::thread::sleep(Duration::from_millis(10));
         }
-        manager.kill(&terminal_id);
         let report = std::fs::read_to_string(&out).expect("read report");
-        let _ = std::fs::remove_dir_all(&fixture);
         let lines: Vec<&str> = report.lines().collect();
+        let cgroup = lines
+            .get(1)
+            .and_then(|pid| std::fs::read_to_string(format!("/proc/{pid}/cgroup")).ok())
+            .unwrap_or_default();
+        manager.kill(&terminal_id);
+        assert_eq!(
+            manager.flush_teardown_with_timeout(Duration::from_secs(5), &[]),
+            Ok(())
+        );
+        let _ = std::fs::remove_dir_all(&fixture);
 
         assert_eq!(lines.first(), Some(&"kept"), "report: {report:?}");
         let scoped = crate::pane_scope::scope_command_prefix(&limits, &terminal_id).is_some();
-        let unit = lines.get(1).copied().unwrap_or_default();
+        assert_eq!(
+            cgroup.contains(crate::pane_scope::PANE_SCOPE_PREFIX),
+            scoped,
+            "cgroup: {cgroup:?}, report: {report:?}"
+        );
         if scoped {
-            assert!(
-                unit.starts_with(crate::pane_scope::PANE_SCOPE_PREFIX) && unit.ends_with(".scope"),
-                "report: {report:?}"
-            );
             assert_eq!(
                 lines[2..],
-                [(1u64 << 30).to_string(), (2u64 << 30).to_string()]
-            );
-        } else {
-            assert!(
-                !unit.starts_with(crate::pane_scope::PANE_SCOPE_PREFIX),
+                [(1u64 << 30).to_string(), (2u64 << 30).to_string()],
                 "report: {report:?}"
             );
         }
