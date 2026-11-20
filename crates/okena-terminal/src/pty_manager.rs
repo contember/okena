@@ -2,6 +2,7 @@ use crate::backend::{
     LaunchEnvironment, TeardownIncomplete, TerminalLaunchPlan, TerminalSessionTeardown,
     TerminalTeardownRoute,
 };
+use crate::pane_scope::PaneMemoryLimits;
 use crate::pty_write_queue::{PtyWriteQueue, Queued};
 use crate::session_backend::SessionCommand;
 #[cfg(not(windows))]
@@ -25,6 +26,20 @@ use std::time::Duration;
 
 #[cfg(unix)]
 mod cancellable_io;
+
+/// Prefix `cmd`'s argv with the scope launcher. portable-pty's default program
+/// is the user's login shell, started with an empty argv; spell it out.
+#[cfg(unix)]
+fn launch_in_scope(cmd: &mut CommandBuilder, launcher: Vec<String>) {
+    let program: Vec<std::ffi::OsString> = if cmd.is_default_prog() {
+        vec![cmd.get_shell().into(), "-l".into()]
+    } else {
+        cmd.get_argv().clone()
+    };
+    let argv = cmd.get_argv_mut();
+    *argv = launcher.into_iter().map(Into::into).collect();
+    argv.extend(program);
+}
 
 #[cfg(windows)]
 fn append_wsl_environment(cmd: &mut CommandBuilder, environment: &[(String, Option<String>)]) {
@@ -571,6 +586,10 @@ pub struct PtyManager {
     /// `CLAUDE_CONFIG_DIR` exported in the user's shell that launched Okena)
     /// cannot leak into the terminal.
     launch_env: Mutex<LaunchEnvironment>,
+    /// Limits of the systemd scope each new pane runs in. Off until the owner
+    /// applies its settings, so a bare manager (tests, tools) spawns unconfined.
+    #[cfg(unix)]
+    pane_memory: Mutex<PaneMemoryLimits>,
     /// Sender for the shared teardown worker pool. `kill`/`cleanup_exited` enqueue
     /// jobs here instead of spawning a detached thread per call. Wrapped in `Option`
     /// only so `Drop` can `take()` it and close the channel, signaling workers to
@@ -693,6 +712,11 @@ impl PtyManager {
                 }),
                 output_sink: Arc::new(Mutex::new(None)),
                 launch_env: Mutex::new(Arc::new(|_| Vec::new())),
+                #[cfg(unix)]
+                pane_memory: Mutex::new(PaneMemoryLimits {
+                    enabled: false,
+                    ..PaneMemoryLimits::default()
+                }),
                 teardown_tx: Some(teardown_tx),
                 reaper_tx: Some(reaper_tx),
                 teardown_tracker,
@@ -785,6 +809,18 @@ impl PtyManager {
     /// Replace the environment overrides applied to every spawned PTY.
     pub fn set_launch_environment(&self, environment: LaunchEnvironment) {
         *self.launch_env.lock() = environment;
+    }
+
+    /// Replace the memory limits of panes created from now on.
+    pub fn set_pane_memory_limits(&self, limits: PaneMemoryLimits) {
+        #[cfg(unix)]
+        {
+            crate::pane_scope::warm_up(&limits);
+            *self.pane_memory.lock() = limits;
+        }
+        // Panes on Windows have no scope.
+        #[cfg(not(unix))]
+        drop(limits);
     }
 
     fn session_backend(&self) -> ResolvedBackend {
@@ -1036,6 +1072,12 @@ impl PtyManager {
             }
         }
 
+        #[cfg(target_os = "linux")]
+        let reattaching_dtach = self.session_backend() == ResolvedBackend::Dtach
+            && ResolvedBackend::Dtach
+                .socket_path(&ResolvedBackend::Dtach.session_name(terminal_id))
+                .is_some_and(|socket| socket.exists());
+
         #[cfg(unix)]
         if self.session_backend() == ResolvedBackend::Dtach {
             crate::session_backend::prepare_dtach_session(
@@ -1063,6 +1105,10 @@ impl PtyManager {
 
         // Spawn the process
         let child = pair.slave.spawn_command(cmd)?;
+        #[cfg(target_os = "linux")]
+        if reattaching_dtach {
+            self.adopt_dtach_session(terminal_id);
+        }
         #[cfg(unix)]
         let process_session = child
             .process_id()
@@ -1196,6 +1242,29 @@ impl PtyManager {
         Ok(())
     }
 
+    /// A dtach session started before panes ran in scopes (or by an Okena with
+    /// them off) keeps running unconfined after a daemon restart reattaches it;
+    /// move its programs into a scope. Off the caller's thread: it scans /proc
+    /// and calls the user manager.
+    #[cfg(target_os = "linux")]
+    fn adopt_dtach_session(&self, terminal_id: &str) {
+        let limits = self.pane_memory.lock().clone();
+        if !limits.enabled {
+            return;
+        }
+        let terminal_id = terminal_id.to_string();
+        let spawned = std::thread::Builder::new()
+            .name("pane-scope-adopt".to_string())
+            .spawn(move || {
+                let session = ResolvedBackend::Dtach.session_name(&terminal_id);
+                let programs = crate::session_backend::dtach_session_programs(&session);
+                crate::pane_scope::adopt_session(&programs, &limits, &terminal_id);
+            });
+        if let Err(error) = spawned {
+            log::warn!("could not start pane scope adoption: {error}");
+        }
+    }
+
     fn launch_environment(&self, plan: &TerminalLaunchPlan) -> Vec<(String, Option<String>)> {
         let launch_env = self.launch_env.lock().clone();
         let mut environment = launch_env(plan.project_id.as_deref());
@@ -1237,6 +1306,26 @@ impl PtyManager {
             },
         );
 
+        // Cloned out: the first call probes the user manager.
+        let pane_memory = self.pane_memory.lock().clone();
+        let scope_launcher = crate::pane_scope::scope_command_prefix(&pane_memory, terminal_id);
+        // A new session's program starts in the pane's scope, not the session
+        // client: a tmux server or dtach master serves other panes or outlives
+        // this spawn, and a reattach starts no program.
+        let scoped_program = scope_launcher
+            .clone()
+            .filter(|_| session_backend.supports_persistence())
+            .map(|launcher| session_backend.launched_program_argv(launcher, custom_command));
+        let custom_command = match &scoped_program {
+            Some(argv) => argv
+                .split_first()
+                .map(|(program, args)| SessionCommand::Program {
+                    program: program.as_str(),
+                    args,
+                }),
+            None => custom_command,
+        };
+
         let mut cmd = if let Some((program, args)) = session_backend.build_command_with_custom(
             &session_backend.session_name(terminal_id),
             cwd,
@@ -1254,7 +1343,7 @@ impl PtyManager {
             cmd
         } else {
             // No session backend - use shell config or default
-            match &plan.initial_command {
+            let mut cmd = match &plan.initial_command {
                 Some(command) => {
                     let mut cmd = CommandBuilder::new(&command.program);
                     for arg in &command.args {
@@ -1264,7 +1353,11 @@ impl PtyManager {
                     cmd
                 }
                 None => plan.route.build_command(cwd),
+            };
+            if let Some(launcher) = scope_launcher {
+                launch_in_scope(&mut cmd, launcher);
             }
+            cmd
         };
 
         Self::set_terminal_env(&mut cmd, terminal_id);
@@ -2747,6 +2840,86 @@ mod tests {
         );
     }
 
+    /// Runs on a machine without a systemd user manager too: there the pane
+    /// must start unconfined rather than fail.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn pane_runs_in_its_own_memory_scope_and_keeps_its_environment() {
+        let fixture = std::env::temp_dir().join(format!(
+            "okena-pty-scope-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&fixture).expect("create fixture");
+        let out = fixture.join("report");
+        let limits = crate::pane_scope::PaneMemoryLimits {
+            enabled: true,
+            memory_high: "1G".parse().expect("limit"),
+            memory_max: "2G".parse().expect("limit"),
+        };
+        let (manager, _events) = PtyManager::new(SessionBackend::None);
+        manager.set_pane_memory_limits(limits.clone());
+        manager.set_launch_environment(Arc::new(|_| {
+            vec![("OKENA_SCOPE_MARKER".to_string(), Some("kept".to_string()))]
+        }));
+        // `$$` and `${…}` are canaries: systemd-run must not expand them.
+        // The pane stays alive so the test can look its cgroup up from outside.
+        let plan = TerminalLaunchPlan {
+            route: ShellType::Default,
+            initial_command: Some(crate::backend::TerminalLaunchCommand {
+                program: "/bin/sh".to_string(),
+                args: vec![
+                    "-c".to_string(),
+                    "cg=$(sed -n 's/^0:://p' /proc/self/cgroup); \
+                     { echo \"$OKENA_SCOPE_MARKER\"; echo $$; echo \"${OKENA_SCOPE_MARKER#k}\"; \
+                       cat \"/sys/fs/cgroup$cg/memory.high\" \"/sys/fs/cgroup$cg/memory.max\" 2>/dev/null; \
+                     } > \"$1.tmp\"; mv \"$1.tmp\" \"$1\"; exec sleep 30"
+                        .to_string(),
+                    "okena-test".to_string(),
+                    out.to_string_lossy().into_owned(),
+                ],
+            }),
+            ..TerminalLaunchPlan::for_shell(ShellType::Default)
+        };
+        let cwd = fixture.to_string_lossy().into_owned();
+        let terminal_id = manager
+            .create_terminal_with_plan(&cwd, &plan)
+            .expect("create PTY");
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !out.exists() {
+            assert!(std::time::Instant::now() < deadline, "pane wrote nothing");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let report = std::fs::read_to_string(&out).expect("read report");
+        let lines: Vec<&str> = report.lines().collect();
+        let cgroup = lines
+            .get(1)
+            .and_then(|pid| std::fs::read_to_string(format!("/proc/{pid}/cgroup")).ok())
+            .unwrap_or_default();
+        manager.kill(&terminal_id);
+        assert_eq!(
+            manager.flush_teardown_with_timeout(Duration::from_secs(5), &[]),
+            Ok(())
+        );
+        let _ = std::fs::remove_dir_all(&fixture);
+
+        assert_eq!(lines.first(), Some(&"kept"), "report: {report:?}");
+        assert_eq!(lines.get(2), Some(&"ept"), "report: {report:?}");
+        let scoped = crate::pane_scope::scope_command_prefix(&limits, &terminal_id).is_some();
+        assert_eq!(
+            cgroup.contains(crate::pane_scope::PANE_SCOPE_PREFIX),
+            scoped,
+            "cgroup: {cgroup:?}, report: {report:?}"
+        );
+        if scoped {
+            assert_eq!(
+                lines[3..],
+                [(1u64 << 30).to_string(), (2u64 << 30).to_string()],
+                "report: {report:?}"
+            );
+        }
+    }
+
     #[test]
     fn parent_terminal_identity_is_removed_and_okena_named() {
         // A pane keeps the user's Claude Code configuration, only the
@@ -3340,6 +3513,73 @@ mod tests {
             !socket_path.exists(),
             "dtach session socket must be removed"
         );
+    }
+
+    /// A dtach session started without a scope (an older Okena, or scopes
+    /// off) is moved into one when a restarted daemon reattaches it.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn reattached_unscoped_dtach_session_is_moved_into_a_pane_scope() {
+        if SessionBackend::Dtach.resolve() != ResolvedBackend::Dtach {
+            return;
+        }
+        let cwd = std::env::temp_dir().to_string_lossy().into_owned();
+        let plan = TerminalLaunchPlan {
+            route: ShellType::Default,
+            initial_command: Some(crate::backend::TerminalLaunchCommand {
+                program: "/bin/sh".to_string(),
+                args: vec!["-c".to_string(), "sleep 30".to_string()],
+            }),
+            environment: Vec::new(),
+            project_id: None,
+        };
+        let cgroup_of =
+            |pid: i32| std::fs::read_to_string(format!("/proc/{pid}/cgroup")).unwrap_or_default();
+
+        let (first, _first_events) = PtyManager::new(SessionBackend::Dtach);
+        let terminal_id = first
+            .create_terminal_with_plan(&cwd, &plan)
+            .expect("create dtach-backed PTY");
+        let session_name = ResolvedBackend::Dtach.session_name(&terminal_id);
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let program = loop {
+            if let Some(&pid) =
+                crate::session_backend::dtach_session_programs(&session_name).first()
+            {
+                break pid;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "dtach session never started"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        assert!(
+            !cgroup_of(program).contains(crate::pane_scope::PANE_SCOPE_PREFIX),
+            "scopes are off in the first manager"
+        );
+
+        let limits = crate::pane_scope::PaneMemoryLimits::default();
+        let (second, _second_events) = PtyManager::new(SessionBackend::Dtach);
+        second.set_pane_memory_limits(limits.clone());
+        second
+            .create_or_reconnect_terminal_with_plan(Some(&terminal_id), &cwd, &plan)
+            .expect("reattach");
+        let scoped = crate::pane_scope::scope_command_prefix(&limits, &terminal_id).is_some();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let mut adopted = false;
+        while scoped && !adopted && std::time::Instant::now() < deadline {
+            adopted = cgroup_of(program).contains(crate::pane_scope::PANE_SCOPE_PREFIX);
+            std::thread::sleep(Duration::from_millis(20));
+        }
+
+        second.kill(&terminal_id);
+        assert_eq!(
+            second.flush_teardown_with_timeout(Duration::from_secs(5), &[]),
+            Ok(())
+        );
+        drop(first);
+        assert_eq!(adopted, scoped, "cgroup: {}", cgroup_of(program));
     }
 
     /// A pane outlives the Okena that launched it, so its `$OKENA_TTY` goes

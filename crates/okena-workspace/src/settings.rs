@@ -2,6 +2,7 @@ use okena_core::theme::ThemeMode;
 pub use okena_core::types::{
     BoardColumn, DiffViewMode, StatusBarStyle, WorktreeMarker, default_board_columns,
 };
+use okena_terminal::pane_scope::PaneMemoryLimits;
 use okena_terminal::session_backend::SessionBackend;
 use okena_terminal::shell_config::ShellType;
 use okena_transport::client::RemoteConnectionConfig;
@@ -624,6 +625,10 @@ pub struct AppSettings {
     /// Session backend for terminal persistence (tmux/screen/none/auto)
     #[serde(default)]
     pub session_backend: SessionBackend,
+    /// Memory limits of the systemd user scope each new pane runs in (Linux;
+    /// elsewhere, or without a user manager, panes start unconfined).
+    #[serde(default)]
+    pub pane_memory: PaneMemoryLimits,
     /// Automatically resume a pane's AI agent session (e.g. `claude --resume
     /// <id>`) on restore, when one was captured before the restart. Opt-in
     /// (default off). When off, the captured session is still persisted and
@@ -853,6 +858,7 @@ impl Default for AppSettings {
             show_terminal_name_when_inactive: false,
             show_active_terminal_title: false,
             session_backend: SessionBackend::default(),
+            pane_memory: PaneMemoryLimits::default(),
             auto_resume_agent_sessions: false,
             claude_remote: false,
             claude_remote_channel: true,

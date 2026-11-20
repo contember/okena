@@ -414,6 +414,34 @@ impl ResolvedBackend {
         }
     }
 
+    /// The argv of a new session's program prefixed with `launcher` (the
+    /// pane's scope launcher, see [`crate::pane_scope`]). With no `command`,
+    /// the program is the user's shell, started as each backend would start it.
+    pub fn launched_program_argv(
+        &self,
+        launcher: Vec<String>,
+        command: Option<SessionCommand<'_>>,
+    ) -> Vec<String> {
+        let mut argv = launcher;
+        match command {
+            Some(SessionCommand::ShellScript(cmd)) => {
+                argv.extend([user_shell(), "-ic".to_string(), cmd.to_string()]);
+            }
+            Some(SessionCommand::Program { program, args }) => {
+                argv.push(program.to_string());
+                argv.extend(args.iter().cloned());
+            }
+            None => {
+                argv.push(user_shell());
+                // tmux starts its default shell as a login shell.
+                if matches!(self, Self::Tmux) {
+                    argv.push("-l".to_string());
+                }
+            }
+        }
+        argv
+    }
+
     /// Stop a persistent session. Success means both the kill command and a
     /// bounded liveness probe confirm that the session no longer exists.
     pub fn kill_session(&self, session_name: &str) -> bool {
@@ -720,6 +748,38 @@ fn tracked_descendants(roots: &[TrackedProcess]) -> Vec<TrackedProcess> {
         }
     }
     descendants
+}
+
+/// `roots` and every process below them, in no particular order.
+#[cfg(target_os = "linux")]
+pub(crate) fn process_and_descendants(roots: &[i32]) -> Vec<i32> {
+    let tree = process_tree_snapshot();
+    let mut seen: std::collections::HashSet<i32> = std::collections::HashSet::new();
+    let mut pending: Vec<i32> = roots
+        .iter()
+        .copied()
+        .filter(|&pid| raw_process_is_alive(pid))
+        .collect();
+    while let Some(pid) = pending.pop() {
+        if seen.insert(pid) {
+            pending.extend(tree.get(&pid).into_iter().flatten().copied());
+        }
+    }
+    seen.into_iter().collect()
+}
+
+/// The programs a live dtach session runs: the children of its master.
+#[cfg(target_os = "linux")]
+pub(crate) fn dtach_session_programs(session_name: &str) -> Vec<i32> {
+    let masters = dtach_socket_holders(&get_dtach_socket_path(session_name));
+    if masters.is_empty() {
+        return Vec::new();
+    }
+    let tree = process_tree_snapshot();
+    masters
+        .iter()
+        .flat_map(|master| tree.get(master).into_iter().flatten().copied())
+        .collect()
 }
 
 #[cfg(unix)]
@@ -2413,6 +2473,68 @@ fn is_screen_available() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn launched_program_argv_puts_the_launcher_before_the_pane_program() {
+        let launcher = || vec!["systemd-run".to_string(), "--".to_string()];
+        let shell = user_shell();
+        assert_eq!(
+            ResolvedBackend::Dtach.launched_program_argv(launcher(), None),
+            ["systemd-run", "--", shell.as_str()]
+        );
+        assert_eq!(
+            ResolvedBackend::Tmux.launched_program_argv(launcher(), None),
+            ["systemd-run", "--", shell.as_str(), "-l"]
+        );
+        assert_eq!(
+            ResolvedBackend::Screen
+                .launched_program_argv(launcher(), Some(SessionCommand::ShellScript("echo hi"))),
+            ["systemd-run", "--", shell.as_str(), "-ic", "echo hi"]
+        );
+        let args = ["-c".to_string(), "x y".to_string()];
+        assert_eq!(
+            ResolvedBackend::Dtach.launched_program_argv(
+                launcher(),
+                Some(SessionCommand::Program {
+                    program: "/bin/sh",
+                    args: &args,
+                })
+            ),
+            ["systemd-run", "--", "/bin/sh", "-c", "x y"]
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn dtach_runs_a_scoped_program_inside_the_session() {
+        let argv = ResolvedBackend::Dtach.launched_program_argv(
+            vec![
+                "/usr/bin/systemd-run".to_string(),
+                "--user".to_string(),
+                "--".to_string(),
+            ],
+            None,
+        );
+        let (program, args) = ResolvedBackend::Dtach
+            .build_command_with_custom(
+                "tm-scope",
+                "/tmp",
+                Some(SessionCommand::Program {
+                    program: &argv[0],
+                    args: &argv[1..],
+                }),
+                &[],
+            )
+            .expect("dtach command");
+        assert_eq!(program, "sh");
+        let script = &args[1];
+        let dtach_at = script.find("exec dtach -A").expect("dtach");
+        let launcher_at = script.find("/usr/bin/systemd-run").expect("launcher");
+        assert!(
+            dtach_at < launcher_at,
+            "the scope must wrap the program, not dtach: {script}"
+        );
+    }
 
     #[cfg(unix)]
     #[test]

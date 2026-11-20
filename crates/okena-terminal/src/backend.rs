@@ -168,6 +168,8 @@ pub trait TerminalBackend: Send + Sync {
     }
     /// Replace the environment of terminals created from now on.
     fn set_launch_environment(&self, _environment: LaunchEnvironment) {}
+    /// Replace the memory limits of terminals created from now on.
+    fn set_pane_memory_limits(&self, _limits: crate::pane_scope::PaneMemoryLimits) {}
     /// Whether this backend can switch persistence routes without replacement.
     fn supports_session_backend_reconfiguration(&self) -> bool {
         false
@@ -277,6 +279,10 @@ impl TerminalBackend for LocalBackend {
 
     fn set_launch_environment(&self, environment: LaunchEnvironment) {
         self.pty_manager.set_launch_environment(environment);
+    }
+
+    fn set_pane_memory_limits(&self, limits: crate::pane_scope::PaneMemoryLimits) {
+        self.pty_manager.set_pane_memory_limits(limits);
     }
 
     fn supports_session_backend_reconfiguration(&self) -> bool {
