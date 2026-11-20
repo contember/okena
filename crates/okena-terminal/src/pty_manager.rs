@@ -2856,6 +2856,7 @@ mod tests {
             enabled: true,
             memory_high: "1G".parse().expect("limit"),
             memory_max: "2G".parse().expect("limit"),
+            memory_swap_max: "512M".parse().expect("limit"),
         };
         let (manager, _events) = PtyManager::new(SessionBackend::None);
         manager.set_pane_memory_limits(limits.clone());
@@ -2872,7 +2873,7 @@ mod tests {
                     "-c".to_string(),
                     "cg=$(sed -n 's/^0:://p' /proc/self/cgroup); \
                      { echo \"$OKENA_SCOPE_MARKER\"; echo $$; echo \"${OKENA_SCOPE_MARKER#k}\"; \
-                       cat \"/sys/fs/cgroup$cg/memory.high\" \"/sys/fs/cgroup$cg/memory.max\" 2>/dev/null; \
+                       cat \"/sys/fs/cgroup$cg/memory.high\" \"/sys/fs/cgroup$cg/memory.max\" \"/sys/fs/cgroup$cg/memory.swap.max\" 2>/dev/null; \
                      } > \"$1.tmp\"; mv \"$1.tmp\" \"$1\"; exec sleep 30"
                         .to_string(),
                     "okena-test".to_string(),
@@ -2914,7 +2915,11 @@ mod tests {
         if scoped {
             assert_eq!(
                 lines[3..],
-                [(1u64 << 30).to_string(), (2u64 << 30).to_string()],
+                [
+                    (1u64 << 30).to_string(),
+                    (2u64 << 30).to_string(),
+                    (512u64 << 20).to_string()
+                ],
                 "report: {report:?}"
             );
         }
