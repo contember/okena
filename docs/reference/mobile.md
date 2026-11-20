@@ -113,6 +113,11 @@ the app is in the background or polling stopped. The filter lives in the transpo
 subscriptions on every filter change and `state_changed`. A terminal that streams again gets a
 fresh snapshot from the server, so switching terminals costs one snapshot.
 
+The snapshot holds only the visible grid and erases the local scrollback first, so the phone's
+scrollback of a terminal reaches back only to when it was last opened: switching A → B → A drops
+A's earlier history. Output that scrolled out of a terminal's grid while it was off screen never
+reaches the phone.
+
 Consequence: the output-based "running" signal comes only from the streamed terminal. Bells and
 OSC 9/777 notifications of the others come with the state: the daemon stamps each terminal's last
 bell and notification (`StateResponse.terminal_attention`, Unix millis), and the phone raises a
@@ -138,8 +143,8 @@ patched into the cached state; it no longer bumps `state_version`, so a git chan
 any client refetch the whole state.
 
 The JSON routes (`/v1/state`, `/v1/actions`, usage, Claude session/transcript) are gzipped for
-clients that send `Accept-Encoding: gzip`; the transport's reqwest client does, except over the
-local Unix socket.
+clients that send `Accept-Encoding: gzip`; the transport's reqwest client does, except over a
+local daemon endpoint (Unix socket, Windows named pipe).
 
 ### State fetches
 
@@ -148,8 +153,9 @@ Every `state_changed` makes the transport refetch the whole `/v1/state`. The pho
 are coalesced into one fetch at its end, the first change after a quiet window fetches at once),
 none in the background (the store calls `setAppInBackground` on every lifecycle change, also while
 the Android connection service keeps the session alive; a state that changed meanwhile is fetched
-once on return), and no settings, which the app does not use. The desktop keeps the default
-policy: fetch on every change, settings included.
+once on return), and no settings, which the app does not use. A failed fetch keeps the state
+stale and is retried after 1 s, doubling up to 30 s (never sooner than the policy's interval).
+The desktop keeps the default policy: fetch on every change, settings included.
 
 The transport counts payload bytes per connection (`traffic_stats`: PTY, snapshots, state with
 the number of fetches, settings, other events). The state is fetched with transparent

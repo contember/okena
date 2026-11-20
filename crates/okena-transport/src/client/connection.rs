@@ -464,10 +464,15 @@ impl TrafficCounters {
     }
 }
 
+/// Longest wait before retrying a failed state fetch.
+const STATE_RETRY_MAX: Duration = Duration::from_secs(30);
+
 /// When the session should next fetch the state.
 struct StateRefresh {
     stale: bool,
     last_fetch: Instant,
+    /// Failed fetches since the last one that succeeded.
+    failures: u32,
 }
 
 impl StateRefresh {
@@ -475,6 +480,7 @@ impl StateRefresh {
         Self {
             stale: false,
             last_fetch: now,
+            failures: 0,
         }
     }
 
@@ -485,12 +491,30 @@ impl StateRefresh {
     fn on_fetched(&mut self, now: Instant) {
         self.stale = false;
         self.last_fetch = now;
+        self.failures = 0;
+    }
+
+    /// The state stays stale and is retried with a doubling delay, so a
+    /// transient error does not leave it stale until the next change.
+    fn on_failed(&mut self, now: Instant) {
+        self.last_fetch = now;
+        self.failures = self.failures.saturating_add(1);
+    }
+
+    fn retry_delay(&self) -> Duration {
+        match self.failures {
+            0 => Duration::ZERO,
+            n => Duration::from_secs(1)
+                .saturating_mul(1 << (n - 1).min(5))
+                .min(STATE_RETRY_MAX),
+        }
     }
 
     /// The instant to fetch at, or `None` while there is nothing to fetch or
     /// fetching is deferred. May be in the past (fetch now).
     fn due(&self, policy: &StateSyncPolicy) -> Option<Instant> {
-        (self.stale && !policy.deferred).then(|| self.last_fetch + policy.min_interval)
+        (self.stale && !policy.deferred)
+            .then(|| self.last_fetch + policy.min_interval.max(self.retry_delay()))
     }
 }
 
@@ -545,15 +569,24 @@ async fn fetch_state(
         .bytes()
         .await
         .map_err(|e| StateFetchError::Other(e.to_string()))?;
-    let state = parse_state_body(&body, gzipped).map_err(StateFetchError::Other)?;
+    let state =
+        parse_state_body(&body, gzipped, MAX_STATE_JSON_BYTES).map_err(StateFetchError::Other)?;
     Ok((state, body.len()))
 }
 
-fn parse_state_body(body: &[u8], gzipped: bool) -> Result<StateResponse, String> {
+/// Largest decompressed state accepted: well above a workspace of hundreds of
+/// projects, low enough that a corrupt or hostile body cannot exhaust memory.
+const MAX_STATE_JSON_BYTES: u64 = 64 * 1024 * 1024;
+
+fn parse_state_body(body: &[u8], gzipped: bool, max_json: u64) -> Result<StateResponse, String> {
     if gzipped {
         let mut json = Vec::new();
-        std::io::Read::read_to_end(&mut flate2::read::GzDecoder::new(body), &mut json)
+        let decoder = flate2::read::GzDecoder::new(body);
+        std::io::Read::read_to_end(&mut std::io::Read::take(decoder, max_json + 1), &mut json)
             .map_err(|e| format!("cannot decompress state: {e}"))?;
+        if json.len() as u64 > max_json {
+            return Err(format!("decompressed state exceeds {max_json} bytes"));
+        }
         serde_json::from_slice(&json)
     } else {
         serde_json::from_slice(body)
@@ -634,8 +667,8 @@ struct StreamSubscriptions {
     /// Terminals the session wants streamed (sent Subscribe, no Unsubscribe).
     subscribed: HashSet<String>,
     /// Subscribes sent per terminal whose `subscribed` reply has not arrived.
-    /// The server hands out a fresh stream id per Subscribe, so only the reply
-    /// to the latest one carries a live id.
+    /// After an Unsubscribe the server hands out a fresh stream id, so only the
+    /// reply to the latest Subscribe carries a live id.
     pending: HashMap<String, u32>,
 }
 
@@ -1902,8 +1935,8 @@ impl<H: ConnectionHandler> RemoteClient<H> {
         // Step 3: Fetch state via HTTP
         let base_url = config.http_origin();
         // Off-host the state is fetched gzipped and decoded by hand (see
-        // `fetch_state`); the local socket is not worth compressing.
-        let accept_gzip = local_unix_path(config).is_none();
+        // `fetch_state`); a local daemon endpoint is not worth compressing.
+        let accept_gzip = config.local_endpoint.is_none();
         let client = if let Some(path) = local_unix_path(config) {
             unix_http_client(path)
         } else {
@@ -2196,8 +2229,10 @@ impl<H: ConnectionHandler> RemoteClient<H> {
                     // Reuse the session HTTP client (built once at Step 3) so
                     // connection pooling / keep-alive is preserved across
                     // refetches instead of rebuilding a client per event.
-                    match fetch_state(&client, &base_url, token, accept_gzip).await {
+                    let fetched = fetch_state(&client, &base_url, token, accept_gzip).await;
+                    match fetched {
                         Ok((new_state, bytes)) => {
+                            refresh.on_fetched(Instant::now());
                             traffic.record_state(bytes);
                             let diff = diff_states(&cached_state, &new_state);
                             let new_size_map = collect_terminal_sizes(&new_state);
@@ -2244,7 +2279,10 @@ impl<H: ConnectionHandler> RemoteClient<H> {
                                 })
                                 .await;
                         }
-                        Err(error) => log::warn!("State re-fetch failed: {error}"),
+                        Err(error) => {
+                            log::warn!("State re-fetch failed: {error}");
+                            refresh.on_failed(Instant::now());
+                        }
                     }
                     if sync_rx.borrow().fetch_settings {
                         match fetch_remote_settings(&client, &base_url, token).await {
@@ -2260,9 +2298,6 @@ impl<H: ConnectionHandler> RemoteClient<H> {
                             Err(error) => log::warn!("{error}"),
                         }
                     }
-                    // A failed fetch is not retried until the next change,
-                    // as before: retrying at once could spin on a dead route.
-                    refresh.on_fetched(Instant::now());
                     continue;
                 }
                 _ = tokio::time::sleep_until(tokio::time::Instant::from_std(liveness.deadline())) => {
@@ -2874,6 +2909,40 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_state_fetch_is_retried_with_a_growing_delay() {
+        let t0 = Instant::now();
+        let mut refresh = StateRefresh::fetched_at(t0);
+        let policy = StateSyncPolicy::default();
+        refresh.on_changed();
+        refresh.on_failed(t0);
+        assert_eq!(refresh.due(&policy), Some(t0 + Duration::from_secs(1)));
+        refresh.on_failed(t0);
+        assert_eq!(refresh.due(&policy), Some(t0 + Duration::from_secs(2)));
+        for _ in 0..20 {
+            refresh.on_failed(t0);
+        }
+        assert_eq!(refresh.due(&policy), Some(t0 + STATE_RETRY_MAX));
+        // A success ends the retries and the backoff.
+        refresh.on_fetched(t0);
+        assert_eq!(refresh.due(&policy), None);
+        refresh.on_changed();
+        assert_eq!(refresh.due(&policy), Some(t0));
+    }
+
+    #[test]
+    fn a_state_retry_waits_at_least_the_coalescing_interval() {
+        let t0 = Instant::now();
+        let mut refresh = StateRefresh::fetched_at(t0);
+        let policy = StateSyncPolicy {
+            min_interval: Duration::from_secs(5),
+            ..StateSyncPolicy::default()
+        };
+        refresh.on_changed();
+        refresh.on_failed(t0);
+        assert_eq!(refresh.due(&policy), Some(t0 + Duration::from_secs(5)));
+    }
+
+    #[test]
     fn deferred_state_refresh_waits_and_then_fetches_once() {
         let t0 = Instant::now();
         let mut refresh = StateRefresh::fetched_at(t0);
@@ -2897,10 +2966,18 @@ mod tests {
         let gzipped = encoder.finish().unwrap();
 
         for (body, gzip) in [(&json, false), (&gzipped, true)] {
-            let parsed = parse_state_body(body, gzip).expect("state parses");
+            let parsed = parse_state_body(body, gzip, MAX_STATE_JSON_BYTES).expect("state parses");
             assert_eq!(wanted_streams(&parsed, None), vec!["t1"]);
         }
-        assert!(parse_state_body(&json, true).is_err());
+        assert!(parse_state_body(&json, true, MAX_STATE_JSON_BYTES).is_err());
+
+        // A body that inflates past the limit is refused, not decoded.
+        let limit = json.len() as u64 - 1;
+        match parse_state_body(&gzipped, true, limit) {
+            Err(error) => assert!(error.contains("exceeds"), "{error}"),
+            Ok(_) => panic!("a body past the limit must be refused"),
+        }
+        assert!(parse_state_body(&gzipped, true, json.len() as u64).is_ok());
     }
 
     #[test]
