@@ -64,6 +64,7 @@ function stubNative(layouts: string[]): WorkspaceNative {
     secondsSinceActivity: () => 0,
     getTerminalActivity: () => [],
     markTerminalSeen: () => {},
+    setStreamedTerminals: () => {},
     focusTerminal: () => Promise.resolve(),
     getUsage: () => undefined,
     getUsageRevision: () => 0,
@@ -778,5 +779,92 @@ describe('workspace agent usage', () => {
     pending[1].resolve(false);
     await settle();
     expect(useWorkspaceStore.getState().usageRefreshing).toBe(false);
+  });
+});
+
+describe('terminal streaming', () => {
+  let streamed: string[][];
+  let foreground: boolean;
+
+  beforeEach(() => {
+    jest.useFakeTimers();
+    streamed = [];
+    foreground = true;
+    configureWorkspaceStore({
+      native: {
+        ...stubNative([TABS_FIRST_ACTIVE]),
+        setStreamedTerminals: (_c, ids) => {
+          streamed.push(ids);
+        },
+      },
+      isForeground: () => foreground,
+      isInBackground: () => !foreground,
+    });
+  });
+
+  afterEach(() => {
+    useWorkspaceStore.getState().stop();
+    configureWorkspaceStore({ isForeground: undefined, isInBackground: undefined });
+    jest.useRealTimers();
+  });
+
+  it('streams nothing on the dashboard and only the terminal on screen', () => {
+    useWorkspaceStore.getState().start('conn-1');
+    // The connection opens on the dashboard.
+    expect(streamed).toEqual([[]]);
+
+    useWorkspaceStore.getState().showWorkspace();
+    expect(streamed.at(-1)).toEqual(['t1']);
+
+    useWorkspaceStore.getState().selectTerminal('t2');
+    expect(streamed.at(-1)).toEqual(['t2']);
+
+    useWorkspaceStore.getState().showDashboard();
+    expect(streamed.at(-1)).toEqual([]);
+  });
+
+  it('sends a set only when it changes', () => {
+    useWorkspaceStore.getState().start('conn-1');
+    useWorkspaceStore.getState().showWorkspace();
+    const sent = streamed.length;
+
+    jest.advanceTimersByTime(WORKSPACE_POLL_MS * 3);
+    expect(streamed.length).toBe(sent);
+  });
+
+  it('stops streaming in the background and resumes in the foreground', () => {
+    useWorkspaceStore.getState().start('conn-1');
+    useWorkspaceStore.getState().showWorkspace();
+
+    foreground = false;
+    useWorkspaceStore.getState().syncStreams();
+    expect(streamed.at(-1)).toEqual([]);
+
+    foreground = true;
+    useWorkspaceStore.getState().syncStreams();
+    expect(streamed.at(-1)).toEqual(['t1']);
+  });
+
+  it('keeps streaming while iOS is inactive', () => {
+    let background = false;
+    configureWorkspaceStore({
+      isForeground: () => false,
+      isInBackground: () => background,
+    });
+    useWorkspaceStore.getState().start('conn-1');
+    useWorkspaceStore.getState().showWorkspace();
+    expect(streamed.at(-1)).toEqual(['t1']);
+
+    background = true;
+    useWorkspaceStore.getState().syncStreams();
+    expect(streamed.at(-1)).toEqual([]);
+  });
+
+  it('stops streaming when polling stops', () => {
+    useWorkspaceStore.getState().start('conn-1');
+    useWorkspaceStore.getState().showWorkspace();
+
+    useWorkspaceStore.getState().stop();
+    expect(streamed.at(-1)).toEqual([]);
   });
 });

@@ -1,5 +1,5 @@
 import { createContext, useContext } from "react";
-import type { StateResponse, WsOutbound } from "../api/types";
+import type { ApiGitStatus, StateResponse, WsOutbound } from "../api/types";
 import { WsManager, type WsStatus } from "../api/websocket";
 
 // ── Terminal Registry ───────────────────────────────────────────────────────
@@ -57,10 +57,37 @@ export interface AppState {
   streamMappings: Record<string, number>;
   /** Terminal whose Claude chat panel is open, if any. */
   claudePanelTerminalId: string | null;
+  /**
+   * The last `git_status_changed` map of this WS connection. Git changes do
+   * not trigger a state refetch, so a `/v1/state` response that was in flight
+   * when the push arrived must not overwrite it. Cleared when the connection
+   * status changes (no push is replayed on reconnect).
+   */
+  gitStatuses: Record<string, ApiGitStatus> | null;
+}
+
+/**
+ * Apply a pushed git status map. The push is the daemon's complete map, so a
+ * project it lacks has no status, except in a state response that is newer
+ * than the push (`keepMissing`): a project added since keeps its own status.
+ */
+function withGitStatuses(
+  workspace: StateResponse,
+  statuses: Record<string, ApiGitStatus>,
+  keepMissing: boolean,
+): StateResponse {
+  return {
+    ...workspace,
+    projects: workspace.projects.map((p) => ({
+      ...p,
+      git_status: statuses[p.id] ?? (keepMissing ? p.git_status : null),
+    })),
+  };
 }
 
 export type AppAction =
   | { type: "set_workspace"; workspace: StateResponse }
+  | { type: "set_git_statuses"; statuses: Record<string, ApiGitStatus> }
   | { type: "select_project"; projectId: string }
   | { type: "select_terminal"; terminalId: string | null }
   | { type: "set_sidebar_open"; open: boolean }
@@ -73,7 +100,21 @@ export type AppAction =
 export function appReducer(state: AppState, action: AppAction): AppState {
   switch (action.type) {
     case "set_workspace":
-      return { ...state, workspace: action.workspace };
+      return {
+        ...state,
+        workspace: state.gitStatuses
+          ? withGitStatuses(action.workspace, state.gitStatuses, true)
+          : action.workspace,
+      };
+    case "set_git_statuses":
+      // Git status changes arrive as their own message, not as a state change.
+      return {
+        ...state,
+        gitStatuses: action.statuses,
+        workspace: state.workspace
+          ? withGitStatuses(state.workspace, action.statuses, false)
+          : null,
+      };
     case "select_project":
       return { ...state, selectedProjectId: action.projectId };
     case "select_terminal":
@@ -81,7 +122,11 @@ export function appReducer(state: AppState, action: AppAction): AppState {
     case "set_sidebar_open":
       return { ...state, sidebarOpen: action.open };
     case "set_ws_status":
-      return { ...state, wsStatus: action.status };
+      return {
+        ...state,
+        wsStatus: action.status,
+        gitStatuses: action.status === state.wsStatus ? state.gitStatuses : null,
+      };
     case "set_stream_mappings":
       return { ...state, streamMappings: { ...state.streamMappings, ...action.mappings } };
     case "clear_stream_mappings":
@@ -101,6 +146,7 @@ export const initialState: AppState = {
   wsStatus: "disconnected",
   streamMappings: {},
   claudePanelTerminalId: null,
+  gitStatuses: null,
 };
 
 // ── Context ─────────────────────────────────────────────────────────────────

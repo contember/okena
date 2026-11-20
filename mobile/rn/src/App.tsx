@@ -97,9 +97,11 @@ export const App: React.FC = () => {
       // A failed restore just leaves the user on the server list.
     });
     // The store keeps background reconnects enabled while the Android service runs.
-    const appState = AppState.addEventListener('change', (next) =>
-      connectionStore().getState().onAppStateChange(next),
-    );
+    const appState = AppState.addEventListener('change', (next) => {
+      connectionStore().getState().onAppStateChange(next);
+      // Background streams nothing, foreground the terminal on screen again.
+      workspaceStore().getState().syncStreams();
+    });
     return () => {
       appState.remove();
       unbindNav();

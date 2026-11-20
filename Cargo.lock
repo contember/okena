@@ -7039,6 +7039,7 @@ dependencies = [
  "tokio-rustls",
  "tokio-tungstenite 0.24.0",
  "tokio-util",
+ "tower-http",
  "tower-service",
  "uuid",
 ]
@@ -7129,6 +7130,7 @@ name = "okena-transport"
 version = "0.1.0"
 dependencies = [
  "async-channel",
+ "flate2",
  "futures",
  "log",
  "okena-core",

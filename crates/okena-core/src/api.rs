@@ -74,6 +74,22 @@ pub struct StateResponse {
     /// terminals. Runtime-only.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub live_terminal_ids: Vec<String>,
+    /// When each terminal last rang the bell or raised an `OSC 9` / `OSC 777`
+    /// notification, for terminals that ever did. Lets a client that does not
+    /// stream a terminal's output still flag it. Runtime-only; a client tells
+    /// new events by a timestamp that moved, never by comparing clocks.
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub terminal_attention: std::collections::HashMap<String, ApiTerminalAttention>,
+}
+
+/// Unix-millis timestamps of a terminal's last bell and last desktop
+/// notification (see [`StateResponse::terminal_attention`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApiTerminalAttention {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bell_at: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notification_at: Option<u64>,
 }
 
 /// OS window bounds in screen pixels.
@@ -1829,6 +1845,7 @@ mod tests {
             claude_sessions: Vec::new(),
             claude_pr_links: Default::default(),
             live_terminal_ids: Vec::new(),
+            terminal_attention: Default::default(),
         };
         let json = serde_json::to_string(&resp).unwrap();
         let parsed: StateResponse = serde_json::from_str(&json).unwrap();

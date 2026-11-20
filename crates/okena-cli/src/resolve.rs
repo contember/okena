@@ -492,6 +492,7 @@ mod tests {
             claude_sessions: Vec::new(),
             claude_pr_links: Default::default(),
             live_terminal_ids: Vec::new(),
+            terminal_attention: Default::default(),
         }
     }
 

@@ -71,3 +71,17 @@ fn toggle_flips_both_ways_and_clears_a_shell_bell() {
     assert!(!terminal.toggle_unread(), "shell bell -> read");
     assert!(!terminal.has_bell());
 }
+
+#[test]
+fn recorded_attention_keeps_the_latest_bell_and_notification() {
+    let terminal = terminal();
+    assert_eq!(terminal.attention(), (None, None));
+
+    terminal.record_attention(true, false, 1_000);
+    assert_eq!(terminal.attention(), (Some(1_000), None));
+
+    // A batch with neither edge leaves both stamps alone.
+    terminal.record_attention(false, false, 2_000);
+    terminal.record_attention(false, true, 3_000);
+    assert_eq!(terminal.attention(), (Some(1_000), Some(3_000)));
+}

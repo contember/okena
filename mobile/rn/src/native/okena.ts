@@ -466,6 +466,16 @@ export interface OkenaNative {
   onAppBackground(): void;
 
   /**
+   * The app went to (`true`) or left (`false`) the background. Call on every
+   * change, also while the Android connection service runs: in the background
+   * no workspace state is fetched; a changed state is fetched once on return.
+   */
+  setAppInBackground(background: boolean): void;
+
+  /** Payload bytes the connection has received since it connected, by kind. */
+  getTrafficStats(connId: ConnId): TrafficStats | undefined;
+
+  /**
    * Retry one connection now: skip the backoff and reset the attempt budget,
    * keeping terminals and cached state. Only meaningful when
    * {@link canReconnectNow} is true.
@@ -561,13 +571,22 @@ export interface OkenaNative {
   getProjectOrder(connId: ConnId): ProjectId[];
 
   /**
-   * Activity signals of every terminal the connection mirrors (the client
-   * subscribes to all of them). Cheap: one call per state poll.
+   * Activity signals of every terminal the connection mirrors. Output time
+   * only moves for streamed terminals (see {@link setStreamedTerminals});
+   * bells and notifications of the rest arrive with the state. Cheap: one
+   * call per state poll.
    */
   getTerminalActivity(connId: ConnId): TerminalActivity[];
 
   /** The user viewed a terminal: clear its unseen bell / notification. */
   markTerminalSeen(connId: ConnId, terminalId: TerminalId): void;
+
+  /**
+   * Stream PTY output only for these terminals (the ones on screen); `[]`
+   * streams nothing. A connection starts with nothing streamed. A terminal
+   * that is streamed again gets a fresh snapshot from the server.
+   */
+  setStreamedTerminals(connId: ConnId, terminalIds: TerminalId[]): void;
 
   /** The fullscreen terminal, if one is active. */
   getFullscreenTerminal(connId: ConnId): FullscreenInfo | undefined;
@@ -887,6 +906,29 @@ function toProjectInfo(p: GenProjectInfo): ProjectInfo {
   };
 }
 
+/** Payload bytes received since connecting (framing overhead excluded). */
+export interface TrafficStats {
+  ptyBytes: number;
+  snapshotBytes: number;
+  stateBytes: number;
+  stateFetches: number;
+  settingsBytes: number;
+  eventBytes: number;
+}
+
+type GenTrafficStats = { [K in keyof TrafficStats]: bigint | number };
+
+function toTrafficStats(s: GenTrafficStats): TrafficStats {
+  return {
+    ptyBytes: Number(s.ptyBytes),
+    snapshotBytes: Number(s.snapshotBytes),
+    stateBytes: Number(s.stateBytes),
+    stateFetches: Number(s.stateFetches),
+    settingsBytes: Number(s.settingsBytes),
+    eventBytes: Number(s.eventBytes),
+  };
+}
+
 type GenTerminalActivity = Omit<TerminalActivity, 'lastOutputMsAgo'> & {
   lastOutputMsAgo?: bigint | number;
 };
@@ -938,6 +980,12 @@ export function getOkenaNative(): OkenaNative {
       markTerminalSeen: (connId: ConnId, terminalId: TerminalId) => {
         if (typeof gen.markTerminalSeen === 'function') gen.markTerminalSeen(connId, terminalId);
       },
+      // Bindings generated before `set_streamed_terminals` existed stream
+      // every terminal, as before.
+      setStreamedTerminals: (connId: ConnId, terminalIds: TerminalId[]) => {
+        if (typeof gen.setStreamedTerminals === 'function')
+          gen.setStreamedTerminals(connId, terminalIds);
+      },
       // Bindings generated before `scroll_wheel` / `take_dirty` existed: keep
       // scrolling the local scrollback and keep the always-repaint loop.
       scrollWheel:
@@ -972,6 +1020,14 @@ export function getOkenaNative(): OkenaNative {
       },
       onAppBackground: () => {
         if (typeof gen.onAppBackground === 'function') gen.onAppBackground();
+      },
+      setAppInBackground: (background: boolean) => {
+        if (typeof gen.setAppInBackground === 'function') gen.setAppInBackground(background);
+      },
+      getTrafficStats: (connId: ConnId) => {
+        if (typeof gen.getTrafficStats !== 'function') return undefined;
+        const stats = gen.getTrafficStats(connId) as GenTrafficStats | undefined;
+        return stats === undefined ? undefined : toTrafficStats(stats);
       },
       reconnectNow: (connId: ConnId) => {
         if (typeof gen.reconnectNow === 'function') gen.reconnectNow(connId);

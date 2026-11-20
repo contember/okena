@@ -636,7 +636,6 @@ impl DaemonCore {
             tokio::task::spawn_local(crate::git_poll::run_git_poll(
                 reactor.workspace.clone(),
                 git_status_tx.clone(),
-                reactor.state_version.clone(),
                 remote_subscribed_terminals.clone(),
                 remote_visible_projects.clone(),
                 git_poll_trigger_rx,

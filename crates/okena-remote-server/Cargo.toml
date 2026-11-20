@@ -33,6 +33,9 @@ axum = { version = "0.8", features = ["ws"] }
 hyper = { version = "1", features = ["server", "http1", "http2"] }
 hyper-util = { version = "0.1", features = ["server-auto", "tokio"] }
 tower-service = "0.3"
+# gzip for the JSON endpoints: a full /v1/state is hundreds of KB and remote
+# (mobile) clients refetch it on every state change.
+tower-http = { version = "0.6", default-features = false, features = ["compression-gzip"] }
 
 # TLS (self-signed cert + dual-stack http/https on one port)
 rcgen = "0.13"
