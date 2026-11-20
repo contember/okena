@@ -74,8 +74,10 @@ fn write_grid(term: &Term<ZedEventListener>, target: SnapshotTarget) -> Vec<u8> 
         // stack old content into the remote client's scrollback and the user
         // would see their output duplicated when scrolling up. `\x1b[3J` (ED 3
         // = erase saved lines) drops the history alacritty just pushed, leaving
-        // a clean grid before the snapshot body renders.
-        buf.extend_from_slice(b"\x1b[2J\x1b[3J\x1b[H");
+        // a clean grid before the snapshot body renders. The SGR reset comes
+        // first: the erase and every line scrolled in take the current colours,
+        // which may be left over from the client's earlier output.
+        buf.extend_from_slice(b"\x1b[0m\x1b[2J\x1b[3J\x1b[H");
     }
 
     let mut current = SgrState::default();
@@ -120,16 +122,43 @@ fn write_history(buf: &mut Vec<u8>, grid: &Grid<Cell>, current: &mut SgrState) {
     if lines == 0 {
         return;
     }
+    let cols = grid.columns();
     // The line feeds must scroll the whole screen: a scroll region the client
     // kept from earlier output would hold the lines back from its history.
-    buf.extend_from_slice(b"\x1b[r");
+    // Autowrap continues soft-wrapped rows; the mode restore at the end of the
+    // snapshot puts the source's setting back.
+    buf.extend_from_slice(b"\x1b[r\x1b[?7h");
+    let mut continues_wrap = false;
     for back in (1..=lines).rev() {
         let line = Line(-(back as i32));
-        // The blank tail costs bytes and nothing else; a wrapped row keeps it.
-        let end = (0..grid.columns())
-            .rposition(|col| !grid[Point::new(line, Column(col))].is_empty())
-            .map_or(0, |last| last + 1);
+        // The newest history row always ends in a line feed: the line-feed
+        // count below assumes the cursor stands below the last history row.
+        let wraps = back > 1
+            && grid[Point::new(line, Column(cols - 1))]
+                .flags
+                .contains(Flags::WRAPLINE);
+        let end = if wraps {
+            cols
+        } else {
+            // The blank tail costs bytes and nothing else.
+            let end = (0..cols)
+                .rposition(|col| !grid[Point::new(line, Column(col))].is_empty())
+                .map_or(0, |last| last + 1);
+            let first_bg = grid[Point::new(line, Column(0))].bg;
+            if continues_wrap && (end == 0 || first_bg != Color::Named(NamedColor::Background)) {
+                // The wrap into this row happens on its first glyph, and a wrap
+                // at the bottom scrolls in a line with that glyph's background:
+                // write the whole row so no cell keeps it by mistake.
+                cols
+            } else {
+                end
+            }
+        };
         write_row(buf, grid, line, current, end);
+        continues_wrap = wraps;
+        if wraps {
+            continue;
+        }
         // Lines scrolled in take the current background, so end it first.
         if *current != SgrState::default() {
             buf.extend_from_slice(b"\x1b[0m");
@@ -340,7 +369,7 @@ mod tests {
         let owned_bytes = source.render_snapshot();
         let owned = String::from_utf8_lossy(&owned_bytes);
         assert!(owned.contains("\x1b[?1049l"));
-        assert!(owned.contains("\x1b[2J\x1b[3J\x1b[H"));
+        assert!(owned.contains("\x1b[0m\x1b[2J\x1b[3J\x1b[H"));
         assert!(owned.contains("\x1b[?1002h"));
         assert!(!owned.contains("\x1b[K"), "host-only erase leaked");
     }
@@ -376,7 +405,7 @@ mod tests {
         assert_eq!(
             String::from_utf8_lossy(&owned_bytes),
             format!(
-                "\x1b[?1049l\x1b[?6l\x1b[2J\x1b[3J\x1b[H{body}{}\x1b]2;\x1b\\",
+                "\x1b[?1049l\x1b[?6l\x1b[0m\x1b[2J\x1b[3J\x1b[H{body}{}\x1b]2;\x1b\\",
                 String::from_utf8_lossy(&modes)
             )
         );
@@ -507,6 +536,46 @@ mod tests {
         })
     }
 
+    /// Glyph and background of every screen row.
+    fn screen_cells(terminal: &Terminal) -> Vec<Vec<(char, alacritty_terminal::vte::ansi::Color)>> {
+        use alacritty_terminal::grid::Dimensions;
+        use alacritty_terminal::index::{Column, Line, Point};
+
+        terminal.with_content(|term| {
+            let grid = term.grid();
+            (0..grid.screen_lines() as i32)
+                .map(|row| {
+                    (0..grid.columns())
+                        .map(|col| {
+                            let cell = &grid[Point::new(Line(row), Column(col))];
+                            (cell.c, cell.bg)
+                        })
+                        .collect()
+                })
+                .collect()
+        })
+    }
+
+    /// Which history rows, oldest first, continue on the next row.
+    fn history_wraps(terminal: &Terminal) -> Vec<bool> {
+        use alacritty_terminal::grid::Dimensions;
+        use alacritty_terminal::index::{Column, Line, Point};
+        use alacritty_terminal::term::cell::Flags;
+
+        terminal.with_content(|term| {
+            let grid = term.grid();
+            let last = Column(grid.columns() - 1);
+            (1..=grid.history_size() as i32)
+                .rev()
+                .map(|back| {
+                    grid[Point::new(Line(-back), last)]
+                        .flags
+                        .contains(Flags::WRAPLINE)
+                })
+                .collect()
+        })
+    }
+
     fn screen_text(terminal: &Terminal) -> Vec<String> {
         use alacritty_terminal::grid::Dimensions;
         use alacritty_terminal::index::{Column, Line, Point};
@@ -566,16 +635,43 @@ mod tests {
     #[test]
     fn history_colours_stay_on_their_own_rows() {
         let source = terminal("source");
-        print_lines(&source, 10);
-        // A row painted blue to its end, then plain rows after it.
+        // Enough rows before it that the blue row's line feed scrolls when it
+        // is replayed, then plain rows after it.
+        print_lines(&source, 40);
         source.process_output(b"\x1b[44mblue\x1b[K\r\n");
         source.process_output(b"\x1b[0m");
         print_lines(&source, 40);
         let mirror = terminal("mirror");
+        // A colour left over from what the client streamed before.
+        mirror.process_output(b"\x1b[41mstreamed in red");
 
         mirror.process_output(&source.render_snapshot());
 
         assert_eq!(history_cells(&mirror), history_cells(&source));
+        assert_eq!(screen_cells(&mirror), screen_cells(&source));
+    }
+
+    #[test]
+    fn soft_wrapped_history_rows_stay_wrapped() {
+        use alacritty_terminal::grid::Dimensions;
+
+        let source = terminal("source");
+        let cols = source.with_content(|term| term.grid().columns());
+        print_lines(&source, 10);
+        // A long line, and one whose continuation is only blanks.
+        source.process_output(format!("{}\r\n", "w".repeat(cols + 20)).as_bytes());
+        source.process_output(format!("{}{}\r\n", "b".repeat(cols), " ".repeat(5)).as_bytes());
+        // A wrap whose continuation starts on a coloured background.
+        source.process_output(format!("{}\x1b[42mg\x1b[0m\r\n", "c".repeat(cols)).as_bytes());
+        print_lines(&source, 40);
+        assert!(history_wraps(&source).iter().filter(|&&w| w).count() >= 3);
+        let mirror = terminal("mirror");
+
+        mirror.process_output(&source.render_snapshot());
+
+        assert_eq!(history_wraps(&mirror), history_wraps(&source));
+        assert_eq!(history_cells(&mirror), history_cells(&source));
+        assert_eq!(screen_text(&mirror), screen_text(&source));
     }
 
     #[test]
