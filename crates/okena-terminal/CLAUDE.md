@@ -11,6 +11,7 @@ Wraps `alacritty_terminal` for ANSI processing and `portable-pty` for cross-plat
 | `shell_config.rs` | `ShellType` enum, `CommandBuilder` construction. Cross-platform shell detection (bash/zsh/fish/sh on Unix; cmd/PowerShell/WSL on Windows). |
 | `session_backend.rs` | `SessionBackend` enum — tmux/screen/dtach on Unix; psmux on Windows; per-distro tmux/dtach/screen inside WSL. |
 | `dtach_pool.rs` | Guards for the dtach session pool every daemon of a user shares: owner tags (`tm-<id>.owner`, the profile dir of the daemon that runs the session), `DtachPoolLease` (one `flock`ed file per live daemon in `<pool>/leases/`) and the attached-client probe used by start-up reconciliation. |
+| `pane_scope.rs` | Per-pane systemd user scope with `MemoryHigh`/`MemoryMax` (Linux): `PaneMemoryLimits` (the `pane_memory` setting), the `systemd-run --user --scope` launcher prefixed to a new pane's program (inside dtach/tmux/screen, never around the session client), and adoption of an unscoped dtach session on reattach via `busctl` `StartTransientUnit` with `PIDs`. Probed once per process; without a user manager panes start unconfined. |
 | `input.rs` | Key-to-bytes conversion. DECCKM cursor mode handling. Platform-specific modifier mappings. |
 | `backend.rs` | Terminal backend abstraction. |
 | `process.rs` | Process spawning utilities. |

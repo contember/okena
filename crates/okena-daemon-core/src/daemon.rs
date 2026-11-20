@@ -383,6 +383,7 @@ impl DaemonCore {
         // Claude remote's preload env rides along when that setting is on.
         let claude_pane_env = Arc::new(crate::claude_remote::PaneEnv::resolve());
         pty_manager.set_launch_environment(claude_pane_env.launch_environment(&params.settings));
+        pty_manager.set_pane_memory_limits(params.settings.pane_memory.clone());
         let broadcaster = Arc::new(PtyBroadcaster::new());
         pty_manager.set_output_sink(broadcaster.clone());
         let terminals: TerminalsRegistry = Arc::new(Mutex::new(HashMap::new()));

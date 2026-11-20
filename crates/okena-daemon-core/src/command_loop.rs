@@ -211,6 +211,16 @@ fn refresh_claude_pty_env_after_committed_settings_change(
     }
 }
 
+fn apply_pane_memory_after_committed_settings_change(
+    outcome: &SettingsUpdateOutcome,
+    settings: &Arc<Mutex<AppSettings>>,
+    backend: &Arc<dyn TerminalBackend>,
+) {
+    if outcome.committed {
+        backend.set_pane_memory_limits(settings.lock().pane_memory.clone());
+    }
+}
+
 const MAX_CONCURRENT_CONTENT_SEARCHES: usize = 2;
 
 fn spawn_content_search_with<Run>(
@@ -3109,6 +3119,9 @@ pub async fn daemon_command_loop(
                             &backend,
                             &claude_pane_env,
                         );
+                        apply_pane_memory_after_committed_settings_change(
+                            &outcome, &settings, &backend,
+                        );
                         if outcome.committed {
                             crate::ai_proxy::apply_settings_change(
                                 &ai_proxy_before,
@@ -5364,6 +5377,12 @@ mod tests {
             self.events.lock().push("env".to_string());
         }
 
+        fn set_pane_memory_limits(&self, limits: okena_terminal::pane_scope::PaneMemoryLimits) {
+            self.events
+                .lock()
+                .push(format!("memory:{}:{}", limits.enabled, limits.memory_max));
+        }
+
         fn supports_session_backend_reconfiguration(&self) -> bool {
             true
         }
@@ -5678,6 +5697,36 @@ mod tests {
         );
 
         assert_eq!(&*events.lock(), &["env".to_string()]);
+    }
+
+    #[test]
+    fn pane_memory_limits_apply_only_after_committed_settings_changes() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let backend: Arc<dyn TerminalBackend> = Arc::new(RecordingMigrationBackend::new(
+            events.clone(),
+            SessionBackend::None,
+            false,
+            false,
+        ));
+        let mut changed = default_settings();
+        changed.pane_memory.memory_max = "20G".parse().expect("limit");
+        let settings = Arc::new(Mutex::new(changed));
+
+        apply_pane_memory_after_committed_settings_change(
+            &SettingsUpdateOutcome::uncommitted(CommandResult::Err("rejected".to_string())),
+            &settings,
+            &backend,
+        );
+        apply_pane_memory_after_committed_settings_change(
+            &SettingsUpdateOutcome {
+                result: CommandResult::Ok(None),
+                committed: true,
+            },
+            &settings,
+            &backend,
+        );
+
+        assert_eq!(&*events.lock(), &["memory:true:20G".to_string()]);
     }
 
     #[test]

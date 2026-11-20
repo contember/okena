@@ -7,6 +7,8 @@ pub mod input;
 /// macOS process introspection via libproc (replaces `pgrep`/`lsof`/`ps`).
 #[cfg(target_os = "macos")]
 pub mod macos_proc;
+/// Memory limits: each pane in its own systemd user scope (Linux).
+pub mod pane_scope;
 pub mod process;
 pub mod pty_manager;
 mod pty_write_queue;
