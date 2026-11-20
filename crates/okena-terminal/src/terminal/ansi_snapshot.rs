@@ -180,8 +180,12 @@ fn write_row(buf: &mut Vec<u8>, grid: &Grid<Cell>, line: Line, current: &mut Sgr
     for col_idx in 0..end {
         let cell = &grid[Point::new(line, Column(col_idx))];
 
-        // Skip wide char spacer cells
-        if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
+        // Skip wide char spacers. A leading one ends a row the wide char did
+        // not fit; leaving it out lets the client wrap the same way.
+        if cell
+            .flags
+            .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER)
+        {
             continue;
         }
 
@@ -213,7 +217,13 @@ fn write_row(buf: &mut Vec<u8>, grid: &Grid<Cell>, line: Line, current: &mut Sgr
         // Write the cell's glyph: base char, then the zero-width marks
         // stacked on it. The marks advance no column on the replaying end.
         let mut utf8_buf = [0u8; 4];
-        let base = if cell.c == '\0' { ' ' } else { cell.c };
+        // A tab cell is blank: replaying `\t` would jump to the next tab stop
+        // and shift the rest of the row.
+        let base = if cell.c == '\0' || cell.c == '\t' {
+            ' '
+        } else {
+            cell.c
+        };
         buf.extend_from_slice(base.encode_utf8(&mut utf8_buf).as_bytes());
         for mark in cell.zerowidth().into_iter().flatten() {
             buf.extend_from_slice(mark.encode_utf8(&mut utf8_buf).as_bytes());
@@ -672,6 +682,62 @@ mod tests {
         assert_eq!(history_wraps(&mirror), history_wraps(&source));
         assert_eq!(history_cells(&mirror), history_cells(&source));
         assert_eq!(screen_text(&mirror), screen_text(&source));
+    }
+
+    #[test]
+    fn tab_cells_keep_the_rest_of_the_row_in_place() {
+        let source = terminal("source");
+        source.process_output(b"\tindented\r\nx\ty\tz\r\n");
+        print_lines(&source, 40);
+        source.process_output(b"\ton screen");
+        let mirror = terminal("mirror");
+
+        mirror.process_output(&source.render_snapshot());
+
+        let blank_tabs = |rows: Vec<Vec<(char, alacritty_terminal::vte::ansi::Color)>>| {
+            rows.into_iter()
+                .map(|row| {
+                    row.into_iter()
+                        .map(|(c, bg)| (if c == '\t' { ' ' } else { c }, bg))
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(history_cells(&mirror), blank_tabs(history_cells(&source)));
+        assert_eq!(screen_cells(&mirror), blank_tabs(screen_cells(&source)));
+    }
+
+    #[test]
+    fn a_wide_char_that_did_not_fit_wraps_the_same_way() {
+        use alacritty_terminal::grid::Dimensions;
+        use alacritty_terminal::index::{Column, Line, Point};
+        use alacritty_terminal::term::cell::Flags;
+
+        let leading_spacers = |terminal: &Terminal| {
+            terminal.with_content(|term| {
+                let grid = term.grid();
+                let last = Column(grid.columns() - 1);
+                (1..=grid.history_size() as i32)
+                    .filter(|back| {
+                        grid[Point::new(Line(-back), last)]
+                            .flags
+                            .contains(Flags::LEADING_WIDE_CHAR_SPACER)
+                    })
+                    .count()
+            })
+        };
+        let source = terminal("source");
+        let cols = source.with_content(|term| term.grid().columns());
+        source.process_output(format!("{}\u{6f22}\r\n", "x".repeat(cols - 1)).as_bytes());
+        print_lines(&source, 40);
+        assert_eq!(leading_spacers(&source), 1);
+        let mirror = terminal("mirror");
+
+        mirror.process_output(&source.render_snapshot());
+
+        assert_eq!(leading_spacers(&mirror), 1);
+        assert_eq!(history_wraps(&mirror), history_wraps(&source));
+        assert_eq!(history_cells(&mirror), history_cells(&source));
     }
 
     #[test]
