@@ -1,0 +1,120 @@
+name: Nightly
+
+# Builds the newest main commit with a green Build run and publishes it as a
+# GitHub prerelease tagged `nightly-YYYYMMDD-<sha7>`. Prereleases never reach
+# users on their own: the in-app updater and both install scripts read
+# /releases/latest and skip prereleases, and the Homebrew cask is bumped only
+# by build.yml's stable release job.
+
+on:
+  schedule:
+    - cron: '17 2 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: nightly
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      sha: ${{ steps.pick.outputs.sha }}
+      tag: ${{ steps.pick.outputs.tag }}
+      skip: ${{ steps.pick.outputs.skip }}
+
+    steps:
+      - name: Pick the newest green main commit
+        id: pick
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          # Walk main newest-first and take the first commit whose push run of
+          # build.yml succeeded. Run order alone is not enough: a re-run of an
+          # old commit would sort above newer ones.
+          gh api "repos/$REPO/actions/workflows/build.yml/runs?branch=main&event=push&status=success&per_page=100" \
+            --jq '.workflow_runs[].head_sha' > green.txt
+          gh api "repos/$REPO/commits?sha=main&per_page=100" --jq '.[].sha' > main.txt
+          sha=$(grep -Fxf green.txt main.txt | head -n 1 || true)
+          if [[ -z "$sha" ]]; then
+            echo "::error::none of the last 100 main commits has a green Build run"
+            exit 1
+          fi
+          sha7=${sha:0:7}
+
+          existing=$(gh api --paginate "repos/$REPO/releases?per_page=100" \
+            --jq ".[] | select(.tag_name | startswith(\"nightly-\") and endswith(\"-$sha7\")) | .tag_name")
+          if [[ -n "$existing" ]]; then
+            echo "$sha already has a nightly: $existing"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "tag=nightly-$(date -u +%Y%m%d)-$sha7" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: [resolve]
+    if: needs.resolve.outputs.skip == 'false'
+    uses: ./.github/workflows/desktop-build.yml
+    with:
+      ref: ${{ needs.resolve.outputs.sha }}
+
+  publish:
+    needs: [resolve, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download release assets
+        uses: actions/download-artifact@v4
+        with:
+          name: release-assets
+
+      # gh uploads the assets to a draft and publishes it last, so a nightly
+      # never appears with a partial asset set. `--latest=false` keeps it from
+      # ever becoming /releases/latest.
+      - name: Publish prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ needs.resolve.outputs.sha }}
+          TAG: ${{ needs.resolve.outputs.tag }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          {
+            echo "Nightly build of $SHA from \`main\`, built by $RUN_URL."
+            echo
+            echo "Untested beyond CI. The in-app updater, the install scripts and the Homebrew cask ignore nightlies; download an archive below and check it against \`SHA256SUMS\`."
+          } > notes.md
+          shopt -s nullglob
+          gh release create "$TAG" --repo "$REPO" --target "$SHA" \
+            --prerelease --latest=false \
+            --title "$TAG" --notes-file notes.md \
+            ./*.tar.gz ./*.zip ./*.dmg SHA256SUMS
+
+      - name: Keep the newest 14 nightlies
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          gh api --paginate "repos/$REPO/releases?per_page=100" \
+            --jq '.[] | select(.tag_name | startswith("nightly-")) | [.created_at, .tag_name] | @tsv' \
+            | sort -r | tail -n +15 | cut -f 2 > stale.txt
+          while read -r tag; do
+            echo "deleting $tag"
+            gh release delete "$tag" --repo "$REPO" --cleanup-tag --yes
+          done < stale.txt
