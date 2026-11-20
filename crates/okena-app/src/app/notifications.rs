@@ -16,7 +16,6 @@
 //! (and raise its window). `notify-rust` can't surface a click callback on
 //! macOS/Windows, so there the bubble is shown without a jump.
 
-use crate::terminal::terminal::TerminalNotification;
 use crate::views::window::WindowView;
 use crate::workspace::state::WindowId;
 use gpui::*;
@@ -56,6 +55,20 @@ fn choose_notification_window(candidates: &[NotificationWindowCandidate]) -> Win
         })
         .map(|candidate| candidate.id)
         .unwrap_or(WindowId::Main)
+}
+
+fn notification_title(source: Option<(&str, &str)>, title: Option<String>) -> String {
+    let source = match source {
+        Some((project, terminal)) if !terminal.is_empty() && terminal != project => {
+            format!("{project} · {terminal}")
+        }
+        Some((project, _)) => project.to_string(),
+        None => return title.unwrap_or_else(|| "Okena".to_string()),
+    };
+    match title {
+        Some(title) => format!("{source} — {title}"),
+        None => source,
+    }
 }
 
 /// Okena's toast AppUserModelID (same as `WindowOptions::app_id`). Unpackaged
@@ -160,7 +173,7 @@ impl Okena {
         // PTY hot path. Both drains are a quick lock + take/swap, so we drain
         // unconditionally to keep the queues bounded (and clear a stale bell
         // edge), then bail before touching settings when there's nothing.
-        let mut drained: Vec<(String, Vec<TerminalNotification>, bool)> = Vec::new();
+        let mut drained = Vec::new();
         {
             let reg = self.terminals.lock();
             for tid in dirty_terminal_ids {
@@ -168,7 +181,7 @@ impl Okena {
                     let osc = term.take_pending_notifications();
                     let bell = term.take_pending_bell();
                     if !osc.is_empty() || bell {
-                        drained.push((tid.clone(), osc, bell));
+                        drained.push((tid.clone(), osc, bell, term.title()));
                     }
                 }
             }
@@ -195,41 +208,42 @@ impl Okena {
             return;
         }
 
-        for (tid, osc, bell) in drained {
+        for (tid, osc, bell, osc_title) in drained {
             // Resolve the owning project + pane for focus suppression and
             // click-to-focus. Unmapped terminals (e.g. some service/hook PTYs)
             // still notify — just without suppression or a jump target.
-            let resolved: Option<(String, String, Vec<usize>)> = {
+            let resolved = {
                 let ws = self.workspace.read(cx);
-                ws.find_project_for_terminal(&tid).and_then(|p| {
-                    p.layout
-                        .as_ref()
-                        .and_then(|l| l.find_terminal_path(&tid))
-                        .map(|path| (p.id.clone(), p.name.clone(), path))
+                ws.find_project_for_terminal(&tid).and_then(|project| {
+                    let path = project.layout.as_ref()?.find_terminal_path(&tid)?;
+                    let terminal_name = project.terminal_display_name(&tid, osc_title);
+                    Some((
+                        project.id.clone(),
+                        project.name.clone(),
+                        path,
+                        terminal_name,
+                    ))
                 })
             };
 
-            if let Some((project_id, _, path)) = &resolved
+            if let Some((project_id, _, path, _)) = &resolved
                 && self.pane_focused_in_active_window(project_id, path, cx)
             {
                 continue;
             }
 
-            let jump = resolved.as_ref().map(|(pid, _, _)| NotificationJump {
+            let jump = resolved.as_ref().map(|(pid, _, _, _)| NotificationJump {
                 project_id: pid.clone(),
                 terminal_id: tid.clone(),
             });
-            // OSC 9 / bell carry no title; fall back to the project name.
-            let fallback_title = resolved
+            let source = resolved
                 .as_ref()
-                .map(|(_, name, _)| name.clone())
-                .unwrap_or_else(|| "Okena".to_string());
+                .map(|(_, project, _, terminal)| (project.as_str(), terminal.as_str()));
 
             if n.osc && !osc.is_empty() {
                 for notification in osc {
-                    let title = notification.title.unwrap_or_else(|| fallback_title.clone());
                     show_notification(
-                        title,
+                        notification_title(source, notification.title),
                         notification.body,
                         jump.clone(),
                         self.notification_jump_tx.clone(),
@@ -245,7 +259,7 @@ impl Okena {
 
             if bell && n.bell {
                 show_notification(
-                    fallback_title,
+                    notification_title(source, None),
                     "🔔 Terminal bell".to_string(),
                     jump,
                     self.notification_jump_tx.clone(),
@@ -516,9 +530,34 @@ impl Okena {
 
 #[cfg(test)]
 mod tests {
-    use super::{NotificationWindowCandidate, choose_notification_window};
+    use super::{NotificationWindowCandidate, choose_notification_window, notification_title};
     use crate::workspace::state::WindowId;
     use uuid::Uuid;
+
+    #[test]
+    fn notification_title_includes_the_source_with_or_without_a_supplied_title() {
+        let source = Some(("Okena", "Překlad"));
+        assert_eq!(notification_title(source, None), "Okena · Překlad");
+        assert_eq!(
+            notification_title(source, Some("Build finished".into())),
+            "Okena · Překlad — Build finished"
+        );
+    }
+
+    #[test]
+    fn notification_title_uses_the_project_when_the_tab_name_is_empty_or_identical() {
+        assert_eq!(notification_title(Some(("Okena", "")), None), "Okena");
+        assert_eq!(notification_title(Some(("Okena", "Okena")), None), "Okena");
+    }
+
+    #[test]
+    fn notification_title_keeps_the_fallback_for_unmapped_terminals() {
+        assert_eq!(notification_title(None, None), "Okena");
+        assert_eq!(
+            notification_title(None, Some("Build finished".into())),
+            "Build finished"
+        );
+    }
 
     fn candidate(
         id: WindowId,
