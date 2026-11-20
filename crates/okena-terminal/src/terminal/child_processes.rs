@@ -270,16 +270,29 @@ mod tests {
 
     #[test]
     fn no_child_processes_is_known_only_for_a_live_childless_process() {
-        let mut child = std::process::Command::new("sleep")
-            .arg("30")
+        use std::io::{BufRead, Write};
+
+        let mut child = std::process::Command::new("cat")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
             .spawn()
-            .expect("spawn sleep");
+            .expect("spawn cat");
+        // `spawn` can return before exec renames the child (the kernel wakes a
+        // vfork parent first), so wait until `cat` itself echoes a line.
+        let mut stdin = child.stdin.take().expect("cat stdin");
+        stdin.write_all(b"ready\n").expect("write to cat");
+        let mut echoed = String::new();
+        std::io::BufReader::new(child.stdout.take().expect("cat stdout"))
+            .read_line(&mut echoed)
+            .expect("read from cat");
+        assert_eq!(echoed, "ready\n");
+
         assert!(has_no_child_processes(child.id()));
         assert!(!has_no_child_processes(std::process::id()));
-        assert_eq!(process_name(child.id()).as_deref(), Some("sleep"));
+        assert_eq!(process_name(child.id()).as_deref(), Some("cat"));
 
-        child.kill().expect("kill sleep");
-        child.wait().expect("reap sleep");
+        child.kill().expect("kill cat");
+        child.wait().expect("reap cat");
         assert!(
             !has_no_child_processes(child.id()),
             "a missing pid is unknown"
