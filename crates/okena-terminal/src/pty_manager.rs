@@ -2856,6 +2856,7 @@ mod tests {
             enabled: true,
             memory_high: "1G".parse().expect("limit"),
             memory_max: "2G".parse().expect("limit"),
+            memory_swap_max: "512M".parse().expect("limit"),
         };
         let (manager, _events) = PtyManager::new(SessionBackend::None);
         manager.set_pane_memory_limits(limits.clone());
@@ -2872,7 +2873,7 @@ mod tests {
                     "-c".to_string(),
                     "cg=$(sed -n 's/^0:://p' /proc/self/cgroup); \
                      { echo \"$OKENA_SCOPE_MARKER\"; echo $$; echo \"${OKENA_SCOPE_MARKER#k}\"; \
-                       cat \"/sys/fs/cgroup$cg/memory.high\" \"/sys/fs/cgroup$cg/memory.max\" 2>/dev/null; \
+                       cat \"/sys/fs/cgroup$cg/memory.high\" \"/sys/fs/cgroup$cg/memory.max\" \"/sys/fs/cgroup$cg/memory.swap.max\" 2>/dev/null; \
                      } > \"$1.tmp\"; mv \"$1.tmp\" \"$1\"; exec sleep 30"
                         .to_string(),
                     "okena-test".to_string(),
@@ -2914,7 +2915,11 @@ mod tests {
         if scoped {
             assert_eq!(
                 lines[3..],
-                [(1u64 << 30).to_string(), (2u64 << 30).to_string()],
+                [
+                    (1u64 << 30).to_string(),
+                    (2u64 << 30).to_string(),
+                    (512u64 << 20).to_string()
+                ],
                 "report: {report:?}"
             );
         }
@@ -3559,7 +3564,12 @@ mod tests {
             "scopes are off in the first manager"
         );
 
-        let limits = crate::pane_scope::PaneMemoryLimits::default();
+        let limits = crate::pane_scope::PaneMemoryLimits {
+            enabled: true,
+            memory_high: "1G".parse().expect("limit"),
+            memory_max: "2G".parse().expect("limit"),
+            memory_swap_max: "512M".parse().expect("limit"),
+        };
         let (second, _second_events) = PtyManager::new(SessionBackend::Dtach);
         second.set_pane_memory_limits(limits.clone());
         second
@@ -3572,6 +3582,17 @@ mod tests {
             adopted = cgroup_of(program).contains(crate::pane_scope::PANE_SCOPE_PREFIX);
             std::thread::sleep(Duration::from_millis(20));
         }
+        let cgroup = cgroup_of(program);
+        let adopted_limits: Vec<String> = ["memory.high", "memory.max", "memory.swap.max"]
+            .iter()
+            .map(|file| {
+                let dir = cgroup.trim().strip_prefix("0::").unwrap_or_default();
+                std::fs::read_to_string(format!("/sys/fs/cgroup{dir}/{file}"))
+                    .unwrap_or_default()
+                    .trim()
+                    .to_string()
+            })
+            .collect();
 
         second.kill(&terminal_id);
         assert_eq!(
@@ -3579,7 +3600,18 @@ mod tests {
             Ok(())
         );
         drop(first);
-        assert_eq!(adopted, scoped, "cgroup: {}", cgroup_of(program));
+        assert_eq!(adopted, scoped, "cgroup: {cgroup}");
+        if adopted {
+            assert_eq!(
+                adopted_limits,
+                [
+                    (1u64 << 30).to_string(),
+                    (2u64 << 30).to_string(),
+                    (512u64 << 20).to_string()
+                ],
+                "cgroup: {cgroup}"
+            );
+        }
     }
 
     /// A pane outlives the Okena that launched it, so its `$OKENA_TTY` goes

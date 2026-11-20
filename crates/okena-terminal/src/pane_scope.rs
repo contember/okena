@@ -1,8 +1,9 @@
 //! Memory limits for the processes of a pane.
 //!
 //! On Linux with a systemd user manager, every pane's program runs in its own
-//! transient scope (`okena-pane-<id>-<nonce>.scope`) with `MemoryHigh` and
-//! `MemoryMax`, so one runaway pane cannot exhaust the machine. Elsewhere, or
+//! transient scope (`okena-pane-<id>-<nonce>.scope`) with `MemoryHigh`,
+//! `MemoryMax` and `MemorySwapMax`, so one runaway pane cannot exhaust the
+//! machine. Elsewhere, or
 //! when the user manager is unreachable, panes start unconfined as before.
 
 use serde::{Deserialize, Serialize};
@@ -20,11 +21,31 @@ pub struct PaneMemoryLimits {
     #[serde(default = "default_enabled")]
     pub enabled: bool,
     /// systemd `MemoryHigh`: past it the kernel throttles and reclaims the pane.
-    #[serde(default = "default_memory_high")]
+    #[serde(default = "default_memory_high", deserialize_with = "nonzero_limit")]
     pub memory_high: MemoryLimit,
     /// systemd `MemoryMax`: past it the kernel OOM-kills inside the pane.
-    #[serde(default = "default_memory_max")]
+    #[serde(default = "default_memory_max", deserialize_with = "nonzero_limit")]
     pub memory_max: MemoryLimit,
+    /// systemd `MemorySwapMax`: how much of the pane may sit in swap. Past
+    /// `memory_high` the kernel pushes the pane into swap rather than killing
+    /// it, so without a cap one pane can fill the swap every pane shares.
+    /// `0` keeps the pane out of swap.
+    #[serde(default = "default_memory_swap_max")]
+    pub memory_swap_max: MemoryLimit,
+}
+
+/// `MemoryHigh` / `MemoryMax` of 0 would throttle or kill every process in
+/// the pane; only `MemorySwapMax` takes 0.
+fn nonzero_limit<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<MemoryLimit, D::Error> {
+    let limit = MemoryLimit::deserialize(deserializer)?;
+    if limit == MemoryLimit::Bytes(0) {
+        return Err(serde::de::Error::custom(
+            "a memory_high or memory_max of 0 would kill every process in the pane",
+        ));
+    }
+    Ok(limit)
 }
 
 fn default_enabled() -> bool {
@@ -39,12 +60,17 @@ fn default_memory_max() -> MemoryLimit {
     MemoryLimit::Bytes(16 * GIB)
 }
 
+fn default_memory_swap_max() -> MemoryLimit {
+    MemoryLimit::Bytes(4 * GIB)
+}
+
 impl Default for PaneMemoryLimits {
     fn default() -> Self {
         Self {
             enabled: default_enabled(),
             memory_high: default_memory_high(),
             memory_max: default_memory_max(),
+            memory_swap_max: default_memory_swap_max(),
         }
     }
 }
@@ -54,7 +80,7 @@ const MIB: u64 = 1024 * KIB;
 const GIB: u64 = 1024 * MIB;
 const TIB: u64 = 1024 * GIB;
 
-/// A cgroup memory limit: a positive byte count or `infinity`. Written in
+/// A cgroup memory limit: a byte count or `infinity`. Written in
 /// settings as systemd does, `"12G"`, `"512M"`, `"1073741824"` or
 /// `"infinity"` (suffixes are powers of 1024).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -113,9 +139,6 @@ impl FromStr for MemoryLimit {
             .ok()
             .and_then(|count| count.checked_mul(unit))
             .ok_or_else(|| format!("memory limit {value:?} is too large"))?;
-        if bytes == 0 {
-            return Err("a memory limit of 0 would kill every process in the pane".to_string());
-        }
         Ok(Self::Bytes(bytes))
     }
 }
@@ -138,6 +161,7 @@ impl fmt::Display for MemoryLimit {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let bytes = match *self {
             Self::Infinity => return f.write_str("infinity"),
+            Self::Bytes(0) => return f.write_str("0"),
             Self::Bytes(bytes) => bytes,
         };
         for (unit, suffix) in [(TIB, "T"), (GIB, "G"), (MIB, "M"), (KIB, "K")] {
@@ -243,6 +267,7 @@ fn scope_properties(limits: &PaneMemoryLimits, oom_policy: bool) -> Vec<String> 
     let mut properties = vec![
         format!("MemoryHigh={}", limits.memory_high.systemd_value()),
         format!("MemoryMax={}", limits.memory_max.systemd_value()),
+        format!("MemorySwapMax={}", limits.memory_swap_max.systemd_value()),
     ];
     // The kernel kills the largest process; the pane's shell keeps running.
     if oom_policy {
@@ -341,6 +366,7 @@ fn probe_scope_runner() -> Option<ScopeRunner> {
         enabled: true,
         memory_high: MemoryLimit::Infinity,
         memory_max: MemoryLimit::Infinity,
+        memory_swap_max: MemoryLimit::Infinity,
     };
     let mut argv = scope_argv(&runner, &limits, &unit_name("probe"), "probe");
     argv.push("true".to_string());
@@ -528,7 +554,7 @@ fn start_transient_unit_args(
     .into_iter()
     .map(str::to_string)
     .collect();
-    let property_count = if oom_policy { 6 } else { 5 };
+    let property_count = if oom_policy { 7 } else { 6 };
     args.extend([
         unit.to_string(),
         "fail".to_string(),
@@ -548,6 +574,9 @@ fn start_transient_unit_args(
         "MemoryMax".to_string(),
         "t".to_string(),
         limits.memory_max.dbus_value().to_string(),
+        "MemorySwapMax".to_string(),
+        "t".to_string(),
+        limits.memory_swap_max.dbus_value().to_string(),
         "CollectMode".to_string(),
         "s".to_string(),
         "inactive-or-failed".to_string(),
@@ -575,21 +604,12 @@ mod tests {
         assert_eq!("1048576".parse(), Ok(MemoryLimit::Bytes(MIB)));
         assert_eq!(" infinity ".parse(), Ok(MemoryLimit::Infinity));
         assert_eq!("2T".parse(), Ok(MemoryLimit::Bytes(2 * TIB)));
+        assert_eq!("0G".parse(), Ok(MemoryLimit::Bytes(0)));
     }
 
     #[test]
     fn memory_limits_reject_what_systemd_would_misread() {
-        for value in [
-            "",
-            "G",
-            "0",
-            "0G",
-            "12GB",
-            "1.5G",
-            "-1G",
-            "12X",
-            "99999999999T",
-        ] {
+        for value in ["", "G", "12GB", "1.5G", "-1G", "12X", "99999999999T"] {
             assert!(
                 value.parse::<MemoryLimit>().is_err(),
                 "{value:?} must be rejected"
@@ -602,6 +622,7 @@ mod tests {
         assert_eq!(MemoryLimit::Bytes(16 * GIB).to_string(), "16G");
         assert_eq!(MemoryLimit::Bytes(1536 * MIB).to_string(), "1536M");
         assert_eq!(MemoryLimit::Bytes(1000).to_string(), "1000");
+        assert_eq!(MemoryLimit::Bytes(0).to_string(), "0");
         assert_eq!(MemoryLimit::Infinity.to_string(), "infinity");
     }
 
@@ -611,12 +632,25 @@ mod tests {
         assert_eq!(limits, PaneMemoryLimits::default());
         assert_eq!(limits.memory_high, MemoryLimit::Bytes(12 * GIB));
         assert_eq!(limits.memory_max, MemoryLimit::Bytes(16 * GIB));
+        assert_eq!(limits.memory_swap_max, MemoryLimit::Bytes(4 * GIB));
         let json = serde_json::to_string(&limits).expect("serialize");
         assert_eq!(
             json,
-            r#"{"enabled":true,"memory_high":"12G","memory_max":"16G"}"#
+            r#"{"enabled":true,"memory_high":"12G","memory_max":"16G","memory_swap_max":"4G"}"#
         );
+        // A profile saved before the swap cap existed gets the default cap.
+        let earlier: PaneMemoryLimits =
+            serde_json::from_str(r#"{"enabled":true,"memory_high":"8G","memory_max":"10G"}"#)
+                .expect("earlier settings");
+        assert_eq!(earlier.memory_swap_max, MemoryLimit::Bytes(4 * GIB));
+        assert_eq!(earlier.memory_max, MemoryLimit::Bytes(10 * GIB));
         assert!(serde_json::from_str::<PaneMemoryLimits>(r#"{"memory_max":"lots"}"#).is_err());
+        // 0 keeps a pane out of swap, but would kill it as MemoryHigh / MemoryMax.
+        let no_swap: PaneMemoryLimits =
+            serde_json::from_str(r#"{"memory_swap_max":"0"}"#).expect("swap 0");
+        assert_eq!(no_swap.memory_swap_max, MemoryLimit::Bytes(0));
+        assert!(serde_json::from_str::<PaneMemoryLimits>(r#"{"memory_high":"0"}"#).is_err());
+        assert!(serde_json::from_str::<PaneMemoryLimits>(r#"{"memory_max":"0G"}"#).is_err());
     }
 
     #[test]
@@ -625,6 +659,7 @@ mod tests {
             enabled: true,
             memory_high: MemoryLimit::Bytes(GIB),
             memory_max: MemoryLimit::Infinity,
+            memory_swap_max: MemoryLimit::Bytes(512 * MIB),
         };
         let runner = ScopeRunner::for_systemd_version(
             vec![
@@ -651,6 +686,7 @@ mod tests {
         assert!(argv.contains(&"--description=Okena pane t-1".to_string()));
         assert!(argv.contains(&format!("MemoryHigh={GIB}")));
         assert!(argv.contains(&"MemoryMax=infinity".to_string()));
+        assert!(argv.contains(&format!("MemorySwapMax={}", 512 * MIB)));
         assert!(argv.contains(&"OOMPolicy=continue".to_string()));
         assert!(argv.contains(&"--expand-environment=no".to_string()));
         assert_eq!(argv.last().map(String::as_str), Some("--"));
@@ -739,14 +775,15 @@ mod tests {
         let joined = args.join(" ");
         assert!(
             joined
-                .contains("okena-pane-x.scope fail 6 Description s Okena pane t-1 PIDs au 2 10 20")
+                .contains("okena-pane-x.scope fail 7 Description s Okena pane t-1 PIDs au 2 10 20")
         );
         assert!(joined.contains(&format!("MemoryHigh t {}", 12 * GIB)));
         assert!(joined.contains(&format!("MemoryMax t {}", 16 * GIB)));
+        assert!(joined.contains(&format!("MemorySwapMax t {}", 4 * GIB)));
         assert!(joined.ends_with("CollectMode s inactive-or-failed OOMPolicy s continue 0"));
 
         let old = start_transient_unit_args("u.scope", &[10], &limits, false, "t-1").join(" ");
-        assert!(old.contains("u.scope fail 5 Description"));
+        assert!(old.contains("u.scope fail 6 Description"));
         assert!(old.ends_with("CollectMode s inactive-or-failed 0"));
     }
 }
