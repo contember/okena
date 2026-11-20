@@ -416,6 +416,20 @@ mod tests {
         assert!(catalog_release(&release("0.26.0", false, false, false), &current, None).is_none());
     }
 
+    /// nightly.yml publishes these as prereleases; the non-semver tag keeps
+    /// them out even if the prerelease flag were lost.
+    #[test]
+    fn nightly_releases_are_never_offered() {
+        let current = Version::parse("0.27.0").unwrap();
+        for prerelease in [true, false] {
+            let mut nightly = release("0.26.0", false, prerelease, true);
+            nightly["tag_name"] = "nightly-20261120-50c64ec".into();
+            assert!(catalog_release(&nightly, &current, None).is_none());
+            assert!(published_notes(std::slice::from_ref(&nightly)).is_empty());
+            assert!(release_asset(&nightly, Some("0.27.0"), VersionRelation::Newer).is_err());
+        }
+    }
+
     #[test]
     fn exact_release_rejects_wrong_direction() {
         let newer = release_asset(
