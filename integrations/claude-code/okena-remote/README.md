@@ -23,7 +23,7 @@ removed or changed. It then gives every new pane:
 | Variable | Value |
 |---|---|
 | `BUN_OPTIONS` | `--preload=<path to preload.js>` (plus any `BUN_OPTIONS` the daemon inherited) |
-| `OKENA_BIN` | the `okena` binary the hooks and the channel server run; on Linux `<profile dir>/bin/okena`, a hard link (else a copy) of the daemon's binary made at every daemon start, so panes keep a working binary after the build they started from is removed |
+| `OKENA_BIN` | the `okena` binary the hooks and the channel server run; on Linux `<profile dir>/bin/okena`, a hard link (else a copy) of the daemon's binary, refreshed at every daemon start, so panes keep a working binary after the build they started from is removed |
 | `OKENA_CLAUDE_REMOTE_CHANNEL` | `1` when the MCP channel is on, else `0` |
 | `OKENA_PROFILE` | the daemon's profile, so the hooks reach this daemon even from a tmux server another profile started |
 

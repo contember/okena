@@ -50,7 +50,7 @@ The two reactor trait families are what make the logic crates reactor-agnostic:
 | File | Purpose |
 |------|---------|
 | `daemon.rs` | `DaemonCore::{new,run}` — assembles managers, git watcher, bridge, `RemoteServer`; drives the reactor on a `LocalSet` until shutdown. |
-| `claude_remote.rs` | Claude remote pane env: resolves the `okena` binary (on Linux handed to panes as `<profile dir>/bin/okena`, a hard link or copy refreshed at every start, so a removed build does not break panes that outlive it), writes the embedded `preload.js` to the first private whitespace-free location (profile dir, `$XDG_RUNTIME_DIR`, the user cache dir, `$TMPDIR`) and re-ensures it every 10 min, composes the PTY env with the Claude account env. |
+| `claude_remote.rs` | Claude remote pane env: resolves the `okena` binary (on Linux handed to panes as `<profile dir>/bin/okena`, a hard link, else a copy stamped with the build's mtime, refreshed at every start, so a removed build does not break panes that outlive it), writes the embedded `preload.js` to the first private whitespace-free location (profile dir, `$XDG_RUNTIME_DIR`, the user cache dir, `$TMPDIR`) and re-ensures it every 10 min, composes the PTY env with the Claude account env. |
 | `command_loop.rs` | `daemon_command_loop` — the gpui-free port of `remote_command_loop`. Handles `GetState` (builds `StateResponse`) and every action arm. Largest file in the crate. |
 | `reactor.rs` | `DaemonReactor` shared state + `spawn_observers`. |
 | `observers.rs` | The observer tasks: autosave, state snapshot, service sync. Re-entrancy guards live here. |

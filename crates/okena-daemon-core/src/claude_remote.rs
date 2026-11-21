@@ -236,6 +236,7 @@ fn stable_okena_bin_or_original(okena_bin: PathBuf, _profile_root: &Path) -> Pat
     okena_bin
 }
 
+#[cfg(target_os = "linux")]
 const STABLE_BIN_DIR: &str = "bin";
 
 /// Put `source` at `<dir>/okena`: a hard link (same file, no copy), or a copy
@@ -247,27 +248,65 @@ fn install_stable_okena_bin(source: &Path, dir: &Path, euid: u32) -> std::io::Re
     use std::os::unix::fs::MetadataExt as _;
 
     create_private_dir(dir, euid)?;
+    remove_interrupted_installs(dir);
     let target = dir.join("okena");
     // A hard link to a symlink would link the symlink, relative target and all.
     let source = std::fs::canonicalize(source)?;
     let source_meta = std::fs::metadata(&source)?;
-    // A copy is made again at every start: once its source is gone, an older
-    // link or copy cannot be told from a copy of this build.
     if std::fs::symlink_metadata(&target).is_ok_and(|current| {
-        current.dev() == source_meta.dev() && current.ino() == source_meta.ino()
+        let same_file = current.dev() == source_meta.dev() && current.ino() == source_meta.ino();
+        // A copy carries its source's modification time (`copy_stamped`).
+        let same_copy = current.is_file()
+            && current.len() == source_meta.len()
+            && current.modified().ok() == source_meta.modified().ok();
+        same_file || same_copy
     }) {
         return Ok(target);
     }
     let temp = dir.join(format!("okena.{}.tmp", std::process::id()));
-    let _ = std::fs::remove_file(&temp);
     let installed = std::fs::hard_link(&source, &temp)
-        .or_else(|_| std::fs::copy(&source, &temp).map(drop))
+        .or_else(|_| copy_stamped(&source, &source_meta, &temp))
         .and_then(|()| std::fs::rename(&temp, &target));
     if let Err(error) = installed {
         let _ = std::fs::remove_file(&temp);
         return Err(error);
     }
     Ok(target)
+}
+
+/// Copy `source` with its modification time, so the next start can tell this
+/// copy is current, and with a mode only we can write.
+#[cfg(target_os = "linux")]
+fn copy_stamped(
+    source: &Path,
+    source_meta: &std::fs::Metadata,
+    temp: &Path,
+) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    std::fs::copy(source, temp)?;
+    // Before opening: a copy of a read-only install cannot be opened to write.
+    std::fs::set_permissions(temp, std::fs::Permissions::from_mode(0o755))?;
+    std::fs::File::options()
+        .write(true)
+        .open(temp)?
+        .set_modified(source_meta.modified()?)
+}
+
+/// Temporary files a daemon killed mid-copy left behind. The instance lock
+/// makes this daemon the only writer of the profile.
+#[cfg(target_os = "linux")]
+fn remove_interrupted_installs(dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with("okena.") && name.ends_with(".tmp") {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -507,6 +546,39 @@ mod tests {
         let next = fake_build(&root, "build-2", "build 2");
         assert_eq!(stable_okena_bin_or_original(next, &profile), stable);
         assert_eq!(executable_contents(&stable), "build 2");
+        std::fs::remove_dir_all(root).expect("remove temp dir");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_current_copy_is_kept_and_a_stale_one_replaced() {
+        use std::os::unix::fs::MetadataExt as _;
+
+        let root = temp_dir("stable-bin-copy");
+        let dir = root.join(STABLE_BIN_DIR);
+        create_private_dir(&dir, euid()).expect("create bin dir");
+        let build = fake_build(&root, "build", "the build");
+        let target = dir.join("okena");
+        // What another file system leaves: a copy instead of a link.
+        copy_stamped(&build, &std::fs::metadata(&build).unwrap(), &target).expect("copy");
+        let copy_inode = std::fs::metadata(&target).unwrap().ino();
+        // A daemon killed mid-copy.
+        let interrupted = dir.join("okena.4242.tmp");
+        std::fs::write(&interrupted, "partial").expect("write partial copy");
+
+        install_stable_okena_bin(&build, &dir, euid()).expect("install");
+        assert_eq!(std::fs::metadata(&target).unwrap().ino(), copy_inode);
+        assert!(!interrupted.exists());
+
+        // Same length, another build: a different modification time.
+        std::fs::write(&build, "new build").expect("rebuild");
+        let rebuilt = std::fs::File::options().write(true).open(&build).unwrap();
+        rebuilt
+            .set_modified(std::time::SystemTime::UNIX_EPOCH)
+            .expect("set mtime");
+        std::fs::write(&target, "old build").expect("old copy");
+        install_stable_okena_bin(&build, &dir, euid()).expect("install");
+        assert_eq!(executable_contents(&target), "new build");
         std::fs::remove_dir_all(root).expect("remove temp dir");
     }
 
