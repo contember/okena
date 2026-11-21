@@ -264,6 +264,17 @@ pub fn foreground_command(_pid: u32) -> Option<String> {
     None
 }
 
+/// A pid no process can have: the kernel hands out pids below `pid_max`. A
+/// reaped child's pid would do only until the kernel reuses it.
+#[cfg(all(test, target_os = "linux"))]
+fn pid_without_a_process() -> u32 {
+    std::fs::read_to_string("/proc/sys/kernel/pid_max")
+        .expect("read pid_max")
+        .trim()
+        .parse()
+        .expect("parse pid_max")
+}
+
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
@@ -293,11 +304,9 @@ mod tests {
 
         child.kill().expect("kill cat");
         child.wait().expect("reap cat");
-        assert!(
-            !has_no_child_processes(child.id()),
-            "a missing pid is unknown"
-        );
-        assert_eq!(process_name(child.id()), None);
+        let missing = pid_without_a_process();
+        assert!(!has_no_child_processes(missing), "a missing pid is unknown");
+        assert_eq!(process_name(missing), None);
     }
 }
 
@@ -551,6 +560,6 @@ mod proc_tests {
             child.kill().unwrap();
             child.wait().unwrap();
         }
-        assert_eq!(children(proc_root, first.id(), false), None);
+        assert_eq!(children(proc_root, pid_without_a_process(), false), None);
     }
 }
