@@ -60,10 +60,16 @@ impl PaneEnv {
             ),
             None => Vec::new(),
         };
+        let okena_bin = okena_remote_server::local::remember_current_executable()
+            .ok()
+            .and_then(|exe| okena_bin_for_exe(&exe));
         Self {
-            okena_bin: okena_remote_server::local::remember_current_executable()
-                .ok()
-                .and_then(|exe| okena_bin_for_exe(&exe)),
+            okena_bin: match (okena_bin, profile) {
+                (Some(okena_bin), Some(profile)) => {
+                    Some(stable_okena_bin_or_original(okena_bin, &profile.root))
+                }
+                (okena_bin, _) => okena_bin,
+            },
             preload_locations,
             profile_id: profile.map(|profile| profile.id.clone()),
             ai_proxy: AiProxyPoll::default(),
@@ -201,6 +207,106 @@ fn okena_bin_for_exe(exe: &Path) -> Option<PathBuf> {
     }
     let sibling = exe.with_file_name(format!("okena{}", std::env::consts::EXE_SUFFIX));
     sibling.is_file().then_some(sibling)
+}
+
+/// `okena_bin` at a path that outlives the build it came from, else
+/// `okena_bin` itself. A pane keeps `OKENA_BIN` for its whole life, which
+/// spans daemon restarts, so a removed build directory would break every
+/// `claude` started in it.
+#[cfg(target_os = "linux")]
+fn stable_okena_bin_or_original(okena_bin: PathBuf, profile_root: &Path) -> PathBuf {
+    // SAFETY: `geteuid(2)` takes no arguments, dereferences no pointers, and is
+    // documented as never failing.
+    let euid = unsafe { libc::geteuid() };
+    match install_stable_okena_bin(&okena_bin, &profile_root.join(STABLE_BIN_DIR), euid) {
+        Ok(stable) => stable,
+        Err(error) => {
+            log::warn!(
+                "[claude-remote] panes get {okena_bin:?}: no stable copy in the profile: {error}"
+            );
+            okena_bin
+        }
+    }
+}
+
+/// Only Linux: a macOS app bundle's binary is not known to run when copied out
+/// of the bundle, and its path survives updates anyway.
+#[cfg(not(target_os = "linux"))]
+fn stable_okena_bin_or_original(okena_bin: PathBuf, _profile_root: &Path) -> PathBuf {
+    okena_bin
+}
+
+#[cfg(target_os = "linux")]
+const STABLE_BIN_DIR: &str = "bin";
+
+/// Put `source` at `<dir>/okena`: a hard link (same file, no copy), or a copy
+/// across file systems or when the link is refused. Replaced by a rename, so a
+/// hook running the previous one keeps its file. The directory must be private:
+/// every `claude` in a pane runs this file.
+#[cfg(target_os = "linux")]
+fn install_stable_okena_bin(source: &Path, dir: &Path, euid: u32) -> std::io::Result<PathBuf> {
+    use std::os::unix::fs::MetadataExt as _;
+
+    create_private_dir(dir, euid)?;
+    remove_interrupted_installs(dir);
+    let target = dir.join("okena");
+    // A hard link to a symlink would link the symlink, relative target and all.
+    let source = std::fs::canonicalize(source)?;
+    let source_meta = std::fs::metadata(&source)?;
+    if std::fs::symlink_metadata(&target).is_ok_and(|current| {
+        let same_file = current.dev() == source_meta.dev() && current.ino() == source_meta.ino();
+        // A copy carries its source's modification time (`copy_stamped`).
+        let same_copy = current.is_file()
+            && current.len() == source_meta.len()
+            && current.modified().ok() == source_meta.modified().ok();
+        same_file || same_copy
+    }) {
+        return Ok(target);
+    }
+    let temp = dir.join(format!("okena.{}.tmp", std::process::id()));
+    let installed = std::fs::hard_link(&source, &temp)
+        .or_else(|_| copy_stamped(&source, &source_meta, &temp))
+        .and_then(|()| std::fs::rename(&temp, &target));
+    if let Err(error) = installed {
+        let _ = std::fs::remove_file(&temp);
+        return Err(error);
+    }
+    Ok(target)
+}
+
+/// Copy `source` with its modification time, so the next start can tell this
+/// copy is current, and with a mode only we can write.
+#[cfg(target_os = "linux")]
+fn copy_stamped(
+    source: &Path,
+    source_meta: &std::fs::Metadata,
+    temp: &Path,
+) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    std::fs::copy(source, temp)?;
+    // Before opening: a copy of a read-only install cannot be opened to write.
+    std::fs::set_permissions(temp, std::fs::Permissions::from_mode(0o755))?;
+    std::fs::File::options()
+        .write(true)
+        .open(temp)?
+        .set_modified(source_meta.modified()?)
+}
+
+/// Temporary files a daemon killed mid-copy left behind. The instance lock
+/// makes this daemon the only writer of the profile.
+#[cfg(target_os = "linux")]
+fn remove_interrupted_installs(dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with("okena.") && name.ends_with(".tmp") {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -396,6 +502,114 @@ mod tests {
 
         assert_eq!(okena_bin_for_exe(&dir.join("okena-daemon")), None);
         std::fs::remove_dir_all(dir).expect("remove temp dir");
+    }
+
+    /// A fake `okena` build: an executable file in its own build directory.
+    #[cfg(target_os = "linux")]
+    fn fake_build(root: &Path, name: &str, contents: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let build = root.join(name);
+        std::fs::create_dir_all(&build).expect("create build dir");
+        let bin = build.join("okena");
+        std::fs::write(&bin, contents).expect("write fake okena");
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755))
+            .expect("make fake okena executable");
+        bin
+    }
+
+    /// Read without running it: executing a file this process just wrote races
+    /// other tests' forks for its write descriptor (`ETXTBSY`).
+    #[cfg(target_os = "linux")]
+    fn executable_contents(path: &Path) -> String {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let mode = std::fs::metadata(path).expect("stat").permissions().mode();
+        assert_eq!(mode & 0o111, 0o111, "{path:?} is executable");
+        std::fs::read_to_string(path).expect("read")
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_okena_binary_panes_get_outlives_the_build_it_came_from() {
+        let root = temp_dir("stable-bin");
+        let profile = root.join("profile");
+        std::fs::create_dir_all(&profile).expect("create profile dir");
+        let build = fake_build(&root, "build-1", "build 1");
+
+        let stable = stable_okena_bin_or_original(build.clone(), &profile);
+        assert_eq!(stable, profile.join(STABLE_BIN_DIR).join("okena"));
+        std::fs::remove_dir_all(build.parent().unwrap()).expect("remove build 1");
+        assert_eq!(executable_contents(&stable), "build 1");
+
+        // The next daemon start, from another build, replaces it at the same path.
+        let next = fake_build(&root, "build-2", "build 2");
+        assert_eq!(stable_okena_bin_or_original(next, &profile), stable);
+        assert_eq!(executable_contents(&stable), "build 2");
+        std::fs::remove_dir_all(root).expect("remove temp dir");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_current_copy_is_kept_and_a_stale_one_replaced() {
+        use std::os::unix::fs::MetadataExt as _;
+
+        let root = temp_dir("stable-bin-copy");
+        let dir = root.join(STABLE_BIN_DIR);
+        create_private_dir(&dir, euid()).expect("create bin dir");
+        let build = fake_build(&root, "build", "the build");
+        let target = dir.join("okena");
+        // What another file system leaves: a copy instead of a link.
+        copy_stamped(&build, &std::fs::metadata(&build).unwrap(), &target).expect("copy");
+        let copy_inode = std::fs::metadata(&target).unwrap().ino();
+        // A daemon killed mid-copy.
+        let interrupted = dir.join("okena.4242.tmp");
+        std::fs::write(&interrupted, "partial").expect("write partial copy");
+
+        install_stable_okena_bin(&build, &dir, euid()).expect("install");
+        assert_eq!(std::fs::metadata(&target).unwrap().ino(), copy_inode);
+        assert!(!interrupted.exists());
+
+        // Same length, another build: a different modification time.
+        std::fs::write(&build, "new build").expect("rebuild");
+        let rebuilt = std::fs::File::options().write(true).open(&build).unwrap();
+        rebuilt
+            .set_modified(std::time::SystemTime::UNIX_EPOCH)
+            .expect("set mtime");
+        std::fs::write(&target, "old build").expect("old copy");
+        install_stable_okena_bin(&build, &dir, euid()).expect("install");
+        assert_eq!(executable_contents(&target), "new build");
+        std::fs::remove_dir_all(root).expect("remove temp dir");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_symlinked_okena_is_installed_as_the_file_it_points_to() {
+        let root = temp_dir("stable-bin-link");
+        let build = fake_build(&root, "build", "the build");
+        let link = root.join("okena-link");
+        std::os::unix::fs::symlink(&build, &link).expect("symlink okena");
+
+        let stable = install_stable_okena_bin(&link, &root.join(STABLE_BIN_DIR), euid())
+            .expect("install stable okena");
+        std::fs::remove_dir_all(build.parent().unwrap()).expect("remove build");
+        assert!(!std::fs::symlink_metadata(&stable).unwrap().is_symlink());
+        assert_eq!(executable_contents(&stable), "the build");
+        std::fs::remove_dir_all(root).expect("remove temp dir");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn panes_get_the_build_path_when_the_profile_cannot_hold_a_copy() {
+        let root = temp_dir("stable-bin-refused");
+        let build = fake_build(&root, "build", "the build");
+        // A file where the private bin directory would go.
+        let profile = root.join("profile");
+        std::fs::create_dir_all(&profile).expect("create profile dir");
+        std::fs::write(profile.join(STABLE_BIN_DIR), "").expect("block bin dir");
+
+        assert_eq!(stable_okena_bin_or_original(build.clone(), &profile), build);
+        std::fs::remove_dir_all(root).expect("remove temp dir");
     }
 
     #[test]

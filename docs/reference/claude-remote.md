@@ -45,7 +45,9 @@ channel attached; `claude_sessions` in `GET /v1/state`) or has an open dialog
 1. The daemon writes a Bun preload script and gives new panes
    `BUN_OPTIONS=--preload=<file>`, `OKENA_BIN`,
    `OKENA_CLAUDE_REMOTE_CHANNEL` and `OKENA_PROFILE`. The `claude` binary is Bun-compiled, so the
-   preload runs inside it before Claude Code parses its arguments.
+   preload runs inside it before Claude Code parses its arguments. On Linux
+   `OKENA_BIN` is `<profile dir>/bin/okena`, which the daemon points at its own
+   binary at every start, so panes outlive the build they started from.
 2. For an interactive run, the preload appends `--settings` with Okena's hooks
    and, with the channel on, `--mcp-config` plus
    `--dangerously-load-development-channels server:okena-remote`. Claude shows

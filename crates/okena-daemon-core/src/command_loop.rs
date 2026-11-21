@@ -2850,6 +2850,17 @@ fn spawn_merge_worktree_close(
     CommandResult::Ok(Some(serde_json::json!({ "pending": true })))
 }
 
+/// Fails while a Docker Compose container still points inside one of the
+/// roots: checked before a checkout is removed or renamed. A parameter of the
+/// loop so tests answer it instead of the host's Docker.
+pub type ComposeContainerInspection = fn(&[PathBuf]) -> Result<(), String>;
+
+/// The daemon's [`ComposeContainerInspection`]: a fresh `docker ps -a`.
+pub fn inspect_docker_compose_containers(roots: &[PathBuf]) -> Result<(), String> {
+    okena_services::docker_compose::ensure_no_compose_containers_under(roots)
+        .map_err(|error| error.to_string())
+}
+
 /// GPUI-free remote command loop for the headless daemon.
 ///
 /// Processes [`RemoteCommand`]s off the [`BridgeReceiver`] until every bridge
@@ -2879,6 +2890,7 @@ pub async fn daemon_command_loop(
     claude_pane_env: Arc<ClaudePaneEnv>,
     claude_hub: Weak<ClaudeRemoteHub>,
     ai_proxy_poll: crate::ai_proxy::AiProxyPoll,
+    inspect_compose_containers: ComposeContainerInspection,
 ) {
     // Single dormant "main" FocusManager. The loop is single-threaded, so it
     // owns the FM directly instead of resolving a per-window entity like the
@@ -4075,10 +4087,7 @@ pub async fn daemon_command_loop(
                                         &service_tick,
                                         &deadlines,
                                         &runtime,
-                                        |roots| {
-                                            okena_services::docker_compose::ensure_no_compose_containers_under(&roots)
-                                                .map_err(|error| error.to_string())
-                                        },
+                                        move |roots| inspect_compose_containers(&roots),
                                         |plan, force| plan.remove(force),
                                     )
                                     .await;
@@ -4155,10 +4164,7 @@ pub async fn daemon_command_loop(
                                         &service_tick,
                                         &deadlines,
                                         &runtime,
-                                        |roots| {
-                                            okena_services::docker_compose::ensure_no_compose_containers_under(&roots)
-                                                .map_err(|error| error.to_string())
-                                        },
+                                        move |roots| inspect_compose_containers(&roots),
                                         |plan, force| plan.remove(force),
                                     )
                                     .await
@@ -4217,12 +4223,7 @@ pub async fn daemon_command_loop(
                                 &service_tick,
                                 &deadlines,
                                 &runtime,
-                                |roots| {
-                                    okena_services::docker_compose::ensure_no_compose_containers_under(
-                                        &roots,
-                                    )
-                                    .map_err(|error| error.to_string())
-                                },
+                                move |roots| inspect_compose_containers(&roots),
                                 |plan| plan.execute(),
                             )
                             .await;
@@ -5253,6 +5254,7 @@ mod tests {
         daemon_config: DaemonConfig,
         hook_runner: Option<okena_hooks::HookRunner>,
         hook_monitor: Option<okena_hooks::HookMonitor>,
+        inspect_compose_containers: ComposeContainerInspection,
     }
 
     impl Harness {
@@ -5277,6 +5279,7 @@ mod tests {
                 Arc::new(ClaudePaneEnv::resolve()),
                 Weak::new(),
                 crate::ai_proxy::AiProxyPoll::default(),
+                self.inspect_compose_containers,
             ))
         }
     }
@@ -5308,6 +5311,8 @@ mod tests {
             daemon_config,
             hook_runner: None,
             hook_monitor: None,
+            // No Compose containers: the host's Docker must not decide a test.
+            inspect_compose_containers: |_| Ok(()),
         }
     }
 
@@ -7912,16 +7917,23 @@ mod tests {
                     .await
                     .expect("send worktree removal");
 
+                // A removal refused before its hook answers at once; waiting
+                // out the timeout would hide its error.
                 let parked = tokio::time::timeout(Duration::from_secs(20), async {
                     while !started.exists() {
+                        if let Ok(early) = remove_reply_rx.try_recv() {
+                            return Err(early);
+                        }
                         tokio::time::sleep(Duration::from_millis(10)).await;
                     }
+                    Ok(())
                 })
                 .await;
-                assert!(
-                    parked.is_ok(),
-                    "the removal never reached its close hook (a refused Compose preflight gets here first)"
-                );
+                match parked {
+                    Ok(Ok(())) => {}
+                    Ok(Err(early)) => panic!("the removal ended before its close hook: {early:?}"),
+                    Err(_) => panic!("the removal did not reach its close hook within 20 s"),
+                }
 
                 let input = tokio::time::timeout(
                     Duration::from_millis(500),
