@@ -767,6 +767,7 @@ impl DaemonCore {
                 claude_pane_env,
                 claude_hub,
                 ai_proxy_poll,
+                crate::command_loop::inspect_docker_compose_containers,
             );
             tokio::pin!(cmd);
             let interrupted = tokio::select! {
