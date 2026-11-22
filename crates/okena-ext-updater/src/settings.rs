@@ -622,7 +622,7 @@ impl UpdaterSettingsView {
                                     div()
                                         .text_size(ui_text_sm(cx))
                                         .text_color(rgb(t.term_yellow))
-                                        .child("This nightly build may predate the stable release you are running. Okena keeps your current configuration by default."),
+                                        .child("This nightly build may predate the stable release you are running. Okena keeps your current configuration."),
                                 )
                             }),
                     )
@@ -947,7 +947,7 @@ impl Render for UpdaterSettingsView {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{CatalogState, ReleaseCatalog, UpdateChannel, UpdaterSettingsView};
 
     fn catalog(channel: UpdateChannel, version: &str) -> ReleaseCatalog {
         serde_json::from_value(serde_json::json!({
