@@ -1,7 +1,8 @@
-use crate::{GlobalUpdateInfo, ReleaseCatalog, RevertRelease, UpdateStatus};
+use crate::{GlobalUpdateInfo, ReleaseCatalog, RevertRelease, UpdateChannel, UpdateStatus};
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 use gpui_component::{h_flex, v_flex};
+use okena_core::profiles::ConfigSnapshot;
 use okena_extensions::ThemeColors;
 use okena_ui::button::{button, button_primary};
 use okena_ui::settings::{section_container, section_header};
@@ -18,12 +19,19 @@ enum CatalogState {
     Failed(String),
 }
 
+#[derive(Clone)]
+enum InstallSelection {
+    PreviousRelease(String),
+    StableReturn(String),
+}
+
 pub struct UpdaterSettingsView {
     catalog: CatalogState,
-    selected_version: Option<String>,
+    selection: Option<InstallSelection>,
     keep_config: bool,
     submitting: bool,
     restarting: bool,
+    request_error: Option<String>,
 }
 
 impl UpdaterSettingsView {
@@ -32,10 +40,11 @@ impl UpdaterSettingsView {
         Self::poll_status(cx);
         Self {
             catalog: CatalogState::Loading,
-            selected_version: None,
+            selection: None,
             keep_config: false,
             submitting: false,
             restarting: false,
+            request_error: None,
         }
     }
 
@@ -65,17 +74,7 @@ impl UpdaterSettingsView {
                     info.apply_snapshot(snapshot);
                 }
                 if this
-                    .update(cx, |this, cx| {
-                        if let Some(info) = &info
-                            && !matches!(
-                                info.status(),
-                                UpdateStatus::Checking
-                                    | UpdateStatus::Downloading { .. }
-                                    | UpdateStatus::Installing { .. }
-                            )
-                        {
-                            this.submitting = false;
-                        }
+                    .update(cx, |_, cx| {
                         cx.notify();
                     })
                     .is_err()
@@ -101,29 +100,48 @@ impl UpdaterSettingsView {
         .detach();
     }
 
-    fn selected_release(&self) -> Option<RevertRelease> {
-        let CatalogState::Loaded(catalog) = &self.catalog else {
-            return None;
+    fn selected_install(&self, cx: &App) -> Option<(InstallSelection, Option<ConfigSnapshot>)> {
+        let selection = self.selection.clone()?;
+        let config = match &selection {
+            InstallSelection::PreviousRelease(version) => {
+                let CatalogState::Loaded(catalog) = &self.catalog else {
+                    return None;
+                };
+                catalog
+                    .releases
+                    .iter()
+                    .find(|release| &release.version == version)?
+                    .config_snapshot
+                    .clone()
+            }
+            InstallSelection::StableReturn(version) => {
+                let snapshot = cx.try_global::<GlobalUpdateInfo>()?.0.snapshot();
+                if !snapshot.stable_return
+                    || !matches!(snapshot.status, UpdateStatus::Ready { version: ready, .. } if &ready == version)
+                {
+                    return None;
+                }
+                snapshot.stable_return_config
+            }
         };
-        let selected = self.selected_version.as_deref()?;
-        catalog
-            .releases
-            .iter()
-            .find(|release| release.version == selected)
-            .cloned()
+        Some((selection, config))
     }
 
     fn render_status(&self, t: &ThemeColors, cx: &App) -> Option<AnyElement> {
         let status = cx.try_global::<GlobalUpdateInfo>()?.0.status();
         let (label, color) = match status {
-            UpdateStatus::Checking => ("Resolving release…".to_string(), t.text_muted),
+            UpdateStatus::Checking => ("Checking for updates…".to_string(), t.text_muted),
             UpdateStatus::Downloading { version, progress } => (
-                format!("Downloading v{version} · {progress}%"),
+                format!(
+                    "Downloading {} · {progress}%",
+                    crate::update_version_label(&version)
+                ),
                 t.term_yellow,
             ),
-            UpdateStatus::Installing { version } => {
-                (format!("Installing v{version}…"), t.term_yellow)
-            }
+            UpdateStatus::Installing { version } => (
+                format!("Installing {}…", crate::update_version_label(&version)),
+                t.term_yellow,
+            ),
             UpdateStatus::ReadyToRestart {
                 version,
                 config_restore,
@@ -131,9 +149,15 @@ impl UpdaterSettingsView {
                 let config = config_restore
                     .map(|snapshot| format!(" · config from {}", snapshot.created_at))
                     .unwrap_or_else(|| " · keeping current config".to_string());
-                (format!("v{version} installed{config}"), t.term_green)
+                (
+                    format!(
+                        "{} installed{config}",
+                        crate::update_version_label(&version)
+                    ),
+                    t.term_green,
+                )
             }
-            UpdateStatus::Failed { error } => (format!("Revert failed: {error}"), t.term_red),
+            UpdateStatus::Failed { error } => (format!("Update failed: {error}"), t.term_red),
             _ => return None,
         };
         Some(
@@ -153,6 +177,10 @@ impl UpdaterSettingsView {
     }
 
     fn render_current(&self, catalog: &ReleaseCatalog, t: &ThemeColors, cx: &App) -> AnyElement {
+        let running = cx
+            .try_global::<GlobalUpdateInfo>()
+            .and_then(|info| info.0.snapshot().running_version)
+            .unwrap_or_else(|| catalog.current_version.clone());
         section_container(t)
             .child(
                 h_flex()
@@ -184,7 +212,7 @@ impl UpdaterSettingsView {
                                     .font_family("monospace")
                                     .text_size(ui_text(13.0, cx))
                                     .text_color(rgb(t.text_primary))
-                                    .child(format!("v{}", catalog.current_version)),
+                                    .child(format!("v{running}")),
                             )
                             .child(
                                 div()
@@ -197,10 +225,153 @@ impl UpdaterSettingsView {
             .into_any_element()
     }
 
+    fn submit(
+        &mut self,
+        request: impl FnOnce() -> anyhow::Result<crate::UpdateStatusSnapshot> + Send + 'static,
+        cx: &mut Context<Self>,
+    ) {
+        if self.submitting {
+            return;
+        }
+        self.submitting = true;
+        self.request_error = None;
+        cx.notify();
+        let info = cx
+            .try_global::<GlobalUpdateInfo>()
+            .map(|global| global.0.clone());
+        cx.spawn(async move |this, cx| {
+            let result = smol::unblock(request).await;
+            let _ = this.update(cx, |this, cx| {
+                match result {
+                    Ok(snapshot) => {
+                        if let Some(info) = info {
+                            info.apply_snapshot(snapshot);
+                        }
+                        this.selection = None;
+                    }
+                    Err(error) => this.request_error = Some(error.to_string()),
+                }
+                this.submitting = false;
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn render_channel(&self, t: &ThemeColors, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let snapshot = cx.try_global::<GlobalUpdateInfo>()?.0.snapshot();
+        if !snapshot.channel_supported || snapshot.is_homebrew {
+            return None;
+        }
+        let can_change = !self.submitting
+            && !matches!(
+                snapshot.status,
+                UpdateStatus::Installing { .. } | UpdateStatus::ReadyToRestart { .. }
+            );
+        let mut choices = h_flex().gap(px(8.0));
+        for (channel, id, label) in [
+            (UpdateChannel::Release, "update-channel-release", "Release"),
+            (UpdateChannel::Nightly, "update-channel-nightly", "Nightly"),
+        ] {
+            let choice = if snapshot.channel == channel {
+                button_primary(id, label, t).cursor_default()
+            } else {
+                button(id, label, t)
+                    .when(!can_change, |choice| choice.opacity(0.45).cursor_default())
+                    .when(can_change, |choice| {
+                        choice.on_click(cx.listener(move |this, _, _, cx| {
+                            this.submit(move || crate::daemon_client::request_channel(channel), cx);
+                        }))
+                    })
+            };
+            choices = choices.child(choice);
+        }
+        Some(
+            section_container(t)
+                .child(
+                    h_flex()
+                        .px(px(12.0))
+                        .py(px(10.0))
+                        .gap(px(8.0))
+                        .justify_between()
+                        .child(div().text_size(ui_text_md(cx)).child("Update channel"))
+                        .child(choices),
+                )
+                .into_any_element(),
+        )
+    }
+
+    fn render_ready(&self, t: &ThemeColors, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let snapshot = cx.try_global::<GlobalUpdateInfo>()?.0.snapshot();
+        let UpdateStatus::Ready { version, .. } = snapshot.status else {
+            return None;
+        };
+        let (message, action) = if snapshot.stable_return {
+            let has_config = snapshot.stable_return_config.is_some();
+            let message = format!("Release v{version} is ready");
+            let action = button_primary("review-stable-return", "Review installation…", t)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.selection = Some(InstallSelection::StableReturn(version.clone()));
+                    this.keep_config = !has_config;
+                    this.request_error = None;
+                    cx.notify();
+                }));
+            (message, action)
+        } else {
+            let message = format!("{} is ready", crate::update_version_label(&version));
+            let action = button_primary("install-update", "Install update", t).on_click(
+                cx.listener(|this, _, _, cx| {
+                    this.submit(crate::daemon_client::request_install, cx);
+                }),
+            );
+            (message, action)
+        };
+        Some(
+            section_container(t)
+                .child(
+                    h_flex()
+                        .px(px(12.0))
+                        .py(px(10.0))
+                        .gap(px(8.0))
+                        .justify_between()
+                        .child(div().text_size(ui_text_md(cx)).child(message))
+                        .child(action),
+                )
+                .into_any_element(),
+        )
+    }
+
+    fn render_request_error(&self, t: &ThemeColors, cx: &App) -> Option<AnyElement> {
+        Some(
+            div()
+                .mx(px(16.0))
+                .mb(px(12.0))
+                .text_size(ui_text_sm(cx))
+                .text_color(rgb(t.term_red))
+                .child(self.request_error.clone()?)
+                .into_any_element(),
+        )
+    }
+
+    fn revert_block_reason(cx: &App) -> Option<&'static str> {
+        let status = cx.try_global::<GlobalUpdateInfo>()?.0.status();
+        crate::daemon_client::revert_block_reason(&status)
+    }
+
+    fn render_revert_block(reason: &'static str, t: &ThemeColors, cx: &App) -> Div {
+        div()
+            .mx(px(16.0))
+            .mb(px(12.0))
+            .text_size(ui_text_sm(cx))
+            .text_color(rgb(t.term_yellow))
+            .child(reason)
+    }
+
     fn render_release_row(
         &self,
         release: &RevertRelease,
         is_last: bool,
+        can_revert: bool,
         t: &ThemeColors,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -282,27 +453,50 @@ impl UpdaterSettingsView {
                     "Revert",
                     t,
                 )
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.selected_version = Some(version.clone());
-                    this.keep_config = !has_snapshot;
-                    cx.notify();
-                })),
+                .when(!can_revert, |button| button.opacity(0.45).cursor_default())
+                .when(can_revert, |button| {
+                    button.on_click(cx.listener(move |this, _, _, cx| {
+                        if Self::revert_block_reason(cx).is_some() {
+                            return;
+                        }
+                        this.selection = Some(InstallSelection::PreviousRelease(version.clone()));
+                        this.keep_config = !has_snapshot;
+                        this.request_error = None;
+                        cx.notify();
+                    }))
+                }),
             )
             .into_any_element()
     }
 
     fn render_confirmation(
         &self,
-        release: RevertRelease,
+        selection: InstallSelection,
+        snapshot: Option<ConfigSnapshot>,
         t: &ThemeColors,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let version = release.version.clone();
-        let snapshot = release.config_snapshot.clone();
+        let (version, title, action) = match &selection {
+            InstallSelection::PreviousRelease(version) => (
+                version,
+                "Confirm version revert",
+                format!("Revert to v{version}"),
+            ),
+            InstallSelection::StableReturn(version) => (
+                version,
+                "Confirm return to Release",
+                format!("Install Release v{version}"),
+            ),
+        };
         let restore_config = snapshot.is_some() && !self.keep_config;
-        let keep_config = self.keep_config;
+        let historical = matches!(&selection, InstallSelection::PreviousRelease(_));
+        let block_reason = historical.then(|| Self::revert_block_reason(cx)).flatten();
+        let can_submit = !self.submitting && block_reason.is_none();
         v_flex()
-            .child(section_header("Confirm version revert", t, cx))
+            .child(section_header(title, t, cx))
+            .children(self.render_request_error(t, cx))
+            .children(block_reason.map(|reason| Self::render_revert_block(reason, t, cx)))
+            .children(self.render_restart_action(t, cx))
             .child(
                 section_container(t)
                     .child(
@@ -355,7 +549,7 @@ impl UpdaterSettingsView {
                                                     "Restore the checkpoint created {}.",
                                                     snapshot.created_at
                                                 ),
-                                                Some(_) => "Keep the current config. It may be incompatible with this older version.".to_string(),
+                                                Some(_) => "Keep the current config. It may be incompatible with this version.".to_string(),
                                                 None => "No exact checkpoint exists. The current config must be kept and may be incompatible.".to_string(),
                                             }),
                                     ),
@@ -383,56 +577,42 @@ impl UpdaterSettingsView {
                             .justify_end()
                             .child(button("cancel-version-revert", "Cancel", t).on_click(
                                 cx.listener(|this, _, _, cx| {
-                                    this.selected_version = None;
+                                    this.selection = None;
+                                    this.request_error = None;
                                     cx.notify();
                                 }),
                             ))
                             .child(
-                                button_primary(
-                                    "confirm-version-revert",
-                                    format!("Revert to v{version}"),
-                                    t,
-                                )
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    if this.submitting {
-                                        return;
-                                    }
-                                    this.submitting = true;
-                                    let version = version.clone();
-                                    let keep_config = keep_config;
-                                    let info = cx
-                                        .try_global::<GlobalUpdateInfo>()
-                                        .map(|global| global.0.clone());
-                                    cx.spawn(async move |this, cx| {
-                                        let result = smol::unblock(move || {
-                                            crate::daemon_client::request_revert(
-                                                &version,
-                                                keep_config,
-                                            )
-                                        })
-                                        .await;
-                                        let _ = this.update(cx, |this, cx| {
-                                            match result {
-                                                Ok(snapshot) => {
-                                                    if let Some(info) = info {
-                                                        info.apply_snapshot(snapshot);
-                                                    }
-                                                    this.selected_version = None;
-                                                }
-                                                Err(error) => {
-                                                    this.submitting = false;
-                                                    if let Some(info) = info {
-                                                        info.set_status(UpdateStatus::Failed {
-                                                            error: error.to_string(),
-                                                        });
-                                                    }
-                                                }
-                                            }
-                                            cx.notify();
-                                        });
+                                button_primary("confirm-version-revert", action, t)
+                                    .when(!can_submit, |button| {
+                                        button.opacity(0.45).cursor_default()
                                     })
-                                    .detach();
-                                })),
+                                    .when(can_submit, |button| {
+                                        button.on_click(cx.listener(move |this, _, _, cx| {
+                                            if historical && Self::revert_block_reason(cx).is_some()
+                                            {
+                                                return;
+                                            }
+                                            let selection = selection.clone();
+                                            this.submit(
+                                                move || match selection {
+                                                    InstallSelection::PreviousRelease(version) => {
+                                                        crate::daemon_client::request_revert(
+                                                            &version,
+                                                            !restore_config,
+                                                        )
+                                                    }
+                                                    InstallSelection::StableReturn(version) => {
+                                                        crate::daemon_client::request_stable_install(
+                                                            &version,
+                                                            restore_config,
+                                                        )
+                                                    }
+                                                },
+                                                cx,
+                                            );
+                                        }))
+                                    }),
                             ),
                     ),
             )
@@ -460,7 +640,10 @@ impl UpdaterSettingsView {
                                     div()
                                         .text_size(ui_text(13.0, cx))
                                         .text_color(rgb(t.text_primary))
-                                        .child(format!("v{version} is ready")),
+                                        .child(format!(
+                                            "{} is ready",
+                                            crate::update_version_label(&version)
+                                        )),
                                 )
                                 .child(
                                     div()
@@ -526,12 +709,16 @@ impl UpdaterSettingsView {
 impl Render for UpdaterSettingsView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
-        if let Some(release) = self.selected_release() {
-            return self.render_confirmation(release, &t, cx);
+        if let Some((selection, config)) = self.selected_install(cx) {
+            return self.render_confirmation(selection, config, &t, cx);
         }
+        self.selection = None;
 
         let mut content = v_flex()
             .child(section_header("Auto Update", &t, cx))
+            .children(self.render_channel(&t, cx))
+            .children(self.render_request_error(&t, cx))
+            .children(self.render_ready(&t, cx))
             .when_some(self.render_status(&t, cx), |content, status| {
                 content.child(status)
             })
@@ -603,12 +790,18 @@ impl Render for UpdaterSettingsView {
                             .child("No older compatible releases found."),
                     );
                 } else {
+                    let block_reason = Self::revert_block_reason(cx);
+                    let can_revert = !self.submitting && block_reason.is_none();
+                    next = next.children(
+                        block_reason.map(|reason| Self::render_revert_block(reason, &t, cx)),
+                    );
                     let count = catalog.releases.len();
                     let mut releases = section_container(&t);
                     for (index, release) in catalog.releases.iter().enumerate() {
                         releases = releases.child(self.render_release_row(
                             release,
                             index + 1 == count,
+                            can_revert,
                             &t,
                             cx,
                         ));

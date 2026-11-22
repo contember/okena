@@ -31,17 +31,33 @@ pub use installer::restart_app;
 pub use local_build::{GlobalLocalBuild, LocalBuildState, LocalBuildStatus};
 pub use local_build::{LocalCheckout, detect_local_checkout};
 pub use status::{
-    GlobalUpdateInfo, UpdateInfo, UpdateReservation, UpdateStatus, UpdateStatusSnapshot,
+    GlobalUpdateInfo, UpdateChannel, UpdateInfo, UpdateReservation, UpdateStatus,
+    UpdateStatusSnapshot,
 };
 
 #[cfg(feature = "gpui-ui")]
-gpui::actions!(updater, [RebuildLocal, RestartLocalBuild]);
+gpui::actions!(
+    updater,
+    [RebuildLocal, RestartLocalBuild, OpenUpdateSettings]
+);
+
+#[cfg(feature = "gpui-ui")]
+pub const EXTENSION_ID: &str = "updater";
+
+/// The GitHub tag for a candidate reported by update status.
+pub fn update_version_label(version: &str) -> String {
+    if version.starts_with("nightly-") {
+        version.to_string()
+    } else {
+        format!("v{version}")
+    }
+}
 
 #[cfg(feature = "gpui-ui")]
 pub fn register() -> ExtensionRegistration {
     ExtensionRegistration {
         manifest: ExtensionManifest {
-            id: "updater",
+            id: EXTENSION_ID,
             name: "Auto Update",
             default_enabled: true,
         },
@@ -68,7 +84,7 @@ pub fn init(app_version: &str, cx: &mut gpui::App) {
     }
     installer::cleanup_old_binary();
 
-    let update_info = UpdateInfo::new(app_version.to_string());
+    let update_info = UpdateInfo::for_desktop(app_version.to_string());
     cx.set_global(GlobalUpdateInfo(update_info));
 
     if let Some(checkout) = detect_local_checkout() {

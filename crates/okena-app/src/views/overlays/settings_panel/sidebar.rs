@@ -16,7 +16,7 @@ impl SettingsPanel {
             SettingsCategory::all().to_vec()
         };
 
-        // Collect extension categories (extensions with settings_view that are enabled)
+        // Updater settings are available even when its status widget is disabled.
         let ext_categories: Vec<(SettingsCategory, String)> = if self.selected_project_id.is_none()
         {
             cx.try_global::<ExtensionRegistry>()
@@ -30,7 +30,8 @@ impl SettingsPanel {
                         .iter()
                         .filter(|ext| {
                             ext.settings_view.is_some()
-                                && settings.enabled_extensions.contains(ext.manifest.id)
+                                && (ext.manifest.id == okena_ext_updater::EXTENSION_ID
+                                    || settings.enabled_extensions.contains(ext.manifest.id))
                         })
                         .map(|ext| {
                             (

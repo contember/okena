@@ -4,10 +4,8 @@ name: Nightly
 # prerelease tagged `nightly-YYYYMMDD-<sha7>`, but only when that commit's
 # Build run on main completed green; otherwise the night is skipped. An older
 # commit is never built: its tag would need the `workflows` permission the
-# workflow token cannot hold. Prereleases never reach users on their own: the
-# in-app updater and both install scripts read /releases/latest and skip
-# prereleases, and the Homebrew cask is bumped only by build.yml's stable
-# release job.
+# workflow token cannot hold. The desktop updater offers these builds to
+# users on the Nightly channel. Install scripts and the Homebrew cask use stable releases.
 
 on:
   schedule:
@@ -129,7 +127,7 @@ jobs:
           {
             echo "Nightly build of $SHA from \`main\`, built by $RUN_URL."
             echo
-            echo "Untested beyond CI. The in-app updater, the install scripts and the Homebrew cask ignore nightlies; download an archive below and check it against \`SHA256SUMS\`."
+            echo "Untested beyond CI. To follow these builds, select Nightly in Settings → Auto Update in a channel-aware desktop installation. For a manual install, download your platform archive and verify it against \`SHA256SUMS\`."
           } > notes.md
           printf '%s\n' "$MANIFEST" > nightly.json
           sha256sum nightly.json >> SHA256SUMS

@@ -1,11 +1,17 @@
+use crate::status::UpdateChannel;
 use anyhow::{Context, Result};
+use okena_core::build_info::{BUILD_INFO, NightlyBuild};
 use parking_lot::Mutex;
 use semver::Version;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 const RELEASES_URL: &str = "https://api.github.com/repos/contember/okena/releases";
+const RELEASE_DOWNLOADS_URL: &str = "https://github.com/contember/okena/releases/download";
+const CHECKSUMS_NAME: &str = "SHA256SUMS";
+const NIGHTLY_MANIFEST_NAME: &str = "nightly.json";
 
 /// Download data for one platform-specific release asset.
 #[derive(Clone, Debug)]
@@ -91,9 +97,30 @@ impl ReleaseNotesCache {
     }
 }
 
-/// Check GitHub for the latest release newer than `app_version`.
-pub async fn check_for_update(app_version: String) -> Result<Option<ReleaseAsset>> {
-    smol::unblock(move || check_blocking(&app_version)).await
+/// Check the selected channel for a verified update on this platform.
+pub async fn check_for_update(
+    app_version: &str,
+    channel: UpdateChannel,
+) -> Result<Option<ReleaseAsset>> {
+    let app_version = app_version.to_owned();
+    smol::unblock(move || match channel {
+        UpdateChannel::Release => {
+            let release = fetch_latest_stable(&app_version)?;
+            stable_update_asset(&release, &app_version, BUILD_INFO.nightly.is_some())
+        }
+        UpdateChannel::Nightly => check_nightly(&app_version, BUILD_INFO.nightly.as_ref()),
+    })
+    .await
+}
+
+/// Find an upgrade hint for installations managed by an external package manager.
+pub async fn check_for_package_update(app_version: &str) -> Result<Option<ReleaseAsset>> {
+    let app_version = app_version.to_owned();
+    smol::unblock(move || {
+        let release = fetch_latest_stable(&app_version)?;
+        stable_offer(&release, &app_version, false)
+    })
+    .await
 }
 
 /// List stable releases older than the running version that have an asset for
@@ -130,13 +157,194 @@ pub async fn release_for_revert(app_version: String, target: String) -> Result<R
     smol::unblock(move || release_for_revert_blocking(&app_version, &target)).await
 }
 
-fn check_blocking(app_version: &str) -> Result<Option<ReleaseAsset>> {
-    let response = fetch_json(
+fn fetch_latest_stable(app_version: &str) -> Result<serde_json::Value> {
+    fetch_json(
         &format!("{RELEASES_URL}/latest"),
         app_version,
         "updater.check",
+    )
+}
+
+fn stable_update_asset(
+    release: &serde_json::Value,
+    app_version: &str,
+    running_nightly: bool,
+) -> Result<Option<ReleaseAsset>> {
+    let Some(mut asset) = stable_offer(release, app_version, running_nightly)? else {
+        return Ok(None);
+    };
+    asset.checksum_url = Some(
+        asset_download_url(release_assets(release)?, CHECKSUMS_NAME)
+            .with_context(|| format!("release v{} has no {CHECKSUMS_NAME}", asset.version))?
+            .to_owned(),
+    );
+    Ok(Some(asset))
+}
+
+fn stable_offer(
+    release: &serde_json::Value,
+    app_version: &str,
+    running_nightly: bool,
+) -> Result<Option<ReleaseAsset>> {
+    if !is_stable_release(release) {
+        return Ok(None);
+    }
+    let Some(version) = release["tag_name"].as_str().and_then(parse_release_version) else {
+        return Ok(None);
+    };
+    let current = Version::parse(app_version).context("invalid current version")?;
+    if !version.pre.is_empty() || (!running_nightly && version <= current) {
+        return Ok(None);
+    }
+    release_asset(release, &version)
+}
+
+fn check_nightly(
+    app_version: &str,
+    running: Option<&NightlyBuild>,
+) -> Result<Option<ReleaseAsset>> {
+    // The publisher retains only the 14 newest nightlies. The latest 100
+    // releases include those recent builds and cost one GitHub API request.
+    let response = fetch_json(
+        &format!("{RELEASES_URL}?per_page=100"),
+        app_version,
+        "updater.nightly.releases",
     )?;
-    release_asset(&response, Some(app_version), VersionRelation::Newer)
+    let releases = response
+        .as_array()
+        .context("release list is not an array")?;
+    select_nightly(releases, app_version, running, |url| {
+        let response = okena_transport::http::send(
+            okena_transport::http::HttpRequest::get(url)
+                .timeout(Duration::from_secs(15))
+                .label("updater.nightly.metadata"),
+        )
+        .with_context(|| format!("failed to fetch {url}"))?
+        .error_for_status()
+        .with_context(|| format!("failed to fetch {url}"))?;
+        Ok(response.bytes().to_vec())
+    })
+}
+
+fn select_nightly(
+    releases: &[serde_json::Value],
+    app_version: &str,
+    running: Option<&NightlyBuild>,
+    mut fetch: impl FnMut(&str) -> Result<Vec<u8>>,
+) -> Result<Option<ReleaseAsset>> {
+    let stable_version = running
+        .is_none()
+        .then(|| Version::parse(app_version))
+        .transpose()
+        .context("invalid current version")?;
+    let mut first_error = None;
+    let mut fetch_asset = |url: &str, first_error: &mut Option<anyhow::Error>| match fetch(url) {
+        Ok(bytes) => Some(bytes),
+        Err(error) => {
+            first_error.get_or_insert(error);
+            None
+        }
+    };
+    let mut candidates = Vec::new();
+    for release in releases {
+        let Some(tag) = release["tag_name"].as_str() else {
+            continue;
+        };
+        let Some((date, short_sha)) = nightly_tag_parts(tag) else {
+            continue;
+        };
+        if release["draft"].as_bool() != Some(false)
+            || release["prerelease"].as_bool() != Some(true)
+            || release["published_at"].as_str().is_none_or(str::is_empty)
+            || running.is_some_and(|build| build.tag == tag)
+        {
+            continue;
+        }
+        let Ok(assets) = release_assets(release) else {
+            continue;
+        };
+        let asset_name = platform_asset_name();
+        let official_url = |name: &str| {
+            let url = asset_download_url(assets, name)?;
+            (url == format!("{RELEASE_DOWNLOADS_URL}/{tag}/{name}")).then_some(url)
+        };
+        let (Some(asset_url), Some(checksum_url), Some(manifest_url)) = (
+            official_url(asset_name),
+            official_url(CHECKSUMS_NAME),
+            official_url(NIGHTLY_MANIFEST_NAME),
+        ) else {
+            continue;
+        };
+        let Some(manifest) = fetch_asset(manifest_url, &mut first_error) else {
+            continue;
+        };
+        let Ok(build) = serde_json::from_slice::<NightlyBuild>(&manifest) else {
+            continue;
+        };
+        let Ok(base_version) = Version::parse(&build.base_version) else {
+            continue;
+        };
+        if build.tag != tag
+            || build.date != format!("{}-{}-{}", &date[..4], &date[4..6], &date[6..])
+            || build.sha.len() != 40
+            || !build.sha.bytes().all(is_lower_hex)
+            || !build.sha.starts_with(short_sha)
+            || release["target_commitish"].as_str() != Some(build.sha.as_str())
+            || build.run_number == 0
+            || running.is_some_and(|current| build.run_number <= current.run_number)
+            || stable_version
+                .as_ref()
+                .is_some_and(|stable| base_version.cmp_precedence(stable).is_lt())
+        {
+            continue;
+        }
+        candidates.push((build, manifest, asset_url, checksum_url));
+    }
+
+    candidates.sort_by(|(a, ..), (b, ..)| b.run_number.cmp(&a.run_number));
+    for (build, manifest, asset_url, checksum_url) in candidates {
+        let Some(sums) = fetch_asset(checksum_url, &mut first_error) else {
+            continue;
+        };
+        if let Ok(sums) = std::str::from_utf8(&sums)
+            && listed_sha256(sums, platform_asset_name()).is_some()
+            && listed_sha256(sums, NIGHTLY_MANIFEST_NAME).is_some_and(|hash| {
+                hash.eq_ignore_ascii_case(&format!("{:x}", Sha256::digest(&manifest)))
+            })
+        {
+            return Ok(Some(ReleaseAsset {
+                version: build.tag,
+                asset_url: asset_url.to_owned(),
+                asset_name: platform_asset_name().to_owned(),
+                checksum_url: Some(checksum_url.to_owned()),
+            }));
+        }
+        let error = anyhow::anyhow!("Nightly {} has invalid release checksums", build.tag);
+        log::warn!("{error}");
+        first_error.get_or_insert(error);
+    }
+    first_error.map_or(Ok(None), Err)
+}
+
+fn nightly_tag_parts(tag: &str) -> Option<(&str, &str)> {
+    let (date, sha) = tag.strip_prefix("nightly-")?.split_once('-')?;
+    (date.len() == 8
+        && date.bytes().all(|byte| byte.is_ascii_digit())
+        && sha.len() == 7
+        && sha.bytes().all(is_lower_hex))
+    .then_some((date, sha))
+}
+
+fn is_lower_hex(byte: u8) -> bool {
+    byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)
+}
+
+pub(crate) fn listed_sha256<'a>(sums: &'a str, asset: &str) -> Option<&'a str> {
+    let hash = sums.lines().find_map(|line| {
+        let (hash, name) = line.split_once(char::is_whitespace)?;
+        (name.trim() == asset).then_some(hash)
+    })?;
+    (hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit())).then_some(hash)
 }
 
 fn list_revert_releases_blocking(app_version: &str) -> Result<ReleaseCatalog> {
@@ -243,8 +451,7 @@ fn release_for_revert_blocking(app_version: &str, target: &str) -> Result<Releas
     if !is_stable_release(&response) {
         anyhow::bail!("release v{target} is not stable");
     }
-    // The direction is already enforced above, so `None` here means one thing only.
-    release_asset(&response, None, VersionRelation::Older)?
+    release_asset(&response, &target)?
         .with_context(|| format!("release v{target} has no asset for this platform"))
 }
 
@@ -269,31 +476,10 @@ fn fetch_json(url: &str, app_version: &str, label: &'static str) -> Result<serde
     response.json().context("failed to parse release JSON")
 }
 
-#[derive(Clone, Copy)]
-enum VersionRelation {
-    Newer,
-    Older,
-}
-
 fn release_asset(
     release: &serde_json::Value,
-    app_version: Option<&str>,
-    relation: VersionRelation,
+    remote_version: &Version,
 ) -> Result<Option<ReleaseAsset>> {
-    let tag = release["tag_name"].as_str().context("missing tag_name")?;
-    let remote_version =
-        Version::parse(tag.strip_prefix('v').unwrap_or(tag)).context("invalid remote version")?;
-    if let Some(app_version) = app_version {
-        let current = Version::parse(app_version).context("invalid current version")?;
-        let matches = match relation {
-            VersionRelation::Newer => remote_version > current,
-            VersionRelation::Older => remote_version < current,
-        };
-        if !matches {
-            return Ok(None);
-        }
-    }
-
     let (asset_name, asset_url, checksum_url) = platform_asset(release)?;
     if asset_url.is_none() {
         log::warn!("Release {remote_version} exists but has no asset named '{asset_name}'");
@@ -342,20 +528,30 @@ fn is_stable_release(release: &serde_json::Value) -> bool {
 
 fn platform_asset(release: &serde_json::Value) -> Result<(String, Option<String>, Option<String>)> {
     let expected = platform_asset_name().to_string();
-    let assets = release["assets"]
-        .as_array()
-        .context("missing assets array")?;
-    let mut asset_url = None;
-    let mut checksum_url = None;
-    for asset in assets {
-        let name = asset["name"].as_str().unwrap_or_default();
-        if name == expected {
-            asset_url = asset["browser_download_url"].as_str().map(str::to_string);
-        } else if matches!(name, "SHA256SUMS" | "sha256sums.txt") {
-            checksum_url = asset["browser_download_url"].as_str().map(str::to_string);
-        }
-    }
+    let assets = release_assets(release)?;
+    let asset_url = asset_download_url(assets, &expected).map(str::to_owned);
+    let checksum_url = asset_download_url(assets, CHECKSUMS_NAME)
+        .or_else(|| asset_download_url(assets, "sha256sums.txt"))
+        .map(str::to_owned);
     Ok((expected, asset_url, checksum_url))
+}
+
+fn release_assets(release: &serde_json::Value) -> Result<&[serde_json::Value]> {
+    release["assets"]
+        .as_array()
+        .map(Vec::as_slice)
+        .context("missing assets array")
+}
+
+fn asset_download_url<'a>(assets: &'a [serde_json::Value], name: &str) -> Option<&'a str> {
+    assets
+        .iter()
+        .filter(|asset| asset["name"].as_str() == Some(name))
+        .find_map(|asset| {
+            asset["browser_download_url"]
+                .as_str()
+                .filter(|url| !url.is_empty())
+        })
 }
 
 pub fn platform_asset_name() -> &'static str {
@@ -419,26 +615,273 @@ mod tests {
     /// nightly.yml publishes these as prereleases; the non-semver tag keeps
     /// them out even if the prerelease flag were lost.
     #[test]
-    fn nightly_releases_are_never_offered() {
+    fn nightly_releases_are_excluded_from_stable_history() {
         let current = Version::parse("0.27.0").unwrap();
         for prerelease in [true, false] {
             let mut nightly = release("0.26.0", false, prerelease, true);
             nightly["tag_name"] = "nightly-20261120-50c64ec".into();
             assert!(catalog_release(&nightly, &current, None).is_none());
             assert!(published_notes(std::slice::from_ref(&nightly)).is_empty());
-            assert!(release_asset(&nightly, Some("0.27.0"), VersionRelation::Newer).is_err());
+            assert!(
+                stable_update_asset(&nightly, "0.27.0", true)
+                    .unwrap()
+                    .is_none()
+            );
         }
     }
 
     #[test]
-    fn exact_release_rejects_wrong_direction() {
-        let newer = release_asset(
-            &release("0.28.0", false, false, true),
-            Some("0.27.0"),
-            VersionRelation::Older,
+    fn returning_to_release_allows_same_or_lower_version() {
+        let mut stable = release("0.42.0", false, false, true);
+        stable["assets"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({
+                "name": "SHA256SUMS",
+                "browser_download_url": "https://example.test/SHA256SUMS"
+            }));
+        assert!(
+            stable_update_asset(&stable, "0.42.0", false)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            stable_update_asset(&stable, "0.43.0", false)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            stable_update_asset(&stable, "0.41.0", false)
+                .unwrap()
+                .unwrap()
+                .version,
+            "0.42.0"
+        );
+        for current in ["0.42.0", "0.43.0"] {
+            assert_eq!(
+                stable_update_asset(&stable, current, true)
+                    .unwrap()
+                    .unwrap()
+                    .version,
+                "0.42.0"
+            );
+        }
+    }
+
+    #[test]
+    fn self_update_requires_checksums_but_legacy_rollback_still_resolves() {
+        let old_release = release("0.42.0", false, false, true);
+        assert!(stable_update_asset(&old_release, "0.41.0", false).is_err());
+        assert!(
+            stable_offer(&old_release, "0.41.0", false)
+                .unwrap()
+                .unwrap()
+                .checksum_url
+                .is_none()
+        );
+    }
+
+    type NightlyFixture = (serde_json::Value, Vec<u8>, Vec<u8>);
+
+    fn nightly_fixture(short_sha: &str, run_number: u64) -> NightlyFixture {
+        nightly_fixture_for_version(short_sha, run_number, "0.42.0")
+    }
+
+    fn nightly_fixture_for_version(
+        short_sha: &str,
+        run_number: u64,
+        base_version: &str,
+    ) -> NightlyFixture {
+        let tag = format!("nightly-20261122-{short_sha}");
+        let sha = format!("{short_sha}{}", "a".repeat(33));
+        let manifest = serde_json::json!({
+            "tag": tag,
+            "date": "2026-11-22",
+            "sha": sha,
+            "run_number": run_number,
+            "base_version": base_version
+        })
+        .to_string()
+        .into_bytes();
+        let sums = nightly_test_sums(&manifest);
+        let assets: Vec<_> = [platform_asset_name(), "SHA256SUMS", "nightly.json"]
+            .into_iter()
+            .map(|name| serde_json::json!({
+                "name": name,
+                "browser_download_url": format!("https://github.com/contember/okena/releases/download/{tag}/{name}")
+            }))
+            .collect();
+        let release = serde_json::json!({
+            "tag_name": tag,
+            "target_commitish": sha,
+            "draft": false,
+            "prerelease": true,
+            "published_at": "2026-11-22T12:00:00Z",
+            "assets": assets
+        });
+        (release, manifest, sums)
+    }
+
+    fn nightly_test_sums(manifest: &[u8]) -> Vec<u8> {
+        use sha2::{Digest, Sha256};
+        format!(
+            "{}  {}\n{:x}  nightly.json\n",
+            "a".repeat(64),
+            platform_asset_name(),
+            Sha256::digest(manifest),
         )
-        .unwrap();
-        assert!(newer.is_none());
+        .into_bytes()
+    }
+
+    fn select_test_nightly(
+        fixtures: &[NightlyFixture],
+        running: Option<&NightlyBuild>,
+    ) -> Option<ReleaseAsset> {
+        select_test_nightly_at(fixtures, "0.42.0", running, None).unwrap()
+    }
+
+    fn select_test_nightly_at(
+        fixtures: &[NightlyFixture],
+        app_version: &str,
+        running: Option<&NightlyBuild>,
+        unavailable_url: Option<&str>,
+    ) -> Result<Option<ReleaseAsset>> {
+        let releases: Vec<_> = fixtures
+            .iter()
+            .map(|(release, _, _)| release.clone())
+            .collect();
+        select_nightly(&releases, app_version, running, |url| {
+            anyhow::ensure!(Some(url) != unavailable_url, "fixture HTTP 404 for {url}");
+            for (release, manifest, sums) in fixtures {
+                let tag = release["tag_name"].as_str().unwrap();
+                if url
+                    == format!(
+                        "https://github.com/contember/okena/releases/download/{tag}/nightly.json"
+                    )
+                {
+                    return Ok(manifest.clone());
+                }
+                if url
+                    == format!(
+                        "https://github.com/contember/okena/releases/download/{tag}/SHA256SUMS"
+                    )
+                {
+                    return Ok(sums.clone());
+                }
+            }
+            panic!("unexpected asset URL {url}");
+        })
+    }
+
+    #[test]
+    fn selects_greatest_nightly_run_even_on_same_day_and_cargo_version() {
+        let first = nightly_fixture("1111111", 19);
+        let second = nightly_fixture("2222222", 20);
+        let running_first = serde_json::from_slice(&first.1).unwrap();
+        let running_second = serde_json::from_slice(&second.1).unwrap();
+        let fixtures = [first, second];
+        for running in [None, Some(&running_first)] {
+            assert_eq!(
+                select_test_nightly(&fixtures, running).unwrap().version,
+                "nightly-20261122-2222222"
+            );
+        }
+        assert!(select_test_nightly(&fixtures, Some(&running_second)).is_none());
+    }
+
+    #[test]
+    fn stable_build_skips_older_nightly_base_versions() {
+        let older = nightly_fixture_for_version("1111111", 30, "0.42.0");
+        let equal = nightly_fixture_for_version("2222222", 20, "0.43.0");
+        let newer = nightly_fixture_for_version("3333333", 19, "0.44.0");
+        let fixtures = [older, newer, equal];
+
+        for (available, expected) in [
+            (&fixtures[..1], None),
+            (&fixtures[..2], Some("nightly-20261122-3333333")),
+            (&fixtures[..], Some("nightly-20261122-2222222")),
+        ] {
+            let found = select_test_nightly_at(available, "0.43.0", None, None).unwrap();
+            assert_eq!(
+                found.as_ref().map(|release| release.version.as_str()),
+                expected
+            );
+        }
+
+        let running = serde_json::from_slice(&fixtures[2].1).unwrap();
+        let found = select_test_nightly_at(&fixtures, "0.43.0", Some(&running), None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(found.version, "nightly-20261122-1111111");
+    }
+
+    #[test]
+    fn unavailable_nightly_assets_allow_verified_fallback_or_report_failure() {
+        let newest = nightly_fixture("2222222", 20);
+        let older = nightly_fixture("1111111", 19);
+        let fixtures = [newest, older];
+
+        for asset in [NIGHTLY_MANIFEST_NAME, CHECKSUMS_NAME] {
+            let url = format!("{RELEASE_DOWNLOADS_URL}/nightly-20261122-2222222/{asset}");
+            assert_eq!(
+                select_test_nightly_at(&fixtures, "0.42.0", None, Some(&url))
+                    .unwrap()
+                    .unwrap()
+                    .version,
+                "nightly-20261122-1111111"
+            );
+            let error =
+                select_test_nightly_at(&fixtures[..1], "0.42.0", None, Some(&url)).unwrap_err();
+            assert!(error.to_string().contains("fixture HTTP 404"));
+        }
+    }
+
+    #[test]
+    fn invalid_nightly_checksums_without_fallback_are_reported() {
+        let mut nightly = nightly_fixture("1111111", 19);
+        nightly.1.push(b' ');
+        let error = select_test_nightly_at(&[nightly], "0.42.0", None, None).unwrap_err();
+        assert!(error.to_string().contains("invalid release checksums"));
+    }
+
+    #[test]
+    fn ignores_ineligible_nightly_releases() {
+        let mut draft = nightly_fixture("1111111", 21);
+        draft.0["draft"] = true.into();
+        let mut unrelated = nightly_fixture("2222222", 22);
+        unrelated.0["tag_name"] = "v0.43.0-rc.1".into();
+        let mut legacy = nightly_fixture("3333333", 23);
+        legacy.0["assets"].as_array_mut().unwrap().pop();
+        let mut wrong_platform = nightly_fixture("4444444", 24);
+        wrong_platform.0["assets"].as_array_mut().unwrap().remove(0);
+        let mut tampered_manifest = nightly_fixture("5555555", 25);
+        tampered_manifest.1.push(b' ');
+        let mut mismatched_metadata = nightly_fixture("6666666", 26);
+        mismatched_metadata.0["target_commitish"] = "b".repeat(40).into();
+        let mut wrong_checksum = nightly_fixture("7777777", 27);
+        wrong_checksum.2 = nightly_test_sums(&wrong_checksum.1);
+        wrong_checksum.2[0] = b'g';
+        let mut invalid_metadata = nightly_fixture("8888888", 28);
+        let mut manifest: serde_json::Value = serde_json::from_slice(&invalid_metadata.1).unwrap();
+        manifest["base_version"] = "invalid".into();
+        invalid_metadata.1 = manifest.to_string().into_bytes();
+        invalid_metadata.2 = nightly_test_sums(&invalid_metadata.1);
+
+        let fixtures = [
+            draft,
+            unrelated,
+            legacy,
+            wrong_platform,
+            tampered_manifest,
+            mismatched_metadata,
+            wrong_checksum,
+            invalid_metadata,
+            nightly_fixture("9999999", 20),
+        ];
+        assert_eq!(
+            select_test_nightly(&fixtures, None).unwrap().version,
+            "nightly-20261122-9999999"
+        );
     }
 
     #[test]
