@@ -5,7 +5,7 @@ use axum::http::StatusCode;
 use okena_core::api::{
     ApiAppRestartRequest, ApiRestartedDesktop, ApiUpdateRestartResponse, ApiWindow,
 };
-use okena_ext_updater::UpdateStatus;
+use okena_ext_updater::{UpdateChannel, UpdateStatus};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
@@ -230,7 +230,9 @@ pub async fn get_releases(
     if !peer.is_local_trusted() {
         return Err(StatusCode::FORBIDDEN);
     }
-    okena_ext_updater::checker::list_revert_releases(state.update_info.app_version())
+    state.update_info.refresh_channel();
+    let channel = state.update_info.snapshot().channel;
+    okena_ext_updater::checker::list_revert_releases(state.update_info.app_version(), channel)
         .await
         .map(Json)
         .map_err(|error| {
@@ -280,13 +282,20 @@ pub async fn post_revert(
     // Unlike check/install, a rejected revert must be reported: the caller waits
     // for a status transition that would otherwise never come.
     info.refresh_channel();
-    let token = info.try_start_revert().ok_or_else(|| {
-        (
-            StatusCode::CONFLICT,
-            "another update is in progress; finish the installation and restart before reverting"
-                .into(),
-        )
-    })?;
+    let channel = if request.version.starts_with("nightly-") {
+        UpdateChannel::Nightly
+    } else {
+        UpdateChannel::Release
+    };
+    if channel == UpdateChannel::Nightly && !request.keep_config {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "nightly reverts keep the current configuration".into(),
+        ));
+    }
+    let token = info
+        .try_start_revert(channel)
+        .map_err(|error| (StatusCode::CONFLICT, error.to_string()))?;
     tokio::spawn(async move {
         okena_ext_updater::manager::run_revert(info, token, request.version, !request.keep_config)
             .await;

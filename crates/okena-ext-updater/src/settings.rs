@@ -2,6 +2,7 @@ use crate::{GlobalUpdateInfo, ReleaseCatalog, RevertRelease, UpdateChannel, Upda
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 use gpui_component::{h_flex, v_flex};
+use okena_core::build_info::BUILD_INFO;
 use okena_core::profiles::ConfigSnapshot;
 use okena_extensions::ThemeColors;
 use okena_ui::button::{button, button_primary};
@@ -27,6 +28,9 @@ enum InstallSelection {
 
 pub struct UpdaterSettingsView {
     catalog: CatalogState,
+    catalog_channel: UpdateChannel,
+    catalog_request: u64,
+    status_revision: u64,
     selection: Option<InstallSelection>,
     keep_config: bool,
     submitting: bool,
@@ -36,30 +40,74 @@ pub struct UpdaterSettingsView {
 
 impl UpdaterSettingsView {
     pub fn new(cx: &mut Context<Self>) -> Self {
-        Self::load_catalog(cx);
-        Self::poll_status(cx);
-        Self {
+        let catalog_channel = cx
+            .try_global::<GlobalUpdateInfo>()
+            .map(|global| global.0.snapshot().channel)
+            .unwrap_or_default();
+        let mut view = Self {
             catalog: CatalogState::Loading,
+            catalog_channel,
+            catalog_request: 0,
+            status_revision: 0,
             selection: None,
             keep_config: false,
             submitting: false,
             restarting: false,
             request_error: None,
-        }
+        };
+        view.load_catalog(cx);
+        Self::poll_status(cx);
+        view
     }
 
-    fn load_catalog(cx: &mut Context<Self>) {
+    fn invalidate_catalog(&mut self) {
+        self.catalog_request += 1;
+        self.catalog = CatalogState::Loading;
+    }
+
+    fn load_catalog(&mut self, cx: &mut Context<Self>) {
+        self.invalidate_catalog();
+        let request = self.catalog_request;
         cx.spawn(async move |this, cx| {
             let result = smol::unblock(crate::daemon_client::fetch_releases).await;
             let _ = this.update(cx, |this, cx| {
-                this.catalog = match result {
-                    Ok(catalog) => CatalogState::Loaded(catalog),
-                    Err(error) => CatalogState::Failed(error.to_string()),
-                };
-                cx.notify();
+                if this.apply_catalog_response(request, result) {
+                    cx.notify();
+                }
             });
         })
         .detach();
+    }
+
+    fn apply_catalog_response(
+        &mut self,
+        request: u64,
+        result: anyhow::Result<ReleaseCatalog>,
+    ) -> bool {
+        // An earlier request for this same channel can still be in flight.
+        if request != self.catalog_request {
+            return false;
+        }
+        self.catalog = match result {
+            Ok(catalog) if catalog.channel == self.catalog_channel => CatalogState::Loaded(catalog),
+            Ok(_) => CatalogState::Failed(
+                "The update channel changed while release history was loading.".to_string(),
+            ),
+            Err(error) => CatalogState::Failed(error.to_string()),
+        };
+        true
+    }
+
+    fn refresh_catalog(&mut self, channel: UpdateChannel, force: bool, cx: &mut Context<Self>) {
+        let channel_changed = self.catalog_channel != channel;
+        if channel_changed {
+            self.catalog_channel = channel;
+            self.selection = None;
+            self.request_error = None;
+        }
+        if channel_changed || force {
+            self.load_catalog(cx);
+        }
     }
 
     fn poll_status(cx: &mut Context<Self>) {
@@ -68,13 +116,24 @@ impl UpdaterSettingsView {
             .map(|global| global.0.clone());
         cx.spawn(async move |this, cx| {
             loop {
-                if let Some(info) = &info
-                    && let Ok(snapshot) = smol::unblock(crate::daemon_client::fetch_status).await
-                {
-                    info.apply_snapshot(snapshot);
-                }
+                let Ok(revision) = this.update(cx, |this, _| {
+                    (!this.submitting).then_some(this.status_revision)
+                }) else {
+                    return;
+                };
+                let snapshot = if revision.is_some() && info.is_some() {
+                    smol::unblock(crate::daemon_client::fetch_status).await.ok()
+                } else {
+                    None
+                };
                 if this
-                    .update(cx, |_, cx| {
+                    .update(cx, |this, cx| {
+                        if revision == Some(this.status_revision)
+                            && let (Some(info), Some(snapshot)) = (&info, snapshot)
+                        {
+                            this.refresh_catalog(snapshot.channel, false, cx);
+                            info.apply_snapshot(snapshot);
+                        }
                         cx.notify();
                     })
                     .is_err()
@@ -100,19 +159,21 @@ impl UpdaterSettingsView {
         .detach();
     }
 
-    fn selected_install(&self, cx: &App) -> Option<(InstallSelection, Option<ConfigSnapshot>)> {
+    fn selected_install(
+        &self,
+        cx: &App,
+    ) -> Option<(InstallSelection, Option<ConfigSnapshot>, bool)> {
         let selection = self.selection.clone()?;
-        let config = match &selection {
+        let (config, legacy_nightly) = match &selection {
             InstallSelection::PreviousRelease(version) => {
                 let CatalogState::Loaded(catalog) = &self.catalog else {
                     return None;
                 };
-                catalog
+                let release = catalog
                     .releases
                     .iter()
-                    .find(|release| &release.version == version)?
-                    .config_snapshot
-                    .clone()
+                    .find(|release| &release.version == version)?;
+                (release.config_snapshot.clone(), release.legacy_nightly)
             }
             InstallSelection::StableReturn(version) => {
                 let snapshot = cx.try_global::<GlobalUpdateInfo>()?.0.snapshot();
@@ -121,10 +182,10 @@ impl UpdaterSettingsView {
                 {
                     return None;
                 }
-                snapshot.stable_return_config
+                (snapshot.stable_return_config, false)
             }
         };
-        Some((selection, config))
+        Some((selection, config, legacy_nightly))
     }
 
     fn render_status(&self, t: &ThemeColors, cx: &App) -> Option<AnyElement> {
@@ -212,7 +273,7 @@ impl UpdaterSettingsView {
                                     .font_family("monospace")
                                     .text_size(ui_text(13.0, cx))
                                     .text_color(rgb(t.text_primary))
-                                    .child(format!("v{running}")),
+                                    .child(crate::update_version_label(&running)),
                             )
                             .child(
                                 div()
@@ -228,12 +289,17 @@ impl UpdaterSettingsView {
     fn submit(
         &mut self,
         request: impl FnOnce() -> anyhow::Result<crate::UpdateStatusSnapshot> + Send + 'static,
+        channel_change: bool,
         cx: &mut Context<Self>,
     ) {
         if self.submitting {
             return;
         }
         self.submitting = true;
+        self.status_revision += 1;
+        if channel_change {
+            self.invalidate_catalog();
+        }
         self.request_error = None;
         cx.notify();
         let info = cx
@@ -244,12 +310,18 @@ impl UpdaterSettingsView {
             let _ = this.update(cx, |this, cx| {
                 match result {
                     Ok(snapshot) => {
+                        this.refresh_catalog(snapshot.channel, channel_change, cx);
                         if let Some(info) = info {
                             info.apply_snapshot(snapshot);
                         }
                         this.selection = None;
                     }
-                    Err(error) => this.request_error = Some(error.to_string()),
+                    Err(error) => {
+                        this.request_error = Some(error.to_string());
+                        if channel_change {
+                            this.load_catalog(cx);
+                        }
+                    }
                 }
                 this.submitting = false;
                 cx.notify();
@@ -273,14 +345,18 @@ impl UpdaterSettingsView {
             (UpdateChannel::Release, "update-channel-release", "Release"),
             (UpdateChannel::Nightly, "update-channel-nightly", "Nightly"),
         ] {
-            let choice = if snapshot.channel == channel {
+            let choice = if self.catalog_channel == channel {
                 button_primary(id, label, t).cursor_default()
             } else {
                 button(id, label, t)
                     .when(!can_change, |choice| choice.opacity(0.45).cursor_default())
                     .when(can_change, |choice| {
                         choice.on_click(cx.listener(move |this, _, _, cx| {
-                            this.submit(move || crate::daemon_client::request_channel(channel), cx);
+                            this.submit(
+                                move || crate::daemon_client::request_channel(channel),
+                                true,
+                                cx,
+                            );
                         }))
                     })
             };
@@ -321,7 +397,7 @@ impl UpdaterSettingsView {
             let message = format!("{} is ready", crate::update_version_label(&version));
             let action = button_primary("install-update", "Install update", t).on_click(
                 cx.listener(|this, _, _, cx| {
-                    this.submit(crate::daemon_client::request_install, cx);
+                    this.submit(crate::daemon_client::request_install, false, cx);
                 }),
             );
             (message, action)
@@ -377,7 +453,13 @@ impl UpdaterSettingsView {
     ) -> AnyElement {
         let version = release.version.clone();
         let has_snapshot = release.config_snapshot.is_some();
-        let published = release.published_at.get(..10).unwrap_or("unknown");
+        let keep_config = self.catalog_channel == UpdateChannel::Nightly || !has_snapshot;
+        let request = self.catalog_request;
+        let published = release
+            .published_at
+            .get(..10)
+            .map(|date| format!("Published {date}"))
+            .unwrap_or_else(|| "Publication date unavailable".to_string());
         div()
             .id(ElementId::Name(format!("revert-version-{version}").into()))
             .relative()
@@ -425,7 +507,7 @@ impl UpdaterSettingsView {
                                     .font_family("monospace")
                                     .text_size(ui_text_md(cx))
                                     .text_color(rgb(t.text_primary))
-                                    .child(format!("v{}", release.version)),
+                                    .child(crate::update_version_label(&release.version)),
                             )
                             .when(has_snapshot, |row| {
                                 row.child(
@@ -444,7 +526,7 @@ impl UpdaterSettingsView {
                         div()
                             .text_size(ui_text_sm(cx))
                             .text_color(rgb(t.text_muted))
-                            .child(format!("Released {published}")),
+                            .child(published),
                     ),
             )
             .child(
@@ -456,11 +538,13 @@ impl UpdaterSettingsView {
                 .when(!can_revert, |button| button.opacity(0.45).cursor_default())
                 .when(can_revert, |button| {
                     button.on_click(cx.listener(move |this, _, _, cx| {
-                        if Self::revert_block_reason(cx).is_some() {
+                        if this.catalog_request != request
+                            || Self::revert_block_reason(cx).is_some()
+                        {
                             return;
                         }
                         this.selection = Some(InstallSelection::PreviousRelease(version.clone()));
-                        this.keep_config = !has_snapshot;
+                        this.keep_config = keep_config;
                         this.request_error = None;
                         cx.notify();
                     }))
@@ -473,23 +557,32 @@ impl UpdaterSettingsView {
         &self,
         selection: InstallSelection,
         snapshot: Option<ConfigSnapshot>,
+        legacy_nightly: bool,
         t: &ThemeColors,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let (version, title, action) = match &selection {
             InstallSelection::PreviousRelease(version) => (
-                version,
-                "Confirm version revert",
-                format!("Revert to v{version}"),
+                crate::update_version_label(version),
+                if self.catalog_channel == UpdateChannel::Nightly {
+                    "Confirm nightly revert"
+                } else {
+                    "Confirm version revert"
+                },
+                "Revert to",
             ),
             InstallSelection::StableReturn(version) => (
-                version,
+                crate::update_version_label(version),
                 "Confirm return to Release",
-                format!("Install Release v{version}"),
+                "Install Release",
             ),
         };
         let restore_config = snapshot.is_some() && !self.keep_config;
         let historical = matches!(&selection, InstallSelection::PreviousRelease(_));
+        let stable_to_nightly = historical
+            && self.catalog_channel == UpdateChannel::Nightly
+            && BUILD_INFO.nightly.is_none();
+        let request = self.catalog_request;
         let block_reason = historical.then(|| Self::revert_block_reason(cx)).flatten();
         let can_submit = !self.submitting && block_reason.is_none();
         v_flex()
@@ -508,14 +601,30 @@ impl UpdaterSettingsView {
                                 div()
                                     .text_size(ui_text(13.0, cx))
                                     .text_color(rgb(t.text_primary))
-                                    .child(format!("Install Okena v{version}")),
+                                    .child(format!("Install Okena {version}")),
                             )
                             .child(
                                 div()
                                     .text_size(ui_text_sm(cx))
                                     .text_color(rgb(t.term_yellow))
                                     .child("Restarting the daemon will end active terminal sessions."),
-                            ),
+                            )
+                            .when(legacy_nightly, |content| {
+                                content.child(
+                                    div()
+                                        .text_size(ui_text_sm(cx))
+                                        .text_color(rgb(t.term_yellow))
+                                        .child("After restart, this build reports its base version and checks only for stable releases. Update channel controls require a newer build."),
+                                )
+                            })
+                            .when(stable_to_nightly, |content| {
+                                content.child(
+                                    div()
+                                        .text_size(ui_text_sm(cx))
+                                        .text_color(rgb(t.term_yellow))
+                                        .child("This nightly build may predate the stable release you are running. Okena keeps your current configuration by default."),
+                                )
+                            }),
                     )
                     .child(
                         div()
@@ -583,13 +692,19 @@ impl UpdaterSettingsView {
                                 }),
                             ))
                             .child(
-                                button_primary("confirm-version-revert", action, t)
+                                button_primary(
+                                    "confirm-version-revert",
+                                    format!("{action} {version}"),
+                                    t,
+                                )
                                     .when(!can_submit, |button| {
                                         button.opacity(0.45).cursor_default()
                                     })
                                     .when(can_submit, |button| {
                                         button.on_click(cx.listener(move |this, _, _, cx| {
-                                            if historical && Self::revert_block_reason(cx).is_some()
+                                            if historical
+                                                && (this.catalog_request != request
+                                                    || Self::revert_block_reason(cx).is_some())
                                             {
                                                 return;
                                             }
@@ -609,6 +724,7 @@ impl UpdaterSettingsView {
                                                         )
                                                     }
                                                 },
+                                                false,
                                                 cx,
                                             );
                                         }))
@@ -709,8 +825,8 @@ impl UpdaterSettingsView {
 impl Render for UpdaterSettingsView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
-        if let Some((selection, config)) = self.selected_install(cx) {
-            return self.render_confirmation(selection, config, &t, cx);
+        if let Some((selection, config, legacy_nightly)) = self.selected_install(cx) {
+            return self.render_confirmation(selection, config, legacy_nightly, &t, cx);
         }
         self.selection = None;
 
@@ -734,8 +850,8 @@ impl Render for UpdaterSettingsView {
                     .text_color(rgb(t.text_muted))
                     .child("Loading release history…"),
             ),
-            CatalogState::Failed(error) => {
-                let error = error.clone();
+            CatalogState::Failed(message) => {
+                let message = message.clone();
                 content.child(
                     section_container(&t).child(
                         div()
@@ -748,23 +864,37 @@ impl Render for UpdaterSettingsView {
                                 div()
                                     .text_size(ui_text_sm(cx))
                                     .text_color(rgb(t.term_red))
-                                    .child(error),
+                                    .child(message),
                             )
                             .child(button("retry-release-history", "Retry", &t).on_click(
                                 cx.listener(|this, _, _, cx| {
-                                    this.catalog = CatalogState::Loading;
-                                    Self::load_catalog(cx);
-                                    cx.notify();
+                                    if !this.submitting {
+                                        this.load_catalog(cx);
+                                        cx.notify();
+                                    }
                                 }),
                             )),
                     ),
                 )
             }
             CatalogState::Loaded(catalog) => {
-                let catalog = catalog.clone();
+                let (heading, empty) = match catalog.channel {
+                    UpdateChannel::Release => (
+                        "Earlier stable releases",
+                        "No older compatible releases found.",
+                    ),
+                    UpdateChannel::Nightly if BUILD_INFO.nightly.is_some() => (
+                        "Earlier nightly builds",
+                        "No older compatible nightly builds found.",
+                    ),
+                    UpdateChannel::Nightly => (
+                        "Available nightly builds",
+                        "No compatible nightly builds found.",
+                    ),
+                };
                 let mut next = content
-                    .child(self.render_current(&catalog, &t, cx))
-                    .child(section_header("Earlier stable releases", &t, cx));
+                    .child(self.render_current(catalog, &t, cx))
+                    .child(section_header(heading, &t, cx));
                 let is_homebrew = cx
                     .try_global::<GlobalUpdateInfo>()
                     .is_some_and(|global| global.0.is_homebrew());
@@ -787,7 +917,7 @@ impl Render for UpdaterSettingsView {
                             .mx(px(16.0))
                             .text_size(ui_text_md(cx))
                             .text_color(rgb(t.text_muted))
-                            .child("No older compatible releases found."),
+                            .child(empty),
                     );
                 } else {
                     let block_reason = Self::revert_block_reason(cx);
@@ -812,5 +942,98 @@ impl Render for UpdaterSettingsView {
             }
         };
         content.into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn catalog(channel: UpdateChannel, version: &str) -> ReleaseCatalog {
+        serde_json::from_value(serde_json::json!({
+            "channel": channel,
+            "current_version": "1.2.3",
+            "releases": [{
+                "version": version,
+                "published_at": "2026-11-21T23:10:00Z",
+                "release_url": "https://github.com/contember/okena/releases",
+                "asset_name": "okena.exe",
+                "config_snapshot": null,
+            }],
+        }))
+        .expect("valid release history fixture")
+    }
+
+    fn settings() -> UpdaterSettingsView {
+        UpdaterSettingsView {
+            catalog: CatalogState::Loaded(catalog(UpdateChannel::Release, "1.2.2")),
+            catalog_channel: UpdateChannel::Release,
+            catalog_request: 1,
+            status_revision: 0,
+            selection: None,
+            keep_config: false,
+            submitting: false,
+            restarting: false,
+            request_error: None,
+        }
+    }
+
+    #[test]
+    fn switching_to_nightly_drops_release_history_and_ignores_delayed_replies() {
+        let mut view = settings();
+        let old_request = view.catalog_request;
+
+        // The channel POST clears the old rows before waiting for the daemon.
+        view.invalidate_catalog();
+        assert!(matches!(view.catalog, CatalogState::Loading));
+
+        view.catalog_channel = UpdateChannel::Nightly;
+        view.invalidate_catalog();
+        let nightly_request = view.catalog_request;
+        let stale_history = catalog(UpdateChannel::Release, "1.2.2");
+        assert!(!view.apply_catalog_response(old_request, Ok(stale_history)));
+        assert!(!view.apply_catalog_response(
+            old_request,
+            Err(anyhow::anyhow!("release history timed out")),
+        ));
+        assert!(matches!(view.catalog, CatalogState::Loading));
+
+        let tag = "nightly-20261121-a1b2c3d";
+        let nightly_history = catalog(UpdateChannel::Nightly, tag);
+        assert!(view.apply_catalog_response(nightly_request, Ok(nightly_history)));
+        let CatalogState::Loaded(history) = &view.catalog else {
+            panic!("nightly history should be loaded");
+        };
+        assert_eq!(history.channel, UpdateChannel::Nightly);
+        assert_eq!(history.releases[0].version, tag);
+    }
+
+    #[test]
+    fn switching_back_does_not_accept_an_old_reply_for_the_same_channel() {
+        let mut view = settings();
+        let original_release_request = view.catalog_request;
+        view.catalog_channel = UpdateChannel::Nightly;
+        view.invalidate_catalog();
+        view.catalog_channel = UpdateChannel::Release;
+        view.invalidate_catalog();
+
+        assert!(!view.apply_catalog_response(
+            original_release_request,
+            Ok(catalog(UpdateChannel::Release, "1.2.2")),
+        ));
+        assert!(matches!(view.catalog, CatalogState::Loading));
+    }
+
+    #[test]
+    fn response_for_a_different_channel_finishes_loading_with_a_retriable_error() {
+        let mut view = settings();
+        view.catalog_channel = UpdateChannel::Nightly;
+        view.invalidate_catalog();
+
+        assert!(view.apply_catalog_response(
+            view.catalog_request,
+            Ok(catalog(UpdateChannel::Release, "1.2.2")),
+        ));
+        assert!(matches!(view.catalog, CatalogState::Failed(_)));
     }
 }

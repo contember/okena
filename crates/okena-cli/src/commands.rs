@@ -2404,12 +2404,16 @@ pub fn cli_update_revert(
         .iter()
         .find(|release| release.version == version)
     else {
-        eprintln!("Version v{version} is not an available older stable release.");
+        eprintln!(
+            "{} is not in the selected channel history.",
+            okena_ext_updater::update_version_label(version)
+        );
         return 1;
     };
     if !keep_config && release.config_snapshot.is_none() {
         eprintln!(
-            "No config snapshot exists for v{version}. Re-run with --keep-config to accept the compatibility risk."
+            "No config snapshot exists for {}. Re-run with --keep-config to accept the compatibility risk.",
+            okena_ext_updater::update_version_label(version)
         );
         return 1;
     }
@@ -2427,6 +2431,7 @@ pub fn cli_update_revert(
     let plan = serde_json::json!({
         "current_version": catalog.current_version,
         "target_version": release.version,
+        "legacy_nightly": release.legacy_nightly,
         "asset": release.asset_name,
         "config": config_action,
         "restart_daemon": restart,
@@ -2531,7 +2536,17 @@ pub fn cli_update_revert(
 fn print_revert_plan(plan: &serde_json::Value, diagnostic: bool) {
     let current = plan["current_version"].as_str().unwrap_or("unknown");
     let target = plan["target_version"].as_str().unwrap_or("unknown");
-    let mut lines = vec![format!("Binary: v{current} -> v{target}")];
+    let mut lines = vec![format!(
+        "Binary: {} -> {}",
+        okena_ext_updater::update_version_label(current),
+        okena_ext_updater::update_version_label(target)
+    )];
+    if plan["legacy_nightly"] == true {
+        lines.push(
+            "After restart, this nightly reports its base version and checks only for stable releases."
+                .to_string(),
+        );
+    }
     if plan["config"]["action"] == "restore" {
         lines.push(format!(
             "Config: restore snapshot from {}",

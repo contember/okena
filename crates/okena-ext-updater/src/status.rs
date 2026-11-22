@@ -407,13 +407,19 @@ impl UpdateInfo {
     }
 
     /// A confirmed historical revert supersedes any downloaded candidate.
-    pub fn try_start_revert(&self) -> Option<u64> {
+    pub fn try_start_revert(&self, target_channel: UpdateChannel) -> anyhow::Result<u64> {
         let mut inner = self.inner.lock();
+        anyhow::ensure!(
+            inner.preference.channel == target_channel,
+            "this version belongs to a different update channel; refresh the history"
+        );
         if inner.active.is_some()
             || is_in_flight(&inner.status)
             || matches!(inner.status, UpdateStatus::ReadyToRestart { .. })
         {
-            return None;
+            anyhow::bail!(
+                "another update is in progress; finish the installation and restart before reverting"
+            );
         }
         let old = std::mem::replace(&mut inner.status, UpdateStatus::Checking);
         inner.active = Some(UpdateOp::ManualCheck);
@@ -425,7 +431,7 @@ impl UpdateInfo {
         if let UpdateStatus::Ready { path, .. } = old {
             crate::downloader::discard_download(&path);
         }
-        Some(token)
+        Ok(token)
     }
 
     /// Reserve the update state for the background check loop.
@@ -522,11 +528,6 @@ impl UpdateInfo {
             "version revert cancelled"
         );
         let lock = self.current_install_lock(&mut inner)?;
-        if inner.preference.channel != UpdateChannel::Release {
-            let release = inner.preference.selecting(UpdateChannel::Release);
-            self.persist_preference(release)?;
-            inner.preference = release;
-        }
         inner.install_lock = lock;
         Self::update_status(&mut inner, UpdateStatus::Installing { version });
         Ok(())
@@ -1054,6 +1055,34 @@ mod tests {
     }
 
     #[test]
+    fn reverting_a_nightly_preserves_the_nightly_channel() {
+        let info = info();
+        let check = info
+            .change_channel(super::UpdateChannel::Nightly)
+            .unwrap()
+            .unwrap();
+        drop(info.adopt_manual(check));
+        info.set_status(UpdateStatus::Idle);
+        let token = info
+            .try_start_revert(super::UpdateChannel::Nightly)
+            .unwrap();
+        info.begin_revert_install(token, "nightly-20261121-292fa56".into())
+            .unwrap();
+        assert_eq!(info.snapshot().channel, super::UpdateChannel::Nightly);
+    }
+
+    #[test]
+    fn stale_history_from_another_channel_cannot_replace_a_staged_update() {
+        let info = info();
+        ready(&info);
+        assert!(
+            info.try_start_revert(super::UpdateChannel::Nightly)
+                .is_err()
+        );
+        assert!(matches!(info.status(), UpdateStatus::Ready { .. }));
+    }
+
+    #[test]
     fn another_profile_cannot_install_a_superseded_download() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("channel.json");
@@ -1110,7 +1139,10 @@ mod tests {
             config_restore: None,
         });
         drop(reservation);
-        assert!(info.try_start_revert().is_none());
+        assert!(
+            info.try_start_revert(super::UpdateChannel::Release)
+                .is_err()
+        );
     }
 
     #[test]

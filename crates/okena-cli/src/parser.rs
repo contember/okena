@@ -203,7 +203,7 @@ pub enum Command {
         #[command(subcommand)]
         cmd: PaletteCmd,
     },
-    /// Inspect updates or revert to an older stable release
+    /// Inspect updates or revert to an earlier release from the selected update channel
     Update {
         #[command(subcommand)]
         cmd: UpdateCmd,
@@ -430,12 +430,12 @@ pub enum UpdateCmd {
         #[arg(long)]
         json: bool,
     },
-    /// List stable releases older than the running version
+    /// List earlier builds from the selected update channel
     List {
         /// Output JSON instead of tab-separated text
         #[arg(long, conflicts_with = "quiet")]
         json: bool,
-        /// Print only version numbers, one per line
+        /// Print only versions or nightly tags, one per line
         #[arg(short, long, conflicts_with = "json")]
         quiet: bool,
     },
@@ -449,9 +449,9 @@ pub enum UpdateCmd {
         #[arg(long)]
         json: bool,
     },
-    /// Download and install an older stable release
+    /// Download and install an earlier release from the selected update channel
     Revert {
-        /// Exact release version, without the leading v
+        /// Stable version without the leading v, or an exact nightly tag
         version: String,
         /// Keep the current config despite possible incompatibility
         #[arg(long)]

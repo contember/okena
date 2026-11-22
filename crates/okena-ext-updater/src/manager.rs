@@ -148,8 +148,10 @@ async fn run_revert_inner(
         !info.is_homebrew(),
         "Homebrew installations must be changed through brew"
     );
+    anyhow::ensure!(!info.is_cancelled(token), "version revert cancelled");
+    let channel = info.snapshot().channel;
     let release =
-        crate::checker::release_for_revert(info.app_version(), version.to_owned()).await?;
+        crate::checker::release_for_revert(info.app_version(), version.to_owned(), channel).await?;
     let path = download(info, token, release).await?;
     let result = match info.begin_revert_install(token, version.to_owned()) {
         Ok(()) => install(info, version, &path, restore_config).await,

@@ -110,7 +110,7 @@ pub fn fetch_releases() -> Result<ReleaseCatalog> {
     endpoint
         .client
         .get(&endpoint.url)
-        .timeout(Duration::from_secs(20))
+        .timeout(Duration::from_secs(90))
         .send()
         .context("failed to fetch release history")?
         .error_for_status()

@@ -883,6 +883,18 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn revert_from_a_different_channel_is_rejected_before_downloading() {
+        let mut router = test_router(Arc::new(AuthStore::with_secret(vec![7u8; 32])));
+        let mut request = axum::http::Request::post("/v1/update/revert")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"version":"nightly-20261121-292fa56","keep_config":true}"#))
+            .unwrap();
+        request.extensions_mut().insert(PeerInfo::Local);
+        let response = router.call(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
     async fn legacy_install_without_a_body_reaches_the_install_guard() {
         let mut router = test_router(Arc::new(AuthStore::with_secret(vec![7u8; 32])));
         let mut request = axum::http::Request::post("/v1/update/install")
