@@ -11,7 +11,7 @@ use clap::{Parser, Subcommand};
 #[derive(Parser)]
 #[command(
     name = "okena",
-    version,
+    version = okena_core::build_info::BUILD_INFO.version.as_str(),
     about = "Control a running Okena instance",
     disable_help_subcommand = false,
     // The binary also launches the GUI; only the subcommands below are CLI.
@@ -932,7 +932,7 @@ mod tests {
             .get_version()
             .expect("clap needs version metadata or `-V` is an unknown argument")
             .to_string();
-        assert_eq!(version, env!("CARGO_PKG_VERSION"));
+        assert_eq!(version, okena_core::build_info::BUILD_INFO.version);
         // The workspace version is the shipped app version; a per-crate 0.1.0
         // here would report a version no release ever had.
         assert_ne!(version, "0.1.0");

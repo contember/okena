@@ -360,9 +360,7 @@ impl Render for AboutModal {
         }
 
         let update_info = cx.try_global::<GlobalUpdateInfo>().map(|global| &global.0);
-        let version = update_info
-            .map(|info| info.app_version())
-            .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string());
+        let version = &okena_core::build_info::BUILD_INFO.version;
         let source = if cx.has_global::<GlobalLocalBuild>() {
             "Local source build"
         } else if update_info.is_some_and(|info| info.is_homebrew()) {

@@ -5,6 +5,7 @@ pub mod agent_session;
 pub mod agent_status;
 pub mod ai_proxy;
 pub mod api;
+pub mod build_info;
 pub mod claude_remote;
 pub mod git_poll;
 pub mod keys;

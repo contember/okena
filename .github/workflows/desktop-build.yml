@@ -6,6 +6,11 @@ name: Desktop build
 
 on:
   workflow_call:
+    inputs:
+      nightly_manifest:
+        description: Contents of the nightly.json release asset
+        type: string
+        default: ''
 
 # A called workflow does not inherit the caller's env.
 env:
@@ -35,6 +40,8 @@ jobs:
             artifact: okena-windows-x64
 
     runs-on: ${{ matrix.os }}
+    env:
+      OKENA_NIGHTLY_MANIFEST: ${{ inputs.nightly_manifest }}
     # A cold-cache macOS x64 build took 114.7 min (okena#357); the cap stops a
     # hung runner from holding the job for GitHub's 6-hour default.
     timeout-minutes: 120
@@ -90,6 +97,33 @@ jobs:
 
       - name: Build daemon (separate resolution — keeps it GPUI-free)
         run: cargo build --release --target ${{ matrix.target }} -p okena-daemon
+
+      - uses: actions/setup-python@v5
+        if: inputs.nightly_manifest != ''
+        with:
+          python-version: '3.12'
+
+      - name: Verify nightly versions before packaging
+        if: inputs.nightly_manifest != ''
+        shell: python
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          import json
+          import os
+          import pathlib
+          import subprocess
+
+          manifest = json.loads(os.environ["OKENA_NIGHTLY_MANIFEST"])
+          short_sha = manifest["sha"][:7]
+          assert manifest["tag"] == f"nightly-{manifest['date'].replace('-', '')}-{short_sha}"
+          version = f"{manifest['base_version']} Nightly · {short_sha}"
+          for name in ("okena", "okena-daemon"):
+              path = pathlib.Path("target", os.environ["TARGET"], "release", name)
+              if os.name == "nt":
+                  path = path.with_suffix(".exe")
+              actual = subprocess.check_output([path, "--version"], encoding="utf-8", timeout=15).strip()
+              assert actual == f"{name} {version}", repr(actual)
 
       - name: Prepare artifact (Linux)
         if: runner.os == 'Linux'

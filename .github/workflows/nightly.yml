@@ -30,12 +30,15 @@ jobs:
       actions: read
     outputs:
       tag: ${{ steps.pick.outputs.tag }}
+      manifest: ${{ steps.identity.outputs.manifest }}
       skip: ${{ steps.pick.outputs.skip }}
 
     steps:
       - uses: actions/checkout@v4
         with:
-          sparse-checkout: scripts/nightly-gate.sh
+          sparse-checkout: |
+            /scripts/nightly-gate.sh
+            /Cargo.toml
           sparse-checkout-cone-mode: false
 
       - name: Check that main HEAD has a green Build run
@@ -65,10 +68,37 @@ jobs:
             echo "tag=nightly-$(date -u +%Y%m%d)-${SHA:0:7}" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Identify the nightly build
+        id: identity
+        if: steps.pick.outputs.skip == 'false'
+        shell: python
+        env:
+          TAG: ${{ steps.pick.outputs.tag }}
+        run: |
+          import datetime
+          import json
+          import os
+          import tomllib
+
+          tag = os.environ["TAG"]
+          with open("Cargo.toml", "rb") as cargo:
+              base_version = tomllib.load(cargo)["workspace"]["package"]["version"]
+          manifest = {
+              "tag": tag,
+              "date": datetime.datetime.strptime(tag.split("-")[1], "%Y%m%d").date().isoformat(),
+              "sha": os.environ["GITHUB_SHA"],
+              "run_number": int(os.environ["GITHUB_RUN_NUMBER"]),
+              "base_version": base_version,
+          }
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              print("manifest=" + json.dumps(manifest), file=output)
+
   build:
     needs: [resolve]
     if: needs.resolve.outputs.skip == 'false'
     uses: ./.github/workflows/desktop-build.yml
+    with:
+      nightly_manifest: ${{ needs.resolve.outputs.manifest }}
 
   publish:
     needs: [resolve, build]
@@ -92,6 +122,7 @@ jobs:
           REPO: ${{ github.repository }}
           SHA: ${{ github.sha }}
           TAG: ${{ needs.resolve.outputs.tag }}
+          MANIFEST: ${{ needs.resolve.outputs.manifest }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
@@ -100,11 +131,13 @@ jobs:
             echo
             echo "Untested beyond CI. The in-app updater, the install scripts and the Homebrew cask ignore nightlies; download an archive below and check it against \`SHA256SUMS\`."
           } > notes.md
+          printf '%s\n' "$MANIFEST" > nightly.json
+          sha256sum nightly.json >> SHA256SUMS
           shopt -s nullglob
           gh release create "$TAG" --repo "$REPO" --target "$SHA" \
             --prerelease --latest=false \
             --title "$TAG" --notes-file notes.md \
-            ./*.tar.gz ./*.zip ./*.dmg SHA256SUMS
+            ./*.tar.gz ./*.zip ./*.dmg SHA256SUMS nightly.json
 
       - name: Keep the newest 14 nightlies
         env:
