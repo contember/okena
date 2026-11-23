@@ -13,6 +13,22 @@ pub(super) struct Preference {
 }
 
 impl Preference {
+    /// Before a channel is picked, an installation follows the stream its build came from.
+    pub fn initial() -> Self {
+        Self::unselected(if okena_core::build_info::BUILD_INFO.nightly.is_some() {
+            UpdateChannel::Nightly
+        } else {
+            UpdateChannel::Release
+        })
+    }
+
+    fn unselected(channel: UpdateChannel) -> Self {
+        Self {
+            channel,
+            revision: 0,
+        }
+    }
+
     pub fn selecting(self, channel: UpdateChannel) -> Self {
         Self {
             channel,
@@ -33,14 +49,15 @@ pub(super) fn path(config_root: &Path, install_dir: &Path) -> PathBuf {
         .join("update-channel.json")
 }
 
-pub(super) fn load(path: &Path) -> Result<Preference> {
+/// A missing or unreadable file yields `initial`; the next selection overwrites it.
+pub(super) fn load(path: &Path, initial: Preference) -> Result<Preference> {
     match File::open(path) {
         Ok(file) => match serde_json::from_reader(file) {
             Ok(pref) => Ok(pref),
-            Err(error) if !error.is_io() => Ok(Preference::default()),
+            Err(error) if !error.is_io() => Ok(initial),
             Err(error) => Err(error.into()),
         },
-        Err(error) if error.kind() == ErrorKind::NotFound => Ok(Preference::default()),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(initial),
         Err(error) => Err(error.into()),
     }
 }
@@ -72,4 +89,32 @@ pub(super) fn save(path: &Path, pref: Preference) -> Result<()> {
     file.as_file().sync_all()?;
     file.persist(path)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_nightly_without_a_stored_choice_stays_on_nightly() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("update-channel.json");
+        let nightly = Preference::unselected(UpdateChannel::Nightly);
+        assert_eq!(
+            load(&path, nightly).unwrap().channel,
+            UpdateChannel::Nightly
+        );
+
+        std::fs::write(&path, "{\"chan").unwrap();
+        assert_eq!(
+            load(&path, nightly).unwrap().channel,
+            UpdateChannel::Nightly
+        );
+
+        save(&path, nightly.selecting(UpdateChannel::Release)).unwrap();
+        assert_eq!(
+            load(&path, nightly).unwrap().channel,
+            UpdateChannel::Release
+        );
+    }
 }

@@ -144,9 +144,9 @@ impl UpdateInfo {
             .as_deref()
             .filter(|_| channel_supported)
             .map(|path| {
-                preference::load(path).unwrap_or_else(|error| {
+                preference::load(path, Preference::initial()).unwrap_or_else(|error| {
                     log::warn!("Could not read update channel: {error}");
-                    Preference::default()
+                    Preference::initial()
                 })
             })
             .unwrap_or_default();
@@ -285,7 +285,7 @@ impl UpdateInfo {
 
     fn stored_preference(&self, inner: &UpdateInfoInner) -> anyhow::Result<Preference> {
         match &self.channel_path {
-            Some(path) => preference::load(path),
+            Some(path) => preference::load(path, Preference::initial()),
             None => Ok(inner.preference),
         }
     }
