@@ -1,8 +1,11 @@
 name: Build
 
 on:
+  # Branch pushes run through pull_request; a push trigger on them too would run
+  # Build twice. A branch without a PR runs it via workflow_dispatch, which also
+  # starts the full multi-platform `build` job.
   push:
-    branches: ['**']
+    branches: [main]
     tags: ['v*']
   pull_request:
     branches: [main]
@@ -18,8 +21,9 @@ env:
   CARGO_PROFILE_DEV_DEBUG: 0
 
 jobs:
-  # Runs on every push: Linux clippy + split gates. Tests run in `test`, in
-  # parallel: clippy metadata and test codegen share few build artifacts.
+  # Runs on main, PRs and dispatch: Linux clippy + split gates. Tests run in
+  # `test`, in parallel: clippy metadata and test codegen share few build
+  # artifacts.
   #
   # Rust caches are saved from main only. Branch copies of the multi-GB Linux
   # cache pushed the repo past GitHub's 10 GB cache limit, which evicted main's
@@ -88,7 +92,7 @@ jobs:
             exit 1
           fi
 
-  # Runs on every push: Linux tests.
+  # Runs on main, PRs and dispatch: Linux tests.
   test:
     if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
     runs-on: ubuntu-latest
@@ -155,8 +159,8 @@ jobs:
 
   # Windows-only `cfg` branches never compile in the Linux `check` job above, so
   # a platform-specific break used to surface only once a tag started the full
-  # matrix — too late, with the tag already pushed. Compile for Windows on every
-  # push instead. Plain `cargo check`, not clippy: Windows still carries
+  # matrix — too late, with the tag already pushed. Compile for Windows on main,
+  # PRs and dispatch instead. Plain `cargo check`, not clippy: Windows still carries
   # pre-existing warnings that `-D warnings` would turn into failures.
   check-windows:
     if: ${{ !startsWith(github.ref, 'refs/tags/v') }}

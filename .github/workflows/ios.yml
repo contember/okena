@@ -1,8 +1,9 @@
 name: iOS beta
 
 on:
+  # PR branches run through pull_request only, so a push starts one run, not two.
   push:
-    branches: ["**"]
+    branches: [main]
     paths:
       - "mobile/rn/**"
       - "crates/okena-mobile-ffi/**"
