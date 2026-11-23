@@ -1025,8 +1025,12 @@ impl Render for StatusBar {
                                 .build(window, cx)
                         })
                     });
+                // macOS keeps a stable version in About Okena; a nightly keeps its build id in view.
                 right
-                    .child(version)
+                    .when(
+                        cfg!(not(target_os = "macos")) || build.nightly.is_some(),
+                        |el| el.child(version),
+                    )
                     .child(div().text_color(rgb(t.text_secondary)).child(time_str))
                     .child(self.render_remote_status_popover(&remote_snapshots, &t, cx))
             })
