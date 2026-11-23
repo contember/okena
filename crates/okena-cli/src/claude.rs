@@ -681,9 +681,7 @@ fn startup_dialog_key(dialog: ApiClaudeStartupDialog, screen: &str) -> Option<&'
     let selected = lines
         .iter()
         .position(|line| line.trim_start().starts_with('❯'));
-    let confirm = lines
-        .iter()
-        .position(|line| line.contains(dialog.confirm_label()));
+    let confirm = lines.iter().position(|line| dialog.is_confirm_option(line));
     match (selected, confirm) {
         (Some(selected), Some(confirm)) if confirm < selected => Some("ArrowUp"),
         _ => Some("ArrowDown"),
@@ -1295,6 +1293,35 @@ mod tests {
         assert_eq!(startup_dialog_key(Channels, on_confirm), Some("Enter"));
         let on_exit = "    1. I am using this for local development\n  ❯ 2. Exit";
         assert_eq!(startup_dialog_key(Channels, on_exit), Some("ArrowUp"));
+    }
+
+    /// The Channels dialog in a 40-column pane, its confirming option cut
+    /// short with `…`, the selection on Exit.
+    const CHANNELS_40_COLUMNS_ON_EXIT: &str = "\
+  WARNING: Loading development
+  channels
+
+  Channels: server:okena-remote
+
+    1. I am using this for local dev…
+  ❯ 2. Exit
+
+  Enter to confirm · Esc to cancel";
+
+    #[test]
+    fn startup_dialog_key_answers_a_truncated_channels_option_in_a_40_column_pane() {
+        use ApiClaudeStartupDialog::Channels;
+        let fits = |screen: &str| screen.lines().all(|line| line.chars().count() <= 40);
+        assert!(fits(CHANNELS_40_COLUMNS_ON_EXIT));
+        assert_eq!(
+            startup_dialog_key(Channels, CHANNELS_40_COLUMNS_ON_EXIT),
+            Some("ArrowUp")
+        );
+        let on_confirm = CHANNELS_40_COLUMNS_ON_EXIT
+            .replace("    1. I am", "  ❯ 1. I am")
+            .replace("  ❯ 2. Exit", "    2. Exit");
+        assert!(fits(&on_confirm));
+        assert_eq!(startup_dialog_key(Channels, &on_confirm), Some("Enter"));
     }
 
     #[test]
