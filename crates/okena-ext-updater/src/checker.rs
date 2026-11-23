@@ -21,7 +21,8 @@ pub struct ReleaseAsset {
     pub version: String,
     pub asset_url: String,
     pub asset_name: String,
-    pub checksum_url: Option<String>,
+    /// Lowercase hex SHA-256 the archive must match, read from the release's `SHA256SUMS`.
+    pub sha256: String,
 }
 
 /// Published release shown in the version history UI and CLI.
@@ -112,15 +113,20 @@ pub async fn check_for_update(
     smol::unblock(move || match channel {
         UpdateChannel::Release => {
             let release = fetch_latest_stable(&app_version)?;
-            stable_update_asset(&release, &app_version, BUILD_INFO.nightly.is_some())
+            stable_update_asset(
+                &release,
+                &app_version,
+                BUILD_INFO.nightly.is_some(),
+                fetch_release_file,
+            )
         }
         UpdateChannel::Nightly => check_nightly(&app_version, BUILD_INFO.nightly.as_ref()),
     })
     .await
 }
 
-/// Find an upgrade hint for installations managed by an external package manager.
-pub async fn check_for_package_update(app_version: &str) -> Result<Option<ReleaseAsset>> {
+/// Find the newer stable version an external package manager should install.
+pub async fn check_for_package_update(app_version: &str) -> Result<Option<Version>> {
     let app_version = app_version.to_owned();
     smol::unblock(move || {
         let release = fetch_latest_stable(&app_version)?;
@@ -186,23 +192,19 @@ fn stable_update_asset(
     release: &serde_json::Value,
     app_version: &str,
     running_nightly: bool,
+    fetch: impl FnMut(&str) -> Result<Vec<u8>>,
 ) -> Result<Option<ReleaseAsset>> {
-    let Some(mut asset) = stable_offer(release, app_version, running_nightly)? else {
+    let Some(version) = stable_offer(release, app_version, running_nightly)? else {
         return Ok(None);
     };
-    asset.checksum_url = Some(
-        asset_download_url(release_assets(release)?, CHECKSUMS_NAME)
-            .with_context(|| format!("release v{} has no {CHECKSUMS_NAME}", asset.version))?
-            .to_owned(),
-    );
-    Ok(Some(asset))
+    release_asset(release, &version, fetch)
 }
 
 fn stable_offer(
     release: &serde_json::Value,
     app_version: &str,
     running_nightly: bool,
-) -> Result<Option<ReleaseAsset>> {
+) -> Result<Option<Version>> {
     if !is_stable_release(release) {
         return Ok(None);
     }
@@ -213,7 +215,7 @@ fn stable_offer(
     if !version.pre.is_empty() || (!running_nightly && version <= current) {
         return Ok(None);
     }
-    release_asset(release, &version)
+    Ok(Some(version))
 }
 
 fn check_nightly(
@@ -230,14 +232,15 @@ fn check_nightly(
     let releases = response
         .as_array()
         .context("release list is not an array")?;
-    select_nightly(releases, app_version, running, fetch_nightly_asset)
+    select_nightly(releases, app_version, running, fetch_release_file)
 }
 
-fn fetch_nightly_asset(url: &str) -> Result<Vec<u8>> {
+/// Fetch a small release asset such as `SHA256SUMS` or `nightly.json`.
+fn fetch_release_file(url: &str) -> Result<Vec<u8>> {
     let response = okena_transport::http::send(
         okena_transport::http::HttpRequest::get(url)
             .timeout(Duration::from_secs(15))
-            .label("updater.nightly.metadata"),
+            .label("updater.release_file"),
     )
     .with_context(|| format!("failed to fetch {url}"))?
     .error_for_status()
@@ -326,11 +329,12 @@ impl<'a> PublishedNightly<'a> {
         }))
     }
 
+    /// Check the manifest against `SHA256SUMS` and return the archive's expected hash.
     fn verify_checksums(
         &self,
         manifest: Option<&[u8]>,
         fetch: &mut impl FnMut(&str) -> Result<Vec<u8>>,
-    ) -> Result<()> {
+    ) -> Result<String> {
         let bytes = fetch(self.checksum_url)?;
         let sums = std::str::from_utf8(&bytes).context("invalid checksum file encoding")?;
         let manifest_matches = match manifest {
@@ -344,20 +348,18 @@ impl<'a> PublishedNightly<'a> {
                     .eq_ignore_ascii_case(NIGHTLY_MANIFEST_NAME)
             }),
         };
-        anyhow::ensure!(
-            manifest_matches && listed_sha256(sums, platform_asset_name()).is_some(),
-            "Nightly {} has invalid release checksums",
-            self.tag,
-        );
-        Ok(())
+        let archive_hash = listed_sha256(sums, platform_asset_name())
+            .filter(|_| manifest_matches)
+            .with_context(|| format!("Nightly {} has invalid release checksums", self.tag))?;
+        Ok(archive_hash.to_ascii_lowercase())
     }
 
-    fn download(&self) -> ReleaseAsset {
+    fn download(&self, sha256: String) -> ReleaseAsset {
         ReleaseAsset {
             version: self.tag.to_owned(),
             asset_url: self.asset_url.to_owned(),
             asset_name: platform_asset_name().to_owned(),
-            checksum_url: Some(self.checksum_url.to_owned()),
+            sha256,
         }
     }
 
@@ -425,7 +427,7 @@ fn select_nightly(
     candidates.sort_by_key(|(_, manifest)| Reverse(manifest.run_number));
     for (release, manifest) in candidates {
         match release.verify_checksums(Some(&manifest.bytes), &mut fetch) {
-            Ok(()) => return Ok(Some(release.download())),
+            Ok(sha256) => return Ok(Some(release.download(sha256))),
             Err(error) => {
                 log::warn!("{error}");
                 first_error.get_or_insert(error);
@@ -479,7 +481,7 @@ fn list_revert_releases_blocking(
         channel,
         BUILD_INFO.nightly.as_ref(),
         okena_core::profiles::try_current(),
-        fetch_nightly_asset,
+        fetch_release_file,
     )
 }
 
@@ -558,7 +560,7 @@ fn nightly_catalog(
         let checked = batch.map_err(|_| anyhow::anyhow!("nightly history worker panicked"))?;
         for (release, result) in checked {
             match result {
-                Ok(Some(order)) => rows.push((order, release)),
+                Ok(Some((order, _))) => rows.push((order, release)),
                 Ok(None) => {}
                 Err(error) => {
                     log::warn!("Nightly history skipped {}: {error}", release.tag);
@@ -611,7 +613,7 @@ fn verified_history_nightly(
     running: Option<&NightlyBuild>,
     running_publication: Option<&str>,
     fetch: &mut impl FnMut(&str) -> Result<Vec<u8>>,
-) -> Result<Option<NightlyHistoryOrder>> {
+) -> Result<Option<(NightlyHistoryOrder, String)>> {
     if running.is_some_and(|build| build.tag == release.tag) {
         return Ok(None);
     }
@@ -622,8 +624,11 @@ fn verified_history_nightly(
         if running.is_some_and(|build| manifest.run_number >= build.run_number) {
             return Ok(None);
         }
-        release.verify_checksums(Some(&manifest.bytes), fetch)?;
-        return Ok(Some(NightlyHistoryOrder::Modern(manifest.run_number)));
+        let sha256 = release.verify_checksums(Some(&manifest.bytes), fetch)?;
+        return Ok(Some((
+            NightlyHistoryOrder::Modern(manifest.run_number),
+            sha256,
+        )));
     }
 
     if let Some(running) = running {
@@ -639,8 +644,8 @@ fn verified_history_nightly(
             return Ok(None);
         }
     }
-    release.verify_checksums(None, fetch)?;
-    Ok(Some(NightlyHistoryOrder::Legacy))
+    let sha256 = release.verify_checksums(None, fetch)?;
+    Ok(Some((NightlyHistoryOrder::Legacy, sha256)))
 }
 
 fn nightly_for_revert(
@@ -681,7 +686,7 @@ fn nightly_for_revert(
         target,
         running,
         running_publication,
-        fetch_nightly_asset,
+        fetch_release_file,
     )
 }
 
@@ -695,9 +700,9 @@ fn resolve_nightly_revert(
     let release = PublishedNightly::from_release(release)
         .filter(|release| release.tag == target)
         .with_context(|| format!("{target} is not a published nightly for this platform"))?;
-    verified_history_nightly(&release, running, running_publication, &mut fetch)?
+    let (_, sha256) = verified_history_nightly(&release, running, running_publication, &mut fetch)?
         .with_context(|| format!("{target} is not available for nightly history"))?;
-    Ok(release.download())
+    Ok(release.download(sha256))
 }
 
 fn fetch_published_notes(app_version: &str) -> Result<Vec<PublishedNote>> {
@@ -768,14 +773,27 @@ fn release_note(version: &Version, release: &serde_json::Value) -> ReleaseNote {
 }
 
 fn release_for_revert_blocking(app_version: &str, target: &str) -> Result<ReleaseAsset> {
+    release_for_revert_with(
+        app_version,
+        target,
+        |url, label| fetch_json(url, app_version, label),
+        fetch_release_file,
+    )
+}
+
+fn release_for_revert_with(
+    app_version: &str,
+    target: &str,
+    fetch_release: impl FnOnce(&str, &'static str) -> Result<serde_json::Value>,
+    fetch: impl FnMut(&str) -> Result<Vec<u8>>,
+) -> Result<ReleaseAsset> {
     let target = Version::parse(target).context("invalid target version")?;
     let current = Version::parse(app_version).context("invalid current version")?;
     if target >= current {
         anyhow::bail!("revert target v{target} must be older than v{current}");
     }
-    let response = fetch_json(
+    let response = fetch_release(
         &format!("{RELEASES_URL}/tags/v{target}"),
-        app_version,
         "updater.revert.resolve",
     )?;
     if !is_stable_release(&response)
@@ -788,7 +806,7 @@ fn release_for_revert_blocking(app_version: &str, target: &str) -> Result<Releas
     {
         anyhow::bail!("release v{target} is not stable");
     }
-    release_asset(&response, &target)?
+    release_asset(&response, &target, fetch)?
         .with_context(|| format!("release v{target} has no asset for this platform"))
 }
 
@@ -813,19 +831,30 @@ fn fetch_json(url: &str, app_version: &str, label: &'static str) -> Result<serde
     response.json().context("failed to parse release JSON")
 }
 
+/// Resolve a stable release's archive with the hash it must match. A release
+/// without `SHA256SUMS` cannot be installed: nothing would verify the archive.
 fn release_asset(
     release: &serde_json::Value,
-    remote_version: &Version,
+    version: &Version,
+    mut fetch: impl FnMut(&str) -> Result<Vec<u8>>,
 ) -> Result<Option<ReleaseAsset>> {
     let (asset_name, asset_url, checksum_url) = platform_asset(release)?;
-    if asset_url.is_none() {
-        log::warn!("Release {remote_version} exists but has no asset named '{asset_name}'");
-    }
-    Ok(asset_url.map(|asset_url| ReleaseAsset {
-        version: remote_version.to_string(),
+    let Some(asset_url) = asset_url else {
+        log::warn!("Release {version} exists but has no asset named '{asset_name}'");
+        return Ok(None);
+    };
+    let checksum_url =
+        checksum_url.with_context(|| format!("release v{version} has no {CHECKSUMS_NAME}"))?;
+    let bytes = fetch(&checksum_url)?;
+    let sums = std::str::from_utf8(&bytes).context("invalid checksum file encoding")?;
+    let sha256 = listed_sha256(sums, &asset_name)
+        .with_context(|| format!("release v{version} lists no valid checksum for '{asset_name}'"))?
+        .to_ascii_lowercase();
+    Ok(Some(ReleaseAsset {
+        version: version.to_string(),
         asset_url,
         asset_name,
-        checksum_url,
+        sha256,
     }))
 }
 
@@ -842,8 +871,10 @@ fn catalog_release(
     if !version.pre.is_empty() || version >= *current {
         return None;
     }
-    let (asset_name, asset_url, _) = platform_asset(release).ok()?;
+    // Only releases that publish checksums can be installed, so only those are offered.
+    let (asset_name, asset_url, checksum_url) = platform_asset(release).ok()?;
     asset_url.as_ref()?;
+    checksum_url.as_ref()?;
     let version = version.to_string();
     Some(RevertRelease {
         legacy_nightly: false,
@@ -943,11 +974,15 @@ mod tests {
     #[test]
     fn catalog_keeps_only_older_stable_platform_releases() {
         let current = Version::parse("0.27.0").unwrap();
-        assert!(catalog_release(&release("0.26.0", false, false, true), &current, None).is_some());
-        assert!(catalog_release(&release("0.28.0", false, false, true), &current, None).is_none());
-        assert!(catalog_release(&release("0.26.0", true, false, true), &current, None).is_none());
-        assert!(catalog_release(&release("0.26.0", false, true, true), &current, None).is_none());
-        assert!(catalog_release(&release("0.26.0", false, false, false), &current, None).is_none());
+        let offered = |version, draft, prerelease, has_asset| {
+            let release = with_checksums(release(version, draft, prerelease, has_asset));
+            catalog_release(&release, &current, None).is_some()
+        };
+        assert!(offered("0.26.0", false, false, true));
+        assert!(!offered("0.28.0", false, false, true));
+        assert!(!offered("0.26.0", true, false, true));
+        assert!(!offered("0.26.0", false, true, true));
+        assert!(!offered("0.26.0", false, false, false));
     }
 
     /// nightly.yml publishes these as prereleases; the non-semver tag keeps
@@ -961,43 +996,54 @@ mod tests {
             assert!(catalog_release(&nightly, &current, None).is_none());
             assert!(published_notes(std::slice::from_ref(&nightly)).is_empty());
             assert!(
-                stable_update_asset(&nightly, "0.27.0", true)
-                    .unwrap()
-                    .is_none()
+                stable_update_asset(&nightly, "0.27.0", true, |_| {
+                    panic!("a nightly must be rejected before its checksums are fetched")
+                })
+                .unwrap()
+                .is_none()
             );
         }
     }
 
-    #[test]
-    fn returning_to_release_allows_same_or_lower_version() {
-        let mut stable = release("0.42.0", false, false, true);
-        stable["assets"]
+    const STABLE_SUMS_URL: &str = "https://example.test/SHA256SUMS";
+
+    fn with_checksums(mut release: serde_json::Value) -> serde_json::Value {
+        release["assets"]
             .as_array_mut()
             .unwrap()
             .push(serde_json::json!({
                 "name": "SHA256SUMS",
-                "browser_download_url": "https://example.test/SHA256SUMS"
+                "browser_download_url": STABLE_SUMS_URL
             }));
+        release
+    }
+
+    fn stable_sums(url: &str) -> Result<Vec<u8>> {
+        assert_eq!(url, STABLE_SUMS_URL);
+        Ok(format!("{}  {}\n", "AB".repeat(32), platform_asset_name()).into_bytes())
+    }
+
+    #[test]
+    fn returning_to_release_allows_same_or_lower_version() {
+        let stable = with_checksums(release("0.42.0", false, false, true));
         assert!(
-            stable_update_asset(&stable, "0.42.0", false)
+            stable_update_asset(&stable, "0.42.0", false, stable_sums)
                 .unwrap()
                 .is_none()
         );
         assert!(
-            stable_update_asset(&stable, "0.43.0", false)
+            stable_update_asset(&stable, "0.43.0", false, stable_sums)
                 .unwrap()
                 .is_none()
         );
-        assert_eq!(
-            stable_update_asset(&stable, "0.41.0", false)
-                .unwrap()
-                .unwrap()
-                .version,
-            "0.42.0"
-        );
+        let update = stable_update_asset(&stable, "0.41.0", false, stable_sums)
+            .unwrap()
+            .unwrap();
+        assert_eq!(update.version, "0.42.0");
+        assert_eq!(update.sha256, "ab".repeat(32));
         for current in ["0.42.0", "0.43.0"] {
             assert_eq!(
-                stable_update_asset(&stable, current, true)
+                stable_update_asset(&stable, current, true, stable_sums)
                     .unwrap()
                     .unwrap()
                     .version,
@@ -1007,15 +1053,32 @@ mod tests {
     }
 
     #[test]
-    fn self_update_requires_checksums_but_legacy_rollback_still_resolves() {
-        let old_release = release("0.42.0", false, false, true);
-        assert!(stable_update_asset(&old_release, "0.41.0", false).is_err());
+    fn stable_installs_require_a_listed_checksum() {
+        let unverifiable = release("0.40.0", false, false, true);
+        let current = Version::parse("0.42.0").unwrap();
+        let no_sums = |_: &str| -> Result<Vec<u8>> { panic!("no SHA256SUMS asset to fetch") };
+        assert!(stable_update_asset(&unverifiable, "0.39.0", false, no_sums).is_err());
+        assert!(catalog_release(&unverifiable, &current, None).is_none());
+        let error =
+            release_for_revert_with("0.42.0", "0.40.0", |_, _| Ok(unverifiable.clone()), no_sums)
+                .unwrap_err();
+        assert!(error.to_string().contains("SHA256SUMS"), "{error}");
+
+        let verifiable = with_checksums(release("0.40.0", false, false, true));
+        assert!(catalog_release(&verifiable, &current, None).is_some());
+        let revert = release_for_revert_with(
+            "0.42.0",
+            "0.40.0",
+            |_, _| Ok(verifiable.clone()),
+            stable_sums,
+        )
+        .unwrap();
+        assert_eq!(revert.sha256, "ab".repeat(32));
+
+        let unlisted = |_: &str| Ok(format!("{}  other.zip\n", "ab".repeat(32)).into_bytes());
         assert!(
-            stable_offer(&old_release, "0.41.0", false)
-                .unwrap()
-                .unwrap()
-                .checksum_url
-                .is_none()
+            release_for_revert_with("0.42.0", "0.40.0", |_, _| Ok(verifiable.clone()), unlisted)
+                .is_err()
         );
     }
 
@@ -1267,7 +1330,7 @@ mod tests {
             legacy_fixture("20261121", "5555555"),
             legacy_fixture("20261122", "6666666"),
         ];
-        let mut releases = vec![release("0.41.0", false, false, true)];
+        let mut releases = vec![with_checksums(release("0.41.0", false, false, true))];
         releases.extend(fixtures.iter().map(|fixture| fixture.0.clone()));
 
         let stable = catalog_for_channel(
@@ -1360,7 +1423,7 @@ mod tests {
             if matches!(index, 4 | 6) {
                 let asset = result.unwrap();
                 assert_eq!(asset.version, tag);
-                assert!(asset.checksum_url.is_some());
+                assert_eq!(asset.sha256, "a".repeat(64));
             } else {
                 assert!(result.is_err(), "accepted ineligible release {tag}");
             }

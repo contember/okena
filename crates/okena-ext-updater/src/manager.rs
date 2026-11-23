@@ -13,20 +13,24 @@ pub async fn run_check(info: UpdateInfo, token: u64, manual: bool) {
     }
     let channel = info.snapshot().channel;
     let version = info.app_version();
-    let result = if info.is_homebrew() {
-        crate::checker::check_for_package_update(&version).await
-    } else {
-        crate::checker::check_for_update(&version, channel).await
-    };
-    match result {
-        Ok(Some(release)) if info.is_homebrew() => {
-            info.set_status_if_current(
-                token,
-                UpdateStatus::BrewUpdate {
-                    version: release.version,
-                },
-            );
+    if info.is_homebrew() {
+        match crate::checker::check_for_package_update(&version).await {
+            Ok(Some(version)) => {
+                info.set_status_if_current(
+                    token,
+                    UpdateStatus::BrewUpdate {
+                        version: version.to_string(),
+                    },
+                );
+            }
+            Ok(None) => {
+                info.set_status_if_current(token, UpdateStatus::Idle);
+            }
+            Err(error) => fail(&info, token, error),
         }
+        return;
+    }
+    match crate::checker::check_for_update(&version, channel).await {
         Ok(Some(release)) => {
             let stable_return = channel == UpdateChannel::Release
                 && okena_core::build_info::BUILD_INFO.nightly.is_some();
@@ -64,7 +68,7 @@ async fn download(
         release.version,
         info.clone(),
         token,
-        release.checksum_url,
+        release.sha256,
     )
     .await
 }

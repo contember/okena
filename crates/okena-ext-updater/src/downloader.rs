@@ -13,7 +13,7 @@ pub async fn download_asset(
     version: String,
     update_info: UpdateInfo,
     cancel_token: u64,
-    checksum_url: Option<String>,
+    sha256: String,
 ) -> Result<PathBuf> {
     download_asset_in(
         url,
@@ -21,7 +21,7 @@ pub async fn download_asset(
         version,
         update_info,
         cancel_token,
-        checksum_url,
+        sha256,
         crate::process::get_config_dir().join("updates"),
     )
     .await
@@ -33,7 +33,7 @@ async fn download_asset_in(
     version: String,
     update_info: UpdateInfo,
     cancel_token: u64,
-    checksum_url: Option<String>,
+    sha256: String,
     updates_dir: PathBuf,
 ) -> Result<PathBuf> {
     let (staging_dir, path) = smol::unblock(move || {
@@ -52,9 +52,7 @@ async fn download_asset_in(
             !update_info.is_cancelled(cancel_token),
             "download cancelled"
         );
-        if let Some(cs_url) = checksum_url {
-            verify_checksum(&path, &asset_name, &cs_url)?;
-        }
+        verify_checksum(&path, &asset_name, &sha256)?;
         anyhow::ensure!(
             !update_info.is_cancelled(cancel_token),
             "download cancelled"
@@ -177,24 +175,12 @@ fn download_blocking(
     Ok(())
 }
 
-fn verify_checksum(file_path: &Path, asset_name: &str, checksum_url: &str) -> Result<()> {
+/// `expected_hash` is the release's `SHA256SUMS` entry, read once by the checker.
+fn verify_checksum(file_path: &Path, asset_name: &str, expected_hash: &str) -> Result<()> {
     use sha2::{Digest, Sha256};
     use std::io::Read;
 
-    log::info!("Verifying checksum for {}", asset_name);
-
-    let body = okena_transport::http::send(
-        okena_transport::http::HttpRequest::get(checksum_url)
-            .timeout(Duration::from_secs(30))
-            .label("updater.checksum"),
-    )
-    .context("failed to fetch checksum file")?
-    .error_for_status()
-    .context("checksum file request failed")?
-    .text();
-
-    let expected_hash = crate::checker::listed_sha256(&body, asset_name)
-        .with_context(|| format!("no valid checksum found for '{asset_name}' in SHA256SUMS"))?;
+    log::info!("Verifying checksum for {asset_name}");
 
     let mut file =
         std::fs::File::open(file_path).context("failed to open downloaded file for checksum")?;
@@ -217,7 +203,7 @@ fn verify_checksum(file_path: &Path, asset_name: &str, checksum_url: &str) -> Re
         );
     }
 
-    log::info!("Checksum verified for {}", asset_name);
+    log::info!("Checksum verified for {asset_name}: sha256 {actual_hash}");
     Ok(())
 }
 
@@ -267,6 +253,11 @@ mod tests {
         (url, server)
     }
 
+    fn sha256_hex(body: &str) -> String {
+        use sha2::{Digest, Sha256};
+        format!("{:x}", Sha256::digest(body))
+    }
+
     #[test]
     fn downloads_of_the_same_asset_have_independent_staging_directories() {
         let updates_dir = tempfile::tempdir().unwrap();
@@ -280,7 +271,7 @@ mod tests {
             "0.2.0".into(),
             info.clone(),
             info.current_token(),
-            None,
+            sha256_hex("first archive"),
             updates_dir.path().to_path_buf(),
         ))
         .unwrap();
@@ -293,7 +284,7 @@ mod tests {
             "0.2.0".into(),
             info.clone(),
             info.current_token(),
-            None,
+            sha256_hex("second archive"),
             updates_dir.path().to_path_buf(),
         ))
         .unwrap();
@@ -317,7 +308,6 @@ mod tests {
         let info = UpdateInfo::new("0.1.0".into());
         let asset_name = "okena.zip";
         let (url, archive_server) = serve("archive contents".into());
-        let (checksum_url, checksum_server) = serve(format!("{}  {asset_name}\n", "0".repeat(64)));
 
         let error = smol::block_on(download_asset_in(
             url,
@@ -325,13 +315,12 @@ mod tests {
             "0.2.0".into(),
             info.clone(),
             info.current_token(),
-            Some(checksum_url),
+            "0".repeat(64),
             updates_dir.path().to_path_buf(),
         ))
         .unwrap_err();
         assert!(error.to_string().contains("checksum mismatch"), "{error}");
         archive_server.join().unwrap();
-        checksum_server.join().unwrap();
         assert_eq!(std::fs::read_dir(updates_dir.path()).unwrap().count(), 0);
     }
 }
