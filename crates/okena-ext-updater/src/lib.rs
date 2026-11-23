@@ -6,8 +6,6 @@ pub mod downloader;
 pub mod installer;
 mod local_build;
 pub mod manager;
-#[cfg(feature = "gpui-ui")]
-pub mod orchestrator;
 mod process;
 #[cfg(feature = "gpui-ui")]
 mod settings;
