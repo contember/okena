@@ -1,4 +1,4 @@
-use crate::{ReleaseCatalog, ReleaseNotes, UpdateStatusSnapshot};
+use crate::{ReleaseCatalog, ReleaseNotes, UpdateChannel, UpdateStatus, UpdateStatusSnapshot};
 use anyhow::{Context, Result};
 use std::time::Duration;
 
@@ -76,15 +76,33 @@ pub fn fetch_status() -> Result<UpdateStatusSnapshot> {
 }
 
 pub fn request_check() -> Result<UpdateStatusSnapshot> {
-    post_snapshot("/v1/update/check", "updater.daemon_check")
+    post_snapshot("/v1/update/check", None)
 }
 
 pub fn request_install() -> Result<UpdateStatusSnapshot> {
-    post_snapshot("/v1/update/install", "updater.daemon_install")
+    post_snapshot("/v1/update/install", None)
+}
+
+pub fn request_stable_install(version: &str, restore_config: bool) -> Result<UpdateStatusSnapshot> {
+    post_snapshot(
+        "/v1/update/install",
+        Some(serde_json::json!({
+            "confirm_stable_return": true,
+            "restore_config": restore_config,
+            "version": version,
+        })),
+    )
+}
+
+pub fn request_channel(channel: UpdateChannel) -> Result<UpdateStatusSnapshot> {
+    post_snapshot(
+        "/v1/update/channel",
+        Some(serde_json::json!({ "channel": channel })),
+    )
 }
 
 pub fn request_dismiss() -> Result<UpdateStatusSnapshot> {
-    post_snapshot("/v1/update/dismiss", "updater.daemon_dismiss")
+    post_snapshot("/v1/update/dismiss", None)
 }
 
 pub fn fetch_releases() -> Result<ReleaseCatalog> {
@@ -92,7 +110,7 @@ pub fn fetch_releases() -> Result<ReleaseCatalog> {
     endpoint
         .client
         .get(&endpoint.url)
-        .timeout(Duration::from_secs(20))
+        .timeout(Duration::from_secs(90))
         .send()
         .context("failed to fetch release history")?
         .error_for_status()
@@ -117,22 +135,27 @@ pub fn fetch_release_notes(version: &str) -> Result<ReleaseNotes> {
         .context("failed to decode release notes")
 }
 
+/// Explain why an installation already in progress prevents a version revert.
+pub fn revert_block_reason(status: &UpdateStatus) -> Option<&'static str> {
+    match status {
+        UpdateStatus::Installing { .. } => {
+            Some("Wait for the current installation to finish before reverting.")
+        }
+        UpdateStatus::ReadyToRestart { .. } => {
+            Some("Restart into the installed update before reverting.")
+        }
+        _ => None,
+    }
+}
+
 pub fn request_revert(version: &str, keep_config: bool) -> Result<UpdateStatusSnapshot> {
-    let endpoint = local_update_endpoint("/v1/update/revert")?;
-    endpoint
-        .client
-        .post(&endpoint.url)
-        .timeout(Duration::from_secs(10))
-        .json(&serde_json::json!({
+    post_snapshot(
+        "/v1/update/revert",
+        Some(serde_json::json!({
             "version": version,
             "keep_config": keep_config,
-        }))
-        .send()
-        .context("failed to request version revert")?
-        .error_for_status()
-        .context("version revert request failed")?
-        .json()
-        .context("failed to decode update status")
+        })),
+    )
 }
 
 /// Restart into the replacement daemon and wait for its new endpoint.
@@ -208,16 +231,22 @@ pub fn wait_for_replacement_daemon(old_pid: u32) -> Result<()> {
     anyhow::bail!("replacement daemon did not become ready within 25 seconds")
 }
 
-fn post_snapshot(path: &str, label: &'static str) -> Result<UpdateStatusSnapshot> {
+fn post_snapshot(path: &str, body: Option<serde_json::Value>) -> Result<UpdateStatusSnapshot> {
     let endpoint = local_update_endpoint(path)?;
-    let _ = label;
-    let response = endpoint
+    let mut request = endpoint
         .client
         .post(&endpoint.url)
-        .timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(10));
+    if let Some(body) = &body {
+        request = request.json(body);
+    }
+    let response = request
         .send()
-        .with_context(|| format!("failed to POST {path}"))?
-        .error_for_status()
-        .with_context(|| format!("daemon rejected {path}"))?;
+        .with_context(|| format!("failed to POST {path}"))?;
+    let status = response.status();
+    if !status.is_success() {
+        let message = response.text().unwrap_or_default();
+        anyhow::bail!("daemon rejected {path} ({status}): {message}");
+    }
     response.json().context("failed to decode update status")
 }

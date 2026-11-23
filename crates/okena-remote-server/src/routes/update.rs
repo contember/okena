@@ -5,7 +5,7 @@ use axum::http::StatusCode;
 use okena_core::api::{
     ApiAppRestartRequest, ApiRestartedDesktop, ApiUpdateRestartResponse, ApiWindow,
 };
-use okena_ext_updater::UpdateStatus;
+use okena_ext_updater::{UpdateChannel, UpdateStatus};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
@@ -25,6 +25,7 @@ pub async fn get_status(
     if !peer.is_local_trusted() {
         return Err(StatusCode::FORBIDDEN);
     }
+    state.update_info.refresh_channel();
     Ok(Json(state.update_info.snapshot()))
 }
 
@@ -37,8 +38,8 @@ pub async fn post_check(
     }
 
     let info = state.update_info.clone();
-    if info.try_start_manual() {
-        let token = info.current_token();
+    info.refresh_channel();
+    if let Some(token) = info.try_start_manual_token() {
         tokio::spawn(async move {
             okena_ext_updater::manager::run_check(info, token, true).await;
         });
@@ -47,20 +48,68 @@ pub async fn post_check(
     Ok(Json(state.update_info.snapshot()))
 }
 
+#[derive(serde::Deserialize)]
+pub struct ChannelRequest {
+    channel: okena_ext_updater::UpdateChannel,
+}
+
+pub async fn post_channel(
+    Extension(peer): Extension<PeerInfo>,
+    State(state): State<AppState>,
+    Json(request): Json<ChannelRequest>,
+) -> Result<Json<okena_ext_updater::UpdateStatusSnapshot>, (StatusCode, String)> {
+    if !peer.is_local_trusted() {
+        return Err((StatusCode::FORBIDDEN, String::new()));
+    }
+    let info = state.update_info.clone();
+    if let Some(token) = info
+        .change_channel(request.channel)
+        .map_err(|e| (StatusCode::CONFLICT, e.to_string()))?
+    {
+        tokio::spawn(okena_ext_updater::manager::run_check(info, token, true));
+    }
+    Ok(Json(state.update_info.snapshot()))
+}
+
+#[derive(Default, serde::Deserialize)]
+#[serde(default)]
+pub struct InstallRequest {
+    confirm_stable_return: bool,
+    restore_config: bool,
+    version: Option<String>,
+}
+
 pub async fn post_install(
     Extension(peer): Extension<PeerInfo>,
     State(state): State<AppState>,
-) -> Result<Json<okena_ext_updater::UpdateStatusSnapshot>, StatusCode> {
+    request: Option<Json<InstallRequest>>,
+) -> Result<Json<okena_ext_updater::UpdateStatusSnapshot>, (StatusCode, String)> {
     if !peer.is_local_trusted() {
-        return Err(StatusCode::FORBIDDEN);
+        return Err((StatusCode::FORBIDDEN, String::new()));
     }
 
     let info = state.update_info.clone();
-    if matches!(info.status(), UpdateStatus::Ready { .. }) {
-        tokio::spawn(async move {
-            okena_ext_updater::manager::install_ready_update(info).await;
-        });
-    }
+    let request = request.map(|Json(body)| body).unwrap_or_default();
+    let confirmed = if request.confirm_stable_return {
+        Some(request.version.as_deref().ok_or_else(|| {
+            (
+                StatusCode::BAD_REQUEST,
+                "missing confirmed release version".into(),
+            )
+        })?)
+    } else {
+        None
+    };
+    let (reservation, version, path) = info
+        .claim_install(confirmed, request.restore_config)
+        .map_err(|error| (StatusCode::CONFLICT, error.to_string()))?;
+    tokio::spawn(okena_ext_updater::manager::install_claimed(
+        info,
+        reservation,
+        version,
+        path,
+        request.restore_config,
+    ));
 
     Ok(Json(state.update_info.snapshot()))
 }
@@ -111,7 +160,8 @@ pub async fn post_restart(
         },
     );
     log::info!(
-        "Restarting into v{version}; asked {} desktop(s) to relaunch",
+        "Restarting into {}; asked {} desktop(s) to relaunch",
+        okena_ext_updater::update_version_label(&version),
         desktops.len()
     );
     super::restart::exit_after_ack(&state);
@@ -180,7 +230,9 @@ pub async fn get_releases(
     if !peer.is_local_trusted() {
         return Err(StatusCode::FORBIDDEN);
     }
-    okena_ext_updater::checker::list_revert_releases(state.update_info.app_version())
+    state.update_info.refresh_channel();
+    let channel = state.update_info.snapshot().channel;
+    okena_ext_updater::checker::list_revert_releases(state.update_info.app_version(), channel)
         .await
         .map(Json)
         .map_err(|error| {
@@ -222,19 +274,31 @@ pub async fn post_revert(
     Extension(peer): Extension<PeerInfo>,
     State(state): State<AppState>,
     Json(request): Json<RevertRequest>,
-) -> Result<Json<okena_ext_updater::UpdateStatusSnapshot>, StatusCode> {
+) -> Result<Json<okena_ext_updater::UpdateStatusSnapshot>, (StatusCode, String)> {
     if !peer.is_local_trusted() {
-        return Err(StatusCode::FORBIDDEN);
+        return Err((StatusCode::FORBIDDEN, String::new()));
     }
     let info = state.update_info.clone();
     // Unlike check/install, a rejected revert must be reported: the caller waits
     // for a status transition that would otherwise never come.
-    if !info.try_start_manual() {
-        return Err(StatusCode::CONFLICT);
+    info.refresh_channel();
+    let channel = if request.version.starts_with("nightly-") {
+        UpdateChannel::Nightly
+    } else {
+        UpdateChannel::Release
+    };
+    if channel == UpdateChannel::Nightly && !request.keep_config {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "nightly reverts keep the current configuration".into(),
+        ));
     }
-    info.set_status(UpdateStatus::Checking);
+    let token = info
+        .try_start_revert(channel)
+        .map_err(|error| (StatusCode::CONFLICT, error.to_string()))?;
     tokio::spawn(async move {
-        okena_ext_updater::manager::run_revert(info, request.version, !request.keep_config).await;
+        okena_ext_updater::manager::run_revert(info, token, request.version, !request.keep_config)
+            .await;
     });
     Ok(Json(state.update_info.snapshot()))
 }
@@ -244,22 +308,16 @@ pub fn spawn_background_checker(update_info: okena_ext_updater::UpdateInfo) {
         tokio::time::sleep(Duration::from_secs(30)).await;
 
         loop {
+            update_info.refresh_channel();
             if let Some(token) = update_info.try_start() {
                 okena_ext_updater::manager::run_check(update_info.clone(), token, false).await;
-            }
-
-            match update_info.status() {
-                UpdateStatus::Ready { .. }
-                | UpdateStatus::ReadyToRestart { .. }
-                | UpdateStatus::Installing { .. }
-                | UpdateStatus::BrewUpdate { .. } => return,
-                _ => {}
-            }
-
-            if matches!(update_info.status(), UpdateStatus::Failed { .. }) {
-                tokio::time::sleep(Duration::from_secs(60)).await;
-                if matches!(update_info.status(), UpdateStatus::Failed { .. }) {
-                    update_info.set_status(UpdateStatus::Idle);
+                match update_info.status() {
+                    UpdateStatus::BrewUpdate { .. } => return,
+                    UpdateStatus::Failed { error } => {
+                        tokio::time::sleep(Duration::from_secs(60)).await;
+                        update_info.clear_background_failure(token, &error);
+                    }
+                    _ => {}
                 }
             }
 

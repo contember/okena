@@ -205,7 +205,7 @@ fn main() {
 
     // Handle --version before initializing anything (used by updater validation)
     if std::env::args().any(|a| a == "--version") {
-        println!("okena {}", env!("CARGO_PKG_VERSION"));
+        println!("okena {}", okena_core::build_info::BUILD_INFO.version);
         return;
     }
 

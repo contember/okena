@@ -2129,7 +2129,10 @@ pub fn cli_update_status(json_mode: bool) -> i32 {
             } else {
                 println!(
                     "{}\t{}",
-                    snapshot.app_version,
+                    snapshot
+                        .running_version
+                        .as_deref()
+                        .unwrap_or(&snapshot.app_version),
                     update_status_label(&snapshot.status)
                 );
             }
@@ -2182,8 +2185,8 @@ pub fn cli_update_list(json_mode: bool, quiet: bool) -> i32 {
 /// Bring the latest release to `ReadyToRestart` (check, download, install as
 /// needed), then restart into it when `restart` is set.
 pub fn cli_update_install(restart: bool, json_mode: bool) -> i32 {
-    use okena_ext_updater::UpdateStatus;
     use okena_ext_updater::daemon_client;
+    use okena_ext_updater::{UpdateStatus, update_version_label};
 
     let snapshot = match daemon_client::fetch_status() {
         Ok(snapshot) => snapshot,
@@ -2200,26 +2203,35 @@ pub fn cli_update_install(restart: bool, json_mode: bool) -> i32 {
 
     let mut checked_at = None;
     let mut install_requested = false;
-    let mut status = snapshot.status;
+    let mut snapshot = snapshot;
     // Download + install of a full release, so generous — but a wedged daemon
     // must not pin the terminal for an hour.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15 * 60);
     let poll_interval = std::time::Duration::from_millis(250);
     let mut unreachable_for = std::time::Duration::ZERO;
     let version = loop {
-        match &status {
-            UpdateStatus::ReadyToRestart { version, .. } => {
+        match &snapshot.status {
+            UpdateStatus::ReadyToRestart {
+                version, revert, ..
+            } => {
+                // A daemon that predates the `revert` flag only shows an older semver.
                 let staged = okena_ext_updater::checker::parse_release_version(version);
                 let current = okena_ext_updater::checker::parse_release_version(&current_version);
-                if let (Some(staged), Some(current)) = (staged, current)
-                    && staged < current
-                {
+                let older = staged
+                    .zip(current)
+                    .is_some_and(|(staged, current)| staged < current);
+                if *revert || older {
                     eprintln!(
-                        "A revert to v{version} is installed and waiting for a restart; `update install` does not restart into an older version."
+                        "A revert to {} is installed and waiting for a restart; `update install` does not restart into an older version.",
+                        update_version_label(version)
                     );
                     return 1;
                 }
                 break version.clone();
+            }
+            UpdateStatus::Ready { .. } if snapshot.stable_return => {
+                eprintln!("Open Settings → Auto Update to confirm the return to Release.");
+                return 1;
             }
             UpdateStatus::Ready { .. } if !install_requested => {
                 if let Err(error) = daemon_client::request_install() {
@@ -2278,9 +2290,9 @@ pub fn cli_update_install(restart: bool, json_mode: bool) -> i32 {
         }
         std::thread::sleep(poll_interval);
         match daemon_client::fetch_status() {
-            Ok(snapshot) => {
+            Ok(latest) => {
                 unreachable_for = std::time::Duration::ZERO;
-                status = snapshot.status;
+                snapshot = latest;
             }
             Err(error) => {
                 unreachable_for += poll_interval;
@@ -2302,13 +2314,17 @@ pub fn cli_update_install(restart: bool, json_mode: bool) -> i32 {
         } else {
             println!("ready-to-restart\t{version}");
             eprintln!(
-                "Run `okena update install --restart` to restart into v{version}; active terminal sessions will end."
+                "Run `okena update install --restart` to restart into {}; active terminal sessions will end.",
+                update_version_label(&version)
             );
         }
         return 0;
     }
 
-    eprintln!("Restarting into v{version}; active terminal sessions will end.");
+    eprintln!(
+        "Restarting into {}; active terminal sessions will end.",
+        update_version_label(&version)
+    );
     let reply = match daemon_client::request_update_restart() {
         Ok(reply) => reply,
         Err(error) => {
@@ -2369,7 +2385,16 @@ pub fn cli_update_revert(
             );
             return 1;
         }
-        Ok(_) => {}
+        Ok(snapshot) => {
+            if yes
+                && !dry_run
+                && let Some(reason) =
+                    okena_ext_updater::daemon_client::revert_block_reason(&snapshot.status)
+            {
+                eprintln!("{reason}");
+                return 1;
+            }
+        }
         Err(error) => {
             eprintln!("Failed to fetch update status: {error}");
             return 1;
@@ -2387,12 +2412,16 @@ pub fn cli_update_revert(
         .iter()
         .find(|release| release.version == version)
     else {
-        eprintln!("Version v{version} is not an available older stable release.");
+        eprintln!(
+            "{} is not in the selected channel history.",
+            okena_ext_updater::update_version_label(version)
+        );
         return 1;
     };
     if !keep_config && release.config_snapshot.is_none() {
         eprintln!(
-            "No config snapshot exists for v{version}. Re-run with --keep-config to accept the compatibility risk."
+            "No config snapshot exists for {}. Re-run with --keep-config to accept the compatibility risk.",
+            okena_ext_updater::update_version_label(version)
         );
         return 1;
     }
@@ -2410,6 +2439,7 @@ pub fn cli_update_revert(
     let plan = serde_json::json!({
         "current_version": catalog.current_version,
         "target_version": release.version,
+        "legacy_nightly": release.legacy_nightly,
         "asset": release.asset_name,
         "config": config_action,
         "restart_daemon": restart,
@@ -2462,6 +2492,12 @@ pub fn cli_update_revert(
                         eprintln!("Version revert failed: {error}");
                         return 1;
                     }
+                    okena_ext_updater::UpdateStatus::Idle => {
+                        eprintln!(
+                            "Version revert was cancelled. Check the selected update channel before retrying."
+                        );
+                        return 1;
+                    }
                     status => {
                         eprintln!(
                             "Version revert stopped in unexpected state: {}",
@@ -2510,7 +2546,17 @@ pub fn cli_update_revert(
 fn print_revert_plan(plan: &serde_json::Value, diagnostic: bool) {
     let current = plan["current_version"].as_str().unwrap_or("unknown");
     let target = plan["target_version"].as_str().unwrap_or("unknown");
-    let mut lines = vec![format!("Binary: v{current} -> v{target}")];
+    let mut lines = vec![format!(
+        "Binary: {} -> {}",
+        okena_ext_updater::update_version_label(current),
+        okena_ext_updater::update_version_label(target)
+    )];
+    if plan["legacy_nightly"] == true {
+        lines.push(
+            "After restart, this nightly reports its base version and checks only for stable releases."
+                .to_string(),
+        );
+    }
     if plan["config"]["action"] == "restore" {
         lines.push(format!(
             "Config: restore snapshot from {}",

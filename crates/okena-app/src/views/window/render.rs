@@ -1462,6 +1462,13 @@ impl Render for WindowView {
                     overlay_manager.update(cx, |om, cx| om.toggle_settings_panel(endpoint, cx));
                 }
             }))
+            .on_action(cx.listener(
+                |this, _: &okena_ext_updater::OpenUpdateSettings, _window, cx| {
+                    let endpoint = this.local_daemon_endpoint(cx);
+                    this.overlay_manager
+                        .update(cx, |om, cx| om.show_update_settings(endpoint, cx));
+                },
+            ))
             // Handle show hook log action
             .on_action(cx.listener({
                 let overlay_manager = overlay_manager.clone();
@@ -1561,9 +1568,15 @@ impl Render for WindowView {
                 }
             }))
             // Handle install update action (dispatched from status bar)
-            .on_action(cx.listener(|_this, _: &InstallUpdate, _window, cx| {
+            .on_action(cx.listener(|this, _: &InstallUpdate, _window, cx| {
                 if let Some(update_info) = cx.try_global::<okena_ext_updater::GlobalUpdateInfo>() {
                     let info = update_info.0.clone();
+                    if info.snapshot().stable_return {
+                        let endpoint = this.local_daemon_endpoint(cx);
+                        this.overlay_manager
+                            .update(cx, |om, cx| om.show_update_settings(endpoint, cx));
+                        return;
+                    }
                     cx.spawn(async move |this, cx| {
                         match smol::unblock(okena_ext_updater::daemon_client::request_install).await
                         {

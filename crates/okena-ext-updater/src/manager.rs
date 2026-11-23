@@ -1,165 +1,168 @@
-use crate::status::{UpdateInfo, UpdateStatus};
+use crate::status::{UpdateChannel, UpdateInfo, UpdateReservation, UpdateStatus};
+use std::path::{Path, PathBuf};
 
-/// Run one check/download pass. The caller claims the reservation
-/// (`try_start_manual` for user-initiated checks, `try_start` for background);
-/// this routine adopts it so it is freed however the pass ends.
+/// Run the daemon's update policy for a reserved user or background check.
 pub async fn run_check(info: UpdateInfo, token: u64, manual: bool) {
     let _reservation = if manual {
-        info.adopt_manual()
+        info.adopt_manual(token)
     } else {
         info.adopt_background(token)
     };
-
-    if info.has_staged_update() {
-        log::info!("Skipping the update check: an update is already staged");
+    if info.has_staged_update() || !info.set_status_if_current(token, UpdateStatus::Checking) {
         return;
     }
-
-    info.set_status(UpdateStatus::Checking);
-
-    match crate::checker::check_for_update(info.app_version()).await {
-        Ok(Some(release)) => {
-            if info.is_homebrew() {
-                info.set_status(UpdateStatus::BrewUpdate {
-                    version: release.version,
-                });
-            } else {
-                info.set_status(UpdateStatus::Downloading {
-                    version: release.version.clone(),
-                    progress: 0,
-                });
-
-                match crate::downloader::download_asset(
-                    release.asset_url,
-                    release.asset_name,
-                    release.version.clone(),
-                    info.clone(),
+    let channel = info.snapshot().channel;
+    let version = info.app_version();
+    if info.is_homebrew() {
+        match crate::checker::check_for_package_update(&version).await {
+            Ok(Some(version)) => {
+                info.set_status_if_current(
                     token,
-                    release.checksum_url,
-                )
-                .await
-                {
-                    Ok(path) => {
-                        info.set_status(UpdateStatus::Ready {
-                            version: release.version,
-                            path,
-                        });
-                    }
-                    Err(e) => {
-                        if !info.is_cancelled(token) {
-                            log::error!("Download failed: {}", e);
-                            info.set_status(UpdateStatus::Failed {
-                                error: e.to_string(),
-                            });
-                        }
-                    }
-                }
+                    UpdateStatus::BrewUpdate {
+                        version: version.to_string(),
+                    },
+                );
+            }
+            Ok(None) => {
+                info.set_status_if_current(token, UpdateStatus::Idle);
+            }
+            Err(error) => fail(&info, token, error),
+        }
+        return;
+    }
+    match crate::checker::check_for_update(&version, channel).await {
+        Ok(Some(release)) => {
+            let stable_return = channel == UpdateChannel::Release
+                && okena_core::build_info::BUILD_INFO.nightly.is_some();
+            let version = release.version.clone();
+            match download(&info, token, release).await {
+                Ok(path) => info.stage_download(token, version, path, stable_return),
+                Err(error) => fail(&info, token, error),
             }
         }
         Ok(None) => {
-            info.set_status(UpdateStatus::Idle);
+            info.set_status_if_current(token, UpdateStatus::Idle);
         }
-        Err(e) => {
-            log::error!("Update check failed: {}", e);
-            info.set_status(UpdateStatus::Failed {
-                error: e.to_string(),
-            });
-        }
+        Err(error) => fail(&info, token, error),
     }
 }
 
-/// Install the downloaded update currently held in `Ready` status. Takes the
-/// reservation itself, so a duplicate request finds nothing to install.
-pub async fn install_ready_update(info: UpdateInfo) {
-    let Some((_reservation, version, path)) = info.try_start_install() else {
-        return;
-    };
+async fn download(
+    info: &UpdateInfo,
+    token: u64,
+    release: crate::checker::ReleaseAsset,
+) -> anyhow::Result<PathBuf> {
+    anyhow::ensure!(
+        info.set_status_if_current(
+            token,
+            UpdateStatus::Downloading {
+                version: release.version.clone(),
+                progress: 0
+            }
+        ),
+        "download cancelled"
+    );
+    crate::downloader::download_asset(
+        release.asset_url,
+        release.asset_name,
+        release.version,
+        info.clone(),
+        token,
+        release.sha256,
+    )
+    .await
+}
 
-    let result = smol::unblock(move || crate::installer::install_update(&path)).await;
-    match result {
-        Ok(_) => {
-            info.set_status(UpdateStatus::ReadyToRestart {
-                version,
-                config_restore: None,
-            });
-        }
-        Err(e) => {
-            log::error!("Install failed: {}", e);
-            info.set_status(UpdateStatus::Failed {
-                error: e.to_string(),
-            });
-        }
+fn fail(info: &UpdateInfo, token: u64, error: anyhow::Error) {
+    if info.set_status_if_current(
+        token,
+        UpdateStatus::Failed {
+            error: format!("{error:#}"),
+        },
+    ) {
+        log::error!("Update failed: {error:#}");
     }
 }
 
-/// Download and install one exact older release. Config restoration is deferred
-/// until daemon restart so the outgoing daemon cannot overwrite restored files.
-pub async fn run_revert(info: UpdateInfo, target_version: String, restore_config: bool) {
-    let _reservation = info.adopt_manual();
-    info.set_status(UpdateStatus::Checking);
-
-    let result = run_revert_inner(&info, &target_version, restore_config).await;
+/// The route claims the exact staged archive before acknowledging the request.
+pub async fn install_claimed(
+    info: UpdateInfo,
+    reservation: UpdateReservation,
+    version: String,
+    path: PathBuf,
+    restore_config: bool,
+) {
+    let result = install(&info, &version, &path, restore_config, false).await;
+    crate::downloader::discard_download(&path);
     if let Err(error) = result {
-        log::error!("Version revert failed: {error}");
-        info.set_status(UpdateStatus::Failed {
-            error: error.to_string(),
-        });
+        fail(&info, reservation.token(), error);
+    }
+}
+
+async fn install(
+    info: &UpdateInfo,
+    version: &str,
+    path: &Path,
+    restore_config: bool,
+    revert: bool,
+) -> anyhow::Result<()> {
+    let config_restore = if restore_config {
+        let paths = okena_core::profiles::current();
+        let snapshot = okena_core::profiles::config_snapshot_for_version(paths, version)
+            .ok_or_else(|| anyhow::anyhow!("no config snapshot exists for version {version}"))?;
+        okena_core::profiles::schedule_config_restore(paths, version)?;
+        Some(snapshot)
+    } else {
+        None
+    };
+    let archive = path.to_owned();
+    if let Err(error) = smol::unblock(move || crate::installer::install_update(&archive)).await {
+        if restore_config {
+            okena_core::profiles::clear_pending_config_restore(okena_core::profiles::current());
+        }
+        return Err(error);
+    }
+    info.set_status(UpdateStatus::ReadyToRestart {
+        version: version.to_owned(),
+        config_restore,
+        revert,
+    });
+    Ok(())
+}
+
+/// A historical revert has already been confirmed by the caller.
+pub async fn run_revert(
+    info: UpdateInfo,
+    token: u64,
+    target_version: String,
+    restore_config: bool,
+) {
+    let _reservation = info.adopt_manual(token);
+    let result = run_revert_inner(&info, token, &target_version, restore_config).await;
+    if let Err(error) = result {
+        fail(&info, token, error);
     }
 }
 
 async fn run_revert_inner(
     info: &UpdateInfo,
-    target_version: &str,
+    token: u64,
+    version: &str,
     restore_config: bool,
 ) -> anyhow::Result<()> {
-    if info.is_homebrew() {
-        anyhow::bail!("Homebrew installations must be changed through brew");
-    }
+    anyhow::ensure!(
+        !info.is_homebrew(),
+        "Homebrew installations must be changed through brew"
+    );
+    anyhow::ensure!(!info.is_cancelled(token), "version revert cancelled");
+    let channel = info.snapshot().channel;
     let release =
-        crate::checker::release_for_revert(info.app_version(), target_version.to_string()).await?;
-    let config_snapshot = if restore_config {
-        let paths = okena_core::profiles::current();
-        Some(
-            okena_core::profiles::config_snapshot_for_version(paths, target_version).ok_or_else(
-                || anyhow::anyhow!("no config snapshot exists for version {target_version}"),
-            )?,
-        )
-    } else {
-        None
+        crate::checker::release_for_revert(info.app_version(), version.to_owned(), channel).await?;
+    let path = download(info, token, release).await?;
+    let result = match info.begin_revert_install(token, version.to_owned()) {
+        Ok(()) => install(info, version, &path, restore_config, true).await,
+        Err(error) => Err(error),
     };
-
-    info.set_status(UpdateStatus::Downloading {
-        version: release.version.clone(),
-        progress: 0,
-    });
-    let path = crate::downloader::download_asset(
-        release.asset_url,
-        release.asset_name,
-        release.version.clone(),
-        info.clone(),
-        info.current_token(),
-        release.checksum_url,
-    )
-    .await?;
-
-    if restore_config {
-        okena_core::profiles::schedule_config_restore(
-            okena_core::profiles::current(),
-            target_version,
-        )?;
-    }
-    info.set_status(UpdateStatus::Installing {
-        version: release.version.clone(),
-    });
-    let install = smol::unblock(move || crate::installer::install_update(&path)).await;
-    if let Err(error) = install {
-        okena_core::profiles::clear_pending_config_restore(okena_core::profiles::current());
-        return Err(error);
-    }
-
-    info.set_status(UpdateStatus::ReadyToRestart {
-        version: release.version,
-        config_restore: config_snapshot,
-    });
-    Ok(())
+    crate::downloader::discard_download(&path);
+    result
 }

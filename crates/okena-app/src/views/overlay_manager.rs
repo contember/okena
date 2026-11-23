@@ -830,6 +830,21 @@ impl OverlayManager {
         }
     }
 
+    pub fn show_update_settings(
+        &mut self,
+        daemon_endpoint: Option<DaemonEndpoint>,
+        cx: &mut Context<Self>,
+    ) {
+        let workspace = self.workspace.clone();
+        let entity = cx.new(|cx| {
+            let mut panel = SettingsPanel::new(workspace, daemon_endpoint, cx);
+            panel.show_updater(cx);
+            panel
+        });
+        self.subscribe_settings_panel(&entity, cx);
+        self.open_modal(entity, cx);
+    }
+
     /// Subscribe to a settings panel: close on `Close`, forward per-project hook
     /// edits as an `OverlayManagerEvent` the host dispatches to the daemon.
     fn subscribe_settings_panel(&mut self, entity: &Entity<SettingsPanel>, cx: &mut Context<Self>) {

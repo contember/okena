@@ -1,4 +1,4 @@
-use crate::keybindings::Cancel;
+use crate::keybindings::{Cancel, InstallUpdate};
 use crate::theme::{ThemeColors, theme};
 use crate::ui::tokens::{ui_text, ui_text_md, ui_text_ms, ui_text_sm};
 use crate::views::components::{modal_backdrop, modal_content};
@@ -13,6 +13,7 @@ const GITHUB_URL: &str = "https://github.com/contember/okena";
 enum UpdateAction {
     Check,
     Install,
+    ReviewStableReturn,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -52,31 +53,46 @@ fn update_presentation(status: &UpdateStatus, confirmed_current: bool) -> Update
             action: None,
         },
         UpdateStatus::Available { version, .. } => UpdatePresentation {
-            title: format!("Okena v{version} is available"),
+            title: format!(
+                "Okena {} is available",
+                okena_ext_updater::update_version_label(version)
+            ),
             detail: "The update is being prepared for download.".to_string(),
             tone: UpdateTone::Good,
             action: None,
         },
         UpdateStatus::Downloading { version, progress } => UpdatePresentation {
-            title: format!("Downloading Okena v{version}"),
+            title: format!(
+                "Downloading Okena {}",
+                okena_ext_updater::update_version_label(version)
+            ),
             detail: format!("{progress}% complete"),
             tone: UpdateTone::Warning,
             action: None,
         },
         UpdateStatus::Ready { version, .. } => UpdatePresentation {
-            title: format!("Okena v{version} is ready to install"),
+            title: format!(
+                "Okena {} is ready to install",
+                okena_ext_updater::update_version_label(version)
+            ),
             detail: "Install now, then restart when prompted.".to_string(),
             tone: UpdateTone::Good,
             action: Some(UpdateAction::Install),
         },
         UpdateStatus::Installing { version } => UpdatePresentation {
-            title: format!("Installing Okena v{version}"),
+            title: format!(
+                "Installing Okena {}",
+                okena_ext_updater::update_version_label(version)
+            ),
             detail: "The new build is being installed.".to_string(),
             tone: UpdateTone::Warning,
             action: None,
         },
         UpdateStatus::ReadyToRestart { version, .. } => UpdatePresentation {
-            title: format!("Okena v{version} is ready"),
+            title: format!(
+                "Okena {} is ready",
+                okena_ext_updater::update_version_label(version)
+            ),
             detail: "Restart from the status bar to finish the update.".to_string(),
             tone: UpdateTone::Good,
             action: None,
@@ -133,8 +149,14 @@ impl AboutModal {
     }
 
     fn update_presentation(&self, cx: &App) -> Option<UpdatePresentation> {
-        cx.try_global::<GlobalUpdateInfo>()
-            .map(|global| update_presentation(&global.0.status(), self.confirmed_current))
+        let snapshot = cx.try_global::<GlobalUpdateInfo>()?.0.snapshot();
+        let mut presentation = update_presentation(&snapshot.status, self.confirmed_current);
+        if snapshot.stable_return && presentation.action == Some(UpdateAction::Install) {
+            presentation.detail =
+                "Review the return to Release in Auto Update settings.".to_string();
+            presentation.action = Some(UpdateAction::ReviewStableReturn);
+        }
+        Some(presentation)
     }
 
     fn close(&self, cx: &mut Context<Self>) {
@@ -168,23 +190,6 @@ impl AboutModal {
                 this.confirmed_current = confirmed_current;
                 cx.notify();
             });
-        })
-        .detach();
-    }
-
-    fn install_update(&mut self, cx: &mut Context<Self>) {
-        let Some(global) = cx.try_global::<GlobalUpdateInfo>() else {
-            return;
-        };
-        let info = global.0.clone();
-        cx.spawn(async move |this, cx| {
-            match smol::unblock(okena_ext_updater::daemon_client::request_install).await {
-                Ok(snapshot) => info.apply_snapshot(snapshot),
-                Err(error) => info.set_status(UpdateStatus::Failed {
-                    error: error.to_string(),
-                }),
-            }
-            let _ = this.update(cx, |_, cx| cx.notify());
         })
         .detach();
     }
@@ -249,12 +254,14 @@ impl AboutModal {
         let label = match action {
             UpdateAction::Check => "Check now",
             UpdateAction::Install => "Install update",
+            UpdateAction::ReviewStableReturn => "Review installation…",
         };
 
         div()
             .id(match action {
                 UpdateAction::Check => "about-check-update",
                 UpdateAction::Install => "about-install-update",
+                UpdateAction::ReviewStableReturn => "about-review-stable-return",
             })
             .cursor_pointer()
             .px(px(10.0))
@@ -268,9 +275,12 @@ impl AboutModal {
             .font_weight(FontWeight::MEDIUM)
             .text_color(rgb(t.text_primary))
             .child(label)
-            .on_click(cx.listener(move |this, _, _, cx| match action {
+            .on_click(cx.listener(move |this, _, window, cx| match action {
                 UpdateAction::Check => this.check_for_updates(cx),
-                UpdateAction::Install => this.install_update(cx),
+                UpdateAction::Install => window.dispatch_action(Box::new(InstallUpdate), cx),
+                UpdateAction::ReviewStableReturn => {
+                    window.dispatch_action(Box::new(okena_ext_updater::OpenUpdateSettings), cx);
+                }
             }))
     }
 
@@ -360,9 +370,7 @@ impl Render for AboutModal {
         }
 
         let update_info = cx.try_global::<GlobalUpdateInfo>().map(|global| &global.0);
-        let version = update_info
-            .map(|info| info.app_version())
-            .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string());
+        let version = &okena_core::build_info::BUILD_INFO.version;
         let source = if cx.has_global::<GlobalLocalBuild>() {
             "Local source build"
         } else if update_info.is_some_and(|info| info.is_homebrew()) {

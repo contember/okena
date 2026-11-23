@@ -179,7 +179,7 @@ impl RemoteServer {
 
         let start_time = std::time::Instant::now();
         okena_ext_updater::installer::cleanup_old_binary();
-        let update_info = okena_ext_updater::UpdateInfo::new(app_version.to_string());
+        let update_info = okena_ext_updater::UpdateInfo::for_daemon(app_version.to_string());
 
         // Set true once a client authenticates; gates the idle-exit monitor so a
         // freshly-spawned daemon isn't reaped before its GUI first connects.

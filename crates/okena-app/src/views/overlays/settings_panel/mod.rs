@@ -1056,6 +1056,13 @@ impl SettingsPanel {
         cx.notify();
     }
 
+    pub(crate) fn show_updater(&mut self, cx: &mut Context<Self>) {
+        self.set_category(
+            SettingsCategory::Extension(okena_ext_updater::EXTENSION_ID.to_string()),
+            cx,
+        );
+    }
+
     /// Reload per-project hook inputs with values from the selected project
     fn reload_project_hook_inputs(&mut self, cx: &mut Context<Self>) {
         let global_hooks = settings_entity(cx).read(cx).settings.hooks.clone();

@@ -313,6 +313,10 @@ pub fn build_router(
         )
         .route("/v1/update/check", axum::routing::post(update::post_check))
         .route(
+            "/v1/update/channel",
+            axum::routing::post(update::post_channel),
+        )
+        .route(
             "/v1/update/revert",
             axum::routing::post(update::post_revert),
         )
@@ -842,6 +846,7 @@ mod tests {
             Call::get("/v1/update/status"),
             Call::get("/v1/update/release-notes"),
             Call::post("/v1/update/check"),
+            Call::post("/v1/update/channel"),
             Call::post("/v1/update/install"),
             Call::post("/v1/update/dismiss"),
             Call::post("/v1/update/restart"),
@@ -875,6 +880,31 @@ mod tests {
                 .await,
             StatusCode::OK
         );
+    }
+
+    #[tokio::test]
+    async fn revert_from_a_different_channel_is_rejected_before_downloading() {
+        let mut router = test_router(Arc::new(AuthStore::with_secret(vec![7u8; 32])));
+        let mut request = axum::http::Request::post("/v1/update/revert")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                r#"{"version":"nightly-20261121-292fa56","keep_config":true}"#,
+            ))
+            .unwrap();
+        request.extensions_mut().insert(PeerInfo::Local);
+        let response = router.call(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn legacy_install_without_a_body_reaches_the_install_guard() {
+        let mut router = test_router(Arc::new(AuthStore::with_secret(vec![7u8; 32])));
+        let mut request = axum::http::Request::post("/v1/update/install")
+            .body(Body::empty())
+            .unwrap();
+        request.extensions_mut().insert(PeerInfo::Local);
+        let response = router.call(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
     }
 
     /// Restarting into an update needs one installed and waiting; otherwise

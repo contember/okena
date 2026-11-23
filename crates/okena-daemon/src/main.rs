@@ -44,7 +44,10 @@ fn main() -> anyhow::Result<()> {
         .context("failed to remember daemon executable path")?;
 
     if std::env::args().any(|a| a == "--version") {
-        println!("okena-daemon {}", env!("CARGO_PKG_VERSION"));
+        println!(
+            "okena-daemon {}",
+            okena_core::build_info::BUILD_INFO.version
+        );
         return Ok(());
     }
 
