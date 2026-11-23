@@ -145,8 +145,8 @@ The bundle ID is permanent after the first App Store Connect upload.
 
 The **iOS beta** workflow (`.github/workflows/ios.yml`) builds an unsigned release archive
 on relevant PRs and pushes to `main`. It cross-compiles Rust for `aarch64-apple-ios`,
-generates the native module, installs pods, archives, and checks the bundle ID, version, JS bundle, fonts, and
-privacy manifest in the archive.
+generates the native module, installs pods, archives, and checks the bundle ID, version,
+JS bundle, fonts, and privacy manifest in the archive.
 
 For a TestFlight build, run the workflow manually on the branch to release, enable `upload`,
 and supply a `build_number` greater than every previous upload of this version. The workflow

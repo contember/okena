@@ -2,7 +2,8 @@ name: Build
 
 on:
   # Branch pushes run through pull_request; a push trigger on them too would run
-  # Build twice. A branch without a PR runs it via workflow_dispatch.
+  # Build twice. A branch without a PR runs it via workflow_dispatch, which also
+  # starts the full multi-platform `build` job.
   push:
     branches: [main]
     tags: ['v*']
@@ -158,8 +159,8 @@ jobs:
 
   # Windows-only `cfg` branches never compile in the Linux `check` job above, so
   # a platform-specific break used to surface only once a tag started the full
-  # matrix — too late, with the tag already pushed. Compile for Windows on every
-  # push instead. Plain `cargo check`, not clippy: Windows still carries
+  # matrix — too late, with the tag already pushed. Compile for Windows on main,
+  # PRs and dispatch instead. Plain `cargo check`, not clippy: Windows still carries
   # pre-existing warnings that `-D warnings` would turn into failures.
   check-windows:
     if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
