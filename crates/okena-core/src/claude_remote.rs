@@ -60,14 +60,12 @@ pub enum ApiClaudeStartupDialog {
     Channels,
 }
 
-/// Whether `line` is the option `label`, whole or cut short with `…`, as Claude
-/// Code truncates a label too wide for the pane.
+/// Whether `line` is the option `label`, whole or only its start: Claude Code
+/// wraps a label too wide for the pane onto the next line, or cuts it with `…`.
+/// A start under ten characters is too short to tell the label apart.
 fn shows_option(line: &str, label: &str) -> bool {
-    line == label
-        || line
-            .strip_suffix('…')
-            .map(str::trim_end)
-            .is_some_and(|cut| cut.len() >= 10 && label.starts_with(cut))
+    let start = line.strip_suffix('…').map_or(line, str::trim_end);
+    line == label || (start.len() >= 10 && label.starts_with(start))
 }
 
 /// A screen line without its indent and the `❯` selection marker.
@@ -459,6 +457,21 @@ mod tests {
         // A cut too short to tell the label apart does not.
         assert_eq!(
             ApiClaudeStartupDialog::detect(" ❯ No…\n   Yes, I trust this folder"),
+            None
+        );
+    }
+
+    #[test]
+    fn a_label_wrapped_by_a_narrow_pane_counts_by_its_first_line() {
+        let channels = "  ❯ 1. I am using this for\n       local development\n    2. Exit";
+        assert_eq!(
+            ApiClaudeStartupDialog::detect(channels),
+            Some(ApiClaudeStartupDialog::Channels)
+        );
+        assert!(ApiClaudeStartupDialog::Channels.confirm_selected(channels));
+        // A first line too short to tell the label apart does not.
+        assert_eq!(
+            ApiClaudeStartupDialog::detect(" ❯ No, cont\n   inue\n   Yes, I trust this folder"),
             None
         );
     }

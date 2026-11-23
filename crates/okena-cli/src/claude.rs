@@ -1325,6 +1325,63 @@ mod tests {
     }
 
     #[test]
+    fn startup_dialog_key_answers_dialogs_wrapped_by_a_narrow_pane() {
+        // Screens of Claude Code 2.1.330 captured in a tmux pane of that width;
+        // it wraps an option too wide for the pane onto the next line.
+        use ApiClaudeStartupDialog::{Channels, Trust};
+        let cases = [
+            (
+                Channels,
+                include_str!("../tests/fixtures/claude-startup/channels-40-cols-exit.txt"),
+                "ArrowUp",
+            ),
+            (
+                Channels,
+                include_str!("../tests/fixtures/claude-startup/channels-40-cols-confirm.txt"),
+                "Enter",
+            ),
+            (
+                Channels,
+                include_str!("../tests/fixtures/claude-startup/channels-30-cols-exit.txt"),
+                "ArrowUp",
+            ),
+            (
+                Channels,
+                include_str!("../tests/fixtures/claude-startup/channels-30-cols-confirm.txt"),
+                "Enter",
+            ),
+            (
+                Trust,
+                include_str!("../tests/fixtures/claude-startup/trust-40-cols-cancel.txt"),
+                "ArrowDown",
+            ),
+            (
+                Trust,
+                include_str!("../tests/fixtures/claude-startup/trust-40-cols-confirm.txt"),
+                "Enter",
+            ),
+            (
+                Trust,
+                include_str!("../tests/fixtures/claude-startup/trust-30-cols-cancel.txt"),
+                "ArrowDown",
+            ),
+            (
+                Trust,
+                include_str!("../tests/fixtures/claude-startup/trust-30-cols-confirm.txt"),
+                "Enter",
+            ),
+        ];
+        for (dialog, screen, key) in cases {
+            assert_eq!(
+                ApiClaudeStartupDialog::detect(screen),
+                Some(dialog),
+                "{screen}"
+            );
+            assert_eq!(startup_dialog_key(dialog, screen), Some(key), "{screen}");
+        }
+    }
+
+    #[test]
     fn startup_dialog_key_answers_the_trust_dialog_without_its_title() {
         use ApiClaudeStartupDialog::Trust;
         // A short pane scrolled the title off; only the options remain.
