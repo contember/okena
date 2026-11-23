@@ -13,7 +13,8 @@ the archived [migration record](../archive/headless-migration.md)).
 ## Problem
 
 The migration's own follow-up list was written at the end of Phase D and never
-re-checked against HEAD. Re-verified 2026-08-21 — status per item below.
+re-checked against HEAD. Re-verified 2026-08-21 (item 2: 2026-11-23) — status
+per item below.
 
 ### Still open (verified at HEAD)
 
@@ -24,12 +25,14 @@ re-checked against HEAD. Re-verified 2026-08-21 — status per item below.
    `crates/okena-daemon-core/src/command_loop.rs:3798` (`folder_filter: None`,
    `sidebar_open: None`). Decide client-side persistence vs. a daemon round-trip.
 
-### Flagged, not re-verified (need a live session)
-
-2. **Terminal scrollback on (re)attach.** The SNAPSHOT frame replays the
-   viewport, not history — a pre-existing remote-protocol limitation affecting
-   every remote client. Matters on reconnect to an existing daemon session; the
-   primary "create terminals live" flow is unaffected.
+2. **Terminal scrollback on (re)attach — partly done** (okena#330, re-verified
+   2026-11-23). Since okena#363 every owned snapshot replays up to the newest
+   200 lines of history to every WS client (`SNAPSHOT_HISTORY_LINES` in
+   `crates/okena-terminal/src/terminal/ansi_snapshot.rs`). Left:
+   - no opt-out: `WsInbound::Subscribe` has no field to skip the history
+     (`deny_unknown_fields`), so every snapshot carries it;
+   - a pane on the alternate screen sends no history, so its primary screen
+     is empty on the client once the full-screen app exits.
 
 ### Closed since the list was written — do not re-do
 
@@ -52,11 +55,16 @@ re-checked against HEAD. Re-verified 2026-08-21 — status per item below.
 
 Each item is independent — take it in a run-capable session. Acceptance is
 behavioural: restart the client and see the sidebar/filter come back (1);
-reconnect to a live daemon session and see terminal history (2).
+reconnect to a live daemon session and see terminal history (2; done for the
+primary screen: okena#363 measured it live with the mobile engine, unit tests
+cover the snapshot, desktop and web are not checked live. Left: a client that
+skips the history, and history for a pane attached while on the alternate
+screen).
 
 ## Touch points
 
 - `crates/okena-daemon-core/src/{command_loop,daemon}.rs`
 - `crates/okena-workspace/src/claude_env.rs`
 - `crates/okena-core/src/{api,ws}.rs`
+- `crates/okena-terminal/src/terminal/ansi_snapshot.rs`, `crates/okena-remote-server/src/routes/stream.rs` (item 2)
 - `crates/okena-app/src/views/window/` (client-side presentation state)
