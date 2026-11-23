@@ -1296,7 +1296,8 @@ mod tests {
     }
 
     /// The Channels dialog in a 40-column pane, its confirming option cut
-    /// short with `…`, the selection on Exit.
+    /// short with `…`, the selection on Exit. Written by hand: Claude Code
+    /// 2.1.330 wraps the label instead (the captured fixtures below).
     const CHANNELS_40_COLUMNS_ON_EXIT: &str = "\
   WARNING: Loading development
   channels
@@ -1378,6 +1379,35 @@ mod tests {
                 "{screen}"
             );
             assert_eq!(startup_dialog_key(dialog, screen), Some(key), "{screen}");
+        }
+    }
+
+    #[test]
+    fn startup_dialog_key_answers_a_wrapped_trust_dialog_without_its_title() {
+        use ApiClaudeStartupDialog::Trust;
+        // A short pane: only the wrapped options and the hint stay visible.
+        let bottom = |screen: &'static str| {
+            let lines: Vec<&str> = screen.lines().collect();
+            lines[lines.len() - 6..].join("\n")
+        };
+        let cases = [
+            (
+                bottom(include_str!(
+                    "../tests/fixtures/claude-startup/trust-40-cols-cancel.txt"
+                )),
+                "ArrowDown",
+            ),
+            (
+                bottom(include_str!(
+                    "../tests/fixtures/claude-startup/trust-40-cols-confirm.txt"
+                )),
+                "Enter",
+            ),
+        ];
+        for (screen, key) in cases {
+            assert!(!screen.contains("Accessing workspace:"), "{screen}");
+            assert!(screen.contains("No, continue without these\n"), "{screen}");
+            assert_eq!(startup_dialog_key(Trust, &screen), Some(key), "{screen}");
         }
     }
 

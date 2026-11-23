@@ -77,7 +77,8 @@ impl ApiClaudeStartupDialog {
     /// The dialog Claude shows on `screen` (a pane's visible text), if any.
     pub fn detect(screen: &str) -> Option<Self> {
         [Self::Trust, Self::Channels].into_iter().find(|dialog| {
-            (screen.contains(dialog.marker()) && screen.contains(dialog.confirm_label()))
+            (screen.contains(dialog.marker())
+                && screen.lines().any(|line| dialog.is_confirm_option(line)))
                 || dialog.options_on_screen(screen)
         })
     }
