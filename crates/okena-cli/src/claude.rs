@@ -681,9 +681,7 @@ fn startup_dialog_key(dialog: ApiClaudeStartupDialog, screen: &str) -> Option<&'
     let selected = lines
         .iter()
         .position(|line| line.trim_start().starts_with('❯'));
-    let confirm = lines
-        .iter()
-        .position(|line| line.contains(dialog.confirm_label()));
+    let confirm = lines.iter().position(|line| dialog.is_confirm_option(line));
     match (selected, confirm) {
         (Some(selected), Some(confirm)) if confirm < selected => Some("ArrowUp"),
         _ => Some("ArrowDown"),
@@ -1295,6 +1293,122 @@ mod tests {
         assert_eq!(startup_dialog_key(Channels, on_confirm), Some("Enter"));
         let on_exit = "    1. I am using this for local development\n  ❯ 2. Exit";
         assert_eq!(startup_dialog_key(Channels, on_exit), Some("ArrowUp"));
+    }
+
+    /// The Channels dialog in a 40-column pane, its confirming option cut
+    /// short with `…`, the selection on Exit. Written by hand: Claude Code
+    /// 2.1.330 wraps the label instead (the captured fixtures below).
+    const CHANNELS_40_COLUMNS_ON_EXIT: &str = "\
+  WARNING: Loading development
+  channels
+
+  Channels: server:okena-remote
+
+    1. I am using this for local dev…
+  ❯ 2. Exit
+
+  Enter to confirm · Esc to cancel";
+
+    #[test]
+    fn startup_dialog_key_answers_a_truncated_channels_option_in_a_40_column_pane() {
+        use ApiClaudeStartupDialog::Channels;
+        let fits = |screen: &str| screen.lines().all(|line| line.chars().count() <= 40);
+        assert!(fits(CHANNELS_40_COLUMNS_ON_EXIT));
+        assert_eq!(
+            startup_dialog_key(Channels, CHANNELS_40_COLUMNS_ON_EXIT),
+            Some("ArrowUp")
+        );
+        let on_confirm = CHANNELS_40_COLUMNS_ON_EXIT
+            .replace("    1. I am", "  ❯ 1. I am")
+            .replace("  ❯ 2. Exit", "    2. Exit");
+        assert!(fits(&on_confirm));
+        assert_eq!(startup_dialog_key(Channels, &on_confirm), Some("Enter"));
+    }
+
+    #[test]
+    fn startup_dialog_key_answers_dialogs_wrapped_by_a_narrow_pane() {
+        // Screens of Claude Code 2.1.330 captured in a tmux pane of that width;
+        // it wraps an option too wide for the pane onto the next line.
+        use ApiClaudeStartupDialog::{Channels, Trust};
+        let cases = [
+            (
+                Channels,
+                include_str!("../tests/fixtures/claude-startup/channels-40-cols-exit.txt"),
+                "ArrowUp",
+            ),
+            (
+                Channels,
+                include_str!("../tests/fixtures/claude-startup/channels-40-cols-confirm.txt"),
+                "Enter",
+            ),
+            (
+                Channels,
+                include_str!("../tests/fixtures/claude-startup/channels-30-cols-exit.txt"),
+                "ArrowUp",
+            ),
+            (
+                Channels,
+                include_str!("../tests/fixtures/claude-startup/channels-30-cols-confirm.txt"),
+                "Enter",
+            ),
+            (
+                Trust,
+                include_str!("../tests/fixtures/claude-startup/trust-40-cols-cancel.txt"),
+                "ArrowDown",
+            ),
+            (
+                Trust,
+                include_str!("../tests/fixtures/claude-startup/trust-40-cols-confirm.txt"),
+                "Enter",
+            ),
+            (
+                Trust,
+                include_str!("../tests/fixtures/claude-startup/trust-30-cols-cancel.txt"),
+                "ArrowDown",
+            ),
+            (
+                Trust,
+                include_str!("../tests/fixtures/claude-startup/trust-30-cols-confirm.txt"),
+                "Enter",
+            ),
+        ];
+        for (dialog, screen, key) in cases {
+            assert_eq!(
+                ApiClaudeStartupDialog::detect(screen),
+                Some(dialog),
+                "{screen}"
+            );
+            assert_eq!(startup_dialog_key(dialog, screen), Some(key), "{screen}");
+        }
+    }
+
+    #[test]
+    fn startup_dialog_key_answers_a_wrapped_trust_dialog_without_its_title() {
+        use ApiClaudeStartupDialog::Trust;
+        // A short pane: only the wrapped options and the hint stay visible.
+        let bottom = |screen: &'static str| {
+            let lines: Vec<&str> = screen.lines().collect();
+            lines[lines.len() - 6..].join("\n")
+        };
+        let cases = [
+            (
+                bottom(include_str!(
+                    "../tests/fixtures/claude-startup/trust-40-cols-cancel.txt"
+                )),
+                "ArrowDown",
+            ),
+            (
+                bottom(include_str!(
+                    "../tests/fixtures/claude-startup/trust-40-cols-confirm.txt"
+                )),
+                "Enter",
+            ),
+        ];
+        for (screen, key) in cases {
+            assert!(!screen.contains("Accessing workspace:"), "{screen}");
+            assert!(screen.contains("No, continue without these\n"), "{screen}");
+            assert_eq!(startup_dialog_key(Trust, &screen), Some(key), "{screen}");
+        }
     }
 
     #[test]

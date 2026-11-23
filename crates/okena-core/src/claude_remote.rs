@@ -60,21 +60,25 @@ pub enum ApiClaudeStartupDialog {
     Channels,
 }
 
-/// Whether `line` is the option `label`, whole or cut short with `…`, as Claude
-/// Code truncates a label too wide for the pane.
+/// Whether `line` is the option `label`, whole or only its start: Claude Code
+/// wraps a label too wide for the pane onto the next line, or cuts it with `…`.
+/// A start under ten characters is too short to tell the label apart.
 fn shows_option(line: &str, label: &str) -> bool {
-    line == label
-        || line
-            .strip_suffix('…')
-            .map(str::trim_end)
-            .is_some_and(|cut| cut.len() >= 10 && label.starts_with(cut))
+    let start = line.strip_suffix('…').map_or(line, str::trim_end);
+    line == label || (start.len() >= 10 && label.starts_with(start))
+}
+
+/// A screen line without its indent and the `❯` selection marker.
+fn option_text(line: &str) -> &str {
+    line.trim().trim_start_matches('❯').trim_start()
 }
 
 impl ApiClaudeStartupDialog {
     /// The dialog Claude shows on `screen` (a pane's visible text), if any.
     pub fn detect(screen: &str) -> Option<Self> {
         [Self::Trust, Self::Channels].into_iter().find(|dialog| {
-            (screen.contains(dialog.marker()) && screen.contains(dialog.confirm_label()))
+            (screen.contains(dialog.marker())
+                && screen.lines().any(|line| dialog.is_confirm_option(line)))
                 || dialog.options_on_screen(screen)
         })
     }
@@ -90,12 +94,9 @@ impl ApiClaudeStartupDialog {
                 &["Yes, I trust this folder"],
                 &["No, exit", "No, continue without these permissions"],
             ],
-            Self::Channels => &[&["1. I am using this for local development"], &["2. Exit"]],
+            Self::Channels => &[&[Self::Channels.confirm_label()], &["2. Exit"]],
         };
-        let lines: Vec<&str> = screen
-            .lines()
-            .map(|line| line.trim().trim_start_matches('❯').trim_start())
-            .collect();
+        let lines: Vec<&str> = screen.lines().map(option_text).collect();
         options.iter().all(|spellings| {
             spellings
                 .iter()
@@ -103,21 +104,25 @@ impl ApiClaudeStartupDialog {
         })
     }
 
-    /// The option that accepts the dialog.
-    pub fn confirm_label(self) -> &'static str {
+    /// The option that accepts the dialog, as Claude prints it.
+    fn confirm_label(self) -> &'static str {
         match self {
             Self::Trust => "Yes, I trust this folder",
-            Self::Channels => "I am using this for local development",
+            Self::Channels => "1. I am using this for local development",
         }
+    }
+
+    /// Whether the screen `line` is the confirming option, selected or not,
+    /// whole or cut short by a narrow pane.
+    pub fn is_confirm_option(self, line: &str) -> bool {
+        shows_option(option_text(line), self.confirm_label())
     }
 
     /// Whether the confirming option is the selected one (`❯` before it).
     pub fn confirm_selected(self, screen: &str) -> bool {
-        screen.lines().any(|line| {
-            line.trim_start()
-                .strip_prefix('❯')
-                .is_some_and(|rest| rest.contains(self.confirm_label()))
-        })
+        screen
+            .lines()
+            .any(|line| line.trim_start().starts_with('❯') && self.is_confirm_option(line))
     }
 
     fn marker(self) -> &'static str {
@@ -444,9 +449,30 @@ mod tests {
             ApiClaudeStartupDialog::detect(narrow),
             Some(ApiClaudeStartupDialog::Trust)
         );
+        let channels = "  ❯ 1. I am using this for local dev…\n    2. Exit";
+        assert_eq!(
+            ApiClaudeStartupDialog::detect(channels),
+            Some(ApiClaudeStartupDialog::Channels)
+        );
+        assert!(ApiClaudeStartupDialog::Channels.confirm_selected(channels));
         // A cut too short to tell the label apart does not.
         assert_eq!(
             ApiClaudeStartupDialog::detect(" ❯ No…\n   Yes, I trust this folder"),
+            None
+        );
+    }
+
+    #[test]
+    fn a_label_wrapped_by_a_narrow_pane_counts_by_its_first_line() {
+        let channels = "  ❯ 1. I am using this for\n       local development\n    2. Exit";
+        assert_eq!(
+            ApiClaudeStartupDialog::detect(channels),
+            Some(ApiClaudeStartupDialog::Channels)
+        );
+        assert!(ApiClaudeStartupDialog::Channels.confirm_selected(channels));
+        // A first line too short to tell the label apart does not.
+        assert_eq!(
+            ApiClaudeStartupDialog::detect(" ❯ No, cont\n   inue\n   Yes, I trust this folder"),
             None
         );
     }
