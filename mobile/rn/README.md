@@ -55,7 +55,7 @@ beta uses `cz.mangoweb.okena` (matching its TestFlight build); pass it as the wo
 `application_id` input, or locally as `OKENA_APPLICATION_ID`.
 
 The **Android beta** workflow (`.github/workflows/android.yml`) builds unsigned validation
-artifacts on relevant pushes to branches and on PRs. Relevant pushes to `main` build signed
+artifacts on relevant PRs. Relevant pushes to `main` build signed
 test artifacts: version code `1000 + run number`, application ID from the
 `ANDROID_APPLICATION_ID` repository variable (default `com.contember.okena`). Merge the
 workflow into the default branch before its manual dispatch is available in GitHub Actions.
@@ -64,7 +64,7 @@ a `version_code` greater than every previous Play upload and automatic `main` bu
 Download the artifact named `okena-android-signed-<application_id>-<version_code>`.
 CI cross-compiles Rust, generates the native module, builds the AAB/APK, runs Android lint,
 verifies 16 KB ELF/APK alignment, and checks the AAB signature. TypeScript, lint and Jest run
-in the `mobile-rn` job of `.github/workflows/build.yml` on every push.
+in the `mobile-rn` job of `.github/workflows/build.yml` on PRs and pushes to `main`.
 
 Configure these repository secrets before requesting a signed build:
 
@@ -144,8 +144,8 @@ Bundle ID: `com.contember.okena`. Display name: Okena. Version: 0.1.0.
 The bundle ID is permanent after the first App Store Connect upload.
 
 The **iOS beta** workflow (`.github/workflows/ios.yml`) builds an unsigned release archive
-on relevant pushes/PRs. It cross-compiles Rust for `aarch64-apple-ios`, generates the native
-module, installs pods, archives, and checks the bundle ID, version, JS bundle, fonts, and
+on relevant PRs and pushes to `main`. It cross-compiles Rust for `aarch64-apple-ios`,
+generates the native module, installs pods, archives, and checks the bundle ID, version, JS bundle, fonts, and
 privacy manifest in the archive.
 
 For a TestFlight build, run the workflow manually on the branch to release, enable `upload`,
