@@ -2208,14 +2208,19 @@ pub fn cli_update_install(restart: bool, json_mode: bool) -> i32 {
     let mut unreachable_for = std::time::Duration::ZERO;
     let version = loop {
         match &snapshot.status {
-            UpdateStatus::ReadyToRestart { version, .. } => {
+            UpdateStatus::ReadyToRestart {
+                version, revert, ..
+            } => {
+                // A daemon that predates the `revert` flag only shows an older semver.
                 let staged = okena_ext_updater::checker::parse_release_version(version);
                 let current = okena_ext_updater::checker::parse_release_version(&current_version);
-                if let (Some(staged), Some(current)) = (staged, current)
-                    && staged < current
-                {
+                let older = staged
+                    .zip(current)
+                    .is_some_and(|(staged, current)| staged < current);
+                if *revert || older {
                     eprintln!(
-                        "A revert to v{version} is installed and waiting for a restart; `update install` does not restart into an older version."
+                        "A revert to {} is installed and waiting for a restart; `update install` does not restart into an older version.",
+                        update_version_label(version)
                     );
                     return 1;
                 }

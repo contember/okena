@@ -92,7 +92,7 @@ pub async fn install_claimed(
     path: PathBuf,
     restore_config: bool,
 ) {
-    let result = install(&info, &version, &path, restore_config).await;
+    let result = install(&info, &version, &path, restore_config, false).await;
     crate::downloader::discard_download(&path);
     if let Err(error) = result {
         fail(&info, reservation.token(), error);
@@ -104,6 +104,7 @@ async fn install(
     version: &str,
     path: &Path,
     restore_config: bool,
+    revert: bool,
 ) -> anyhow::Result<()> {
     let config_restore = if restore_config {
         let paths = okena_core::profiles::current();
@@ -124,6 +125,7 @@ async fn install(
     info.set_status(UpdateStatus::ReadyToRestart {
         version: version.to_owned(),
         config_restore,
+        revert,
     });
     Ok(())
 }
@@ -158,7 +160,7 @@ async fn run_revert_inner(
         crate::checker::release_for_revert(info.app_version(), version.to_owned(), channel).await?;
     let path = download(info, token, release).await?;
     let result = match info.begin_revert_install(token, version.to_owned()) {
-        Ok(()) => install(info, version, &path, restore_config).await,
+        Ok(()) => install(info, version, &path, restore_config, true).await,
         Err(error) => Err(error),
     };
     crate::downloader::discard_download(&path);

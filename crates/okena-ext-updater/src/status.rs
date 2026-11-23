@@ -43,6 +43,9 @@ pub enum UpdateStatus {
         version: String,
         #[serde(default)]
         config_restore: Option<okena_core::profiles::ConfigSnapshot>,
+        /// Installed from the version history rather than as the channel's update.
+        #[serde(default)]
+        revert: bool,
     },
     BrewUpdate {
         version: String,
@@ -982,6 +985,7 @@ mod tests {
         info.set_status(UpdateStatus::ReadyToRestart {
             version: "0.2.0".into(),
             config_restore: None,
+            revert: false,
         });
         drop(install);
         assert!(info.change_channel(super::UpdateChannel::Nightly).is_err());
@@ -1027,6 +1031,7 @@ mod tests {
         first.set_status(UpdateStatus::ReadyToRestart {
             version: "0.2.0".into(),
             config_restore: None,
+            revert: false,
         });
         drop(install);
         assert!(
@@ -1137,6 +1142,7 @@ mod tests {
         info.set_status(UpdateStatus::ReadyToRestart {
             version: "0.2.0".to_string(),
             config_restore: None,
+            revert: false,
         });
         drop(reservation);
         assert!(
@@ -1223,6 +1229,7 @@ mod tests {
         info.set_status(UpdateStatus::ReadyToRestart {
             version: "0.2.0".to_string(),
             config_restore: None,
+            revert: false,
         });
         assert!(info.has_staged_update());
         info.set_status(UpdateStatus::Idle);

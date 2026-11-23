@@ -206,6 +206,7 @@ impl UpdaterSettingsView {
             UpdateStatus::ReadyToRestart {
                 version,
                 config_restore,
+                ..
             } => {
                 let config = config_restore
                     .map(|snapshot| format!(" · config from {}", snapshot.created_at))
