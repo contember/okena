@@ -130,9 +130,15 @@ pub async fn check_for_package_update(app_version: &str) -> Result<Option<Versio
     let app_version = app_version.to_owned();
     smol::unblock(move || {
         let release = fetch_latest_stable(&app_version)?;
-        stable_offer(&release, &app_version, false)
+        package_offer(&release, &app_version)
     })
     .await
+}
+
+/// The cask installs this platform's archive, so a release without one is not an update yet.
+fn package_offer(release: &serde_json::Value, app_version: &str) -> Result<Option<Version>> {
+    let has_archive = platform_asset(release)?.1.is_some();
+    Ok(stable_offer(release, app_version, false)?.filter(|_| has_archive))
 }
 
 /// List published versions available for manual installation in the selected channel.
@@ -1050,6 +1056,17 @@ mod tests {
                 "0.42.0"
             );
         }
+    }
+
+    #[test]
+    fn package_updates_wait_for_this_platforms_archive() {
+        let without_archive = release("0.43.0", false, false, false);
+        assert!(package_offer(&without_archive, "0.42.0").unwrap().is_none());
+        let with_archive = release("0.43.0", false, false, true);
+        assert_eq!(
+            package_offer(&with_archive, "0.42.0").unwrap(),
+            Some(Version::new(0, 43, 0))
+        );
     }
 
     #[test]
