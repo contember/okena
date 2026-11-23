@@ -2129,7 +2129,10 @@ pub fn cli_update_status(json_mode: bool) -> i32 {
             } else {
                 println!(
                     "{}\t{}",
-                    snapshot.running_version.as_deref().unwrap_or(&snapshot.app_version),
+                    snapshot
+                        .running_version
+                        .as_deref()
+                        .unwrap_or(&snapshot.app_version),
                     update_status_label(&snapshot.status)
                 );
             }
@@ -2490,7 +2493,9 @@ pub fn cli_update_revert(
                         return 1;
                     }
                     okena_ext_updater::UpdateStatus::Idle => {
-                        eprintln!("Version revert was cancelled. Check the selected update channel before retrying.");
+                        eprintln!(
+                            "Version revert was cancelled. Check the selected update channel before retrying."
+                        );
                         return 1;
                     }
                     status => {

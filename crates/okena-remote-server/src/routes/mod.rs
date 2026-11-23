@@ -887,7 +887,9 @@ mod tests {
         let mut router = test_router(Arc::new(AuthStore::with_secret(vec![7u8; 32])));
         let mut request = axum::http::Request::post("/v1/update/revert")
             .header("content-type", "application/json")
-            .body(Body::from(r#"{"version":"nightly-20261121-292fa56","keep_config":true}"#))
+            .body(Body::from(
+                r#"{"version":"nightly-20261121-292fa56","keep_config":true}"#,
+            ))
             .unwrap();
         request.extensions_mut().insert(PeerInfo::Local);
         let response = router.call(request).await.unwrap();

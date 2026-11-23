@@ -1462,11 +1462,13 @@ impl Render for WindowView {
                     overlay_manager.update(cx, |om, cx| om.toggle_settings_panel(endpoint, cx));
                 }
             }))
-            .on_action(cx.listener(|this, _: &okena_ext_updater::OpenUpdateSettings, _window, cx| {
-                let endpoint = this.local_daemon_endpoint(cx);
-                this.overlay_manager
-                    .update(cx, |om, cx| om.show_update_settings(endpoint, cx));
-            }))
+            .on_action(cx.listener(
+                |this, _: &okena_ext_updater::OpenUpdateSettings, _window, cx| {
+                    let endpoint = this.local_daemon_endpoint(cx);
+                    this.overlay_manager
+                        .update(cx, |om, cx| om.show_update_settings(endpoint, cx));
+                },
+            ))
             // Handle show hook log action
             .on_action(cx.listener({
                 let overlay_manager = overlay_manager.clone();
