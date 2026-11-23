@@ -568,6 +568,7 @@ pub fn migrate_legacy_layout_if_needed(paths: &ProfilePaths) -> Result<()> {
     eprintln!("Migrating legacy Okena state into profile 'default'…");
     std::fs::create_dir_all(dst)?;
 
+    #[cfg(unix)]
     const SENSITIVE: &[&str] = &["remote_secret", "remote_tokens.json", "pair_code"];
 
     for name in &candidates {

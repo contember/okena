@@ -526,7 +526,7 @@ fn nightly_catalog(
     // the release list and four 15-second asset requests on the slowest
     // worker while staying within the client's 90-second history timeout.
     let chunk_size = candidates.len().div_ceil(NIGHTLY_HISTORY_WORKERS).max(1);
-    let checked = std::thread::scope(|scope| {
+    let batches = std::thread::scope(|scope| {
         let workers: Vec<_> = candidates
             .chunks(chunk_size)
             .map(|chunk| {
@@ -549,18 +549,21 @@ fn nightly_catalog(
             .collect();
         workers
             .into_iter()
-            .flat_map(|worker| worker.join().expect("nightly history worker panicked"))
+            .map(|worker| worker.join())
             .collect::<Vec<_>>()
     });
     let mut rows = Vec::new();
     let mut first_error = None;
-    for (release, result) in checked {
-        match result {
-            Ok(Some(order)) => rows.push((order, release)),
-            Ok(None) => {}
-            Err(error) => {
-                log::warn!("Nightly history skipped {}: {error}", release.tag);
-                first_error.get_or_insert(error);
+    for batch in batches {
+        let checked = batch.map_err(|_| anyhow::anyhow!("nightly history worker panicked"))?;
+        for (release, result) in checked {
+            match result {
+                Ok(Some(order)) => rows.push((order, release)),
+                Ok(None) => {}
+                Err(error) => {
+                    log::warn!("Nightly history skipped {}: {error}", release.tag);
+                    first_error.get_or_insert(error);
+                }
             }
         }
     }
@@ -1403,6 +1406,16 @@ mod tests {
             )
             .is_ok()
         );
+    }
+
+    #[test]
+    fn nightly_history_reports_worker_panics_as_a_catalog_error() {
+        let releases = [
+            nightly_fixture("1111111", 19).0,
+            nightly_fixture("2222222", 20).0,
+        ];
+        let error = nightly_catalog(&releases, None, &|_| panic!("test worker panic")).unwrap_err();
+        assert_eq!(error.to_string(), "nightly history worker panicked");
     }
 
     #[test]
