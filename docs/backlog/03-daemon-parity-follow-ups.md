@@ -13,7 +13,8 @@ the archived [migration record](../archive/headless-migration.md)).
 ## Problem
 
 The migration's own follow-up list was written at the end of Phase D and never
-re-checked against HEAD. Re-verified 2026-08-21 — status per item below.
+re-checked against HEAD. Re-verified 2026-08-21 (item 2: 2026-11-23) — status
+per item below.
 
 ### Still open (verified at HEAD)
 
@@ -25,8 +26,8 @@ re-checked against HEAD. Re-verified 2026-08-21 — status per item below.
    `sidebar_open: None`). Decide client-side persistence vs. a daemon round-trip.
 
 2. **Terminal scrollback on (re)attach — partly done** (okena#330, re-verified
-   2026-11-23). Since okena#363 every owned snapshot replays the newest 200
-   lines of history to every WS client (`SNAPSHOT_HISTORY_LINES` in
+   2026-11-23). Since okena#363 every owned snapshot replays up to the newest
+   200 lines of history to every WS client (`SNAPSHOT_HISTORY_LINES` in
    `crates/okena-terminal/src/terminal/ansi_snapshot.rs`). Left:
    - no opt-out: `WsInbound::Subscribe` has no field to skip the history
      (`deny_unknown_fields`), so every snapshot carries it;
@@ -55,12 +56,15 @@ re-checked against HEAD. Re-verified 2026-08-21 — status per item below.
 Each item is independent — take it in a run-capable session. Acceptance is
 behavioural: restart the client and see the sidebar/filter come back (1);
 reconnect to a live daemon session and see terminal history (2; done for the
-primary screen — what is left is a client that skips the history, and history
-for a pane attached while on the alternate screen).
+primary screen: okena#363 measured it live with the mobile engine, unit tests
+cover the snapshot, desktop and web are not checked live. Left: a client that
+skips the history, and history for a pane attached while on the alternate
+screen).
 
 ## Touch points
 
 - `crates/okena-daemon-core/src/{command_loop,daemon}.rs`
 - `crates/okena-workspace/src/claude_env.rs`
 - `crates/okena-core/src/{api,ws}.rs`
+- `crates/okena-terminal/src/terminal/ansi_snapshot.rs`, `crates/okena-remote-server/src/routes/stream.rs` (item 2)
 - `crates/okena-app/src/views/window/` (client-side presentation state)
