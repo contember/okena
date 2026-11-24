@@ -2397,6 +2397,11 @@ impl OverlayManager {
                         line: *line,
                         column: *column,
                     });
+                    // Close through the viewer's own `Close` event so a
+                    // detached window closes as well as the modal.
+                    if crate::settings::settings(cx).close_file_viewer_on_open_externally {
+                        emitter.update(cx, |_, cx| cx.emit(FileViewerEvent::Close));
+                    }
                 }
             },
         )

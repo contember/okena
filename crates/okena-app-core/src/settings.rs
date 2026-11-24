@@ -238,6 +238,11 @@ impl SettingsState {
     );
     setting_setter!(set_terminal_option_as_meta, terminal_option_as_meta, bool);
     setting_setter!(set_blame_visible, blame_visible, bool);
+    setting_setter!(
+        set_close_file_viewer_on_open_externally,
+        close_file_viewer_on_open_externally,
+        bool
+    );
 
     /// Master switch for native desktop notifications (opt-in).
     pub fn set_notifications_enabled(&mut self, value: bool, cx: &mut Context<Self>) {

@@ -296,6 +296,11 @@ impl ProjectInspector {
                     line: *line,
                     column: *column,
                 });
+                // Same path as the viewer's close button: the host closes the
+                // modal, a detached window closes itself.
+                if crate::settings::settings(cx).close_file_viewer_on_open_externally {
+                    cx.emit(ProjectInspectorEvent::Close);
+                }
             }
         })
         .detach();

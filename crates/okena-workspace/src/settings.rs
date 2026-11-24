@@ -662,6 +662,11 @@ pub struct AppSettings {
     #[serde(default = "default_file_opener")]
     pub file_opener: String,
 
+    /// Close the file viewer (modal or detached window) after its
+    /// "Open externally" button hands the file to the editor. Default: false.
+    #[serde(default)]
+    pub close_file_viewer_on_open_externally: bool,
+
     /// Global lifecycle hooks (can be overridden per-project)
     #[serde(default)]
     pub hooks: HooksConfig,
@@ -864,6 +869,7 @@ impl Default for AppSettings {
             claude_remote_channel: true,
             ai_proxy_enabled: false,
             file_opener: default_file_opener(),
+            close_file_viewer_on_open_externally: false,
             hooks: HooksConfig::default(),
             diff_view_mode: DiffViewMode::default(),
             remote_server_enabled: false,
@@ -1698,6 +1704,19 @@ mod tests {
         let loaded: AppSettings =
             serde_json::from_str(r#"{"hide_projects_without_terminals":true}"#).unwrap();
         assert!(loaded.hide_projects_without_terminals);
+    }
+
+    #[test]
+    fn closing_file_viewer_on_open_externally_is_opt_in() {
+        assert!(!AppSettings::default().close_file_viewer_on_open_externally);
+
+        // Older settings files have no key for it.
+        let loaded: AppSettings = serde_json::from_str("{}").unwrap();
+        assert!(!loaded.close_file_viewer_on_open_externally);
+
+        let loaded: AppSettings =
+            serde_json::from_str(r#"{"close_file_viewer_on_open_externally":true}"#).unwrap();
+        assert!(loaded.close_file_viewer_on_open_externally);
     }
 
     #[test]

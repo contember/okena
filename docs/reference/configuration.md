@@ -110,6 +110,7 @@ If the file contains invalid JSON, Okena recovers as many fields as possible and
   "session_backend": "Auto",
   "auto_resume_agent_sessions": false,
   "file_opener": "",
+  "close_file_viewer_on_open_externally": false,
   "show_focused_border": false,
   "sidebar": {
     "is_open": false,
@@ -220,6 +221,7 @@ If the file contains invalid JSON, Okena recovers as many fields as possible and
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `file_opener` | string | `""` | Editor command for opening file paths (e.g. `"code"`, `"cursor"`, `"zed"`, `"vim"`). Empty = system default |
+| `close_file_viewer_on_open_externally` | bool | `false` | Close the file viewer (modal or detached window) after its "Open externally" button hands the file to the editor |
 
 #### Diff Viewer
 
