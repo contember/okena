@@ -407,6 +407,19 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_settings_patch_cannot_raise_scrollback_past_the_cap() {
+        let patched = preview_settings_patch(
+            &AppSettings::default(),
+            json!({"scrollback_lines": 100_000}),
+        )
+        .unwrap();
+        assert_eq!(
+            patched.scrollback_lines,
+            okena_terminal::terminal::MAX_SCROLLBACK_LINES
+        );
+    }
+
+    #[test]
     fn merge_json_deep_merges_objects() {
         let mut base = json!({
             "a": 1,

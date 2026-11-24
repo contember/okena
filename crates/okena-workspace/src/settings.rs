@@ -594,8 +594,11 @@ pub struct AppSettings {
     #[serde(default = "default_cursor_blink")]
     pub cursor_blink: bool,
     /// Number of scrollback lines (default: 10000, clamped to
-    /// `MIN_SCROLLBACK_LINES..=MAX_SCROLLBACK_LINES`)
-    #[serde(default = "default_scrollback_lines")]
+    /// `MIN_SCROLLBACK_LINES..=MAX_SCROLLBACK_LINES` on every parse)
+    #[serde(
+        default = "default_scrollback_lines",
+        deserialize_with = "deserialize_scrollback_lines"
+    )]
     pub scrollback_lines: u32,
     /// Grace period, in seconds, before a *busy* terminal (one with a running
     /// foreground process) is actually killed when closed. During this window
@@ -965,6 +968,14 @@ fn default_scrollback_lines() -> u32 {
     10000
 }
 
+/// Bounds the value wherever settings enter: the settings file, a settings
+/// patch from a client or the CLI, and the daemon's snapshot on a client.
+fn deserialize_scrollback_lines<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<u32, D::Error> {
+    Ok(u32::deserialize(deserializer)?.clamp(MIN_SCROLLBACK_LINES, MAX_SCROLLBACK_LINES))
+}
+
 fn default_terminal_close_grace_secs() -> u32 {
     5
 }
@@ -1125,9 +1136,6 @@ fn clamp_settings(settings: &mut AppSettings) {
     settings.ui_font_size = settings.ui_font_size.clamp(8.0, 24.0);
     settings.file_font_size = settings.file_font_size.clamp(8.0, 24.0);
     settings.file_line_height = settings.file_line_height.clamp(1.0, 3.0);
-    settings.scrollback_lines = settings
-        .scrollback_lines
-        .clamp(MIN_SCROLLBACK_LINES, MAX_SCROLLBACK_LINES);
     // 0 = disabled; otherwise cap the grace window at a sane upper bound.
     settings.terminal_close_grace_secs = settings.terminal_close_grace_secs.min(60);
 }
@@ -1756,6 +1764,16 @@ mod tests {
         // "hidden project" state the client uses to free a mirror's history.
         let recovered = recover_settings_from_json(r#"{"scrollback_lines": 10}"#).unwrap();
         assert_eq!(recovered.scrollback_lines, MIN_SCROLLBACK_LINES);
+    }
+
+    #[test]
+    fn a_valid_settings_file_is_clamped_on_the_direct_parse() {
+        // The direct parse in `load_settings` and a client's settings patch
+        // never reach `recover_settings_from_json`; the field clamps itself.
+        let parsed: AppSettings = serde_json::from_str(r#"{"scrollback_lines": 100000}"#).unwrap();
+        assert_eq!(parsed.scrollback_lines, MAX_SCROLLBACK_LINES);
+        let parsed: AppSettings = serde_json::from_str(r#"{"scrollback_lines": 10}"#).unwrap();
+        assert_eq!(parsed.scrollback_lines, MIN_SCROLLBACK_LINES);
     }
 
     #[test]

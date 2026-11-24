@@ -26,7 +26,7 @@ fn scrollback_cost(lines: u32, open_terminals: usize) -> String {
         "terminals"
     };
     format!(
-        "Memory once full: {} per {SCROLLBACK_COST_COLUMNS}-column terminal, {} for the {open_terminals} open {noun}",
+        "Daemon memory once full: {} per {SCROLLBACK_COST_COLUMNS}-column terminal, {} for the {open_terminals} open {noun}",
         format_memory(per_terminal),
         format_memory(total),
     )
@@ -284,11 +284,11 @@ mod tests {
         // 10 000 lines x 200 columns x 24-byte cells.
         assert_eq!(
             scrollback_cost(10_000, 3),
-            "Memory once full: 46 MB per 200-column terminal, 137 MB for the 3 open terminals"
+            "Daemon memory once full: 46 MB per 200-column terminal, 137 MB for the 3 open terminals"
         );
         assert_eq!(
             scrollback_cost(10_000, 1),
-            "Memory once full: 46 MB per 200-column terminal, 46 MB for the 1 open terminal"
+            "Daemon memory once full: 46 MB per 200-column terminal, 46 MB for the 1 open terminal"
         );
     }
 }
