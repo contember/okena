@@ -35,7 +35,8 @@ impl Terminal {
     /// Access the whole history, grid and compressed archive, after draining
     /// pending output like [`Terminal::with_content`]. Right after a column
     /// change archived rows may still read clipped or padded; see
-    /// [`Terminal::with_settled_history`].
+    /// [`Terminal::with_settled_history`] and
+    /// [`Terminal::settle_scrolled_history`].
     pub fn with_history<R>(&self, f: impl FnOnce(&HistoryView<'_, ZedEventListener>) -> R) -> R {
         self.history_view(false, f)
     }
@@ -58,12 +59,27 @@ impl Terminal {
         self.drain_pending_output();
         let term = self.term.lock();
         let mut scrollback = self.scrollback.lock();
-        // A viewport showing archived rows shows them at the current width.
-        let settle = settle || scrollback.archive_offset > 0;
-        if scrollback.settle(&term, settle) {
+        if settle && scrollback.settle(&term, true) {
             self.content_generation.fetch_add(1, Ordering::Relaxed);
         }
         f(&HistoryView::new(&term, &scrollback))
+    }
+
+    /// For the renderer, before it reads the content generation: reflow the
+    /// archive once the columns have held for a moment while the viewport
+    /// shows archived rows. Returns `true` while that reflow still waits, so
+    /// the caller paints again.
+    pub fn settle_scrolled_history(&self) -> bool {
+        let term = self.term.lock();
+        let mut scrollback = self.scrollback.lock();
+        if scrollback.archive_offset == 0 || !scrollback.reflow_pending() {
+            return false;
+        }
+        if scrollback.settle(&term, false) {
+            self.content_generation.fetch_add(1, Ordering::Relaxed);
+            return false;
+        }
+        true
     }
 
     /// The visible screen as text: trailing blanks and empty last lines cut.

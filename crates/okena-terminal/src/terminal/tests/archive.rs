@@ -370,6 +370,10 @@ fn a_narrower_screen_reflows_archived_rows() {
     resize_cols(&terminal, 6);
     assert_eq!(grid_history(&terminal), LIVE);
     terminal.scroll_to(usize::MAX);
+    // A viewport in the archive reflows once the width has held.
+    assert!(terminal.settle_scrolled_history());
+    terminal.scrollback.lock().expire_reflow_wait();
+    assert!(!terminal.settle_scrolled_history());
     // `line 10` and up wrap onto a second row, as the grid's rows do.
     assert_eq!(
         visible_rows(&terminal),
@@ -394,6 +398,63 @@ fn archived_rows_read_whole_after_narrowing_and_widening_again() {
     );
     assert_eq!(terminal.search_grid("line 310", true, false).len(), 1);
     assert_eq!(terminal.history_text(), lines(0..=399));
+}
+
+#[test]
+fn a_resize_drag_does_not_reflow_the_archive_on_every_frame() {
+    let terminal = filled();
+    terminal.scroll_to(usize::MAX);
+    for cols in [19, 18, 17, 6] {
+        resize_cols(&terminal, cols);
+        // What a frame of the drag does.
+        assert!(terminal.settle_scrolled_history(), "{cols}");
+        visible_rows(&terminal);
+    }
+    assert!(terminal.scrollback.lock().reflow_pending());
+    // The grid reflowed on its own; archived `line 10`..`line 275` did not.
+    let rows = terminal.scroll_info().0;
+    terminal.scrollback.lock().expire_reflow_wait();
+    assert!(!terminal.settle_scrolled_history());
+    assert_eq!(terminal.scroll_info().0, rows + 266);
+}
+
+#[test]
+fn a_line_between_archive_and_grid_reflows_whole() {
+    // 50 distinct chars, so a row's text occurs once.
+    let long = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMN";
+    for cols in [12, 30] {
+        let terminal = terminal(1_000);
+        feed_lines(&terminal, 0..100);
+        terminal.process_output(format!("{long}\r\n").as_bytes());
+        // 19 history rows and 4 screen rows below the line: its first two
+        // rows are archived, its last is the grid's oldest.
+        feed_lines(&terminal, 100..123);
+        assert_eq!(
+            terminal.with_content(|term| term.grid()[term.grid().topmost_line()]
+                .into_iter()
+                .map(|cell| cell.c)
+                .collect::<String>()
+                .trim_end()
+                .to_owned()),
+            &long[40..]
+        );
+
+        resize_cols(&terminal, cols);
+        let expected = format!("{}\n{long}\n{}", lines(0..=99), lines(100..=122));
+        assert_eq!(terminal.history_text(), expected, "{cols}");
+        terminal.select_all();
+        assert_eq!(
+            terminal.get_selected_text().as_deref(),
+            Some(&*format!("{expected}\n")),
+            "{cols}"
+        );
+        // Search matches within a row; the row holding char 40, where the
+        // grid's part of the line began, reads whole.
+        let cols = usize::from(cols);
+        let start = 40 / cols * cols;
+        let row = &long[start..(start + cols).min(long.len())];
+        assert_eq!(terminal.search_grid(row, true, false).len(), 1, "{cols}");
+    }
 }
 
 #[test]

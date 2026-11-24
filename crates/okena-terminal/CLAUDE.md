@@ -39,11 +39,14 @@ write it to disk.
 - Selection: alacritty's `term.selection` mirrors the history selection while
   both ends are in the grid; once an end is archived, `history_selection.rs`
   (a port of alacritty's range and text rules) resolves it.
-- A column change reflows archived rows like alacritty's grid, but only once
-  the width holds for 300 ms (`Scrollback::settle`; a full archive takes tens
-  of ms). Until then rows read clipped or padded, except through
-  `with_settled_history` (copy, search, export, snapshots) and while the
-  viewport shows archived rows, which reflow at once.
+- A column change reflows archived rows like alacritty's grid, lazily: a full
+  archive takes tens of ms, too long for every frame of a resize drag. Reads
+  through `with_settled_history` (copy, search, export, snapshots) reflow at
+  once; a viewport showing archived rows reflows once the width has held for
+  300 ms (`Terminal::settle_scrolled_history`, called by the renderer). Until
+  then archived rows render clipped or padded. Before the columns change,
+  `complete_archived_line` moves the rest of a line the archive ends in from
+  the grid into the archive, so no line is split between the two reflows.
 - CSI 3 J (outside the alternate screen) and RIS clear the archive.
 
 ## OSC sequences (sidecar)

@@ -110,6 +110,20 @@ impl Scrollback {
         }
     }
 
+    /// Let a pending reflow count as settled, as if the columns had held for
+    /// [`REFLOW_SETTLE`].
+    #[cfg(test)]
+    pub(super) fn expire_reflow_wait(&mut self) {
+        if self.reflow_requested.is_some() {
+            self.reflow_requested = Instant::now().checked_sub(REFLOW_SETTLE);
+        }
+    }
+
+    /// A column change left archived rows laid out at another width.
+    pub(super) fn reflow_pending(&self) -> bool {
+        self.reflow_requested.is_some()
+    }
+
     /// Reflow the archive to the grid's width if a column change asked for it
     /// and the width has held for [`REFLOW_SETTLE`], or at once with `force`
     /// (a read that must see every row at the current width). Keeps a view
@@ -180,7 +194,6 @@ impl Scrollback {
     /// and every resize, so the grid never holds more than the live lines plus
     /// what one step pushed.
     pub(super) fn drain<L: EventListener>(&mut self, term: &mut Term<L>) {
-        self.settle(term, false);
         if term.mode().contains(TermMode::ALT_SCREEN) {
             return;
         }
@@ -211,6 +224,37 @@ impl Scrollback {
             // An end moved into the archive, where alacritty cannot follow.
             term.selection = None;
         }
+    }
+
+    /// Before a column change: when the archive ends in the middle of a line,
+    /// move the rest of it from the grid's history into the archive. alacritty
+    /// reflows only its grid, so a line split between the two would rewrap as
+    /// two lines.
+    pub(super) fn complete_archived_line<L: EventListener>(&mut self, term: &mut Term<L>) {
+        if term.mode().contains(TermMode::ALT_SCREEN) || !self.archive.newest_wraps() {
+            return;
+        }
+        let offset = self.display_offset(term);
+        let history = term.grid().history_size();
+        let mut moved = 0;
+        {
+            let grid = term.grid_mut();
+            while moved < history {
+                let row = &grid[Line(-((history - moved) as i32))];
+                self.archive.push(row);
+                moved += 1;
+                if !wraps(row) {
+                    break;
+                }
+            }
+            if moved == 0 {
+                return;
+            }
+            let limit = self.live_lines + self.archive.capacity();
+            grid.update_history(history - moved);
+            grid.update_history(limit);
+        }
+        self.set_display_offset(term, offset);
     }
 
     /// Drop the archived rows, as an erase of the saved lines does, and a

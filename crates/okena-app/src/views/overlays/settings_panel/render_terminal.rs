@@ -291,10 +291,11 @@ mod tests {
             scrollback_cost(10_000, 1),
             "Daemon memory once full: up to 11 MB per 200-column terminal, 11 MB for the 1 open terminal"
         );
-        // Under the live rows everything sits in the grid.
+        // Under the live rows everything sits in the grid, which allocates
+        // rows in chunks of 1 000.
         assert_eq!(
             scrollback_cost(500, 1),
-            "Daemon memory once full: up to 2 MB per 200-column terminal, 2 MB for the 1 open terminal"
+            "Daemon memory once full: up to 5 MB per 200-column terminal, 5 MB for the 1 open terminal"
         );
     }
 }

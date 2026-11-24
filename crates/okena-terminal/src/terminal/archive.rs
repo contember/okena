@@ -178,6 +178,19 @@ impl ScrollbackArchive {
         self.with_encoded(abs, |bytes| decode_row(bytes, Some(cols)))
     }
 
+    /// The newest archived row soft-wraps into the next one.
+    pub(super) fn newest_wraps(&self) -> bool {
+        let Some(newest) = self.end.checked_sub(1).filter(|abs| *abs >= self.front) else {
+            return false;
+        };
+        self.with_encoded(newest, |bytes| {
+            let row = decode_row(bytes, None);
+            let len = row.len();
+            len > 0 && row[Column(len - 1)].flags.contains(Flags::WRAPLINE)
+        })
+        .unwrap_or(false)
+    }
+
     /// Every row oldest first, each at the width it was archived with.
     pub(super) fn for_each_row(&self, mut f: impl FnMut(&Row<Cell>)) {
         for block in &self.blocks {

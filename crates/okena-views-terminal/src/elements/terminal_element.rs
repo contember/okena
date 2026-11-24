@@ -1541,6 +1541,10 @@ impl Element for TerminalElement {
             None => self.cursor_style,
         };
 
+        if self.terminal.settle_scrolled_history() {
+            // Archived rows on screen still wait to reflow to a new width.
+            window.request_animation_frame();
+        }
         let mut cache_key = TerminalRenderCacheKey {
             content_generation: self.terminal.content_generation(),
             selection,
