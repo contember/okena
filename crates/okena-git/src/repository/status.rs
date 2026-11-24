@@ -416,7 +416,7 @@ pub(crate) fn worktree_diff(path: &Path) -> Option<WorktreeDiff> {
         }
 
         let head_blob = head_blob_bytes(head_entry.as_ref());
-        let worktree_blob = std::fs::read(&full_path);
+        let worktree_blob = read_worktree_blob(&full_path);
         let (added, removed) = tracked_line_counts(
             head_blob.as_deref().unwrap_or_default(),
             worktree_blob.as_deref().unwrap_or_default(),
@@ -442,6 +442,27 @@ pub(crate) fn worktree_diff(path: &Path) -> Option<WorktreeDiff> {
     })
 }
 
+/// Worktree content of `path` as git sees it, without following symlinks.
+/// Git stores a symlink as its target path, so that is what a symlink yields:
+/// reading through a link to a device such as `/dev/full` never reaches EOF and
+/// grew the daemon until the OOM killer stopped it (#377). Other non-regular
+/// files (FIFOs, sockets, devices) have no content to diff, and opening a FIFO
+/// would block, so they are refused as `InvalidData`.
+fn read_worktree_blob(path: &Path) -> std::io::Result<Vec<u8>> {
+    let meta = std::fs::symlink_metadata(path)?;
+    if meta.file_type().is_symlink() {
+        let target = std::fs::read_link(path)?;
+        return Ok(gix::path::into_bstr(target).into_owned().into());
+    }
+    if !meta.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "not a regular file",
+        ));
+    }
+    std::fs::read(path)
+}
+
 /// Line count of an untracked file listed in [`WorktreeDiff::untracked`]
 /// (relative to `root`), each line counting as an addition. Unreadable or
 /// non-UTF-8 files count as zero. Memoized like tracked files, keyed by the
@@ -456,7 +477,10 @@ pub(crate) fn untracked_line_count(path: &Path, root: &Path, file: &str) -> usiz
         return lines;
     }
 
-    let read = std::fs::read_to_string(&full_path);
+    let read = read_worktree_blob(&full_path).and_then(|bytes| {
+        String::from_utf8(bytes)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+    });
     let lines = read
         .as_ref()
         .map(|content| content.lines().count())
@@ -497,16 +521,17 @@ fn get_diff_stats(path: &Path) -> Option<(usize, usize)> {
     Some((added, removed))
 }
 
-/// The regular-blob entry at `rela_path` in the HEAD tree. `None` when HEAD
-/// is unborn, the path isn't in HEAD (freshly added), or it isn't a regular
-/// blob (submodule/gitlink) — all of which diff as "no prior content".
+/// The blob entry at `rela_path` in the HEAD tree: a regular file or a symlink,
+/// whose blob is its target path. `None` when HEAD is unborn, the path isn't in
+/// HEAD (freshly added), or it is a submodule/gitlink — all of which diff as
+/// "no prior content".
 fn head_blob_entry<'repo>(
     head_tree: Option<&gix::Tree<'repo>>,
     rela_path: &gix::bstr::BStr,
 ) -> Option<gix::object::tree::Entry<'repo>> {
     let path = gix::path::from_bstr(rela_path);
     match head_tree?.lookup_entry_by_path(path.as_ref()) {
-        Ok(Some(entry)) if entry.mode().is_blob() => Some(entry),
+        Ok(Some(entry)) if entry.mode().is_blob_or_symlink() => Some(entry),
         _ => None,
     }
 }
@@ -663,6 +688,48 @@ mod tests {
     use super::*;
     use crate::repository::test_support::{git_in, init_temp_repo, repo_with_origin};
     use std::path::PathBuf;
+
+    /// Runs `f` on its own thread and fails the test if it does not finish in
+    /// time. A symlink to a device used to make the status walk read forever.
+    #[cfg(unix)]
+    fn within_seconds<T: Send + 'static>(secs: u64, f: impl FnOnce() -> T + Send + 'static) -> T {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(f());
+        });
+        rx.recv_timeout(std::time::Duration::from_secs(secs))
+            .expect("status walk did not finish: it read a device through a symlink")
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn worktree_diff_counts_a_retargeted_symlink_by_its_target_not_its_content() {
+        let (_tmp, repo) = init_temp_repo();
+        std::os::unix::fs::symlink("target-a", repo.join("link")).unwrap();
+        git_in(&repo, &["add", "link"]);
+        git_in(&repo, &["commit", "-m", "add link"]);
+        // Git stores a symlink as its target path, so a retarget is a one-line
+        // change. Reading through it would never reach EOF on /dev/zero.
+        std::fs::remove_file(repo.join("link")).unwrap();
+        std::os::unix::fs::symlink("/dev/zero", repo.join("link")).unwrap();
+
+        let path = repo.clone();
+        let diff = within_seconds(10, move || worktree_diff(&path)).expect("status walk");
+
+        assert_eq!(diff.tracked, vec![("link".to_string(), 1, 1)]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn untracked_symlink_to_a_device_counts_as_one_line() {
+        let (_tmp, repo) = init_temp_repo();
+        std::os::unix::fs::symlink("/dev/zero", repo.join("link")).unwrap();
+
+        let path = repo.clone();
+        let lines = within_seconds(10, move || untracked_line_count(&path, &path, "link"));
+
+        assert_eq!(lines, 1);
+    }
 
     #[test]
     fn get_status_returns_not_repo_for_non_git_path() {

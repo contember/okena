@@ -48,8 +48,9 @@ pub(super) struct Observed {
 
 /// Stat `path` for memoization. `None` when the stat failed for any reason
 /// other than absence; such files are still diffed, just never remembered.
+/// A symlink is stated itself, not its target: its diff is its target path.
 pub(super) fn observe(path: &Path, now: SystemTime) -> Option<Observed> {
-    let meta = match std::fs::metadata(path) {
+    let meta = match std::fs::symlink_metadata(path) {
         Ok(meta) => meta,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             return Some(Observed {
