@@ -105,10 +105,68 @@ fn terminal(id: &str) -> LayoutNode {
     node
 }
 
+fn start_page(id: &str) -> LayoutNode {
+    let mut node = LayoutNode::new_terminal();
+    if let LayoutNode::Terminal { start_page, .. } = &mut node {
+        *start_page = Some(okena_core::api::StartPage {
+            id: id.into(),
+            cwd: ".".into(),
+        });
+    }
+    node
+}
+
+fn test_layout(
+    cx: &mut TestAppContext,
+    workspace: Entity<Workspace>,
+    focus: Entity<FocusManager>,
+    window_id: WindowId,
+    actions: RecordedActions,
+) -> Entity<LayoutContainer<RecordedActions>> {
+    cx.new(|cx| {
+        let broker = cx.new(|_| RequestBroker::new());
+        let pane_move = cx.new(|_| PaneMoveState::default());
+        LayoutContainer::new(
+            workspace,
+            focus,
+            broker,
+            window_id,
+            "project".into(),
+            String::new(),
+            vec![],
+            Arc::new(NoBackend),
+            Default::default(),
+            Rc::new(RefCell::new(None)),
+            pane_move,
+            Some(actions),
+            |cx| cx.new(|_| gpui::Empty).into(),
+            cx,
+        )
+    })
+}
+
 fn header(
     cx: &mut TestAppContext,
     width: f32,
     show_shell: bool,
+) -> (
+    Entity<LayoutContainer<RecordedActions>>,
+    RecordedActions,
+    VisualTestContext,
+) {
+    header_with_children(
+        cx,
+        width,
+        show_shell,
+        vec![terminal("first"), terminal("second")],
+    )
+}
+
+fn header_with_children(
+    cx: &mut TestAppContext,
+    width: f32,
+    show_shell: bool,
+    children: Vec<LayoutNode>,
 ) -> (
     Entity<LayoutContainer<RecordedActions>>,
     RecordedActions,
@@ -131,34 +189,16 @@ fn header(
         ));
     });
     let actions = RecordedActions::default();
-    let container = cx.new(|cx| {
-        let workspace = cx.new(|_| Workspace::new(WorkspaceData::empty()));
-        let focus = cx.new(|_| FocusManager::new());
-        let broker = cx.new(|_| RequestBroker::new());
-        let pane_move = cx.new(|_| PaneMoveState::default());
-        LayoutContainer::new(
-            workspace,
-            focus,
-            broker,
-            WindowId::Main,
-            "project".into(),
-            String::new(),
-            vec![],
-            Arc::new(NoBackend),
-            Default::default(),
-            Rc::new(RefCell::new(None)),
-            pane_move,
-            Some(actions.clone()),
-            cx,
-        )
-    });
+    let workspace = cx.new(|_| Workspace::new(WorkspaceData::empty()));
+    let focus = cx.new(|_| FocusManager::new());
+    let container = test_layout(cx, workspace, focus, WindowId::Main, actions.clone());
     let window = cx.open_window(size(px(width), px(240.0)), {
         let container = container.clone();
         move |_, cx| {
             cx.observe(&container, |_, _, cx| cx.notify()).detach();
             Header {
                 container,
-                children: vec![terminal("first"), terminal("second")],
+                children,
             }
         }
     });
@@ -187,6 +227,133 @@ fn hover_actions_keep_active_target_until_a_tab_is_clicked(cx: &mut TestAppConte
         matches!(actions.0.lock().last(), Some(ActionRequest::CloseTerminal {terminal_id, ..}) if terminal_id == "second")
     );
     assert!(container.read_with(cx, |c, _| c.tab_rename_state.is_none()));
+}
+
+#[gpui::test]
+fn pending_tabs_keep_separate_close_targets(cx: &mut TestAppContext) {
+    let (container, actions, mut visual) = header_with_children(
+        cx,
+        400.,
+        true,
+        vec![start_page("first-page"), start_page("second-page")],
+    );
+
+    visual.simulate_mouse_move(point(px(10.0), px(220.0)), None, Default::default());
+    let second = visual.debug_bounds("hover-source-1").unwrap();
+    visual.simulate_mouse_move(second.center(), None, Default::default());
+    let close = visual.debug_bounds("close-btn-tabs-[]").unwrap();
+    visual.simulate_click(close.center(), Default::default());
+    assert!(
+        matches!(actions.0.lock().last(), Some(ActionRequest::CloseTerminal { terminal_id, .. }) if terminal_id == "first-page")
+    );
+
+    visual.simulate_click(second.center(), Default::default());
+    assert!(matches!(
+        actions.0.lock().last(),
+        Some(ActionRequest::SetActiveTab { index: 1, .. })
+    ));
+    container.update(cx, |_, cx| cx.notify());
+    visual.simulate_mouse_move(second.center(), None, Default::default());
+    let close = visual.debug_bounds("close-btn-tabs-[]").unwrap();
+    visual.simulate_click(close.center(), Default::default());
+    assert!(
+        matches!(actions.0.lock().last(), Some(ActionRequest::CloseTerminal { terminal_id, .. }) if terminal_id == "second-page")
+    );
+}
+
+#[gpui::test]
+fn pending_panes_navigate_and_launch_with_the_keyboard(cx: &mut TestAppContext) {
+    use crate::actions::FocusNextTerminal;
+    use crate::layout::navigation::get_pane_map;
+    use okena_core::shell::StartPageShell;
+    use okena_workspace::state::ProjectData;
+
+    struct LayoutRoot(Entity<LayoutContainer<RecordedActions>>);
+
+    impl Render for LayoutRoot {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().size_full().child(self.0.clone())
+        }
+    }
+
+    cx.update(|cx| {
+        cx.set_global(okena_ui::theme::GlobalThemeProvider(|_| {
+            okena_ui::theme::DARK_THEME
+        }));
+        cx.set_global(okena_extensions::ExtensionSettingsStore::new(
+            |key, _| {
+                (key == "start_page_buttons").then(|| {
+                    serde_json::json!([
+                        { "name": "Run tests", "command": "cargo test" }
+                    ])
+                })
+            },
+            |_, _, _| {},
+        ));
+        cx.bind_keys([gpui::KeyBinding::new(
+            "ctrl-tab",
+            FocusNextTerminal,
+            Some("TerminalPane"),
+        )]);
+    });
+
+    let layout = LayoutNode::Split {
+        direction: SplitDirection::Vertical,
+        sizes: vec![50.0, 50.0],
+        children: vec![start_page("first-page"), start_page("second-page")],
+    };
+    let project: ProjectData = serde_json::from_value(serde_json::json!({
+        "id": "project",
+        "name": "Keyboard fixture",
+        "path": ".",
+        "layout": layout,
+    }))
+    .unwrap();
+    let mut data = WorkspaceData::empty();
+    data.projects.push(project);
+
+    let window_id = WindowId::Extra("6ce8c733-ce96-4a31-8267-73ceaf957944".parse().unwrap());
+    let workspace = cx.new(|_| Workspace::new(data));
+    let focus = cx.new(|_| FocusManager::new());
+    focus.update(cx, |fm, cx| {
+        workspace.update(cx, |ws, cx| {
+            ws.set_focused_terminal(fm, "project".into(), vec![0], cx);
+        });
+    });
+    let actions = RecordedActions::default();
+    let container = test_layout(cx, workspace, focus.clone(), window_id, actions.clone());
+    let window = cx.open_window(size(px(700.0), px(280.0)), move |_, _| {
+        LayoutRoot(container)
+    });
+    let mut visual = VisualTestContext::from_window(window.into(), cx);
+    settle_frames(&mut visual);
+    let pane_map = get_pane_map(window_id);
+    assert!(pane_map.find_pane("project", &[0]).is_some());
+    assert!(pane_map.find_pane("project", &[1]).is_some());
+
+    visual.simulate_keystrokes("ctrl-tab");
+    assert!(focus.read_with(cx, |fm, _| fm.is_focused("project", &[1])));
+    visual.simulate_keystrokes("enter");
+    assert!(matches!(
+        actions.0.lock().last(),
+        Some(ActionRequest::LaunchStartPage {
+            page_id: Some(id), shell: StartPageShell::Default, command: None, ..
+        }) if id == "second-page"
+    ));
+
+    visual.simulate_keystrokes("tab");
+    settle_frames(&mut visual);
+    visual.simulate_keystrokes("tab");
+    settle_frames(&mut visual);
+    visual.simulate_keystrokes("enter");
+    visual.simulate_event(gpui::KeyUpEvent {
+        keystroke: gpui::Keystroke::parse("enter").unwrap(),
+    });
+    assert!(matches!(
+        actions.0.lock().last(),
+        Some(ActionRequest::LaunchStartPage { page_id: Some(id), command: Some(command), .. })
+            if id == "second-page" && command == "cargo test"
+    ));
 }
 
 #[gpui::test]

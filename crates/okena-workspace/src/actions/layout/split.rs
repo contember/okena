@@ -14,6 +14,26 @@ impl Workspace {
         direction: SplitDirection,
         cx: &mut impl WorkspaceCx,
     ) {
+        self.split_terminal_with_leaf(
+            focus_manager,
+            project_id,
+            path,
+            direction,
+            LayoutNode::new_terminal(),
+            cx,
+        );
+    }
+
+    pub fn split_terminal_with_leaf(
+        &mut self,
+        focus_manager: &mut FocusManager,
+        project_id: &str,
+        path: &[usize],
+        direction: SplitDirection,
+        leaf: LayoutNode,
+        cx: &mut impl WorkspaceCx,
+    ) {
+        let page_id = leaf.start_page().map(|page| page.id.clone());
         log::info!(
             "Workspace::split_terminal called for project {} at path {:?}",
             project_id,
@@ -51,12 +71,15 @@ impl Workspace {
                     *node = LayoutNode::Split {
                         direction,
                         sizes: vec![50.0, 50.0],
-                        children: vec![old_node, LayoutNode::new_terminal()],
+                        children: vec![old_node, leaf],
                     };
                     layout.normalize();
                     log::info!("Split complete");
                     // The newly created terminal has terminal_id: None — find its path
-                    layout.find_uninitialized_terminal_path()
+                    match &page_id {
+                        Some(id) => layout.find_terminal_path(id),
+                        None => layout.find_uninitialized_terminal_path(),
+                    }
                 } else {
                     None
                 }

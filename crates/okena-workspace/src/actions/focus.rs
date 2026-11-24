@@ -608,6 +608,7 @@ mod jump_gpui_tests {
             path: "/tmp/test".to_string(),
             layout: Some(LayoutNode::Terminal {
                 terminal_id: Some(terminal_id.to_string()),
+                start_page: None,
                 pending_agent_resume: None,
                 minimized: false,
                 detached: false,

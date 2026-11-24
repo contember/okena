@@ -20,10 +20,12 @@ fn canonicalize_layout_action(action: ActionRequest, mode: ProjectLayoutMode) ->
 
     match action {
         ActionRequest::SplitTerminal {
+            start_page,
             project_id,
             path,
             direction,
         } => ActionRequest::SplitTerminal {
+            start_page,
             project_id,
             path,
             direction: direction.flipped(),
@@ -144,6 +146,15 @@ impl ActionDispatcher {
         connection_id == okena_transport::client::LOCAL_DAEMON_CONNECTION_ID
     }
 
+    pub fn supports_start_page(&self, cx: &gpui::App) -> bool {
+        let Self::Remote {
+            connection_id,
+            manager,
+            ..
+        } = self;
+        manager.read(cx).supports_start_page(connection_id)
+    }
+
     fn queue_focus_for_next_remote_terminal(
         workspace: &Entity<Workspace>,
         window_id: WindowId,
@@ -155,7 +166,7 @@ impl ActionDispatcher {
             let old_terminal_ids = ws
                 .project(&pid)
                 .and_then(|p| p.layout.as_ref())
-                .map(|layout| layout.collect_terminal_ids())
+                .map(|layout| layout.collect_pane_ids())
                 .unwrap_or_default();
             ws.queue_pending_remote_focus(window_id, &pid, old_terminal_ids);
         });
@@ -317,7 +328,8 @@ impl ActionDispatcher {
                 );
                 // Don't return — the daemon still performs the close
             }
-            ActionRequest::CreateTerminal { project_id } => {
+            ActionRequest::CreateTerminal { project_id, .. }
+            | ActionRequest::LaunchStartPage { project_id, .. } => {
                 // Record pending focus — the actual focus will happen when
                 // the next state sync brings the new terminal into the
                 // client's layout (see sync_remote_projects_into_workspace).
@@ -360,9 +372,24 @@ impl ActionDispatcher {
             _ => {}
         }
 
-        let action = strip_remote_ids(action, connection_id);
+        let mut action = strip_remote_ids(action, connection_id);
         let cid = connection_id.clone();
         manager.update(cx, |rm, cx| {
+            if matches!(
+                action,
+                ActionRequest::CreateTerminal { .. }
+                    | ActionRequest::SplitTerminal { .. }
+                    | ActionRequest::AddTab { .. }
+                    | ActionRequest::CreateWorktree { .. }
+                    | ActionRequest::AddDiscoveredWorktree { .. }
+            ) {
+                action.set_show_start_page(
+                    crate::settings::settings_entity(cx)
+                        .read(cx)
+                        .settings
+                        .show_start_page,
+                );
+            }
             rm.send_action(&cid, action, cx);
         });
     }
@@ -411,6 +438,7 @@ impl ActionDispatcher {
     ) {
         self.dispatch(
             ActionRequest::SplitTerminal {
+                start_page: false,
                 project_id: project_id.to_string(),
                 path: layout_path.to_vec(),
                 direction,
@@ -429,6 +457,7 @@ impl ActionDispatcher {
     ) {
         self.dispatch(
             ActionRequest::AddTab {
+                start_page: false,
                 project_id: project_id.to_string(),
                 path: layout_path.to_vec(),
                 in_group,
@@ -610,10 +639,12 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
             key,
         },
         ActionRequest::SplitTerminal {
+            start_page,
             project_id,
             path,
             direction,
         } => ActionRequest::SplitTerminal {
+            start_page,
             project_id: s(&project_id),
             path,
             direction,
@@ -671,7 +702,22 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
             cols,
             rows,
         },
-        ActionRequest::CreateTerminal { project_id } => ActionRequest::CreateTerminal {
+        ActionRequest::LaunchStartPage {
+            project_id,
+            page_id,
+            shell,
+            command,
+        } => ActionRequest::LaunchStartPage {
+            project_id: s(&project_id),
+            page_id: page_id.map(|id| s(&id)),
+            shell,
+            command,
+        },
+        ActionRequest::CreateTerminal {
+            start_page,
+            project_id,
+        } => ActionRequest::CreateTerminal {
+            start_page,
             project_id: s(&project_id),
         },
         ActionRequest::UpdateSplitSizes {
@@ -737,10 +783,12 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
             shell,
         },
         ActionRequest::AddTab {
+            start_page,
             project_id,
             path,
             in_group,
         } => ActionRequest::AddTab {
+            start_page,
             project_id: s(&project_id),
             path,
             in_group,
@@ -869,13 +917,23 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
             new_path,
             mode,
         },
-        ActionRequest::AddProject { name, path } => ActionRequest::AddProject { name, path },
+        ActionRequest::AddProject {
+            start_page,
+            name,
+            path,
+        } => ActionRequest::AddProject {
+            start_page,
+            name,
+            path,
+        },
         ActionRequest::CloneProject {
+            start_page,
             url,
             parent_dir,
             directory,
             name,
         } => ActionRequest::CloneProject {
+            start_page,
             url,
             parent_dir,
             directory,
@@ -936,6 +994,7 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
             layout,
             terminal_name,
             wait,
+            start_page,
         } => ActionRequest::CreateWorktree {
             project_id: s(&project_id),
             branch,
@@ -944,15 +1003,18 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
             layout,
             terminal_name,
             wait,
+            start_page,
         },
         ActionRequest::AddDiscoveredWorktree {
             parent_project_id,
             worktree_path,
             branch,
+            start_page,
         } => ActionRequest::AddDiscoveredWorktree {
             parent_project_id: s(&parent_project_id),
             worktree_path,
             branch,
+            start_page,
         },
         ActionRequest::RerunHook {
             project_id,
@@ -1369,6 +1431,7 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
         | ActionRequest::DeleteSession { .. }
         | ActionRequest::ImportWorkspace { .. }
         | ActionRequest::ExportWorkspace { .. }
+        | ActionRequest::ListStartPageShells
         | ActionRequest::GetSettings
         | ActionRequest::GetSettingsSchema
         | ActionRequest::SetSettings { .. }
@@ -1414,6 +1477,7 @@ mod tests {
     fn rows_map_visual_split_axis_back_to_canonical_axis() {
         let action = canonicalize_layout_action(
             ActionRequest::SplitTerminal {
+                start_page: false,
                 project_id: "project".to_string(),
                 path: vec![0],
                 direction: SplitDirection::Horizontal,

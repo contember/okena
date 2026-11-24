@@ -3562,6 +3562,7 @@ mod tests {
         );
         client.set_remote_state(Some(StateResponse {
             state_version: 1,
+            supports_start_page: false,
             projects: Vec::new(),
             focused_project_id: None,
             fullscreen_terminal: None,

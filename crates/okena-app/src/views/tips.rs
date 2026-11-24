@@ -1,5 +1,4 @@
-//! Curated discoverability tips shown on the empty (no terminal attached)
-//! project screen.
+//! Curated discoverability tips for empty projects and pending terminal panes.
 //!
 //! Each keyboard tip carries a typed action. Its shortcut is resolved from the
 //! live keymap and the context described by the tip, using the same resolver as action tooltips.
@@ -11,7 +10,14 @@
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use gpui::{Action, App, KeyContext};
+use crate::ui::tokens::{ui_text_ms, ui_text_sm};
+use gpui::prelude::*;
+use gpui::{
+    Action, AnyView, App, AppContext, Context, FontWeight, IntoElement, KeyContext, Render, Window,
+    div, px, rgb, svg,
+};
+use gpui_component::{h_flex, v_flex};
+use okena_ui::theme::theme;
 
 type TipAction = fn() -> Box<dyn Action>;
 
@@ -256,9 +262,162 @@ pub fn next_start_index() -> usize {
     base.wrapping_add(COUNTER.fetch_add(1, Ordering::Relaxed))
 }
 
+/// A card owns its index so adjacent start pages can cycle independently.
+struct TipCard {
+    index: usize,
+}
+
+pub(crate) fn new_tip_card(cx: &mut App) -> AnyView {
+    cx.new(|_| TipCard {
+        index: next_start_index(),
+    })
+    .into()
+}
+
+impl Render for TipCard {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = theme(cx);
+        let tip = tip_at(self.index);
+        // Live keybinding chip when the tip maps to an action; otherwise the
+        // static trigger hint. `None` => no chip at all.
+        let chip = tip.shortcut(cx).or_else(|| tip.hint.map(str::to_string));
+
+        v_flex()
+            .items_center()
+            .gap(px(10.0))
+            .mt(px(20.0))
+            .max_w(px(340.0))
+            .px(px(20.0))
+            .py(px(16.0))
+            .rounded(px(10.0))
+            .bg(rgb(t.bg_secondary))
+            .border_1()
+            .border_color(rgb(t.border))
+            .child(
+                h_flex()
+                    .items_center()
+                    .gap(px(6.0))
+                    .child(
+                        svg()
+                            .path("icons/lightbulb.svg")
+                            .size(px(13.0))
+                            .text_color(rgb(t.button_primary_bg)),
+                    )
+                    .child(
+                        div()
+                            .text_size(ui_text_sm(cx))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(rgb(t.button_primary_bg))
+                            .child("TIP"),
+                    ),
+            )
+            .child(
+                div()
+                    .text_size(ui_text_ms(cx))
+                    .text_color(rgb(t.text_secondary))
+                    .text_center()
+                    .child(tip.text),
+            )
+            .children(chip.map(|c| {
+                div()
+                    .px(px(8.0))
+                    .py(px(3.0))
+                    .rounded(px(5.0))
+                    .bg(rgb(t.bg_primary))
+                    .border_1()
+                    .border_color(rgb(t.border))
+                    .text_size(ui_text_sm(cx))
+                    .text_color(rgb(t.text_secondary))
+                    .child(c)
+            }))
+            .child(
+                h_flex()
+                    .id("next-tip-btn")
+                    .debug_selector(|| "next-tip-btn".into())
+                    .cursor_pointer()
+                    .items_center()
+                    .gap(px(4.0))
+                    .mt(px(2.0))
+                    .text_color(rgb(t.text_muted))
+                    .hover(|s| s.text_color(rgb(t.text_secondary)))
+                    .child(
+                        svg()
+                            .path("icons/refresh.svg")
+                            .size(px(11.0))
+                            .text_color(rgb(t.text_muted)),
+                    )
+                    .child(div().text_size(ui_text_sm(cx)).child("Another tip"))
+                    .on_click(cx.listener(|this, _ev, _window, cx| {
+                        this.index = this.index.wrapping_add(1);
+                        cx.notify();
+                    })),
+            )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[gpui::test]
+    fn start_pages_show_the_terminal_icon_and_cycle_tips(cx: &mut gpui::TestAppContext) {
+        use crate::action_dispatch::ActionDispatcher;
+        use gpui::{Entity, VisualTestContext, size};
+        use okena_views_terminal::layout::start_page::render_start_page_content;
+        use okena_workspace::settings::StartPageButton;
+
+        struct Page {
+            page_id: Option<&'static str>,
+            tip: Entity<TipCard>,
+            buttons: Vec<StartPageButton>,
+        }
+
+        impl Render for Page {
+            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                render_start_page_content::<ActionDispatcher>(
+                    "project",
+                    self.page_id,
+                    Some(&self.buttons),
+                    None,
+                    self.tip.clone().into(),
+                    cx,
+                )
+            }
+        }
+
+        cx.update(|cx| {
+            cx.set_global(okena_ui::theme::GlobalThemeProvider(|_| {
+                okena_ui::theme::DARK_THEME
+            }))
+        });
+        for page_id in [None, Some("waiting-pane")] {
+            let tip = cx.new(|_| TipCard { index: 0 });
+            let window = cx.open_window(size(px(360.), px(420.)), {
+                let tip = tip.clone();
+                move |_, _| {
+                    Page {
+                        page_id,
+                        tip,
+                        // Identical labels isolate the space occupied by the built-in icon.
+                        buttons: vec![StartPageButton {
+                            name: "Start Terminal".into(),
+                            command: "echo ready".into(),
+                            ..Default::default()
+                        }],
+                    }
+                }
+            });
+            let mut view = VisualTestContext::from_window(window.into(), cx);
+            let plain = view.debug_bounds("start-page-button-0").unwrap();
+            let with_icon = view.debug_bounds("start-terminal-btn").unwrap();
+            assert_eq!(with_icon.size.width - plain.size.width, px(22.)); // 14px icon + 8px gap
+            let next = view.debug_bounds("next-tip-btn").unwrap();
+            assert!(next.top() >= plain.bottom());
+            view.simulate_click(next.center(), Default::default());
+            view.run_until_parked();
+            view.update(|_, cx| assert_eq!(tip.read(cx).index, 1));
+        }
+    }
 
     #[gpui::test]
     fn tip_shortcuts_follow_live_remapping_shadowing_and_removal(cx: &mut gpui::TestAppContext) {

@@ -212,10 +212,16 @@ impl AddProjectDialog {
             AddProjectSource::Folder => self.folder_action(cx),
             AddProjectSource::Git => self.clone_action(cx),
         };
-        let Some((action, name, path)) = action else {
+        let Some((mut action, name, path)) = action else {
             return;
         };
 
+        action.set_show_start_page(
+            crate::settings::settings_entity(cx)
+                .read(cx)
+                .settings
+                .show_start_page,
+        );
         let connection_id = self.selected_connection_id();
         if let Some(ref rm) = self.remote_manager {
             let connection_available = rm
@@ -252,6 +258,7 @@ impl AddProjectDialog {
         }
         Some((
             ActionRequest::AddProject {
+                start_page: false,
                 name: name.clone(),
                 path: path.clone(),
             },
@@ -270,6 +277,7 @@ impl AddProjectDialog {
         }
         Some((
             ActionRequest::CloneProject {
+                start_page: false,
                 url,
                 parent_dir,
                 directory,

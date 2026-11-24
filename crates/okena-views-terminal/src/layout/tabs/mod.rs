@@ -93,6 +93,7 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
                             self.active_drag.clone(),
                             self.pane_move.clone(),
                             self.action_dispatcher.clone(),
+                            self.new_tip_card,
                             cx,
                         )
                     })
@@ -179,6 +180,7 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
                                 self.active_drag.clone(),
                                 self.pane_move.clone(),
                                 self.action_dispatcher.clone(),
+                                self.new_tip_card,
                                 cx,
                             )
                         })
@@ -235,7 +237,8 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
                 f.project_id == self.project_id && f.layout_path.starts_with(&self.layout_path)
             });
 
-        let mut active_terminal_id = None;
+        let mut active_pane_id = None;
+        let mut active_is_start_page = false;
         let tab_elements: Vec<_> = children.iter().enumerate().map(|(i, child)| {
             let is_active = i == active_tab;
             let workspace = workspace.clone();
@@ -246,10 +249,11 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
             let layout_path_for_drag = layout_path.clone();
             let layout_path_for_drop = layout_path.clone();
 
-            let terminal_id = match child {
-                LayoutNode::Terminal { terminal_id: Some(id), .. } => Some(id.clone()),
-                _ => None,
+            let (terminal_id, start_page) = match child {
+                LayoutNode::Terminal { terminal_id, start_page, .. } => (terminal_id.clone(), start_page.as_ref()),
+                _ => (None, None),
             };
+            let pane_id = terminal_id.clone().or_else(|| start_page.map(|page| page.id.clone()));
 
             let (is_waiting, idle_label, progress, agent_status, has_bell) =
                 terminal_id.as_ref().map_or((false, None, None, None, false), |tid| {
@@ -288,7 +292,9 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
                 project_for_names.as_ref().is_some_and(|p| p.hook_terminals.contains_key(tid))
             });
 
-            let tab_label = if let Some(ref tid) = terminal_id {
+            let tab_label = if start_page.is_some() {
+                "Start Page".to_owned()
+            } else if let Some(ref tid) = terminal_id {
                 if let Some(ref p) = project_for_names {
                     let osc_title = terminals.lock().get(tid).and_then(|t| t.title());
                     p.terminal_display_name(tid, osc_title)
@@ -306,7 +312,8 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
                 .unwrap_or(0.0);
 
             if is_active {
-                active_terminal_id = terminal_id.clone();
+                active_pane_id = pane_id.clone();
+                active_is_start_page = start_page.is_some();
             }
 
             div()
@@ -487,7 +494,7 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
                 })
                 .on_mouse_down(MouseButton::Middle, {
                     let project_id = project_id.clone();
-                    let terminal_id = terminal_id.clone();
+                    let terminal_id = pane_id.clone();
                     let action_dispatcher = self.action_dispatcher.clone();
                     cx.listener(move |_this, _event: &MouseDownEvent, _window, cx| {
                         if let Some(ref tid) = terminal_id
@@ -500,7 +507,7 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
                         cx.stop_propagation();
                     })
                 })
-                .when_some(terminal_id.clone(), |el, tid| {
+                .when_some(pane_id.clone(), |el, tid| {
                     let terminal_path = if standalone {
                         layout_path_for_drag.clone()
                     } else {
@@ -600,7 +607,7 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
                                 }, cx);
                             }
 
-                        if terminal_id.is_some() {
+                        if pane_id.is_some() {
                             let terminal_path = if standalone {
                                 layout_path.clone()
                             } else {
@@ -742,14 +749,14 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
                 standalone,
                 action_dispatcher: self.action_dispatcher.clone(),
             },
-            active_terminal_id,
+            active_pane_id,
             self.request_broker.clone(),
-            self.backend.supports_buffer_capture(),
+            !active_is_start_page && self.backend.supports_buffer_capture(),
             self.focus_manager.clone(),
             self.workspace.clone(),
             cx,
         );
-        if terminal_view_settings(cx).show_shell_selector {
+        if !active_is_start_page && terminal_view_settings(cx).show_shell_selector {
             extra.insert(
                 0,
                 self.render_shell_indicator(active_tab, cx)

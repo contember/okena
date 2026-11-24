@@ -432,6 +432,7 @@ pub struct OverlayManager {
     pub(crate) window_id: WindowId,
     workspace: Entity<Workspace>,
     pub(crate) focus_manager: Entity<crate::workspace::focus::FocusManager>,
+    remote_manager: Option<Entity<RemoteConnectionManager>>,
     request_broker: Entity<RequestBroker>,
 
     /// The single active modal overlay (only one can be open at a time).
@@ -480,6 +481,7 @@ impl OverlayManager {
             window_id,
             workspace,
             focus_manager,
+            remote_manager: None,
             request_broker,
             active_modal: None,
             modal_type_id: None,
@@ -825,6 +827,7 @@ impl OverlayManager {
         } else {
             let workspace = self.workspace.clone();
             let entity = cx.new(|cx| SettingsPanel::new(workspace, daemon_endpoint, cx));
+            self.load_start_page_shells(&entity, None, cx);
             self.subscribe_settings_panel(&entity, cx);
             self.open_modal(entity, cx);
         }
@@ -841,8 +844,54 @@ impl OverlayManager {
             panel.show_updater(cx);
             panel
         });
+        self.load_start_page_shells(&entity, None, cx);
         self.subscribe_settings_panel(&entity, cx);
         self.open_modal(entity, cx);
+    }
+
+    pub(crate) fn set_remote_manager(&mut self, manager: Entity<RemoteConnectionManager>) {
+        self.remote_manager = Some(manager);
+    }
+
+    fn load_start_page_shells(
+        &self,
+        panel: &Entity<SettingsPanel>,
+        project_id: Option<&str>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(manager) = &self.remote_manager else {
+            return;
+        };
+        let focus = self.focus_manager.read(cx);
+        let focused_terminal = focus.focused_terminal_state();
+        let project_id = project_id
+            .or_else(|| {
+                focused_terminal
+                    .as_ref()
+                    .map(|terminal| terminal.project_id.as_str())
+            })
+            .or_else(|| focus.focused_project_id().map(String::as_str));
+        let connection_id = project_id
+            .and_then(|id| self.workspace.read(cx).project(id))
+            .and_then(|project| project.connection_id.as_deref())
+            .unwrap_or(okena_transport::client::LOCAL_DAEMON_CONNECTION_ID)
+            .to_owned();
+        let request = manager.update(cx, |manager, cx| {
+            manager.send_action_with_result(&connection_id, ActionRequest::ListStartPageShells, cx)
+        });
+        let panel = panel.downgrade();
+        cx.spawn(async move |_, cx| {
+            match request
+                .await
+                .and_then(|value| serde_json::from_value(value).map_err(|error| error.to_string()))
+            {
+                Ok(shells) => {
+                    let _ = panel.update(cx, |panel, cx| panel.set_start_page_shells(shells, cx));
+                }
+                Err(error) => log::debug!("Could not list Start Page shells: {error}"),
+            }
+        })
+        .detach();
     }
 
     /// Subscribe to a settings panel: close on `Close`, forward per-project hook
@@ -912,8 +961,10 @@ impl OverlayManager {
         cx: &mut Context<Self>,
     ) {
         let workspace = self.workspace.clone();
-        let entity =
-            cx.new(|cx| SettingsPanel::new_for_project(workspace, project_id, daemon_endpoint, cx));
+        let entity = cx.new(|cx| {
+            SettingsPanel::new_for_project(workspace, project_id.clone(), daemon_endpoint, cx)
+        });
+        self.load_start_page_shells(&entity, Some(&project_id), cx);
         self.subscribe_settings_panel(&entity, cx);
         self.open_modal(entity, cx);
     }
@@ -1571,6 +1622,18 @@ impl OverlayManager {
         self.close_modal(cx);
         self.close_all_context_menus(cx);
 
+        let is_start_page = self.workspace.read(cx).project(&project_id)
+            .and_then(|project| project.layout.as_ref())
+            .and_then(|layout| layout.get_at_path(&layout_path))
+            .is_some_and(|node| matches!(node,
+                okena_workspace::state::LayoutNode::Terminal { start_page: Some(page), .. } if page.id == terminal_id
+            ));
+
+        let current_name = if is_start_page {
+            "Start Page".to_owned()
+        } else {
+            current_name
+        };
         let menu = cx.new(|cx| {
             TerminalMenu::new(
                 terminal_id,
@@ -1581,6 +1644,7 @@ impl OverlayManager {
                 current_shell,
                 can_export_buffer,
                 has_bell,
+                is_start_page,
                 invocation,
                 cx,
             )
@@ -1675,6 +1739,7 @@ impl OverlayManager {
                 self.emit_project_action(
                     project_id,
                     ActionRequest::SplitTerminal {
+                        start_page: false,
                         project_id: project_id.clone(),
                         path: layout_path.clone(),
                         direction: *direction,

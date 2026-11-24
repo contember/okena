@@ -23,6 +23,8 @@ fn default_zoom_level() -> f32 {
 pub enum LayoutNode {
     Terminal {
         terminal_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        start_page: Option<okena_core::api::StartPage>,
         /// A restored session awaiting successful PTY creation. Travels with this leaf.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pending_agent_resume: Option<okena_core::agent_session::AgentSession>,
@@ -48,6 +50,21 @@ pub enum LayoutNode {
 }
 
 impl LayoutNode {
+    pub fn new_start_page(page: okena_core::api::StartPage) -> Self {
+        let mut node = Self::new_terminal();
+        if let Self::Terminal { start_page, .. } = &mut node {
+            *start_page = Some(page);
+        }
+        node
+    }
+
+    pub fn start_page(&self) -> Option<&okena_core::api::StartPage> {
+        match self {
+            Self::Terminal { start_page, .. } => start_page.as_ref(),
+            _ => None,
+        }
+    }
+
     pub fn pending_agent_resume(&self) -> Option<&okena_core::agent_session::AgentSession> {
         match self {
             Self::Terminal {
@@ -142,6 +159,7 @@ impl LayoutNode {
     pub fn new_terminal() -> Self {
         LayoutNode::Terminal {
             terminal_id: None,
+            start_page: None,
             pending_agent_resume: None,
             minimized: false,
             detached: false,
@@ -168,6 +186,7 @@ impl LayoutNode {
 
         LayoutNode::Terminal {
             terminal_id: None,
+            start_page: None,
             pending_agent_resume: None,
             minimized: false,
             detached: false,
@@ -205,22 +224,34 @@ impl LayoutNode {
     }
 
     /// Collect all terminal IDs in this layout tree
-    pub fn collect_terminal_ids(&self) -> Vec<String> {
+    pub fn collect_pane_ids(&self) -> Vec<String> {
         let mut ids = Vec::new();
-        self.collect_terminal_ids_recursive(&mut ids);
+        self.collect_ids_recursive(&mut ids, true);
         ids
     }
 
-    fn collect_terminal_ids_recursive(&self, ids: &mut Vec<String>) {
+    pub fn collect_terminal_ids(&self) -> Vec<String> {
+        let mut ids = Vec::new();
+        self.collect_ids_recursive(&mut ids, false);
+        ids
+    }
+
+    fn collect_ids_recursive(&self, ids: &mut Vec<String>, include_pages: bool) {
         match self {
-            LayoutNode::Terminal { terminal_id, .. } => {
+            LayoutNode::Terminal {
+                terminal_id,
+                start_page,
+                ..
+            } => {
                 if let Some(id) = terminal_id {
                     ids.push(id.clone());
+                } else if include_pages && let Some(page) = start_page {
+                    ids.push(page.id.clone());
                 }
             }
             LayoutNode::Split { children, .. } | LayoutNode::Tabs { children, .. } => {
                 for child in children {
-                    child.collect_terminal_ids_recursive(ids);
+                    child.collect_ids_recursive(ids, include_pages);
                 }
             }
         }
@@ -321,8 +352,14 @@ impl LayoutNode {
         current_path: Vec<usize>,
     ) -> Option<Vec<usize>> {
         match self {
-            LayoutNode::Terminal { terminal_id, .. } => {
-                if terminal_id.as_deref() == Some(target_id) {
+            LayoutNode::Terminal {
+                terminal_id,
+                start_page,
+                ..
+            } => {
+                if terminal_id.as_deref() == Some(target_id)
+                    || start_page.as_ref().is_some_and(|page| page.id == target_id)
+                {
                     Some(current_path)
                 } else {
                     None
@@ -629,7 +666,9 @@ impl LayoutNode {
     ) -> Option<Vec<usize>> {
         match self {
             LayoutNode::Terminal {
-                terminal_id: None, ..
+                terminal_id: None,
+                start_page: None,
+                ..
             } => Some(current_path),
             LayoutNode::Terminal { .. } => None,
             LayoutNode::Split { children, .. } | LayoutNode::Tabs { children, .. } => {
@@ -881,6 +920,7 @@ impl LayoutNode {
                 ..
             } => LayoutNode::Terminal {
                 terminal_id: None,
+                start_page: None,
                 pending_agent_resume: None,
                 minimized: false,
                 detached: false,
@@ -1114,6 +1154,7 @@ impl LayoutNode {
     pub fn from_api(api: &okena_core::api::ApiLayoutNode) -> Self {
         match api {
             okena_core::api::ApiLayoutNode::Terminal {
+                start_page,
                 terminal_id,
                 minimized,
                 detached,
@@ -1121,6 +1162,7 @@ impl LayoutNode {
                 ..
             } => LayoutNode::Terminal {
                 terminal_id: terminal_id.clone(),
+                start_page: start_page.clone(),
                 pending_agent_resume: None,
                 minimized: *minimized,
                 detached: *detached,
@@ -1151,6 +1193,7 @@ impl LayoutNode {
     pub fn from_api_prefixed(api: &okena_core::api::ApiLayoutNode, prefix: &str) -> Self {
         match api {
             okena_core::api::ApiLayoutNode::Terminal {
+                start_page,
                 terminal_id,
                 minimized,
                 detached,
@@ -1158,6 +1201,10 @@ impl LayoutNode {
                 ..
             } => LayoutNode::Terminal {
                 terminal_id: terminal_id.as_ref().map(|id| format!("{}:{}", prefix, id)),
+                start_page: start_page.clone().map(|mut page| {
+                    page.id = format!("{prefix}:{}", page.id);
+                    page
+                }),
                 pending_agent_resume: None,
                 minimized: *minimized,
                 detached: *detached,
@@ -1201,6 +1248,7 @@ impl LayoutNode {
     ) -> okena_core::api::ApiLayoutNode {
         match self {
             LayoutNode::Terminal {
+                start_page,
                 terminal_id,
                 minimized,
                 detached,
@@ -1213,6 +1261,7 @@ impl LayoutNode {
                     .map(|&(c, r)| (Some(c), Some(r)))
                     .unwrap_or((None, None));
                 okena_core::api::ApiLayoutNode::Terminal {
+                    start_page: start_page.clone(),
                     terminal_id: terminal_id.clone(),
                     minimized: *minimized,
                     detached: *detached,
@@ -1255,6 +1304,7 @@ mod tests {
     fn fresh_layouts_and_api_mirrors_do_not_inherit_pending_resumes() {
         let node = LayoutNode::Terminal {
             terminal_id: None,
+            start_page: None,
             pending_agent_resume: Some(okena_core::agent_session::AgentSession {
                 agent: "claude-code".into(),
                 session_id: "11111111-2222-3333-4444-555555555555".into(),
@@ -1278,6 +1328,7 @@ mod tests {
     fn terminal(id: &str) -> LayoutNode {
         LayoutNode::Terminal {
             terminal_id: Some(id.to_string()),
+            start_page: None,
             pending_agent_resume: None,
             minimized: false,
             detached: false,
@@ -1289,6 +1340,7 @@ mod tests {
     fn terminal_minimized(id: &str) -> LayoutNode {
         LayoutNode::Terminal {
             terminal_id: Some(id.to_string()),
+            start_page: None,
             pending_agent_resume: None,
             minimized: true,
             detached: false,
@@ -1309,6 +1361,7 @@ mod tests {
     fn terminal_detached(id: &str) -> LayoutNode {
         LayoutNode::Terminal {
             terminal_id: Some(id.to_string()),
+            start_page: None,
             pending_agent_resume: None,
             minimized: false,
             detached: true,
@@ -1362,6 +1415,7 @@ mod tests {
             terminal("a"),
             LayoutNode::Terminal {
                 terminal_id: Some("b".to_string()),
+                start_page: None,
                 pending_agent_resume: None,
                 minimized: false,
                 detached: false,
@@ -2210,6 +2264,7 @@ mod tests {
     fn merge_matching_terminals_preserves_visual_flags() {
         let server = LayoutNode::Terminal {
             terminal_id: Some("t1".to_string()),
+            start_page: None,
             pending_agent_resume: None,
             minimized: false,
             detached: false,
@@ -2221,6 +2276,7 @@ mod tests {
         };
         let local = LayoutNode::Terminal {
             terminal_id: Some("t1".to_string()),
+            start_page: None,
             pending_agent_resume: None,
             minimized: true,
             detached: true,
@@ -2258,6 +2314,7 @@ mod tests {
     fn api_layout_preserves_daemon_shell_type() {
         let node = LayoutNode::Terminal {
             terminal_id: Some("t1".to_string()),
+            start_page: None,
             pending_agent_resume: None,
             minimized: false,
             detached: false,
@@ -2389,6 +2446,7 @@ mod tests {
             children: vec![
                 LayoutNode::Terminal {
                     terminal_id: Some("t1".to_string()),
+                    start_page: None,
                     pending_agent_resume: None,
                     minimized: false,
                     detached: false,
@@ -2497,6 +2555,7 @@ mod tests {
             children: vec![
                 LayoutNode::Terminal {
                     terminal_id: Some("t1".to_string()),
+                    start_page: None,
                     pending_agent_resume: None,
                     minimized: true,
                     detached: false,
@@ -2534,6 +2593,7 @@ mod tests {
         let server = hsplit(vec![terminal("t1"), terminal("t2")]);
         let local = LayoutNode::Terminal {
             terminal_id: Some("t1".to_string()),
+            start_page: None,
             pending_agent_resume: None,
             minimized: true,
             detached: false,
@@ -2634,6 +2694,7 @@ mod tests {
     fn single_terminal_is_none_for_zero_or_several() {
         let empty = LayoutNode::Terminal {
             terminal_id: None,
+            start_page: None,
             pending_agent_resume: None,
             minimized: false,
             detached: false,
@@ -2666,5 +2727,28 @@ mod tests {
             sizes: vec![0.5, 0.5],
         };
         assert!(!split.is_in_tab_group(&[1]));
+    }
+}
+
+#[cfg(test)]
+mod start_page_tests {
+    use super::*;
+
+    #[test]
+    fn waiting_page_survives_round_trip_without_becoming_a_terminal_to_spawn() {
+        let page = okena_core::api::StartPage {
+            id: "page-one".into(),
+            cwd: "/project/subdir".into(),
+        };
+        let layout = LayoutNode::new_start_page(page);
+        let restored: LayoutNode =
+            serde_json::from_str(&serde_json::to_string(&layout).unwrap()).unwrap();
+        assert_eq!(restored, layout);
+        assert_eq!(LayoutNode::from_api(&layout.to_api()), layout);
+        let mirror = LayoutNode::from_api_prefixed(&layout.to_api(), "remote:server");
+        assert_eq!(mirror.start_page().unwrap().id, "remote:server:page-one");
+        assert!(restored.collect_terminal_ids().is_empty());
+        assert!(restored.find_uninitialized_terminal_path().is_none());
+        assert_eq!(restored.find_terminal_path("page-one"), Some(vec![]));
     }
 }

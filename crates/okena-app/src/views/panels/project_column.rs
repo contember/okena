@@ -21,7 +21,6 @@ use std::sync::Arc;
 
 use crate::views::panels::hook_panel::HookPanel;
 use crate::views::window::TerminalsRegistry;
-use okena_core::api::ActionRequest;
 use okena_views_services::service_panel::ServicePanel;
 use okena_workspace::requests::{OverlayRequest, ProjectOverlay, ProjectOverlayKind};
 
@@ -168,10 +167,7 @@ pub struct ProjectColumn {
     service_panel: Entity<ServicePanel<ActionDispatcher>>,
     /// Self-contained hook panel entity
     hook_panel: Entity<HookPanel>,
-    /// Index into the discoverability tip pool shown on the empty state.
-    /// Advanced by the "Another tip" control; seeded per column so different
-    /// empty columns don't all open on the same tip.
-    tip_index: usize,
+    tip_card: AnyView,
     /// Whether the pointer is over the header. Drives revealing the hide/focus
     /// controls. Tracked in state (not `group_hover`) because the reveal frees
     /// layout space, and toggling `display` via hover styles crashes GPUI
@@ -320,7 +316,7 @@ impl ProjectColumn {
             git_header,
             service_panel,
             hook_panel,
-            tip_index: crate::views::tips::next_start_index(),
+            tip_card: crate::views::tips::new_tip_card(cx),
             header_hovered: false,
         }
     }
@@ -479,6 +475,7 @@ impl ProjectColumn {
                     active_drag,
                     pane_move,
                     action_dispatcher,
+                    crate::views::tips::new_tip_card,
                     cx,
                 )
             }));
@@ -1329,145 +1326,29 @@ impl ProjectColumn {
 
     fn render_empty_state(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
-        let project_id = self.project_id.clone();
+        let settings = crate::settings::settings_entity(cx).read(cx);
+        let show_start_page = settings.settings.show_start_page
+            && self
+                .action_dispatcher
+                .as_ref()
+                .is_some_and(|dispatcher| dispatcher.supports_start_page(cx));
+        let buttons = show_start_page.then_some(settings.settings.start_page_buttons.as_slice());
 
-        v_flex()
-            .items_center()
-            .justify_center()
+        let content = okena_views_terminal::layout::start_page::render_start_page_content(
+            &self.project_id,
+            None,
+            buttons,
+            self.action_dispatcher.as_ref(),
+            self.tip_card.clone(),
+            cx,
+        );
+
+        div()
+            .id("empty-project-start-page")
             .size_full()
-            .gap(px(16.0))
+            .overflow_y_scroll()
             .bg(rgb(t.bg_primary))
-            .child(
-                svg()
-                    .path("icons/folder.svg")
-                    .size(px(48.0))
-                    .text_color(rgb(t.text_muted)),
-            )
-            .child(
-                div()
-                    .text_size(ui_text_xl(cx))
-                    .text_color(rgb(t.text_muted))
-                    .child("No terminal attached"),
-            )
-            .child(
-                div()
-                    .id("start-terminal-btn")
-                    .cursor_pointer()
-                    .px(px(16.0))
-                    .py(px(8.0))
-                    .rounded(px(6.0))
-                    .bg(rgb(t.button_primary_bg))
-                    .hover(|s| s.bg(rgb(t.button_primary_hover)))
-                    .flex()
-                    .items_center()
-                    .gap(px(8.0))
-                    .child(
-                        svg()
-                            .path("icons/terminal.svg")
-                            .size(px(14.0))
-                            .text_color(rgb(t.button_primary_fg)),
-                    )
-                    .child(
-                        div()
-                            .text_size(ui_text_md(cx))
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(rgb(t.button_primary_fg))
-                            .child("Start Terminal"),
-                    )
-                    .on_click({
-                        let dispatcher = self.action_dispatcher.clone();
-                        move |_, _window, cx| {
-                            if let Some(ref dispatcher) = dispatcher {
-                                dispatcher.dispatch(
-                                    ActionRequest::CreateTerminal {
-                                        project_id: project_id.clone(),
-                                    },
-                                    cx,
-                                );
-                            }
-                        }
-                    }),
-            )
-            .child(self.render_tip(cx))
-    }
-
-    /// Render a single rotating discoverability tip below the empty-state CTA.
-    fn render_tip(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let t = theme(cx);
-        let tip = crate::views::tips::tip_at(self.tip_index);
-        // Live keybinding chip when the tip maps to an action; otherwise the
-        // static trigger hint. `None` => no chip at all.
-        let chip = tip.shortcut(cx).or_else(|| tip.hint.map(str::to_string));
-
-        v_flex()
-            .items_center()
-            .gap(px(10.0))
-            .mt(px(20.0))
-            .max_w(px(340.0))
-            .px(px(20.0))
-            .py(px(16.0))
-            .rounded(px(10.0))
-            .bg(rgb(t.bg_secondary))
-            .border_1()
-            .border_color(rgb(t.border))
-            .child(
-                h_flex()
-                    .items_center()
-                    .gap(px(6.0))
-                    .child(
-                        svg()
-                            .path("icons/lightbulb.svg")
-                            .size(px(13.0))
-                            .text_color(rgb(t.button_primary_bg)),
-                    )
-                    .child(
-                        div()
-                            .text_size(ui_text_sm(cx))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(rgb(t.button_primary_bg))
-                            .child("TIP"),
-                    ),
-            )
-            .child(
-                div()
-                    .text_size(ui_text_ms(cx))
-                    .text_color(rgb(t.text_secondary))
-                    .text_center()
-                    .child(tip.text),
-            )
-            .children(chip.map(|c| {
-                div()
-                    .px(px(8.0))
-                    .py(px(3.0))
-                    .rounded(px(5.0))
-                    .bg(rgb(t.bg_primary))
-                    .border_1()
-                    .border_color(rgb(t.border))
-                    .text_size(ui_text_sm(cx))
-                    .text_color(rgb(t.text_secondary))
-                    .child(c)
-            }))
-            .child(
-                h_flex()
-                    .id("next-tip-btn")
-                    .cursor_pointer()
-                    .items_center()
-                    .gap(px(4.0))
-                    .mt(px(2.0))
-                    .text_color(rgb(t.text_muted))
-                    .hover(|s| s.text_color(rgb(t.text_secondary)))
-                    .child(
-                        svg()
-                            .path("icons/refresh.svg")
-                            .size(px(11.0))
-                            .text_color(rgb(t.text_muted)),
-                    )
-                    .child(div().text_size(ui_text_sm(cx)).child("Another tip"))
-                    .on_click(cx.listener(|this, _ev, _window, cx| {
-                        this.tip_index = this.tip_index.wrapping_add(1);
-                        cx.notify();
-                    })),
-            )
+            .child(content)
     }
 }
 

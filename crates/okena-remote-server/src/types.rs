@@ -22,6 +22,7 @@ mod tests {
     #[test]
     fn prefixed_terminal_id() {
         let api = ApiLayoutNode::Terminal {
+            start_page: None,
             terminal_id: Some("abc-123".into()),
             minimized: false,
             detached: false,
@@ -41,6 +42,7 @@ mod tests {
     #[test]
     fn prefixed_none_terminal_id_stays_none() {
         let api = ApiLayoutNode::Terminal {
+            start_page: None,
             terminal_id: None,
             minimized: true,
             detached: false,
@@ -69,6 +71,7 @@ mod tests {
             sizes: vec![50.0, 50.0],
             children: vec![
                 ApiLayoutNode::Terminal {
+                    start_page: None,
                     terminal_id: Some("t1".into()),
                     minimized: false,
                     detached: false,
@@ -80,6 +83,7 @@ mod tests {
                     active_tab: 0,
                     children: vec![
                         ApiLayoutNode::Terminal {
+                            start_page: None,
                             terminal_id: Some("t2".into()),
                             minimized: false,
                             detached: false,
@@ -88,6 +92,7 @@ mod tests {
                             rows: None,
                         },
                         ApiLayoutNode::Terminal {
+                            start_page: None,
                             terminal_id: Some("t3".into()),
                             minimized: false,
                             detached: true,
@@ -107,6 +112,7 @@ mod tests {
     #[test]
     fn unprefixed_preserves_raw_ids() {
         let api = ApiLayoutNode::Terminal {
+            start_page: None,
             terminal_id: Some("raw-id".into()),
             minimized: false,
             detached: false,

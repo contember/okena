@@ -282,6 +282,20 @@ impl SettingsState {
     setting_setter!(set_min_tile_height, min_tile_height, f32, 100.0, 4000.0);
     setting_setter!(set_idle_timeout_secs, idle_timeout_secs, u32, 0, 300);
     /// Set the default shell type for new terminals
+    pub fn set_show_start_page(&mut self, value: bool, cx: &mut Context<Self>) {
+        self.settings.show_start_page = value;
+        self.save_and_notify(cx);
+    }
+
+    pub fn set_start_page_buttons(
+        &mut self,
+        buttons: Vec<okena_workspace::settings::StartPageButton>,
+        cx: &mut Context<Self>,
+    ) {
+        self.settings.start_page_buttons = buttons;
+        self.save_and_notify(cx);
+    }
+
     pub fn set_default_shell(&mut self, value: ShellType, cx: &mut Context<Self>) {
         self.settings.default_shell = value;
         self.save_and_notify(cx);

@@ -13,6 +13,23 @@ impl Workspace {
         path: &[usize],
         cx: &mut impl WorkspaceCx,
     ) {
+        self.add_tab_with_leaf(
+            focus_manager,
+            project_id,
+            path,
+            LayoutNode::new_terminal(),
+            cx,
+        );
+    }
+
+    pub fn add_tab_with_leaf(
+        &mut self,
+        focus_manager: &mut FocusManager,
+        project_id: &str,
+        path: &[usize],
+        leaf: LayoutNode,
+        cx: &mut impl WorkspaceCx,
+    ) {
         log::info!(
             "Workspace::add_tab called for project {} at path {:?}",
             project_id,
@@ -27,7 +44,7 @@ impl Workspace {
                 && let Some(LayoutNode::Tabs { .. }) = layout.get_at_path(parent_path)
             {
                 // Parent is Tabs - add new tab to the group
-                self.add_tab_to_group(focus_manager, project_id, parent_path, cx);
+                self.add_tab_to_group_with_leaf(focus_manager, project_id, parent_path, leaf, cx);
                 return;
             }
         }
@@ -36,7 +53,7 @@ impl Workspace {
         self.with_layout_node(project_id, path, cx, |node| {
             let old_node = node.clone();
             *node = LayoutNode::Tabs {
-                children: vec![old_node, LayoutNode::new_terminal()],
+                children: vec![old_node, leaf],
                 active_tab: 1,
             };
             log::info!("Created new tab group");
@@ -57,6 +74,23 @@ impl Workspace {
         tabs_path: &[usize],
         cx: &mut impl WorkspaceCx,
     ) {
+        self.add_tab_to_group_with_leaf(
+            focus_manager,
+            project_id,
+            tabs_path,
+            LayoutNode::new_terminal(),
+            cx,
+        );
+    }
+
+    pub fn add_tab_to_group_with_leaf(
+        &mut self,
+        focus_manager: &mut FocusManager,
+        project_id: &str,
+        tabs_path: &[usize],
+        leaf: LayoutNode,
+        cx: &mut impl WorkspaceCx,
+    ) {
         let mut new_tab_index = 0;
         self.with_layout_node(project_id, tabs_path, cx, |node| {
             if let LayoutNode::Tabs {
@@ -64,7 +98,7 @@ impl Workspace {
                 active_tab,
             } = node
             {
-                children.push(LayoutNode::new_terminal());
+                children.push(leaf);
                 *active_tab = children.len() - 1;
                 new_tab_index = *active_tab;
                 log::info!(

@@ -80,6 +80,34 @@ pub struct AvailableShell {
     pub available: bool,
 }
 
+/// Persistent backends can accept a launch before WSL reports an invalid
+/// distribution. Validate the selection on the machine that owns the PTY.
+pub fn validate_start_page_shell(shell: &ShellType) -> Result<(), String> {
+    let available = match shell {
+        ShellType::Default => true,
+        ShellType::Custom { path, .. } => which::which(path).is_ok(),
+        #[cfg(windows)]
+        ShellType::Cmd => which::which("cmd.exe").is_ok(),
+        #[cfg(windows)]
+        ShellType::PowerShell { core } => {
+            which::which(if *core { "pwsh.exe" } else { "powershell.exe" }).is_ok()
+        }
+        #[cfg(windows)]
+        ShellType::Wsl { distro } => {
+            let installed = detect_wsl_distros();
+            match distro {
+                Some(name) => installed.iter().any(|d| d.eq_ignore_ascii_case(name)),
+                None => !installed.is_empty(),
+            }
+        }
+    };
+    if available {
+        Ok(())
+    } else {
+        Err(format!("Shell is unavailable: {}", shell.display_name()))
+    }
+}
+
 /// Detect all available shells on the system
 pub fn available_shells() -> Vec<AvailableShell> {
     let mut shells = vec![AvailableShell {

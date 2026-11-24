@@ -40,6 +40,9 @@ pub struct ApiSystemStats {
 #[derive(Clone, Serialize, Deserialize)]
 pub struct StateResponse {
     pub state_version: u64,
+    /// Whether this daemon accepts Start Page creation and launch actions.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub supports_start_page: bool,
     pub projects: Vec<ApiProject>,
     pub focused_project_id: Option<String>,
     pub fullscreen_terminal: Option<ApiFullscreen>,
@@ -779,6 +782,8 @@ pub struct ApiFolder {
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum ApiLayoutNode {
     Terminal {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        start_page: Option<StartPage>,
         terminal_id: Option<String>,
         minimized: bool,
         detached: bool,
@@ -854,6 +859,13 @@ pub enum FileDownloadRequest {
     },
 }
 
+/// A movable, persistent pane which has not yet created a terminal process.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StartPage {
+    pub id: String,
+    pub cwd: String,
+}
+
 /// POST /v1/actions request body (tagged enum)
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
@@ -875,6 +887,8 @@ pub enum ActionRequest {
         key: SpecialKey,
     },
     SplitTerminal {
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        start_page: bool,
         project_id: String,
         path: Vec<usize>,
         direction: SplitDirection,
@@ -928,7 +942,16 @@ pub enum ActionRequest {
         cols: u16,
         rows: u16,
     },
+    LaunchStartPage {
+        project_id: String,
+        /// Absent only for the first terminal on an empty project screen.
+        page_id: Option<String>,
+        shell: crate::shell::StartPageShell,
+        command: Option<String>,
+    },
     CreateTerminal {
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        start_page: bool,
         project_id: String,
     },
     UpdateSplitSizes {
@@ -995,6 +1018,8 @@ pub enum ActionRequest {
         shell: ShellType,
     },
     AddTab {
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        start_page: bool,
         project_id: String,
         path: Vec<usize>,
         in_group: bool,
@@ -1147,6 +1172,8 @@ pub enum ActionRequest {
         count: usize,
     },
     AddProject {
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        start_page: bool,
         name: String,
         path: String,
     },
@@ -1155,6 +1182,8 @@ pub enum ActionRequest {
     /// receiving host joins them with ITS own separator — a remote daemon may
     /// not share the caller's path conventions.
     CloneProject {
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        start_page: bool,
         url: String,
         parent_dir: String,
         directory: String,
@@ -1214,14 +1243,19 @@ pub enum ActionRequest {
         /// optimistically with `pending: true`.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         wait: bool,
+        /// Open Start Page for an ordinary freshly seeded terminal.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        start_page: bool,
     },
     /// Track an already-on-disk git worktree (discovered by a client-side git
     /// scan) as a project under `parent_project_id`. The daemon creates the
-    /// project, links it to the parent, and spawns its terminal.
+    /// project, links it to the parent, and initializes its first pane.
     AddDiscoveredWorktree {
         parent_project_id: String,
         worktree_path: String,
         branch: String,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        start_page: bool,
     },
     /// Rerun a lifecycle-hook terminal. The daemon kills the old PTY, spawns a
     /// fresh shell at the hook's cwd, and re-types the stored command — command
@@ -1512,6 +1546,9 @@ pub enum ActionRequest {
     },
 
     // ── Settings (app-scoped; handled at the remote bridge) ───────────
+    /// List the available explicit shells on this daemon.
+    ListStartPageShells,
+
     /// Return the full current settings as JSON.
     GetSettings,
     /// Return a defaults instance of the settings (de-facto schema: every key
@@ -1568,6 +1605,23 @@ pub enum ActionRequest {
     AiProxy {
         request: crate::ai_proxy::AiProxyCommand,
     },
+}
+
+impl ActionRequest {
+    /// Carry the creating desktop client's preference to the owning daemon.
+    /// Other clients and explicit command launches keep their existing intent.
+    pub fn set_show_start_page(&mut self, enabled: bool) {
+        match self {
+            Self::CreateTerminal { start_page, .. }
+            | Self::SplitTerminal { start_page, .. }
+            | Self::AddTab { start_page, .. }
+            | Self::AddProject { start_page, .. }
+            | Self::CloneProject { start_page, .. }
+            | Self::CreateWorktree { start_page, .. }
+            | Self::AddDiscoveredWorktree { start_page, .. } => *start_page = enabled,
+            _ => {}
+        }
+    }
 }
 
 /// Part of every error for a terminal teardown that could not confirm its
@@ -1686,14 +1740,19 @@ mod tests {
             layout,
             terminal_name,
             wait,
+            start_page,
             ..
         } = &old
         else {
             panic!("expected CreateWorktree");
         };
-        assert_eq!((layout, terminal_name, wait), (&None, &None, &false));
+        assert_eq!(
+            (layout, terminal_name, wait, start_page),
+            (&None, &None, &false, &false)
+        );
         let value = serde_json::to_value(&old).expect("encodes");
         assert!(value.get("wait").is_none() && value.get("layout").is_none());
+        assert!(value.get("start_page").is_none());
 
         let new: ActionRequest = serde_json::from_value(serde_json::json!({
             "action": "create_worktree",
@@ -1702,6 +1761,7 @@ mod tests {
             "layout": "single",
             "terminal_name": "agent",
             "wait": true,
+            "start_page": true,
         }))
         .expect("new request parses");
         assert!(matches!(
@@ -1709,6 +1769,7 @@ mod tests {
             ActionRequest::CreateWorktree {
                 layout: Some(WorktreeLayout::Single),
                 wait: true,
+                start_page: true,
                 ..
             }
         ));
@@ -1735,6 +1796,7 @@ mod tests {
     fn state_response_round_trip() {
         let resp = StateResponse {
             state_version: 42,
+            supports_start_page: false,
             projects: vec![ApiProject {
                 id: "p1".into(),
                 name: "Test".into(),
@@ -1745,6 +1807,7 @@ mod tests {
                     sizes: vec![50.0, 50.0],
                     children: vec![
                         ApiLayoutNode::Terminal {
+                            start_page: None,
                             terminal_id: Some("t1".into()),
                             minimized: false,
                             detached: false,
@@ -1755,6 +1818,7 @@ mod tests {
                         ApiLayoutNode::Tabs {
                             active_tab: 0,
                             children: vec![ApiLayoutNode::Terminal {
+                                start_page: None,
                                 terminal_id: Some("t2".into()),
                                 minimized: true,
                                 detached: true,
@@ -1933,6 +1997,7 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(state.claude_pr_links["t1"][0].number, 7);
+        assert!(!state.supports_start_page);
 
         let empty = StateResponse {
             claude_pr_links: Default::default(),
@@ -2063,6 +2128,7 @@ mod tests {
                 key: SpecialKey::Enter,
             },
             ActionRequest::SplitTerminal {
+                start_page: false,
                 project_id: "p1".into(),
                 path: vec![0, 1],
                 direction: SplitDirection::Vertical,
@@ -2093,6 +2159,7 @@ mod tests {
                 rows: 24,
             },
             ActionRequest::CreateTerminal {
+                start_page: false,
                 project_id: "p1".into(),
             },
             ActionRequest::UpdateSplitSizes {
@@ -2125,6 +2192,7 @@ mod tests {
                 shell: ShellType::Default,
             },
             ActionRequest::AddTab {
+                start_page: false,
                 project_id: "p1".into(),
                 path: vec![0, 1],
                 in_group: true,
@@ -2218,10 +2286,12 @@ mod tests {
                 count: 100,
             },
             ActionRequest::AddProject {
+                start_page: false,
                 name: "My Project".into(),
                 path: "/home/user/projects/my-project".into(),
             },
             ActionRequest::CloneProject {
+                start_page: false,
                 url: "https://github.com/user/my-project.git".into(),
                 parent_dir: "/home/user/projects".into(),
                 directory: "my-project".into(),
@@ -2330,6 +2400,7 @@ mod tests {
                 parent_project_id: "p1".into(),
                 worktree_path: "/home/user/projects/my-project-wt".into(),
                 branch: "feature/x".into(),
+                start_page: true,
             },
             ActionRequest::RerunHook {
                 project_id: "p1".into(),
@@ -2428,6 +2499,7 @@ mod tests {
             sizes: vec![50.0, 50.0],
             children: vec![
                 ApiLayoutNode::Terminal {
+                    start_page: None,
                     terminal_id: Some("t1".into()),
                     minimized: false,
                     detached: false,
@@ -2439,6 +2511,7 @@ mod tests {
                     active_tab: 0,
                     children: vec![
                         ApiLayoutNode::Terminal {
+                            start_page: None,
                             terminal_id: Some("t2".into()),
                             minimized: false,
                             detached: false,
@@ -2447,6 +2520,7 @@ mod tests {
                             rows: None,
                         },
                         ApiLayoutNode::Terminal {
+                            start_page: None,
                             terminal_id: None,
                             minimized: false,
                             detached: false,
@@ -2455,6 +2529,7 @@ mod tests {
                             rows: None,
                         },
                         ApiLayoutNode::Terminal {
+                            start_page: None,
                             terminal_id: Some("t3".into()),
                             minimized: false,
                             detached: true,
@@ -2576,6 +2651,7 @@ mod tests {
         assert_eq!(focus.target_window(), Some("main"));
 
         let create = ActionRequest::CreateTerminal {
+            start_page: false,
             project_id: "p1".into(),
         };
         assert_eq!(create.target_window(), None);

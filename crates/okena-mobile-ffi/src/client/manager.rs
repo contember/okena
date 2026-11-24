@@ -1142,6 +1142,7 @@ mod tests {
 
     fn terminal(id: &str, minimized: bool, shell_type: ShellType) -> ApiLayoutNode {
         ApiLayoutNode::Terminal {
+            start_page: None,
             terminal_id: Some(id.to_string()),
             minimized,
             detached: false,
@@ -1180,6 +1181,7 @@ mod tests {
     fn state(projects: Vec<ApiProject>) -> StateResponse {
         StateResponse {
             state_version: 1,
+            supports_start_page: false,
             projects,
             focused_project_id: None,
             fullscreen_terminal: None,
@@ -1275,6 +1277,7 @@ mod tests {
         assert!(matches!(
             &children[0],
             ApiLayoutNode::Terminal {
+                start_page: None,
                 terminal_id: Some(id),
                 minimized: true,
                 ..

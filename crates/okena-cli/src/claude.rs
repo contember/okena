@@ -1171,6 +1171,7 @@ mod tests {
             path: "/tmp/okena".into(),
             show_in_overview: true,
             layout: Some(ApiLayoutNode::Terminal {
+                start_page: None,
                 terminal_id: Some(terminal_id.into()),
                 minimized: false,
                 detached: false,
