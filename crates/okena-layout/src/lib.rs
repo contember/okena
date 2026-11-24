@@ -223,13 +223,15 @@ impl LayoutNode {
         }
     }
 
-    /// Collect all terminal IDs in this layout tree
+    /// Collect the ID of every pane: terminal IDs, and Start Page IDs for
+    /// panes still waiting on a Start Page.
     pub fn collect_pane_ids(&self) -> Vec<String> {
         let mut ids = Vec::new();
         self.collect_ids_recursive(&mut ids, true);
         ids
     }
 
+    /// Collect all terminal IDs in this layout tree
     pub fn collect_terminal_ids(&self) -> Vec<String> {
         let mut ids = Vec::new();
         self.collect_ids_recursive(&mut ids, false);
