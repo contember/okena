@@ -26,6 +26,12 @@ worktree its own `target/` (the default). If you must share one to save a
 rebuild, `touch` the files you changed before building, and check that cargo
 prints `Compiling` for those crates.
 
+Dev and test builds carry line tables only (`[profile.dev] debug =
+"line-tables-only"`): backtraces keep function names and `file:line`, a
+debugger cannot show variables. For a debugger session build with
+`CARGO_PROFILE_DEV_DEBUG=full cargo build`; it rebuilds every workspace crate,
+and so does the next build without it.
+
 ## Project Structure
 
 ```

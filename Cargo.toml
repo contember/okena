@@ -119,6 +119,10 @@ jemalloc = ["dep:tikv-jemallocator"]
 # https://nnethercote.github.io/dh_view/dh_view.html).
 dhat-heap = ["dep:dhat"]
 
+# Line tables keep file:line in backtraces at a fraction of full debuginfo's size.
+[profile.dev]
+debug = "line-tables-only"
+
 # Profiling build: optimized like release, but keeps debug symbols so heaptrack
 # / perf show readable stacks. Leaves the real `release` profile untouched.
 #   cargo build --profile profiling
