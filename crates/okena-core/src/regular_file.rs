@@ -43,9 +43,9 @@ impl From<ReadRegularFileError> for io::Error {
 }
 
 /// Reads the regular file at `path`, at most `max_len` bytes. Type and length
-/// come from the open file, so a swap after any earlier check can neither
-/// redirect the read nor make it endless: the read stops at the length seen
-/// at open, even if the file keeps growing.
+/// come from the open file, so swapping the last path component after any
+/// earlier check can neither redirect the read nor make it endless: the read
+/// stops at the length seen at open, even if the file keeps growing.
 pub fn read(path: &Path, max_len: u64) -> Result<Vec<u8>, ReadRegularFileError> {
     let file = open_no_follow(path).map_err(ReadRegularFileError::Io)?;
     let meta = file.metadata().map_err(ReadRegularFileError::Io)?;
@@ -56,6 +56,10 @@ pub fn read(path: &Path, max_len: u64) -> Result<Vec<u8>, ReadRegularFileError> 
         return Err(ReadRegularFileError::TooLarge { len: meta.len() });
     }
     let mut bytes = Vec::new();
+    usize::try_from(meta.len())
+        .ok()
+        .and_then(|len| bytes.try_reserve_exact(len).ok())
+        .ok_or_else(|| ReadRegularFileError::Io(io::ErrorKind::OutOfMemory.into()))?;
     file.take(meta.len())
         .read_to_end(&mut bytes)
         .map_err(ReadRegularFileError::Io)?;

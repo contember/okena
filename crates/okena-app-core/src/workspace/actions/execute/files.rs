@@ -917,7 +917,7 @@ mod entry_mutation_tests {
         }
     }
 
-    fn workspace_with_project(path: &Path) -> Workspace {
+    pub(super) fn workspace_with_project(path: &Path) -> Workspace {
         let project = ProjectData {
             id: "p1".to_string(),
             name: "Project".to_string(),
@@ -1175,7 +1175,11 @@ mod entry_mutation_tests {
 
 #[cfg(all(test, unix))]
 mod read_path_file_tests {
-    use super::{ActionResult, MAX_READ_FILE_BYTES, read_path_file, read_path_file_bytes};
+    use super::entry_mutation_tests::workspace_with_project;
+    use super::{
+        ActionResult, MAX_READ_FILE_BYTES, read_file, read_file_bytes, read_path_file,
+        read_path_file_bytes,
+    };
     use std::fs;
     use std::path::Path;
 
@@ -1258,5 +1262,31 @@ mod read_path_file_tests {
         assert!(error.contains("File too large"), "got: {error}");
         let error = read_bytes_err(dir.path(), "big.log");
         assert!(error.contains("File too large"), "got: {error}");
+    }
+
+    /// ReadFile and ReadFileBytes resolve the path without an `is_file()`
+    /// check, so only the guard on the open handle stands between a FIFO in
+    /// the project and a blocked daemon thread.
+    #[test]
+    fn project_read_refuses_a_fifo_without_blocking() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        make_fifo(&dir.path().join("pipe"));
+        for bytes in [false, true] {
+            let root = dir.path().to_path_buf();
+            let result = within_seconds(move || {
+                let ws = workspace_with_project(&root);
+                if bytes {
+                    read_file_bytes(&ws, "p1".to_string(), "pipe".to_string())
+                } else {
+                    read_file(&ws, "p1".to_string(), "pipe".to_string())
+                }
+            });
+            match result {
+                ActionResult::Err(error) => {
+                    assert_eq!(error, "Cannot read file: not a regular file")
+                }
+                ActionResult::Ok(_) => panic!("a FIFO must be refused (bytes: {bytes})"),
+            }
+        }
     }
 }
