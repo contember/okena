@@ -1,11 +1,11 @@
-use alacritty_terminal::grid::{Dimensions, Grid};
-use alacritty_terminal::index::{Column, Line, Point};
-use alacritty_terminal::term::cell::{Cell, Flags};
+use alacritty_terminal::index::Column;
+use alacritty_terminal::term::cell::Flags;
 use regex::Regex;
 use std::hash::{DefaultHasher, Hasher};
 use std::sync::OnceLock;
 
 use super::Terminal;
+use super::scrollback::HistoryView;
 use super::search::GridText;
 use super::types::DetectedLink;
 use super::url_detect::{parse_path_line_col, trim_url_trailing};
@@ -41,10 +41,9 @@ struct ScannedLine {
 impl UrlScanCache {
     /// Refreshes the row texts and reports which visual rows differ from the
     /// last scan. A resize drops everything: rows are compared by position.
-    fn read_rows(&mut self, grid: &Grid<Cell>) -> Vec<bool> {
-        let screen_lines = grid.screen_lines();
-        let cols = grid.columns();
-        let display_offset = grid.display_offset() as i32;
+    fn read_rows<L>(&mut self, view: &HistoryView<'_, L>) -> Vec<bool> {
+        let screen_lines = view.screen_lines();
+        let cols = view.columns();
         if self.cols != cols || self.row_hashes.len() != screen_lines {
             self.cols = cols;
             self.row_hashes.clear();
@@ -56,8 +55,8 @@ impl UrlScanCache {
         let mut hashes = Vec::with_capacity(screen_lines);
         let mut changed = Vec::with_capacity(screen_lines);
         for (visual_row, text) in self.rows.iter_mut().enumerate() {
-            let row = &grid[Line(visual_row as i32 - display_offset)];
-            text.rebuild(row, cols);
+            let row = view.visible_row(visual_row);
+            text.rebuild(&row, cols);
             let wrapline = row[Column(cols - 1)].flags.contains(Flags::WRAPLINE);
             self.row_wrapline[visual_row] = wrapline;
 
@@ -146,17 +145,14 @@ impl Terminal {
         let mut id_to_group: std::collections::HashMap<String, usize> =
             std::collections::HashMap::new();
 
-        self.with_content(|term| {
-            let grid = term.grid();
-            let screen_lines = grid.screen_lines() as i32;
-            let cols = grid.columns();
-            let display_offset = grid.display_offset() as i32;
+        self.with_history(|view| {
+            let cols = view.columns();
 
-            for visual_row in 0..screen_lines {
-                let buffer_line = visual_row - display_offset;
+            for visual_row in 0..view.screen_lines() {
+                let row = view.visible_row(visual_row);
                 let mut col = 0usize;
                 while col < cols {
-                    let cell = &grid[Point::new(Line(buffer_line), Column(col))];
+                    let cell = &row[Column(col)];
                     let Some(hl) = cell.hyperlink() else {
                         col += 1;
                         continue;
@@ -167,8 +163,7 @@ impl Terminal {
                     let start_col = col;
                     col += 1;
                     while col < cols {
-                        let next_cell = &grid[Point::new(Line(buffer_line), Column(col))];
-                        match next_cell.hyperlink() {
+                        match row[Column(col)].hyperlink() {
                             Some(nh) if nh.id() == id => col += 1,
                             _ => break,
                         }
@@ -179,7 +174,7 @@ impl Terminal {
                     let link_group = *id_to_group.entry(id).or_insert(next_group);
 
                     result.push(DetectedLink {
-                        line: visual_row,
+                        line: visual_row as i32,
                         col: start_col,
                         len,
                         text: uri,
@@ -210,7 +205,7 @@ impl Terminal {
     /// [`Self::detect_urls`] that rescans only the logical lines whose rows
     /// changed since `cache` was last used; the result is identical.
     pub fn detect_urls_with(&self, cache: &mut UrlScanCache) -> Vec<DetectedLink> {
-        let changed = self.with_content(|term| cache.read_rows(term.grid()));
+        let changed = self.with_history(|view| cache.read_rows(view));
         cache.scan(&changed)
     }
 }

@@ -1,6 +1,6 @@
 use crate::terminal_view_settings;
-use alacritty_terminal::grid::{Dimensions, Row};
-use alacritty_terminal::index::{Column, Line};
+use alacritty_terminal::grid::Row;
+use alacritty_terminal::index::Column;
 use alacritty_terminal::term::TermMode;
 use alacritty_terminal::term::cell::{Cell, Flags};
 use alacritty_terminal::vte::ansi::{Color, NamedColor};
@@ -907,7 +907,7 @@ impl TerminalRenderCache {
 }
 
 /// Builds the grid layout and reports the `content_generation` it was built
-/// from. The generation is sampled inside `with_content`, i.e. under the same
+/// from. The generation is sampled inside `with_history`, i.e. under the same
 /// `term` lock that every grid mutation takes — reading it after the lock is
 /// released would let a layout be filed under a generation it never saw, and
 /// that pane would then hold a stale frame until some other input changed.
@@ -918,13 +918,13 @@ fn build_terminal_grid_layout(
     state: &TerminalElementState,
     previous: Option<&TerminalGridLayout>,
 ) -> (u64, TerminalGridLayout) {
-    terminal.with_content(|term| {
+    terminal.with_history(|view| {
         let content_generation = terminal.content_generation();
-        let grid = term.grid();
-        let screen_lines = grid.screen_lines();
-        let cols = grid.columns();
-        let display_offset = grid.display_offset() as i32;
-        let cursor_point = grid.cursor.point;
+        let term = view.term();
+        let screen_lines = view.screen_lines();
+        let cols = view.columns();
+        let display_offset = view.display_offset() as i32;
+        let cursor_point = term.grid().cursor.point;
         let previous_rows = previous
             .filter(|previous| previous.rows.len() == screen_lines && previous.cols == cols)
             .map(|previous| previous.rows.as_slice());
@@ -934,9 +934,9 @@ fn build_terminal_grid_layout(
         for row in 0..screen_lines {
             let visual_line = row as i32;
             let buffer_line = visual_line - display_offset;
-            let cells = &grid[Line(buffer_line)];
+            let cells = view.visible_row(row);
             let selected = selected_columns(selection, buffer_line);
-            let hash = row_hash(cells, cols, selected);
+            let hash = row_hash(&cells, cols, selected);
             let reusable = previous_rows
                 .and_then(|rows| rows.get(row))
                 .filter(|row| row.hash == hash);
@@ -945,7 +945,7 @@ fn build_terminal_grid_layout(
                 None => {
                     rebuilt_rows += 1;
                     rows.push(Arc::new(build_row(
-                        cells,
+                        &cells,
                         visual_line,
                         cols,
                         selected,
@@ -1568,7 +1568,7 @@ impl Element for TerminalElement {
                     cells_changed = Some(changed_cells(previous.as_deref(), &layout));
                 }
                 // File the layout under the generation observed while building it:
-                // `with_content` drains pending remote output first, so the value
+                // `with_history` drains pending remote output first, so the value
                 // sampled before the call can already be one behind.
                 cache_key.content_generation = content_generation;
                 render_cache.store(cache_key, layout)

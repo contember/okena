@@ -16,6 +16,31 @@ Wraps `alacritty_terminal` for ANSI processing and `portable-pty` for cross-plat
 | `backend.rs` | Terminal backend abstraction. |
 | `process.rs` | Process spawning utilities. |
 
+## Scrollback archive
+
+alacritty stores every history cell as a 24-byte `Cell`, so history costs
+`lines x columns x 24 B` per terminal, in the daemon and again in each client
+mirror. The grid therefore keeps only `LIVE_HISTORY_LINES` (1,000) history rows;
+older rows move into `terminal/archive.rs` (text plus attribute runs, deflated
+in 256-row blocks). The archive is memory only: terminal output holds secrets,
+never write it to disk.
+
+- `terminal/scrollback.rs` — `Scrollback` (archive, view offset into it, the
+  history-wide selection) and `HistoryView`, the one read path over grid and
+  archive. Line numbers continue below the grid's topmost line, so a row keeps
+  its number when it is archived. Lock order: `term`, then `scrollback`.
+- The grid's own limit stays the full `scrollback_lines`, so one burst loses
+  nothing; `advance_with_prompt_marks` drains it after every ≤ 4 KiB step, and
+  `resize_term` / `set_scrollback_lines` drain too.
+- Anything that reads history or the scrolled viewport (render, search, links,
+  selection, snapshots, `tail_text`, export) goes through `with_history` /
+  `HistoryView`, never `term.grid()` with `display_offset`.
+- Selection: alacritty's `term.selection` mirrors the history selection while
+  both ends are in the grid; once an end is archived, `history_selection.rs`
+  (a port of alacritty's range and text rules) resolves it.
+- Archived rows are not reflowed on resize: a read clips or pads them to the
+  current width. CSI 3 J (outside the alternate screen) and RIS clear the archive.
+
 ## OSC sequences (sidecar)
 
 `terminal/osc_sidecar.rs` is a side-channel VTE parser run on the same byte

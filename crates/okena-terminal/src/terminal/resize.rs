@@ -1,3 +1,4 @@
+use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::term::test::TermSize;
 use std::sync::atomic::Ordering;
 
@@ -38,10 +39,10 @@ impl Terminal {
         }
 
         // Resize terminal grid immediately (independent mutex)
-        let mut term = self.term.lock();
-        let term_size = TermSize::new(new_size.cols as usize, new_size.rows as usize);
-        term.resize(term_size);
-        drop(term);
+        self.resize_term(TermSize::new(
+            new_size.cols as usize,
+            new_size.rows as usize,
+        ));
 
         self.content_generation.fetch_add(1, Ordering::Relaxed);
 
@@ -110,10 +111,27 @@ impl Terminal {
         };
         drop(rs);
         self.resize_state.lock().size = size;
-        let mut term = self.term.lock();
-        let term_size = TermSize::new(cols as usize, rows as usize);
-        term.resize(term_size);
+        self.resize_term(TermSize::new(cols as usize, rows as usize));
         self.content_generation.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Resize the grid, then move history a reflow pushed past the live rows
+    /// into the archive. Archived rows keep the width they were written at.
+    fn resize_term(&self, size: TermSize) {
+        let mut term = self.term.lock();
+        let mut scrollback = self.scrollback.lock();
+        let old_cols = term.grid().columns();
+        let before = scrollback.history_mark(&term);
+        term.resize(size);
+        if term.grid().columns() != old_cols {
+            // alacritty drops its selection on a column change; so does the
+            // history-wide one.
+            scrollback.selection = None;
+        } else {
+            let rows = scrollback.rows_entered(&term, before);
+            scrollback.follow_output(&term, rows);
+        }
+        scrollback.drain(&mut term);
     }
 
     /// Mark this process as the terminal's resize authority.

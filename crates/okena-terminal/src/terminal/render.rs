@@ -1,5 +1,6 @@
 use super::Terminal;
 use super::ansi_snapshot::grid_to_ansi;
+use super::scrollback::HistoryView;
 
 impl Terminal {
     /// Render the terminal's visible content as ANSI escape sequences.
@@ -15,7 +16,9 @@ impl Terminal {
         let mut slow = okena_core::timing::SlowGuard::new("Terminal::render_snapshot");
         self.drain_pending_output();
         let term = self.term.lock();
-        let mut bytes = grid_to_ansi(&term);
+        let scrollback = self.scrollback.lock();
+        let mut bytes = grid_to_ansi(&HistoryView::new(&term, &scrollback));
+        drop(scrollback);
         // A newly attached/reconnected client may never see another title OSC
         // from an idle process. Capture it under the same grid lock/watermark.
         // Empty OSC 2 also clears a stale client title when the source has none.

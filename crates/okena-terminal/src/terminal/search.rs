@@ -1,4 +1,4 @@
-use alacritty_terminal::grid::{Dimensions, Row};
+use alacritty_terminal::grid::Row;
 use alacritty_terminal::index::{Column, Line};
 use alacritty_terminal::term::cell::{Cell, Flags};
 use regex::Regex;
@@ -110,11 +110,10 @@ impl Terminal {
 
         let mut matches = Vec::new();
 
-        self.with_content(|term| {
-            let grid = term.grid();
-            let screen_lines = grid.screen_lines() as i32;
-            let history_size = grid.history_size() as i32;
-            let cols = grid.columns();
+        self.with_history(|view| {
+            let screen_lines = view.screen_lines() as i32;
+            let history_size = view.history_size() as i32;
+            let cols = view.columns();
 
             let mut row_text = GridText::default();
             let mut lowered = GridText::default();
@@ -122,7 +121,7 @@ impl Terminal {
             // Search from top of history to bottom of screen
             // Line numbers: negative = history, 0..screen_lines = visible
             for line in (-history_size)..screen_lines {
-                row_text.rebuild(&grid[Line(line)], cols);
+                row_text.rebuild(&view.row(Line(line)), cols);
 
                 if let Some(ref regex) = regex {
                     for mat in regex.find_iter(row_text.text()) {

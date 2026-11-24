@@ -1,12 +1,13 @@
-use alacritty_terminal::grid::{Dimensions, Grid, GridCell};
-use alacritty_terminal::index::{Column, Line, Point};
+use alacritty_terminal::grid::{Dimensions, GridCell, Row};
+use alacritty_terminal::index::{Column, Line};
+use alacritty_terminal::term::TermMode;
 use alacritty_terminal::term::cell::{Cell, Flags};
-use alacritty_terminal::term::{Term, TermMode};
 use alacritty_terminal::vte::ansi::{Color, NamedColor};
 
 use super::Terminal;
 use super::event_listener::ZedEventListener;
 use super::modes::TerminalModeState;
+use super::scrollback::HistoryView;
 
 /// Tracked SGR state to minimize escape sequences in snapshot output.
 #[derive(Clone, Default, PartialEq)]
@@ -36,8 +37,8 @@ enum SnapshotTarget {
 }
 
 /// Serialize the visible terminal grid to ANSI escape sequences.
-pub(super) fn grid_to_ansi(term: &Term<ZedEventListener>) -> Vec<u8> {
-    write_grid(term, SnapshotTarget::OwnedScreen)
+pub(super) fn grid_to_ansi(view: &HistoryView<'_, ZedEventListener>) -> Vec<u8> {
+    write_grid(view, SnapshotTarget::OwnedScreen)
 }
 
 impl Terminal {
@@ -45,14 +46,13 @@ impl Terminal {
     /// a TUI inside the user's own terminal. Replay cannot leave the host's
     /// alternate screen, erase its scrollback, or install the remote's modes.
     pub fn render_snapshot_for_host_screen(&self) -> Vec<u8> {
-        self.drain_pending_output();
-        let term = self.term.lock();
-        write_grid(&term, SnapshotTarget::HostScreen)
+        self.with_history(|view| write_grid(view, SnapshotTarget::HostScreen))
     }
 }
 
-fn write_grid(term: &Term<ZedEventListener>, target: SnapshotTarget) -> Vec<u8> {
+fn write_grid(view: &HistoryView<'_, ZedEventListener>, target: SnapshotTarget) -> Vec<u8> {
     let owns_screen = target == SnapshotTarget::OwnedScreen;
+    let term = view.term();
     let grid = term.grid();
     let screen_lines = grid.screen_lines();
     let cols = grid.columns();
@@ -83,7 +83,7 @@ fn write_grid(term: &Term<ZedEventListener>, target: SnapshotTarget) -> Vec<u8> 
     let mut current = SgrState::default();
 
     if owns_screen && !term.mode().contains(TermMode::ALT_SCREEN) {
-        write_history(&mut buf, grid, &mut current);
+        write_history(&mut buf, view, &mut current);
     }
 
     for row in 0..screen_lines as i32 {
@@ -97,7 +97,7 @@ fn write_grid(term: &Term<ZedEventListener>, target: SnapshotTarget) -> Vec<u8> 
             current = SgrState::default();
         }
 
-        write_row(&mut buf, grid, Line(row), &mut current, cols);
+        write_row(&mut buf, &grid[Line(row)], &mut current, cols);
     }
 
     // Reset attributes
@@ -117,12 +117,12 @@ fn write_grid(term: &Term<ZedEventListener>, target: SnapshotTarget) -> Vec<u8> 
 /// Replay the newest [`SNAPSHOT_HISTORY_LINES`] of scrollback as lines that
 /// scroll off the top, leaving them in the client's history above a blank
 /// screen for the grid body to draw on.
-fn write_history(buf: &mut Vec<u8>, grid: &Grid<Cell>, current: &mut SgrState) {
-    let lines = grid.history_size().min(SNAPSHOT_HISTORY_LINES);
+fn write_history<L>(buf: &mut Vec<u8>, view: &HistoryView<'_, L>, current: &mut SgrState) {
+    let lines = view.history_size().min(SNAPSHOT_HISTORY_LINES);
     if lines == 0 {
         return;
     }
-    let cols = grid.columns();
+    let cols = view.columns();
     // The line feeds must scroll the whole screen: a scroll region the client
     // kept from earlier output would hold the lines back from its history.
     // Autowrap continues soft-wrapped rows; the mode restore at the end of the
@@ -130,17 +130,14 @@ fn write_history(buf: &mut Vec<u8>, grid: &Grid<Cell>, current: &mut SgrState) {
     buf.extend_from_slice(b"\x1b[r\x1b[?7h");
     let mut continues_wrap = false;
     for back in (1..=lines).rev() {
-        let line = Line(-(back as i32));
+        let row = view.row(Line(-(back as i32)));
         // The newest history row always ends in a line feed: the line-feed
         // count below assumes the cursor stands below the last history row.
-        let wraps = back > 1
-            && grid[Point::new(line, Column(cols - 1))]
-                .flags
-                .contains(Flags::WRAPLINE);
+        let wraps = back > 1 && row[Column(cols - 1)].flags.contains(Flags::WRAPLINE);
         let end = if wraps {
             // A wide char that did not fit left a spacer in the last cell;
             // without it the client wraps the same way and sets its own.
-            let last = &grid[Point::new(line, Column(cols - 1))];
+            let last = &row[Column(cols - 1)];
             if last.flags.contains(Flags::LEADING_WIDE_CHAR_SPACER) {
                 cols - 1
             } else {
@@ -149,9 +146,9 @@ fn write_history(buf: &mut Vec<u8>, grid: &Grid<Cell>, current: &mut SgrState) {
         } else {
             // The blank tail costs bytes and nothing else.
             let end = (0..cols)
-                .rposition(|col| !grid[Point::new(line, Column(col))].is_empty())
+                .rposition(|col| !row[Column(col)].is_empty())
                 .map_or(0, |last| last + 1);
-            let first_bg = grid[Point::new(line, Column(0))].bg;
+            let first_bg = row[Column(0)].bg;
             if continues_wrap && (end == 0 || first_bg != Color::Named(NamedColor::Background)) {
                 // The wrap into this row happens on its first glyph, and a wrap
                 // at the bottom scrolls in a line with that glyph's background:
@@ -161,7 +158,7 @@ fn write_history(buf: &mut Vec<u8>, grid: &Grid<Cell>, current: &mut SgrState) {
                 end
             }
         };
-        write_row(buf, grid, line, current, end);
+        write_row(buf, &row, current, end);
         continues_wrap = wraps;
         if wraps {
             continue;
@@ -174,18 +171,18 @@ fn write_history(buf: &mut Vec<u8>, grid: &Grid<Cell>, current: &mut SgrState) {
         buf.extend_from_slice(b"\r\n");
     }
     // At most `screen_lines - 1` rows are still on screen; scroll them off.
-    for _ in 1..grid.screen_lines() {
+    for _ in 1..view.screen_lines() {
         buf.push(b'\n');
     }
 }
 
 /// Write the first `end` cells of a row, switching SGR only where it changes.
-fn write_row(buf: &mut Vec<u8>, grid: &Grid<Cell>, line: Line, current: &mut SgrState, end: usize) {
+fn write_row(buf: &mut Vec<u8>, row: &Row<Cell>, current: &mut SgrState, end: usize) {
     let default_fg = Color::Named(NamedColor::Foreground);
     let default_bg = Color::Named(NamedColor::Background);
 
     for col_idx in 0..end {
-        let cell = &grid[Point::new(line, Column(col_idx))];
+        let cell = &row[Column(col_idx)];
 
         // Skip wide char spacer cells
         if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {

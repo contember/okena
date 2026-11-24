@@ -1,37 +1,36 @@
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::index::{Column, Line, Point, Side};
-use alacritty_terminal::selection::{Selection, SelectionType};
+use alacritty_terminal::selection::SelectionType;
 use alacritty_terminal::term::TermMode;
 use alacritty_terminal::term::cell::Flags;
 
 use super::Terminal;
+use super::scrollback::{HistorySelection, HistoryView, SelectionPoint};
 
 impl Terminal {
-    /// Select all visible text in the terminal
+    /// Select the whole history and screen.
     pub fn select_all(&self) {
         let mut term = self.term.lock();
-        let grid = term.grid();
-        let rows = grid.screen_lines() as i32;
-        let cols = grid.columns();
-        let history = grid.history_size() as i32;
-
-        // Clear any existing selection
-        term.selection = None;
-        drop(term);
-
-        // Create selection from start of history to end of screen
-        // Start at top-left of history
-        let start_row = -history;
-        let start_col = 0;
-
-        // End at bottom-right of visible area
-        let end_row = rows - 1;
-        let end_col = cols.saturating_sub(1);
-
-        // Use the existing selection infrastructure
-        self.start_selection(start_col, start_row, Side::Left);
-        self.update_selection(end_col, end_row, Side::Right);
-        self.end_selection();
+        let mut scrollback = self.scrollback.lock();
+        let rows = term.grid().screen_lines() as i32;
+        let cols = term.grid().columns();
+        let history = scrollback.history_size(&term) as i32;
+        let selection = HistorySelection {
+            ty: SelectionType::Simple,
+            anchor: SelectionPoint {
+                point: Point::new(Line(-history), Column(0)),
+                side: Side::Left,
+            },
+            head: SelectionPoint {
+                point: Point::new(Line(rows - 1), Column(cols.saturating_sub(1))),
+                side: Side::Right,
+            },
+        };
+        scrollback.set_selection(&mut term, Some(selection));
+        let mut state = self.selection_state.lock();
+        state.start = None;
+        state.end = None;
+        state.is_selecting = false;
     }
 
     /// Start selection at a point
@@ -60,21 +59,26 @@ impl Terminal {
         side: Side,
     ) {
         let mut term = self.term.lock();
+        let mut scrollback = self.scrollback.lock();
 
-        // Convert visual row to buffer row
-        // When scrolled up (display_offset > 0), visual row 0 shows history (negative buffer lines)
-        let display_offset = term.grid().display_offset() as i32;
-        let buffer_row = row - display_offset;
+        // When scrolled up, visual row 0 shows history (negative buffer lines).
+        let buffer_row = row - scrollback.display_offset(&term) as i32;
 
         let mut state = self.selection_state.lock();
         state.start = Some((col, buffer_row as usize));
         state.end = Some((col, buffer_row as usize));
         state.is_selecting = true;
 
-        // Set selection in the terminal using buffer coordinates
-        let point = Point::new(Line(buffer_row), Column(col));
-        let selection = Selection::new(selection_type, point, side);
-        term.selection = Some(selection);
+        let end = SelectionPoint {
+            point: Point::new(Line(buffer_row), Column(col)),
+            side,
+        };
+        let selection = HistorySelection {
+            ty: selection_type,
+            anchor: end,
+            head: end,
+        };
+        scrollback.set_selection(&mut term, Some(selection));
     }
 
     /// Update selection to a new point
@@ -83,17 +87,18 @@ impl Terminal {
     pub fn update_selection(&self, col: usize, row: i32, side: Side) {
         let mut state = self.selection_state.lock();
         if state.is_selecting {
-            // Update terminal selection
             let mut term = self.term.lock();
+            let mut scrollback = self.scrollback.lock();
 
-            // Convert visual row to buffer row
-            let display_offset = term.grid().display_offset() as i32;
-            let buffer_row = row - display_offset;
-
+            let buffer_row = row - scrollback.display_offset(&term) as i32;
             state.end = Some((col, buffer_row as usize));
 
-            if let Some(ref mut selection) = term.selection {
-                let point = Point::new(Line(buffer_row), Column(col));
+            let point = Point::new(Line(buffer_row), Column(col));
+            if let Some(mut selection) = scrollback.selection {
+                selection.head = SelectionPoint { point, side };
+                scrollback.set_selection(&mut term, Some(selection));
+            } else if let Some(ref mut selection) = term.selection {
+                // A selection alacritty moved within a scroll region is its own.
                 selection.update(point, side);
             }
         }
@@ -113,19 +118,22 @@ impl Terminal {
         state.is_selecting = false;
 
         let mut term = self.term.lock();
-        term.selection = None;
+        self.scrollback.lock().set_selection(&mut term, None);
     }
 
     /// Get selected text
     pub fn get_selected_text(&self) -> Option<String> {
-        let term = self.term.lock();
-        term.selection_to_string()
+        self.with_history(|view| match view.archived_selection() {
+            Some(selection) => view.selection_text(&selection),
+            None => view.term().selection_to_string(),
+        })
     }
 
     /// Check if there is an active selection
     pub fn has_selection(&self) -> bool {
         let term = self.term.lock();
-        term.selection.is_some()
+        let scrollback = self.scrollback.lock();
+        term.selection.is_some() || scrollback.archived_selection(&term).is_some()
     }
 
     /// Get selection bounds for rendering
@@ -133,14 +141,16 @@ impl Terminal {
     /// Returns ((start_col, start_row), (end_col, end_row)) where rows are buffer coordinates (can be negative for history)
     pub fn selection_bounds(&self) -> Option<((usize, i32), (usize, i32))> {
         let term = self.term.lock();
-        if let Some(ref selection) = term.selection
-            && let Some(range) = selection.to_range(&*term)
-        {
-            let start = (range.start.column.0, range.start.line.0);
-            let end = (range.end.column.0, range.end.line.0);
-            return Some((start, end));
-        }
-        None
+        let scrollback = self.scrollback.lock();
+        let view = HistoryView::new(&term, &scrollback);
+        let range = match view.archived_selection() {
+            Some(selection) => view.selection_range(&selection),
+            None => term.selection.as_ref().and_then(|s| s.to_range(&*term)),
+        }?;
+        Some((
+            (range.start.column.0, range.start.line.0),
+            (range.end.column.0, range.end.line.0),
+        ))
     }
 
     /// Delete the currently selected text by sending arrow keys + backspaces to the PTY.
@@ -148,9 +158,9 @@ impl Terminal {
     /// Returns true if deletion was performed.
     pub fn delete_selection(&self) -> bool {
         let mut term = self.term.lock();
+        let mut scrollback = self.scrollback.lock();
 
-        let display_offset = term.grid().display_offset();
-        if display_offset != 0 {
+        if scrollback.display_offset(&term) != 0 {
             return false;
         }
 
@@ -224,8 +234,9 @@ impl Terminal {
         buf.extend(std::iter::repeat_n(0x7f, char_count));
 
         // Clear selection
-        term.selection = None;
+        scrollback.set_selection(&mut term, None);
 
+        drop(scrollback);
         drop(term);
         self.send_bytes(&buf);
         true

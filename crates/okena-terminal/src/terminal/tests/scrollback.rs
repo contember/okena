@@ -8,7 +8,6 @@
 
 use super::super::{Terminal, TerminalOptions, TerminalSize};
 use super::helpers::NullTransport;
-use alacritty_terminal::grid::Dimensions;
 use std::sync::Arc;
 
 fn terminal_with(scrollback_lines: u32) -> Terminal {
@@ -28,7 +27,7 @@ fn feed_lines(terminal: &Terminal, count: usize) {
 }
 
 fn history_size(terminal: &Terminal) -> usize {
-    terminal.with_content(|term| term.grid().history_size())
+    terminal.with_history(|view| view.history_size())
 }
 
 #[test]
@@ -81,7 +80,7 @@ fn shrinking_to_zero_leaves_only_the_viewport() {
     terminal.set_scrollback_lines(0);
 
     assert_eq!(history_size(&terminal), 0);
-    let visible = terminal.with_content(|term| term.grid().screen_lines());
+    let visible = terminal.screen_lines();
     assert_eq!(visible, TerminalSize::default().rows as usize);
 }
 
