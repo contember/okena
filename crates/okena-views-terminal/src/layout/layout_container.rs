@@ -454,7 +454,7 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
         let default_launch = super::start_page::launch_request(
             &self.project_id,
             Some(&page.id),
-            okena_core::shell::StartPageShell::Default,
+            okena_core::shell::ShellType::Default,
             None,
         );
         let keyboard_focus = focus.clone();

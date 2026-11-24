@@ -36,7 +36,6 @@ use crate::views::components::{dropdown_anchored_below, modal_backdrop, modal_co
 use crate::workspace::state::Workspace;
 use gpui::prelude::*;
 use gpui::*;
-use okena_core::shell::StartPageShellOption;
 use okena_extensions::ExtensionRegistry;
 use okena_ui::scrollbar::vertical_scrollbar;
 use std::collections::HashMap;
@@ -70,7 +69,6 @@ pub struct SettingsPanel {
     pub(super) shell_button_bounds: Option<Bounds<Pixels>>,
     pub(super) session_backend_button_bounds: Option<Bounds<Pixels>>,
     pub(super) available_shells: Vec<AvailableShell>,
-    start_page_shells: Vec<StartPageShellOption>,
     start_page_shell_dropdown_open: bool,
     start_page_shell_button_bounds: Option<Bounds<Pixels>>,
     start_page_button_draft: Option<render_start_page::StartPageButtonDraft>,
@@ -910,7 +908,6 @@ impl SettingsPanel {
             shell_button_bounds: None,
             session_backend_button_bounds: None,
             available_shells: available_shells(),
-            start_page_shells: Vec::new(),
             start_page_shell_dropdown_open: false,
             start_page_shell_button_bounds: None,
             start_page_button_draft: None,

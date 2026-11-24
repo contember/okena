@@ -52,163 +52,66 @@ pub(super) fn interactive_leaf(
     })
 }
 
-/// A launch whose shell can be checked outside the daemon's workspace lock.
-pub struct PreparedStartPageLaunch {
+/// Turn a Start Page (or an empty project's screen when `page_id` is `None`)
+/// into one terminal. A page that is already gone is a no-op, so a repeated
+/// click does not open a second terminal.
+pub(super) fn launch_start_page(
+    ws: &mut Workspace,
+    focus_manager: &mut FocusManager,
     project_id: String,
     page_id: Option<String>,
     shell: ShellType,
     command: Option<String>,
-    effective_shell: ShellType,
-    workspace_epoch: u64,
-}
-
-pub fn prepare_start_page_launch(
-    ws: &Workspace,
-    project_id: String,
-    page_id: Option<String>,
-    shell: okena_core::shell::StartPageShell,
-    command: Option<String>,
+    backend: &dyn TerminalBackend,
+    terminals: &TerminalsRegistry,
     settings: &AppSettings,
-) -> Result<Option<PreparedStartPageLaunch>, String> {
-    let shell = ShellType::try_from(shell)?;
-    let Some(target) = resolve_start_page_launch(
-        ws,
-        &project_id,
-        page_id.as_deref(),
-        &shell,
-        command.is_none(),
-        settings,
-    )?
-    else {
-        return Ok(None);
+    cx: &mut impl WorkspaceCx,
+) -> ActionResult {
+    let Some(project) = ws.project(&project_id) else {
+        return ActionResult::Err(format!("project not found: {project_id}"));
     };
-    Ok(Some(PreparedStartPageLaunch {
-        project_id,
-        page_id,
-        shell,
-        command,
-        effective_shell: target.effective_shell,
-        workspace_epoch: ws.data_replacement_epoch(),
-    }))
-}
-
-impl PreparedStartPageLaunch {
-    pub fn validate(self) -> Result<ValidatedStartPageLaunch, String> {
-        okena_terminal::shell_config::validate_start_page_shell(&self.effective_shell)?;
-        Ok(ValidatedStartPageLaunch(self))
-    }
-}
-
-pub struct ValidatedStartPageLaunch(PreparedStartPageLaunch);
-
-struct StartPageTarget {
-    path: Vec<usize>,
-    cwd: String,
-    shell: ShellType,
-    effective_shell: ShellType,
-}
-
-impl ValidatedStartPageLaunch {
-    pub fn apply(
-        self,
-        ws: &mut Workspace,
-        focus: &mut FocusManager,
-        backend: &dyn TerminalBackend,
-        terminals: &TerminalsRegistry,
-        settings: &AppSettings,
-        cx: &mut impl WorkspaceCx,
-    ) -> ActionResult {
-        let PreparedStartPageLaunch {
-            project_id,
-            page_id,
-            shell,
-            command,
-            effective_shell,
-            workspace_epoch,
-        } = self.0;
-        if ws.data_replacement_epoch() != workspace_epoch {
-            return ActionResult::Ok(None);
-        }
-        let target = match resolve_start_page_launch(
-            ws,
-            &project_id,
-            page_id.as_deref(),
-            &shell,
-            command.is_none(),
-            settings,
-        ) {
-            Ok(Some(target)) => target,
-            Ok(None) => return ActionResult::Ok(None),
-            Err(error) => return ActionResult::Err(error),
-        };
-        if target.effective_shell != effective_shell {
-            return ActionResult::Err(
-                "The shell changed while it was being checked. Try again.".to_string(),
-            );
-        }
-
-        let choice = super::StartPageSelection {
-            path: target.path.clone(),
-            shell: target.shell,
-            command,
-        };
-        let result = super::spawn_terminals(
-            ws,
-            &project_id,
-            backend,
-            terminals,
-            settings,
-            Some(target.cwd),
-            Some(choice),
-            cx,
-        );
-        if matches!(result, ActionResult::Ok(Some(_))) {
-            ws.set_focused_terminal(focus, project_id, target.path, cx);
-        }
-        result
-    }
-}
-
-fn resolve_start_page_launch(
-    ws: &Workspace,
-    project_id: &str,
-    page_id: Option<&str>,
-    shell: &ShellType,
-    plain_terminal: bool,
-    settings: &AppSettings,
-) -> Result<Option<StartPageTarget>, String> {
-    let project = ws
-        .project(project_id)
-        .ok_or_else(|| format!("project not found: {project_id}"))?;
-    let (path, cwd) = match (project.layout.as_ref(), page_id) {
+    let (path, cwd) = match (project.layout.as_ref(), page_id.as_deref()) {
         (None, None) => (Vec::new(), project.path.clone()),
         (Some(layout), Some(id)) => {
             let Some(path) = layout.find_terminal_path(id) else {
-                return Ok(None);
+                return ActionResult::Ok(None);
             };
             let Some(page) = layout.get_at_path(&path).and_then(|node| node.start_page()) else {
-                return Ok(None);
+                return ActionResult::Ok(None);
             };
-            (path, page.cwd.clone())
+            let cwd = page.cwd.clone();
+            (path, cwd)
         }
         // The first click consumed the page, or it was closed.
-        _ => return Ok(None),
+        _ => return ActionResult::Ok(None),
     };
 
-    let shell = if plain_terminal && *shell == ShellType::Default {
-        ws.get_terminal_shell(project_id, &path).unwrap_or_default()
+    // A page deferred from a cloned layout keeps that pane's shell for Start Terminal.
+    let shell = if command.is_none() && shell == ShellType::Default {
+        ws.get_terminal_shell(&project_id, &path)
+            .unwrap_or_default()
     } else {
-        shell.clone()
+        shell
     };
-    let effective_shell = shell
-        .clone()
-        .resolve_default(project.default_shell.as_ref(), &settings.default_shell);
-    Ok(Some(StartPageTarget {
-        path,
-        cwd,
+    let selection = super::StartPageSelection {
+        path: path.clone(),
         shell,
-        effective_shell,
-    }))
+        command,
+    };
+    let result = super::spawn_terminals(
+        ws,
+        &project_id,
+        backend,
+        terminals,
+        settings,
+        Some(cwd),
+        Some(selection),
+        cx,
+    );
+    if matches!(result, ActionResult::Ok(Some(_))) {
+        ws.set_focused_terminal(focus_manager, project_id, path, cx);
+    }
+    result
 }
 
 pub(super) fn create(

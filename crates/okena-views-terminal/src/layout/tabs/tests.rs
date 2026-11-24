@@ -265,7 +265,7 @@ fn pending_tabs_keep_separate_close_targets(cx: &mut TestAppContext) {
 fn pending_panes_navigate_and_launch_with_the_keyboard(cx: &mut TestAppContext) {
     use crate::actions::FocusNextTerminal;
     use crate::layout::navigation::get_pane_map;
-    use okena_core::shell::StartPageShell;
+    use okena_core::shell::ShellType;
     use okena_workspace::state::ProjectData;
 
     struct LayoutRoot(Entity<LayoutContainer<RecordedActions>>);
@@ -337,7 +337,7 @@ fn pending_panes_navigate_and_launch_with_the_keyboard(cx: &mut TestAppContext) 
     assert!(matches!(
         actions.0.lock().last(),
         Some(ActionRequest::LaunchStartPage {
-            page_id: Some(id), shell: StartPageShell::Default, command: None, ..
+            page_id: Some(id), shell: ShellType::Default, command: None, ..
         }) if id == "second-page"
     ));
 

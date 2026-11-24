@@ -357,16 +357,9 @@ fn windows_encoded_hook_command(command: &str, env_vars: &HashMap<String, String
     ));
     script.push_str("& $env:ComSpec /D /S /C $okenaCommand;exit $LASTEXITCODE");
 
-    let encoded = encode_powershell_script(&script);
-    format!("powershell.exe -NoLogo -NoProfile -EncodedCommand {encoded}")
-}
-
-#[cfg(windows)]
-fn encode_powershell_script(script: &str) -> String {
-    use base64::Engine;
-
     let utf16: Vec<u8> = script.encode_utf16().flat_map(u16::to_le_bytes).collect();
-    base64::engine::general_purpose::STANDARD.encode(utf16)
+    let encoded = base64::engine::general_purpose::STANDARD.encode(utf16);
+    format!("powershell.exe -NoLogo -NoProfile -EncodedCommand {encoded}")
 }
 
 fn safe_hook_environment(env_vars: &HashMap<String, String>) -> Vec<(String, String)> {
@@ -1687,314 +1680,21 @@ pub fn terminal_launch_plan(
     }
 }
 
-/// Run a Start Page command after the terminal hook and keep an interactive
-/// shell available when the command returns. The PTY never carries queued
-/// command input that could be consumed by the startup hook or shell profiles.
-pub fn start_page_launch_plan(
-    shell: ShellType,
-    shell_wrapper: Option<&str>,
-    on_create: Option<&str>,
-    command: &str,
-    env: &HashMap<String, String>,
-) -> Result<TerminalLaunchPlan, String> {
-    let (program, args, _handoff, separator, _) = terminal_launch_parts(&shell);
-    let executable = std::path::Path::new(&program)
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or(&program)
-        .to_ascii_lowercase();
-    let executable = executable.strip_suffix(".exe").unwrap_or(&executable);
-    let posix = matches!(
-        executable,
-        "sh" | "ash" | "bash" | "dash" | "fish" | "ksh" | "mksh" | "zsh"
-    );
-    let unsupported = || {
-        format!(
-            "Start Page commands are unavailable for {program} with these shell settings. Choose a supported shell or use Start Terminal."
-        )
-    };
-
-    let custom_args = match &shell {
-        ShellType::Custom { args, .. } => args.as_slice(),
-        _ => &[],
-    };
-
-    // An existing command or script argument would consume our launch switches.
-    // Accept the ordinary interactive/login/profile switches for POSIX shells.
-    if posix
-        && custom_args.iter().any(|arg| {
-            !matches!(
-                arg.as_str(),
-                "-l" | "--login"
-                    | "-i"
-                    | "--interactive"
-                    | "--noprofile"
-                    | "--norc"
-                    | "--no-config"
-            )
-        })
-    {
-        return Err(unsupported());
-    }
-    // Cmd uses a command sequence; POSIX shells and PowerShell can put the
-    // next command on its own line even if the preceding line has a comment.
-    let separator = if separator == " & " { separator } else { "\n" };
-    let with_hook = |body: &str| match on_create {
-        Some(hook) => format!("{hook}{separator}{body}"),
-        None => body.to_owned(),
-    };
-    let with_wrapper =
-        |nested: &str| with_hook(&wrap_start_page_shell(shell_wrapper, nested, separator));
-
-    let posix_body = || {
-        // terminal_launch_parts adds -ic after the user's shell arguments.
-        let shell_args = &args[..args.len() - 1];
-        let invocation = std::iter::once(program.as_str())
-            .chain(shell_args.iter().map(String::as_str))
-            .map(|arg| quote_for_posix_shell(&program, arg))
-            .collect::<Vec<_>>()
-            .join(" ");
-        let body = format!(
-            "eval {} || true\nexec {invocation} -i",
-            quote_for_posix_shell(&program, command),
-        );
-        if shell_wrapper.is_some() {
-            with_wrapper(&format!(
-                "{invocation} -ic {}",
-                quote_for_posix_shell(&program, &body),
-            ))
-        } else {
-            with_hook(&body)
-        }
-    };
-
-    #[cfg(windows)]
-    let (launch_body, mut args) = match &shell {
-        ShellType::PowerShell { .. } if shell_wrapper.is_none() => {
-            let mut args = args;
-            args.pop(); // Replace -Command with a lossless argv representation.
-            args.push("-EncodedCommand".to_string());
-            (encode_powershell_script(&with_hook(command)), args)
-        }
-        ShellType::PowerShell { .. } => {
-            let nested = format!(
-                "{_handoff} -EncodedCommand {}",
-                encode_powershell_script(command)
-            );
-            (with_wrapper(&nested), args)
-        }
-        ShellType::Default | ShellType::Cmd => {
-            return Ok(TerminalLaunchPlan {
-                route: shell,
-                initial_command: Some(cmd_start_page_command(
-                    &program,
-                    &[],
-                    shell_wrapper,
-                    on_create,
-                    command,
-                )?),
-                environment: safe_hook_environment(env),
-                project_id: None,
-            });
-        }
-        ShellType::Wsl { .. } => {
-            let nested = wsl_start_page_shell(command);
-            let body = if shell_wrapper.is_some() {
-                with_wrapper(&nested)
-            } else {
-                with_hook(&format!("exec {nested}"))
-            };
-            (body, args)
-        }
-        ShellType::Custom { .. }
-            if matches!(executable, "pwsh" | "powershell")
-                && shell_wrapper.is_none()
-                && custom_args.iter().all(|arg| {
-                    matches!(arg.to_ascii_lowercase().as_str(), "-noprofile" | "-nologo")
-                }) =>
-        {
-            let mut args = custom_args.to_vec();
-            if !args.iter().any(|arg| arg.eq_ignore_ascii_case("-NoLogo")) {
-                args.push("-NoLogo".to_string());
-            }
-            args.extend(["-NoExit", "-EncodedCommand"].map(String::from));
-            (encode_powershell_script(&with_hook(command)), args)
-        }
-        ShellType::Custom { .. }
-            if executable == "cmd"
-                && custom_args.iter().all(|arg| {
-                    matches!(
-                        arg.to_ascii_uppercase().as_str(),
-                        "/D" | "/Q" | "/A" | "/U" | "/E:ON" | "/E:OFF" | "/V:ON" | "/V:OFF"
-                    )
-                }) =>
-        {
-            let command =
-                cmd_start_page_command(&program, custom_args, shell_wrapper, on_create, command)?;
-            return Ok(TerminalLaunchPlan {
-                route: shell,
-                initial_command: Some(command),
-                environment: safe_hook_environment(env),
-                project_id: None,
-            });
-        }
-        ShellType::Custom { .. } if posix => (posix_body(), args),
-        ShellType::Custom { .. } => return Err(unsupported()),
-    };
-
-    #[cfg(not(windows))]
-    let (launch_body, mut args) = if posix {
-        (posix_body(), args)
-    } else {
-        return Err(unsupported());
-    };
-
-    args.push(launch_body);
-    Ok(TerminalLaunchPlan {
-        route: shell,
-        initial_command: Some(TerminalLaunchCommand { program, args }),
-        environment: safe_hook_environment(env),
-        project_id: None,
-    })
-}
-
-#[cfg(windows)]
-fn cmd_start_page_command(
-    program: &str,
-    shell_args: &[String],
-    wrapper: Option<&str>,
-    on_create: Option<&str>,
-    command: &str,
-) -> Result<TerminalLaunchCommand, String> {
-    let with_hook = |body: &str| match on_create {
-        Some(hook) => format!("{hook} & {body}"),
-        None => body.to_owned(),
-    };
-    let body = with_hook(command);
-    // For a single argv string without embedded quotes, ConPTY's normal argv
-    // quoting already matches cmd /S. Keep the common path as a direct shell.
-    if wrapper.is_none() && !body.contains('"') && (on_create.is_none() || !command.contains('%')) {
-        let mut args = shell_args.to_vec();
-        args.extend(["/D", "/S", "/K"].map(String::from));
-        args.push(body);
-        return Ok(TerminalLaunchCommand {
-            program: program.to_string(),
-            args,
-        });
-    }
-
-    let powershell = std::env::var_os("SystemRoot")
-        .map(std::path::PathBuf::from)
-        .ok_or("Windows SystemRoot is missing. Use Start Terminal or choose PowerShell.")?
-        .join(r"System32\WindowsPowerShell\v1.0\powershell.exe")
-        .to_string_lossy()
-        .into_owned();
-    let encoded = if wrapper.is_some() || on_create.is_some() {
-        // An outer CMD parses percent substitutions before it executes any of
-        // its statements. Pass only a base64 launcher through that layer.
-        let inner = encode_raw_cmd_launch(program, shell_args, "/K", command)?;
-        let executable = if powershell.contains(' ') {
-            format!("\"{powershell}\"")
-        } else {
-            powershell.clone()
-        };
-        let nested =
-            format!("{executable} -NoLogo -NoProfile -NonInteractive -EncodedCommand {inner}");
-        let wrapped = wrap_start_page_shell(wrapper, &nested, " & ");
-        encode_raw_cmd_launch(program, shell_args, "/C", &with_hook(&wrapped))?
-    } else {
-        encode_raw_cmd_launch(program, shell_args, "/K", command)?
-    };
-    Ok(TerminalLaunchCommand {
-        program: powershell,
-        args: vec![
-            "-NoLogo".to_string(),
-            "-NoProfile".to_string(),
-            "-NonInteractive".to_string(),
-            "-EncodedCommand".to_string(),
-            encoded,
-        ],
-    })
-}
-
-#[cfg(windows)]
-fn encode_raw_cmd_launch(
-    program: &str,
-    shell_args: &[String],
-    switch: &str,
-    body: &str,
-) -> Result<String, String> {
-    use base64::Engine;
-
-    // cmd /S expects the command surrounded by outer quotes, with its inner
-    // quotes unchanged. Windows argv escaping would add backslashes there.
-    let args = format!("{} /D /S {switch} \"{body}\"", shell_args.join(" "));
-    if args.encode_utf16().count() > 8000 {
-        return Err("The wrapped Command Prompt launch is too long. Shorten the command or choose PowerShell.".into());
-    }
-    let b64 = base64::engine::general_purpose::STANDARD;
-    let program = b64.encode(program);
-    let args = b64.encode(args);
-    Ok(encode_powershell_script(&format!(
-        "$start = New-Object System.Diagnostics.ProcessStartInfo\n\
-         $start.UseShellExecute = $false\n\
-         $start.FileName = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{program}'))\n\
-         $start.Arguments = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{args}'))\n\
-         $child = [Diagnostics.Process]::Start($start)\n\
-         $child.WaitForExit()\n\
-         exit $child.ExitCode",
-    )))
-}
-
-fn wrap_start_page_shell(wrapper: Option<&str>, shell: &str, separator: &str) -> String {
-    match wrapper {
-        Some(wrapper) if wrapper.contains("{shell}") => wrapper.replace("{shell}", shell),
-        Some(wrapper) => format!("{wrapper}{separator}{shell}"),
-        None => shell.to_owned(),
-    }
-}
-
-fn quote_for_posix_shell(program: &str, argument: &str) -> String {
-    if std::path::Path::new(program)
-        .file_stem()
-        .is_some_and(|name| name.eq_ignore_ascii_case("fish"))
-    {
-        format!("'{}'", argument.replace('\\', "\\\\").replace('\'', "\\'"))
-    } else {
-        okena_core::shell::shell_quote(argument)
-    }
-}
-
-#[cfg(any(windows, test))]
-fn wsl_start_page_shell(command: &str) -> String {
-    use okena_core::shell::shell_quote;
-
-    // This command runs inside the distribution, where the account's shell
-    // and its alias syntax are known. An argv literal for sh may be parsed
-    // differently by fish, so pass the user's text through the environment.
-    // The interactive handoff inherits cwd and exported variables from eval.
-    let selected_shell = r#""${SHELL:-sh}""#;
-    let body = "eval \"$OKENA_START_PAGE_COMMAND\" || true\nexec env -u OKENA_START_PAGE_COMMAND \"$SHELL\" -i";
-    format!(
-        "env OKENA_START_PAGE_COMMAND={} SHELL={selected_shell} {selected_shell} -ic {}",
-        shell_quote(command),
-        shell_quote(body),
-    )
-}
-
 fn terminal_launch_parts(shell: &ShellType) -> (String, Vec<String>, String, &'static str, bool) {
     #[cfg(windows)]
     match shell {
-        ShellType::Cmd | ShellType::Default => (
-            "cmd.exe".to_string(),
-            vec!["/D".to_string(), "/S".to_string(), "/C".to_string()],
-            "cmd.exe /K".to_string(),
-            " & ",
-            true,
-        ),
+        ShellType::Cmd | ShellType::Default => {
+            return (
+                "cmd.exe".to_string(),
+                vec!["/D".to_string(), "/S".to_string(), "/C".to_string()],
+                "cmd.exe /K".to_string(),
+                " & ",
+                true,
+            );
+        }
         ShellType::PowerShell { core } => {
             let program = if *core { "pwsh.exe" } else { "powershell.exe" };
-            (
+            return (
                 program.to_string(),
                 vec![
                     "-NoLogo".to_string(),
@@ -2004,25 +1704,27 @@ fn terminal_launch_parts(shell: &ShellType) -> (String, Vec<String>, String, &'s
                 format!("{program} -NoLogo -NoExit"),
                 "; ",
                 false,
-            )
+            );
         }
-        ShellType::Wsl { .. } => (
-            "sh".to_string(),
-            vec!["-lc".to_string()],
-            "exec \"${SHELL:-sh}\"".to_string(),
-            "; ",
-            true,
-        ),
+        ShellType::Wsl { .. } => {
+            return (
+                "sh".to_string(),
+                vec!["-lc".to_string()],
+                "exec \"${SHELL:-sh}\"".to_string(),
+                "; ",
+                true,
+            );
+        }
         ShellType::Custom { path, args } => {
             let mut command_args = args.clone();
             command_args.push("-ic".to_string());
-            (
+            return (
                 path.clone(),
                 command_args,
                 format!("exec {}", shell.to_command_string()),
                 "; ",
                 true,
-            )
+            );
         }
     }
 
@@ -2857,363 +2559,15 @@ mod tests {
         let bytes = base64::engine::general_purpose::STANDARD
             .decode(encoded)
             .expect("base64 command");
-        let (pairs, remainder) = bytes.as_chunks::<2>();
-        assert!(remainder.is_empty());
-        let utf16: Vec<_> = pairs.iter().copied().map(u16::from_le_bytes).collect();
+        let utf16: Vec<u16> = bytes
+            .chunks_exact(2)
+            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+            .collect();
         let script = String::from_utf16(&utf16).expect("UTF-16LE command");
 
         assert!(!script.contains(hostile));
         assert!(script.contains(&base64::engine::general_purpose::STANDARD.encode(hostile)));
         assert!(script.contains(&base64::engine::general_purpose::STANDARD.encode("echo ready")));
-    }
-
-    #[test]
-    fn start_page_interactive_shell_runs_inside_wrapper_after_hook() {
-        use okena_core::shell::shell_quote;
-
-        let shell = ShellType::Custom {
-            path: "/bin/bash".into(),
-            args: vec!["-l".into()],
-        };
-        let env = HashMap::from([("OKENA_PROJECT_ID".to_string(), "project".to_string())]);
-        let raw = r#"alias_cmd "two words" 'single' "$HOME""#;
-        let plan = start_page_launch_plan(
-            shell.clone(),
-            Some("envbox -- {shell}"),
-            Some("prepare_project # startup"),
-            raw,
-            &env,
-        )
-        .unwrap();
-
-        assert_eq!(plan.route, shell);
-        assert_eq!(
-            plan.environment,
-            vec![("OKENA_PROJECT_ID".into(), "project".into())]
-        );
-        let launch = plan.initial_command.unwrap();
-        assert_eq!(launch.program, "/bin/bash");
-        let body = format!("eval {} || true\nexec /bin/bash -l -i", shell_quote(raw));
-        assert_eq!(
-            launch.args,
-            vec![
-                "-l".to_string(),
-                "-ic".to_string(),
-                format!(
-                    "prepare_project # startup\nenvbox -- /bin/bash -l -ic {}",
-                    shell_quote(&body)
-                ),
-            ],
-        );
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn start_page_wsl_runs_command_in_distros_interactive_shell() {
-        use okena_core::shell::shell_quote;
-
-        let shell = ShellType::Wsl {
-            distro: Some("Ubuntu".into()),
-        };
-        let raw = r#"alias_cmd "two words" 'single' "$HOME""#;
-        let plan = start_page_launch_plan(
-            shell.clone(),
-            None,
-            Some("prepare_project"),
-            raw,
-            &HashMap::new(),
-        )
-        .unwrap();
-
-        assert_eq!(plan.route, shell);
-        let launch = plan.initial_command.unwrap();
-        assert_eq!(launch.program, "sh");
-        let body = &launch.args[1];
-        assert_eq!(launch.args[0], "-lc");
-        assert!(body.starts_with("prepare_project\nexec env "));
-        assert!(body.contains(&format!("OKENA_START_PAGE_COMMAND={}", shell_quote(raw))));
-        assert!(body.contains(r#""${SHELL:-sh}" -ic"#));
-        assert!(body.contains(r#"exec env -u OKENA_START_PAGE_COMMAND "$SHELL" -i"#));
-    }
-
-    #[cfg(unix)]
-    fn start_page_shell_output(mut command: std::process::Command) -> std::process::Output {
-        use std::io::Write;
-        use std::process::Stdio;
-
-        let mut child = command
-            .env_remove("ENV")
-            .env_remove("BASH_ENV")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("start the shell");
-        child
-            .stdin
-            .take()
-            .unwrap()
-            .write_all(b"printf 'handoff:%s:%s:%s\n' \"$PWD\" \"$START_PAGE_TEST_VALUE\" \"$OKENA_START_PAGE_COMMAND\"\nexit\n")
-            .expect("send a probe to the interactive handoff");
-        child.wait_with_output().expect("collect shell output")
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn start_page_bash_preserves_hook_alias_and_command_environment() {
-        let plan = start_page_launch_plan(
-            ShellType::Custom {
-                path: "/bin/bash".into(),
-                args: vec!["--noprofile".into(), "--norc".into()],
-            },
-            None,
-            Some("alias sp_go='cd /; export START_PAGE_TEST_VALUE=\"quoted value\"'"),
-            "sp_go; okena_start_page_missing_command",
-            &HashMap::new(),
-        )
-        .unwrap();
-        let launch = plan.initial_command.unwrap();
-        let mut command = std::process::Command::new(launch.program);
-        command.args(launch.args);
-        let output = start_page_shell_output(command);
-        assert!(output.status.success(), "{output:?}");
-        assert!(
-            String::from_utf8_lossy(&output.stdout).contains("handoff:/:quoted value:\n"),
-            "{output:?}",
-        );
-        assert!(
-            String::from_utf8_lossy(&output.stderr).contains("okena_start_page_missing_command"),
-            "{output:?}",
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn start_page_wsl_handoff_preserves_changes_and_cleans_the_command_environment() {
-        let launch =
-            wsl_start_page_shell(r#"cd /; export START_PAGE_TEST_VALUE="quoted value"; false"#);
-        let mut command = std::process::Command::new("/bin/sh");
-        command
-            .args(["-c", launch.as_str()])
-            .env("SHELL", "/bin/sh");
-        let output = start_page_shell_output(command);
-        assert!(output.status.success(), "{output:?}");
-        assert!(
-            String::from_utf8_lossy(&output.stdout).contains("handoff:/:quoted value:\n"),
-            "{output:?}",
-        );
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn start_page_powershell_keeps_quoted_hook_and_command_in_one_no_exit_shell() {
-        let shell = ShellType::PowerShell { core: true };
-        let raw = r#"my_alias "Příkaz s mezerami" 'apostrophe' $env:VALUE"#;
-        let hook = "Set-Alias my_alias Write-Host";
-        let plan =
-            start_page_launch_plan(shell.clone(), None, Some(hook), raw, &HashMap::new()).unwrap();
-
-        assert_eq!(plan.route, shell);
-        let launch = plan.initial_command.unwrap();
-        assert_eq!(launch.program, "pwsh.exe");
-        assert_eq!(&launch.args[..3], ["-NoLogo", "-NoExit", "-EncodedCommand"]);
-        assert_eq!(
-            decode_powershell_script(&launch.args[3]),
-            format!("{hook}\n{raw}")
-        );
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn start_page_powershell_runs_command_inside_explicit_wrapper() {
-        let raw = r#"alias_cmd "two words" 'single'"#;
-        let plan = start_page_launch_plan(
-            ShellType::PowerShell { core: false },
-            Some("envbox -- {shell}"),
-            Some("Prepare-Project"),
-            raw,
-            &HashMap::new(),
-        )
-        .unwrap();
-
-        let launch = plan.initial_command.unwrap();
-        assert_eq!(launch.program, "powershell.exe");
-        assert_eq!(&launch.args[..3], ["-NoLogo", "-NoExit", "-Command"]);
-        let encoded = launch.args[3]
-            .strip_prefix(
-                "Prepare-Project\nenvbox -- powershell.exe -NoLogo -NoExit -EncodedCommand ",
-            )
-            .unwrap();
-        assert_eq!(decode_powershell_script(encoded), raw);
-    }
-
-    #[test]
-    fn start_page_rejects_an_unrecognized_shell_and_command_bearing_arguments() {
-        for shell in [
-            ShellType::Custom {
-                path: "nu".into(),
-                args: Vec::new(),
-            },
-            ShellType::Custom {
-                path: "bash".into(),
-                args: vec!["-c".into(), "echo unexpected".into()],
-            },
-        ] {
-            let error = start_page_launch_plan(shell, None, None, "echo selected", &HashMap::new())
-                .unwrap_err();
-            assert!(error.contains("use Start Terminal"), "{error}");
-        }
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn start_page_custom_powershell_selects_native_flags_from_its_basename() {
-        let path = r"C:\Program Files\PowerShell\7\PWSH.EXE";
-        let route = ShellType::Custom {
-            path: path.into(),
-            args: vec!["-NoProfile".into()],
-        };
-        let plan = start_page_launch_plan(
-            route.clone(),
-            None,
-            None,
-            "Write-Host selected",
-            &HashMap::new(),
-        )
-        .unwrap();
-        assert_eq!(plan.route, route);
-        let launch = plan.initial_command.unwrap();
-        assert_eq!(launch.program, path);
-        assert_eq!(
-            &launch.args[..4],
-            ["-NoProfile", "-NoLogo", "-NoExit", "-EncodedCommand"]
-        );
-        assert_eq!(
-            decode_powershell_script(&launch.args[4]),
-            "Write-Host selected"
-        );
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn start_page_plain_cmd_uses_conpty_directly_and_stays_interactive() {
-        use okena_terminal::pty_manager::{PtyEvent, PtyManager};
-        use okena_terminal::session_backend::SessionBackend;
-        use std::time::{Duration, Instant};
-
-        let plan = start_page_launch_plan(
-            ShellType::Cmd,
-            None,
-            Some("echo OkenaDirectHook"),
-            "echo OkenaDirectButton",
-            &HashMap::new(),
-        )
-        .unwrap();
-        let launch = plan.initial_command.as_ref().unwrap();
-        assert_eq!(launch.program, "cmd.exe");
-        assert_eq!(&launch.args[..3], ["/D", "/S", "/K"]);
-
-        let (pty, events) = PtyManager::new(SessionBackend::None);
-        let id = pty
-            .create_terminal_with_plan(std::env::temp_dir().to_str().unwrap(), &plan)
-            .unwrap();
-        let wait_for = |marker: &[u8]| {
-            let deadline = Instant::now() + Duration::from_secs(12);
-            let mut output = Vec::new();
-            while Instant::now() < deadline {
-                match events.try_recv() {
-                    Ok(PtyEvent::Data { data, .. }) => {
-                        let query_start = output.len().saturating_sub(3);
-                        output.extend(data);
-                        if output[query_start..]
-                            .windows(4)
-                            .any(|bytes| bytes == b"\x1b[6n")
-                        {
-                            pty.write_response(&id, b"\x1b[1;1R");
-                        }
-                        if output.windows(marker.len()).any(|bytes| bytes == marker) {
-                            return true;
-                        }
-                    }
-                    Ok(PtyEvent::Exit { .. }) => break,
-                    Err(_) => std::thread::sleep(Duration::from_millis(20)),
-                }
-            }
-            eprintln!(
-                "Output while waiting for {marker:?}: {:?}",
-                String::from_utf8_lossy(&output)
-            );
-            false
-        };
-        let startup = wait_for(b"OkenaDirectButton");
-        pty.send_input(
-            &id,
-            b"set OKENA_START_PAGE_PROBE=After\recho OkenaDirect%OKENA_START_PAGE_PROBE%\r",
-        );
-        let interactive = startup && wait_for(b"OkenaDirectAfter");
-        pty.kill(&id);
-        pty.flush_teardown();
-
-        assert!(startup, "cmd must run the button");
-        assert!(
-            interactive,
-            "cmd must continue accepting input after the button finishes"
-        );
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn start_page_custom_cmd_wrapper_keeps_button_quotes_and_expands_variables_inside() {
-        let program = std::env::var("ComSpec").expect("cmd.exe path");
-        let route = ShellType::Custom {
-            path: program,
-            args: vec!["/Q".into()],
-        };
-        let hook = "echo OkenaStartPageHook";
-        let wrapper = "set \"OKENA_TEST_WRAPPER=from wrapper\" & {shell}";
-        let button = r#"echo "%OKENA_TEST_WRAPPER% & two words" & echo OkenaStartPageButton"#;
-        let plan = start_page_launch_plan(
-            route.clone(),
-            Some(wrapper),
-            Some(hook),
-            button,
-            &HashMap::new(),
-        )
-        .unwrap();
-
-        assert_eq!(plan.route, route);
-        let launch = plan.initial_command.unwrap();
-        let mut command = std::process::Command::new(launch.program);
-        let output = command
-            .args(launch.args)
-            .env_remove("OKENA_TEST_WRAPPER")
-            .stdin(std::process::Stdio::null())
-            .output()
-            .expect("run native Windows startup shell");
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(output.status.success(), "{output:?}");
-        assert!(
-            stdout.contains("\"from wrapper & two words\""),
-            "{output:?}"
-        );
-        assert!(
-            stdout.find("OkenaStartPageHook").unwrap()
-                < stdout.find("OkenaStartPageButton").unwrap(),
-            "{output:?}"
-        );
-    }
-
-    #[cfg(windows)]
-    fn decode_powershell_script(encoded: &str) -> String {
-        use base64::Engine;
-
-        let bytes = base64::engine::general_purpose::STANDARD
-            .decode(encoded)
-            .unwrap();
-        let (pairs, remainder) = bytes.as_chunks::<2>();
-        assert!(remainder.is_empty());
-        let utf16: Vec<_> = pairs.iter().copied().map(u16::from_le_bytes).collect();
-        String::from_utf16(&utf16).unwrap()
     }
 
     #[cfg(windows)]

@@ -50,16 +50,15 @@ use okena_app_core::remote_snapshot::build_state_response;
 #[cfg(test)]
 use okena_app_core::workspace::actions::execute::apply_loaded_session;
 use okena_app_core::workspace::actions::execute::{
-    PreparedContentSearch, ValidatedStartPageLaunch, begin_workspace_replacement,
-    cleanup_stale_prepared_terminal_launches, cleanup_stale_workspace_replacement,
-    clear_failed_terminal_launch_reservations, delete_project, ensure_terminal,
-    ensure_workspace_replacement_allowed, execute_action,
+    PreparedContentSearch, begin_workspace_replacement, cleanup_stale_prepared_terminal_launches,
+    cleanup_stale_workspace_replacement, clear_failed_terminal_launch_reservations, delete_project,
+    ensure_terminal, ensure_workspace_replacement_allowed, execute_action,
     execute_prepared_content_search_with_cancellation, fail_workspace_replacement,
     finish_workspace_replacement, import_workspace_data, load_session_data_for_shell,
     materialize_prepared_terminal_launches, materialize_workspace_replacement,
-    prepare_content_search, prepare_content_search_for_path, prepare_start_page_launch,
-    prepare_workspace_replacement, publish_prepared_terminal_launches,
-    reserve_uninitialized_terminal_launches, spawn_uninitialized_terminals,
+    prepare_content_search, prepare_content_search_for_path, prepare_workspace_replacement,
+    publish_prepared_terminal_launches, reserve_uninitialized_terminal_launches,
+    spawn_uninitialized_terminals,
 };
 use okena_core::api::{
     ActionRequest, ApiGitStatus, ApiServiceInfo, ApiWindow, CommandResult, WorktreeLayout,
@@ -2907,42 +2906,11 @@ pub async fn daemon_command_loop(
         service_tick.clone(),
     );
     let content_search_permits = Arc::new(Semaphore::new(MAX_CONCURRENT_CONTENT_SEARCHES));
-    let (launch_tx, mut launch_rx) = tokio::sync::mpsc::unbounded_channel::<(
-        Option<oneshot::Sender<CommandResult>>,
-        Result<ValidatedStartPageLaunch, String>,
-    )>();
 
     loop {
-        let BridgeMessage { command, mut reply } = tokio::select! {
-            message = bridge_rx.recv() => match message {
-                Ok(message) => message,
-                Err(_) => break,
-            },
-            Some((reply, launch)) = launch_rx.recv() => {
-                let result = match launch {
-                    Ok(launch) => {
-                        let app_settings = settings.lock().clone();
-                        run_main_workspace_mutation(
-                            &workspace,
-                            &backend,
-                            &terminals,
-                            &workspace_tick,
-                            &hook_runner,
-                            &hook_monitor,
-                            |ws, backend, cx| {
-                                launch.apply(
-                                    ws, &mut focus_manager, backend, &terminals, &app_settings, cx,
-                                ).into_command_result()
-                            },
-                        )
-                    }
-                    Err(error) => CommandResult::Err(error),
-                };
-                if let Some(reply) = reply {
-                    let _ = reply.send(result);
-                }
-                continue;
-            }
+        let BridgeMessage { command, mut reply } = match bridge_rx.recv().await {
+            Ok(m) => m,
+            Err(_) => break,
         };
 
         let command = match command {
@@ -2965,62 +2933,6 @@ pub async fn daemon_command_loop(
         };
 
         let command = match command {
-            RemoteCommand::Action(ActionRequest::LaunchStartPage {
-                project_id,
-                page_id,
-                shell,
-                command,
-            }) => {
-                let app_settings = settings.lock().clone();
-                let prepared = prepare_start_page_launch(
-                    &workspace.lock(),
-                    project_id,
-                    page_id,
-                    shell,
-                    command,
-                    &app_settings,
-                );
-                match prepared {
-                    Ok(Some(prepared)) => {
-                        let launch_tx = launch_tx.clone();
-                        let _probe = runtime.spawn_blocking(move || {
-                            let launch = prepared.validate();
-                            let _ = launch_tx.send((reply, launch));
-                        });
-                    }
-                    Ok(None) => {
-                        if let Some(reply) = reply {
-                            let _ = reply.send(CommandResult::Ok(None));
-                        }
-                    }
-                    Err(error) => {
-                        if let Some(reply) = reply {
-                            let _ = reply.send(CommandResult::Err(error));
-                        }
-                    }
-                }
-                continue;
-            }
-            // WSL discovery runs a subprocess.
-            RemoteCommand::Action(ActionRequest::ListStartPageShells) => {
-                spawn_blocking_command_with(reply, &runtime, || {
-                    use okena_core::shell::{ShellType, StartPageShellOption};
-
-                    let shells: Vec<_> = okena_terminal::shell_config::available_shells()
-                        .into_iter()
-                        .filter(|shell| shell.available && shell.shell_type != ShellType::Default)
-                        .map(|shell| StartPageShellOption {
-                            shell: shell.shell_type.into(),
-                            name: shell.name,
-                        })
-                        .collect();
-                    match serde_json::to_value(shells) {
-                        Ok(value) => CommandResult::Ok(Some(value)),
-                        Err(error) => CommandResult::Err(error.to_string()),
-                    }
-                });
-                continue;
-            }
             // Talks to the AI proxy over its management socket (and may start
             // it), so it runs off the loop.
             RemoteCommand::Action(ActionRequest::AiProxy { request }) => {

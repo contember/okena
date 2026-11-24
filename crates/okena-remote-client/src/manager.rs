@@ -167,15 +167,13 @@ fn action_for_daemon(
         ActionRequest::LaunchStartPage {
             project_id,
             page_id: None,
-            shell: okena_core::shell::StartPageShell::Default,
+            shell: okena_core::shell::ShellType::Default,
             command: None,
         } => Ok(ActionRequest::CreateTerminal {
             project_id,
             start_page: false,
         }),
-        ActionRequest::LaunchStartPage { .. } | ActionRequest::ListStartPageShells => {
-            Err("Start Page is unavailable on this daemon")
-        }
+        ActionRequest::LaunchStartPage { .. } => Err("Start Page is unavailable on this daemon"),
         _ => Ok(action),
     }
 }
@@ -1478,7 +1476,7 @@ mod tests {
 
     #[test]
     fn old_daemon_keeps_legacy_terminal_actions() {
-        use okena_core::shell::StartPageShell;
+        use okena_core::shell::ShellType;
 
         let action = ActionRequest::CreateTerminal {
             project_id: "p1".into(),
@@ -1500,7 +1498,7 @@ mod tests {
         let launch = |command| ActionRequest::LaunchStartPage {
             project_id: "p1".into(),
             page_id: None,
-            shell: StartPageShell::Default,
+            shell: ShellType::Default,
             command,
         };
         assert!(matches!(

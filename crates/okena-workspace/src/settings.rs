@@ -532,7 +532,7 @@ pub const SETTINGS_VERSION: u32 = 3;
 pub struct StartPageButton {
     pub name: String,
     pub command: String,
-    pub shell: Option<okena_core::shell::StartPageShell>,
+    pub shell: Option<okena_core::shell::ShellType>,
 }
 
 /// App settings (persisted separately from workspace)

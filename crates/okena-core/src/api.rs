@@ -946,7 +946,7 @@ pub enum ActionRequest {
         project_id: String,
         /// Absent only for the first terminal on an empty project screen.
         page_id: Option<String>,
-        shell: crate::shell::StartPageShell,
+        shell: ShellType,
         command: Option<String>,
     },
     CreateTerminal {
@@ -1546,9 +1546,6 @@ pub enum ActionRequest {
     },
 
     // ── Settings (app-scoped; handled at the remote bridge) ───────────
-    /// List the available explicit shells on this daemon.
-    ListStartPageShells,
-
     /// Return the full current settings as JSON.
     GetSettings,
     /// Return a defaults instance of the settings (de-facto schema: every key

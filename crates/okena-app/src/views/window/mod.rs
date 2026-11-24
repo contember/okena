@@ -804,8 +804,6 @@ impl WindowView {
             .detach();
         }
 
-        self.overlay_manager
-            .update(cx, |overlay, _| overlay.set_remote_manager(manager.clone()));
         self.remote_manager = Some(manager);
 
         // Rebuild dispatch callback with remote manager

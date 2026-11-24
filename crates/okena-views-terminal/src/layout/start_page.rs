@@ -3,7 +3,7 @@ use gpui::prelude::*;
 use gpui::*;
 use gpui_component::v_flex;
 use okena_core::api::ActionRequest;
-use okena_core::shell::StartPageShell;
+use okena_core::shell::ShellType;
 use okena_files::theme::theme;
 use okena_ui::tokens::{ui_text_md, ui_text_xl};
 use okena_workspace::settings::StartPageButton;
@@ -49,7 +49,7 @@ pub fn render_start_page_content<D: ActionDispatch>(
 pub(super) fn launch_request(
     project_id: &str,
     page_id: Option<&str>,
-    shell: StartPageShell,
+    shell: ShellType,
     command: Option<String>,
 ) -> ActionRequest {
     ActionRequest::LaunchStartPage {
@@ -138,7 +138,7 @@ fn render_start_page_buttons<D: ActionDispatch>(
         .child(launcher(
             "start-terminal-btn".into(),
             "Start Terminal".into(),
-            StartPageShell::Default,
+            ShellType::Default,
             None,
         ))
         .children(

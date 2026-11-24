@@ -48,7 +48,6 @@ pub use session::{
     load_session_data, load_session_data_for_shell, materialize_workspace_replacement,
     prepare_workspace_replacement,
 };
-pub use terminal::{PreparedStartPageLaunch, ValidatedStartPageLaunch, prepare_start_page_launch};
 pub use terminal_batch::{
     PreparedTerminalLaunch, PreparedTerminalLaunchOutcome, PublishedTerminalOwners,
     cleanup_stale_prepared_terminal_launches, materialize_prepared_terminal_launches,
@@ -97,19 +96,18 @@ pub fn execute_action(
             page_id,
             shell,
             command,
-        } => {
-            let prepared = match prepare_start_page_launch(
-                ws, project_id, page_id, shell, command, settings,
-            ) {
-                Ok(Some(prepared)) => prepared,
-                Ok(None) => return ActionResult::Ok(None),
-                Err(error) => return ActionResult::Err(error),
-            };
-            match prepared.validate() {
-                Ok(launch) => launch.apply(ws, focus_manager, backend, terminals, settings, cx),
-                Err(error) => ActionResult::Err(error),
-            }
-        }
+        } => terminal::launch_start_page(
+            ws,
+            focus_manager,
+            project_id,
+            page_id,
+            shell,
+            command,
+            backend,
+            terminals,
+            settings,
+            cx,
+        ),
         ActionRequest::CreateTerminal {
             start_page,
             project_id,
@@ -743,8 +741,7 @@ pub fn execute_action(
         // App-scoped actions (settings, theme, command palette) are handled by
         // the remote command loop directly — they touch globals/windows outside
         // the Workspace, so they never reach this Workspace-scoped executor.
-        ActionRequest::ListStartPageShells
-        | ActionRequest::GetSettings
+        ActionRequest::GetSettings
         | ActionRequest::GetSettingsSchema
         | ActionRequest::SetSettings { .. }
         | ActionRequest::GetThemes
@@ -827,7 +824,7 @@ fn effective_terminal_launch(
     global_default_shell: &ShellType,
     shell_wrapper: Option<&str>,
     on_create: Option<&str>,
-    // Command to run after `on_create`, currently only an agent-session resume.
+    // Command to run after `on_create`: an agent-session resume or a Start Page button.
     // Composed into the same shell line so the pane still hands off to an
     // interactive shell once it exits.
     startup_command: Option<&str>,
@@ -1110,32 +1107,19 @@ fn spawn_terminals(
         if let Some(ref command) = resume_command {
             log::info!("agent-resume: project={project_id} path={path:?} command={command}");
         }
-        let plan = if let Some(command) = selection
+        let startup_command = selection
             .as_ref()
             .and_then(|choice| choice.command.as_deref())
-        {
-            let shell = shell_type.resolve_default(project_default_shell.as_ref(), &global_default);
-            match hooks::start_page_launch_plan(
-                shell,
-                shell_wrapper.as_deref(),
-                on_create_cmd.as_deref(),
-                command,
-                &env,
-            ) {
-                Ok(plan) => plan,
-                Err(error) => return ActionResult::Err(error),
-            }
-        } else {
-            effective_terminal_launch(
-                shell_type,
-                project_default_shell.as_ref(),
-                &global_default,
-                shell_wrapper.as_deref(),
-                on_create_cmd.as_deref(),
-                resume_command.as_deref(),
-                &env,
-            )
-        }
+            .or(resume_command.as_deref());
+        let plan = effective_terminal_launch(
+            shell_type,
+            project_default_shell.as_ref(),
+            &global_default,
+            shell_wrapper.as_deref(),
+            on_create_cmd.as_deref(),
+            startup_command,
+            &env,
+        )
         .for_project(&root_project_id);
 
         match backend.create_terminal_with_plan(&spawn_cwd, &plan) {
@@ -1582,16 +1566,13 @@ mod reconnect_shell_tests {
 
         let shell_path = if cfg!(windows) { "cmd.exe" } else { "/bin/sh" }.to_owned();
         let selected = ShellType::Custom {
-            path: shell_path.clone(),
+            path: shell_path,
             args: vec![],
         };
         let choose = ActionRequest::LaunchStartPage {
             project_id: "project".into(),
             page_id: Some(page.id.clone()),
-            shell: okena_core::shell::StartPageShell::Custom {
-                path: shell_path,
-                args: vec![],
-            },
+            shell: selected.clone(),
             command: Some("my-alias --check".into()),
         };
         backend
@@ -1625,74 +1606,6 @@ mod reconnect_shell_tests {
         let body = plan.initial_command.unwrap().args.join(" ");
         assert!(body.find("echo hook").unwrap() < body.find("my-alias --check").unwrap());
         assert!(backend.input_transport.input.lock().unwrap().is_empty());
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn start_page_powershell_executes_hook_alias_then_accepts_more_input() {
-        use okena_terminal::pty_manager::{PtyEvent, PtyManager};
-        use okena_terminal::session_backend::SessionBackend;
-        use std::time::{Duration, Instant};
-
-        let (pty, events) = PtyManager::new(SessionBackend::None);
-        let mut plan = super::hooks::start_page_launch_plan(
-            ShellType::PowerShell { core: false },
-            None,
-            Some(
-                "function Invoke-OkenaProbe { Write-Output ('SP' + 'FIRST') }; Set-Alias pageprobe Invoke-OkenaProbe",
-            ),
-            "pageprobe",
-            &HashMap::new(),
-        ).unwrap();
-        // Keep this real ConPTY test independent from the user's profile.
-        plan.initial_command
-            .as_mut()
-            .unwrap()
-            .args
-            .insert(0, "-NoProfile".into());
-        let id = pty
-            .create_terminal_with_plan(std::env::temp_dir().to_str().unwrap(), &plan)
-            .unwrap();
-        let wait_for = |marker: &str| {
-            let deadline = Instant::now() + Duration::from_secs(15);
-            let mut output = Vec::new();
-            while Instant::now() < deadline {
-                match events.try_recv() {
-                    Ok(PtyEvent::Data { data, .. }) => {
-                        // A real terminal emulator answers ConPTY's initial
-                        // cursor-position request before the child can write.
-                        let query_start = output.len().saturating_sub(3);
-                        output.extend(data);
-                        if output[query_start..].windows(4).any(|w| w == b"\x1b[6n") {
-                            pty.write_response(&id, b"\x1b[1;1R");
-                        }
-                        if output
-                            .windows(marker.len())
-                            .any(|bytes| bytes == marker.as_bytes())
-                        {
-                            return true;
-                        }
-                    }
-                    Ok(PtyEvent::Exit { .. }) => break,
-                    Err(_) => std::thread::sleep(Duration::from_millis(20)),
-                }
-            }
-            eprintln!(
-                "ConPTY output while waiting for {marker}: {:?}",
-                String::from_utf8_lossy(&output)
-            );
-            false
-        };
-        let executed = wait_for("SPFIRST");
-        pty.send_input(&id, b"Write-Output ('SP' + 'SECOND')\r");
-        let interactive = executed && wait_for("SPSECOND");
-        pty.kill(&id);
-        pty.flush_teardown();
-        assert!(executed, "the hook-defined PowerShell alias must run");
-        assert!(
-            interactive,
-            "the same shell must accept a subsequent command"
-        );
     }
 
     #[test]
@@ -1736,47 +1649,6 @@ mod reconnect_shell_tests {
                 .find_terminal_path("terminal"),
             Some(vec![])
         );
-    }
-
-    #[test]
-    fn start_page_rechecks_the_shell_after_validation() {
-        let mut ws = workspace_with_terminal(ShellType::Default, None, None, None);
-        ws.with_project("project", &mut TestCx, |p| {
-            p.layout = None;
-            true
-        });
-        let mut settings = super::AppSettings::default();
-        let launch = super::prepare_start_page_launch(
-            &ws,
-            "project".into(),
-            None,
-            Default::default(),
-            None,
-            &settings,
-        )
-        .unwrap()
-        .unwrap()
-        .validate()
-        .unwrap();
-
-        settings.default_shell = ShellType::Custom {
-            path: "another-shell".into(),
-            args: vec![],
-        };
-        let backend = RecordingBackend::default();
-        let terminals: TerminalsRegistry = Arc::new(Default::default());
-        let mut focus = crate::workspace::focus::FocusManager::default();
-        let result = launch.apply(
-            &mut ws,
-            &mut focus,
-            &backend,
-            &terminals,
-            &settings,
-            &mut TestCx,
-        );
-        assert!(matches!(result, super::ActionResult::Err(_)));
-        assert!(backend.plans.lock().unwrap().is_empty());
-        assert!(ws.project("project").unwrap().layout.is_none());
     }
 
     #[test]

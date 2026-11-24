@@ -588,7 +588,7 @@ mod tests {
 
     #[test]
     fn start_page_settings_round_trip_in_button_order() {
-        use okena_core::shell::StartPageShell;
+        use okena_core::shell::ShellType;
         use okena_workspace::settings::StartPageButton;
 
         let mut legacy = shared(&AppSettings::default());
@@ -610,8 +610,9 @@ mod tests {
             StartPageButton {
                 name: "Open build shell".into(),
                 command: "echo ready".into(),
-                shell: Some(StartPageShell::Wsl {
-                    distro: Some("Ubuntu".into()),
+                shell: Some(ShellType::Custom {
+                    path: "/bin/zsh".into(),
+                    args: vec!["-l".into()],
                 }),
             },
         ];

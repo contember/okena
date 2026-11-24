@@ -5,7 +5,7 @@ use crate::views::components::simple_input::{InputChangedEvent, SimpleInput, Sim
 use crate::workspace::settings::StartPageButton;
 use gpui::prelude::*;
 use gpui::*;
-use okena_core::shell::{StartPageShell, StartPageShellOption};
+use okena_core::shell::ShellType;
 use okena_ui::button::{button, button_primary};
 use okena_ui::dropdown::{dropdown_button, dropdown_option, dropdown_overlay};
 
@@ -18,19 +18,10 @@ pub(super) struct StartPageButtonDraft {
     original: Option<(usize, StartPageButton)>,
     name: Entity<SimpleInputState>,
     command: Entity<SimpleInputState>,
-    shell: Option<StartPageShell>,
+    shell: Option<ShellType>,
 }
 
 impl SettingsPanel {
-    pub(crate) fn set_start_page_shells(
-        &mut self,
-        shells: Vec<StartPageShellOption>,
-        cx: &mut Context<Self>,
-    ) {
-        self.start_page_shells = shells;
-        cx.notify();
-    }
-
     fn edit_start_page_button(
         &mut self,
         original: Option<(usize, StartPageButton)>,
@@ -123,7 +114,7 @@ impl SettingsPanel {
         let shell_label = draft
             .shell
             .as_ref()
-            .map_or_else(|| PROJECT_DEFAULT.to_string(), StartPageShell::display_name);
+            .map_or_else(|| PROJECT_DEFAULT.to_string(), ShellType::display_name);
         let bounds_setter = Self::bounds_setter(cx, |s, b| s.start_page_shell_button_bounds = b);
 
         div()
@@ -191,9 +182,11 @@ impl SettingsPanel {
             .and_then(|draft| draft.shell.as_ref());
 
         let choices = std::iter::once((None, PROJECT_DEFAULT.to_string())).chain(
-            self.start_page_shells
+            // "Project default" covers the default shell.
+            self.available_shells
                 .iter()
-                .map(|option| (Some(option.shell.clone()), option.name.clone())),
+                .filter(|shell| shell.available && shell.shell_type != ShellType::Default)
+                .map(|shell| (Some(shell.shell_type.clone()), shell.name.clone())),
         );
         dropdown_overlay("start-page-shell-list", &t)
             .min_w(px(180.0))
@@ -256,10 +249,10 @@ impl SettingsPanel {
                         if draft_index == Some(index) {
                             return self.render_start_page_button_editor(cx).into_any_element();
                         }
-                        let shell = item.shell.as_ref().map_or_else(
-                            || PROJECT_DEFAULT.to_string(),
-                            StartPageShell::display_name,
-                        );
+                        let shell = item
+                            .shell
+                            .as_ref()
+                            .map_or_else(|| PROJECT_DEFAULT.to_string(), ShellType::display_name);
                         let row = settings_input_row(
                             format!("start-page-command-{index}"),
                             &item.name,

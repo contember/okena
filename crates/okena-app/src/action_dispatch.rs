@@ -1431,7 +1431,6 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
         | ActionRequest::DeleteSession { .. }
         | ActionRequest::ImportWorkspace { .. }
         | ActionRequest::ExportWorkspace { .. }
-        | ActionRequest::ListStartPageShells
         | ActionRequest::GetSettings
         | ActionRequest::GetSettingsSchema
         | ActionRequest::SetSettings { .. }
