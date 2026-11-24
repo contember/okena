@@ -14,6 +14,7 @@ pub mod latency_probe;
 pub mod owner_only;
 pub mod process;
 pub mod profiles;
+pub mod regular_file;
 pub mod render_probe;
 pub mod review;
 pub mod selection;

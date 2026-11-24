@@ -40,6 +40,8 @@ Git status, diff parsing, and worktree operations for project directories.
   yields its target path (the blob git stores), a path under a symlinked
   directory is `NotFound`, `..`/absolute paths and other non-regular files are
   refused: a link to `/dev/zero` never reaches EOF, and opening a FIFO blocks.
+  The open-type-length guard is `okena_core::regular_file::read`, shared with
+  the file viewer's read actions in `okena-app-core`.
 - **Worktree workflow**: Worktrees are managed as lightweight branch checkouts alongside the main repo.
 - **Diff views**: UI for diffs lives in `crates/okena-views-git/src/diff_viewer/`.
 - **The diff viewer loads per file**: `get_diff_files` lists the comparison

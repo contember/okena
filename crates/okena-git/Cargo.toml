@@ -17,10 +17,6 @@ log = "0.4"
 unicode-normalization = "0.1"
 gix = { version = "0.83", default-features = false, features = ["max-performance-safe", "sha1", "revision", "status", "blame"] }
 
-# O_NOFOLLOW | O_NONBLOCK for reading worktree files (`read_worktree_blob`).
-[target.'cfg(unix)'.dependencies]
-libc = "0.2"
-
 # Directory identity for the destructive-removal guard: the stable std API has
 # no equivalent of `dev`/`ino` on Windows.
 [target.'cfg(windows)'.dependencies]
