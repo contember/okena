@@ -54,9 +54,10 @@ pub use resize_authority::{
 };
 pub use transport::TerminalTransport;
 pub use types::{
-    AppCursorShape, ClipboardReadResponder, DEFAULT_SCROLLBACK_LINES, DetectedLink, PromptMark,
-    PromptMarkKind, ResizeState, SelectionState, TerminalOptions, TerminalProgress,
-    TerminalProgressState, TerminalSize, process_scrollback_lines, set_process_scrollback_lines,
+    AppCursorShape, ClipboardReadResponder, DEFAULT_SCROLLBACK_LINES, DetectedLink,
+    MAX_SCROLLBACK_LINES, MIN_SCROLLBACK_LINES, PromptMark, PromptMarkKind, ResizeState,
+    SelectionState, TerminalOptions, TerminalProgress, TerminalProgressState, TerminalSize,
+    process_scrollback_lines, scrollback_memory_bytes, set_process_scrollback_lines,
 };
 
 pub use osc_sidecar::TerminalNotification;

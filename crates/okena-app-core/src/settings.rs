@@ -151,7 +151,13 @@ impl SettingsState {
     }
 
     setting_setter!(set_cursor_blink, cursor_blink, bool);
-    setting_setter!(set_scrollback_lines, scrollback_lines, u32, 100, 100000);
+    setting_setter!(
+        set_scrollback_lines,
+        scrollback_lines,
+        u32,
+        okena_terminal::terminal::MIN_SCROLLBACK_LINES,
+        okena_terminal::terminal::MAX_SCROLLBACK_LINES
+    );
     setting_setter!(
         set_terminal_close_grace_secs,
         terminal_close_grace_secs,

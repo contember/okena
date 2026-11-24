@@ -40,13 +40,28 @@ impl Default for TerminalSize {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TerminalOptions {
     /// Lines of scrollback to retain. Mirrors `AppSettings::scrollback_lines`,
-    /// which the settings layer clamps to 100..=100 000.
+    /// which the settings layer clamps to
+    /// [`MIN_SCROLLBACK_LINES`]..=[`MAX_SCROLLBACK_LINES`].
     pub scrollback_lines: u32,
 }
 
 /// alacritty's own default, kept as ours so terminals built without settings
 /// in reach behave exactly as they did before this knob existed.
 pub const DEFAULT_SCROLLBACK_LINES: u32 = 10_000;
+
+/// Fewest lines the `scrollback_lines` setting accepts.
+pub const MIN_SCROLLBACK_LINES: u32 = 100;
+
+/// Most lines the `scrollback_lines` setting accepts: a full history this deep
+/// costs a 200-column terminal about 100 MB of daemon memory.
+pub const MAX_SCROLLBACK_LINES: u32 = 20_000;
+
+/// Memory a full scrollback of `lines` costs one terminal `cols` wide. alacritty
+/// keeps every history cell as a `Cell`, whatever the cell holds.
+pub fn scrollback_memory_bytes(lines: u32, cols: u16) -> u64 {
+    let cell = std::mem::size_of::<alacritty_terminal::term::cell::Cell>() as u64;
+    u64::from(lines) * u64::from(cols) * cell
+}
 
 /// Process-wide scrollback depth applied to terminals built without explicit
 /// options. Set at boot and on settings changes via

@@ -5,6 +5,7 @@ pub use okena_core::types::{
 use okena_terminal::pane_scope::PaneMemoryLimits;
 use okena_terminal::session_backend::SessionBackend;
 use okena_terminal::shell_config::ShellType;
+use okena_terminal::terminal::{MAX_SCROLLBACK_LINES, MIN_SCROLLBACK_LINES};
 use okena_transport::client::RemoteConnectionConfig;
 
 use anyhow::Result;
@@ -592,7 +593,8 @@ pub struct AppSettings {
     /// Enable cursor blinking (default: false)
     #[serde(default = "default_cursor_blink")]
     pub cursor_blink: bool,
-    /// Number of scrollback lines (default: 10000)
+    /// Number of scrollback lines (default: 10000, clamped to
+    /// `MIN_SCROLLBACK_LINES..=MAX_SCROLLBACK_LINES`)
     #[serde(default = "default_scrollback_lines")]
     pub scrollback_lines: u32,
     /// Grace period, in seconds, before a *busy* terminal (one with a running
@@ -1123,7 +1125,9 @@ fn clamp_settings(settings: &mut AppSettings) {
     settings.ui_font_size = settings.ui_font_size.clamp(8.0, 24.0);
     settings.file_font_size = settings.file_font_size.clamp(8.0, 24.0);
     settings.file_line_height = settings.file_line_height.clamp(1.0, 3.0);
-    settings.scrollback_lines = settings.scrollback_lines.clamp(100, 100_000);
+    settings.scrollback_lines = settings
+        .scrollback_lines
+        .clamp(MIN_SCROLLBACK_LINES, MAX_SCROLLBACK_LINES);
     // 0 = disabled; otherwise cap the grace window at a sane upper bound.
     settings.terminal_close_grace_secs = settings.terminal_close_grace_secs.min(60);
 }
@@ -1640,7 +1644,7 @@ mod tests {
             font_family: "Custom Font".to_string(),
             font_size: 18.0,
             file_line_height: 1.4,
-            scrollback_lines: 42000,
+            scrollback_lines: 12000,
             ..Default::default()
         };
         let json = serde_json::to_string(&original).unwrap();
@@ -1648,7 +1652,7 @@ mod tests {
         assert_eq!(recovered.font_family, "Custom Font");
         assert_eq!(recovered.font_size, 18.0);
         assert_eq!(recovered.file_line_height, 1.4);
-        assert_eq!(recovered.scrollback_lines, 42000);
+        assert_eq!(recovered.scrollback_lines, 12000);
     }
 
     #[test]
@@ -1741,7 +1745,7 @@ mod tests {
         let recovered = recover_settings_from_json(json).unwrap();
         assert_eq!(recovered.font_size, 48.0);
         assert_eq!(recovered.file_line_height, 3.0);
-        assert_eq!(recovered.scrollback_lines, 100_000);
+        assert_eq!(recovered.scrollback_lines, MAX_SCROLLBACK_LINES);
     }
 
     #[test]
@@ -1751,7 +1755,7 @@ mod tests {
         // scroll back at all, and 0 would be indistinguishable from the
         // "hidden project" state the client uses to free a mirror's history.
         let recovered = recover_settings_from_json(r#"{"scrollback_lines": 10}"#).unwrap();
-        assert_eq!(recovered.scrollback_lines, 100);
+        assert_eq!(recovered.scrollback_lines, MIN_SCROLLBACK_LINES);
     }
 
     #[test]
