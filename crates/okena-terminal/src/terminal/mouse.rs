@@ -127,8 +127,7 @@ impl Terminal {
     pub fn move_cursor_to_click(&self, target_col: usize, visual_row: i32) {
         let term = self.term.lock();
 
-        let display_offset = term.grid().display_offset();
-        if display_offset != 0 {
+        if self.scrollback.lock().display_offset(&term) != 0 {
             return;
         }
 

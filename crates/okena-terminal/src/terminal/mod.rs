@@ -12,11 +12,13 @@ use std::time::Instant;
 
 mod ansi_snapshot;
 mod app_version;
+mod archive;
 mod child_processes;
 #[cfg(target_os = "linux")]
 pub(crate) use child_processes::linux_children;
 mod composition;
 mod event_listener;
+mod history_selection;
 mod idle;
 mod io;
 mod links;
@@ -31,6 +33,7 @@ mod render;
 mod resize;
 mod resize_authority;
 mod scroll;
+mod scrollback;
 mod search;
 mod selection;
 mod transport;
@@ -52,6 +55,7 @@ pub use resize_authority::{
     claim_resize_authority_remote_owner, is_resize_authority_local, release_remote_resize_owner,
     resize_authority_snapshot,
 };
+pub use scrollback::{HistoryView, LIVE_HISTORY_LINES};
 pub use transport::TerminalTransport;
 pub use types::{
     AppCursorShape, ClipboardReadResponder, DEFAULT_SCROLLBACK_LINES, DetectedLink,
@@ -65,6 +69,7 @@ pub use osc_sidecar::TerminalNotification;
 use event_listener::{ClipboardQueues, CurrentState, SharedTitle, ZedEventListener};
 use osc_sidecar::OscSidecar;
 use prompt_marks::{PromptSidecar, PromptTracker};
+use scrollback::Scrollback;
 use types::FocusReportState;
 
 #[derive(Debug, Clone, Copy)]
@@ -134,6 +139,10 @@ pub struct Terminal {
     /// and the resize debounce timer.
     pub(super) transport: Arc<dyn TerminalTransport>,
 
+    /// History rows kept in the grid before older ones are archived.
+    /// Immutable; [`LIVE_HISTORY_LINES`] outside tests.
+    live_history_lines: usize,
+
     /// Initial working directory passed at creation time. Immutable.
     /// Used as fallback when the shell has not yet reported its cwd via OSC 7.
     pub(super) initial_cwd: String,
@@ -152,6 +161,11 @@ pub struct Terminal {
     /// VTE byte processor. Locked together with `term` in `process_output`
     /// and `drain_pending_output`. GPUI thread only.
     pub(super) processor: Mutex<Processor>,
+
+    /// History older than the grid's live rows, compressed, plus the scroll
+    /// position and selection on the history-wide line numbering. Always
+    /// locked after `term`. GPUI thread only.
+    scrollback: Mutex<Scrollback>,
 
     /// Mouse/keyboard selection state. GPUI thread only (selection start,
     /// update, finish, cancel — all driven by UI events).
@@ -475,11 +489,9 @@ impl Terminal {
             // (off by default). The actual security gate lives in Okena, not
             // here — alacritty just hands us the request.
             osc52: alacritty_terminal::term::Osc52::CopyPaste,
-            // Scrollback depth. alacritty's default is 10 000 lines, which at
-            // ~24 bytes per cell costs ~50 MB per fully-scrolled 200-column
-            // terminal — doubled, because the daemon and every client mirror
-            // keep their own grid. Honor the user's `scrollback_lines` setting
-            // instead of silently ignoring it.
+            // The grid may hold the whole scrollback, so one burst of output
+            // larger than the live rows loses nothing before it is archived;
+            // `Scrollback::drain` brings it back to the live rows right after.
             scrolling_history: options.scrollback_lines as usize,
             ..TermConfig::default()
         };
@@ -537,6 +549,10 @@ impl Terminal {
 
         Self {
             term: Arc::new(Mutex::new(term)),
+            scrollback: Mutex::new(Scrollback::new(
+                options.scrollback_lines as usize,
+                options.live_history_lines,
+            )),
             processor: Mutex::new(processor),
             terminal_id,
             resize_state,
@@ -564,6 +580,7 @@ impl Terminal {
             non_content_output_generations: AtomicU64::new(0),
             processed_output_sequence: AtomicU64::new(0),
             initial_cwd,
+            live_history_lines: options.live_history_lines,
             reported_cwd,
             pending_notifications,
             progress,
@@ -589,14 +606,14 @@ impl Terminal {
         }
     }
 
-    /// Resize the scrollback buffer of a live terminal.
+    /// Resize the scrollback of a live terminal.
     ///
-    /// Shrinking drops the excess history immediately (alacritty's
-    /// `Grid::update_history` calls `Storage::shrink_lines`, which frees the
-    /// row allocations once more than one batch is spare); growing only raises
-    /// the cap, with rows allocated on demand. Used both when the user edits
-    /// `scrollback_lines` and when a project is hidden in every window, where
-    /// the client mirror does not need to hold history it cannot show.
+    /// Shrinking drops the oldest history at once: archived rows first, then
+    /// grid rows (alacritty's `Grid::update_history` frees row allocations
+    /// once more than one batch is spare); growing only raises the cap. Used
+    /// both when the user edits `scrollback_lines` and when a project is
+    /// hidden in every window, where the client mirror does not need history
+    /// it cannot show.
     ///
     /// Only the *active* grid is updated, matching alacritty: a terminal
     /// currently in the alternate screen keeps its primary-grid history until
@@ -610,19 +627,17 @@ impl Terminal {
         let updated = config.clone();
         drop(config);
 
-        use alacritty_terminal::grid::Dimensions;
         let mut term = self.term.lock();
-        let before = term.grid().history_size();
+        let mut scrollback = self.scrollback.lock();
         term.set_options(updated);
-        let after = term.grid().history_size();
+        scrollback.set_total_lines(lines as usize, self.live_history_lines);
+        scrollback.drain(&mut term);
+        let topmost = -(scrollback.history_size(&term) as i32);
+        drop(scrollback);
         drop(term);
 
-        // Prompt marks are stored relative to the grid's top; dropping history
-        // rows invalidates the ones that fell off. `on_history_changed` only
-        // handles growth (it shifts marks down), so prune explicitly here.
-        if after < before {
-            self.prompt_tracker.lock().drop_marks_above(after);
-        }
+        // Prompt marks above the remaining history have no row any more.
+        self.prompt_tracker.lock().drop_marks_above(topmost);
     }
 
     /// The scrollback depth currently configured for this terminal.

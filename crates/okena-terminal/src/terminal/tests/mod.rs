@@ -1,3 +1,4 @@
+mod archive;
 mod composition;
 mod focus_report;
 mod helpers;

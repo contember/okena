@@ -25,12 +25,12 @@ impl Terminal {
             format!("{} bytes", data.len()),
         );
         let mut term = self.term.lock();
+        let mut scrollback = self.scrollback.lock();
         let mut processor = self.processor.lock();
         let mut sidecar = self.osc_sidecar.lock();
         let mut prompt_sidecar = self.prompt_sidecar.lock();
         let mut prompt_tracker = self.prompt_tracker.lock();
 
-        let history_before = term.grid().history_size();
         let modes_before = TerminalModeState::from_term_mode(term.mode());
 
         // OSC 7 / OSC 9 / XTVERSION observer runs on the full chunk in one
@@ -47,19 +47,14 @@ impl Terminal {
             &mut processor,
             &mut prompt_sidecar,
             &mut prompt_tracker,
+            &mut scrollback,
             data,
         );
         if command_finished {
             self.command_finished_pending.store(true, Ordering::Relaxed);
         }
 
-        let history_after = term.grid().history_size();
         let modes_after = TerminalModeState::from_term_mode(term.mode());
-        prompt_tracker.on_history_changed(
-            history_before,
-            history_after,
-            term.grid().topmost_line().0,
-        );
 
         // New output disengages the prompt-jump walker so the next
         // Above jump starts from the newest prompt again.
@@ -87,6 +82,7 @@ impl Terminal {
         drop(prompt_sidecar);
         drop(sidecar);
         drop(processor);
+        drop(scrollback);
         drop(term);
         if modes_after != modes_before {
             self.transport
@@ -190,29 +186,24 @@ impl Terminal {
             format!("{} bytes", data.len()),
         );
         let mut term = self.term.lock();
+        let mut scrollback = self.scrollback.lock();
         let mut processor = self.processor.lock();
         let mut sidecar = self.osc_sidecar.lock();
         let mut prompt_sidecar = self.prompt_sidecar.lock();
         let mut prompt_tracker = self.prompt_tracker.lock();
 
-        let history_before = term.grid().history_size();
         let content_activity = sidecar.advance(&data) || processor.sync_bytes_count() != 0;
         let command_finished = advance_with_prompt_marks(
             &mut *term,
             &mut processor,
             &mut prompt_sidecar,
             &mut prompt_tracker,
+            &mut scrollback,
             &data,
         );
         if command_finished {
             self.command_finished_pending.store(true, Ordering::Relaxed);
         }
-        let history_after = term.grid().history_size();
-        prompt_tracker.on_history_changed(
-            history_before,
-            history_after,
-            term.grid().topmost_line().0,
-        );
         self.content_generation.fetch_add(1, Ordering::Relaxed);
         // Keep the conservative repaint while sync output was already buffered
         // (it may be released now) or this chunk became buffered itself.

@@ -43,6 +43,8 @@ pub struct TerminalOptions {
     /// which the settings layer clamps to
     /// [`MIN_SCROLLBACK_LINES`]..=[`MAX_SCROLLBACK_LINES`].
     pub scrollback_lines: u32,
+    /// Newest history lines kept in the grid; older ones are compressed.
+    pub(crate) live_history_lines: usize,
 }
 
 /// alacritty's own default, kept as ours so terminals built without settings
@@ -52,15 +54,30 @@ pub const DEFAULT_SCROLLBACK_LINES: u32 = 10_000;
 /// Fewest lines the `scrollback_lines` setting accepts.
 pub const MIN_SCROLLBACK_LINES: u32 = 100;
 
-/// Most lines the `scrollback_lines` setting accepts: a full history this deep
-/// costs a 200-column terminal about 100 MB of daemon memory.
+/// Most lines the `scrollback_lines` setting accepts.
 pub const MAX_SCROLLBACK_LINES: u32 = 20_000;
 
-/// Memory a full scrollback of `lines` costs one terminal `cols` wide. alacritty
-/// keeps every history cell as a `Cell`, whatever the cell holds.
+/// Compressed bytes an archived cell of text output costs at most: full-width
+/// random printable ASCII measures 0.85 B, typical output (logs, source) about
+/// a tenth of a byte.
+const ARCHIVED_CELL_BYTES: u64 = 1;
+
+/// alacritty's grid storage allocates rows in chunks of this many and frees
+/// them only once more than a chunk is unused, so draining to the live rows
+/// leaves up to one chunk spare.
+const GRID_CHUNK_ROWS: u64 = 1_000;
+
+/// Upper estimate of what a full scrollback of `lines` costs one terminal `cols`
+/// wide: the live rows of alacritty's grid rounded up to its allocation chunks,
+/// plus a spare chunk once rows are drained, at a full `Cell` each whatever the
+/// cell holds, and the older rows compressed in the archive.
 pub fn scrollback_memory_bytes(lines: u32, cols: u16) -> u64 {
     let cell = std::mem::size_of::<alacritty_terminal::term::cell::Cell>() as u64;
-    u64::from(lines) * u64::from(cols) * cell
+    let live = u64::from(lines).min(super::scrollback::LIVE_HISTORY_LINES as u64);
+    let archived = u64::from(lines) - live;
+    let spare = if archived > 0 { GRID_CHUNK_ROWS } else { 0 };
+    let grid_rows = live.div_ceil(GRID_CHUNK_ROWS).max(1) * GRID_CHUNK_ROWS + spare;
+    (grid_rows * cell + archived * ARCHIVED_CELL_BYTES) * u64::from(cols)
 }
 
 /// Process-wide scrollback depth applied to terminals built without explicit
@@ -90,6 +107,7 @@ impl Default for TerminalOptions {
     fn default() -> Self {
         Self {
             scrollback_lines: process_scrollback_lines(),
+            live_history_lines: super::scrollback::LIVE_HISTORY_LINES,
         }
     }
 }
@@ -97,7 +115,18 @@ impl Default for TerminalOptions {
 impl TerminalOptions {
     /// Options with an explicit scrollback depth.
     pub fn with_scrollback_lines(scrollback_lines: u32) -> Self {
-        Self { scrollback_lines }
+        Self {
+            scrollback_lines,
+            live_history_lines: super::scrollback::LIVE_HISTORY_LINES,
+        }
+    }
+
+    /// Keep only `lines` of history in the grid, so tests reach the
+    /// compressed archive without producing thousands of lines.
+    #[cfg(test)]
+    pub(crate) fn with_live_history_lines(mut self, lines: usize) -> Self {
+        self.live_history_lines = lines;
+        self
     }
 }
 

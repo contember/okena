@@ -1,4 +1,3 @@
-use alacritty_terminal::grid::Scroll;
 use std::sync::atomic::Ordering;
 
 use super::Terminal;
@@ -143,10 +142,12 @@ impl Terminal {
         let target_offset = (-target.line).max(0);
 
         let mut term = self.term.lock();
-        let current = term.grid().display_offset() as i32;
+        let mut scrollback = self.scrollback.lock();
+        let current = scrollback.display_offset(&term) as i32;
         let delta = target_offset - current;
         if delta != 0 {
-            term.scroll_display(Scroll::Delta(delta));
+            scrollback.set_display_offset(&mut term, target_offset as usize);
+            drop(scrollback);
             drop(term);
             *self.scroll_offset.lock() += delta;
             self.content_generation.fetch_add(1, Ordering::Relaxed);

@@ -167,7 +167,7 @@ If the file contains invalid JSON, Okena recovers as many fields as possible and
 |-----|------|---------|-------------|
 | `cursor_style` | string | `"Block"` | Cursor shape: `"Block"`, `"Bar"`, or `"Underline"` |
 | `cursor_blink` | bool | `false` | Enable cursor blinking |
-| `scrollback_lines` | int | `10000` | Number of scrollback lines (100 - 20,000) |
+| `scrollback_lines` | int | `10000` | Number of scrollback lines (100 - 20,000). The newest 1,000 stay in the terminal grid; older lines are kept compressed in memory, never on disk |
 | `default_shell` | string | `"Default"` | Shell for new terminals. `"Default"` uses the system shell. On Linux/macOS you can also use `"Bash"`, `"Zsh"`, `"Fish"`, etc. |
 | `show_shell_selector` | bool | `false` | Show shell picker in the terminal header |
 | `auto_hide_single_terminal_header` | bool | `false` | Hide the 28px terminal header for standalone terminals. Its actions remain available from the owning project's focused-terminal menu. Multi-tab headers remain visible. |
@@ -453,7 +453,7 @@ Set `enabled` to `false` to disable a specific binding without removing it:
 | `SplitHorizontal` | `Cmd+Shift+D` / `Ctrl+D` | Split terminal horizontally |
 | `AddTab` | `Cmd+T` / `Ctrl+Shift+T` | Add a new tab |
 | `CloseTerminal` | `Cmd+W` / `Ctrl+Shift+W` | Close the focused terminal |
-| `ExportTerminalBuffer` | — | Export the focused terminal's scrollback to a file |
+| `ExportTerminalBuffer` | — | Export the focused terminal's scrollback to a file (tmux's own buffer under a tmux session backend, otherwise the terminal's full history) |
 | `DetachTerminal` | — | Move the focused terminal into a separate window |
 | `Copy` | `Cmd+C` / `Ctrl+Shift+C` | Copy selection |
 | `Paste` | `Cmd+V` / `Ctrl+Shift+V` | Paste from clipboard |

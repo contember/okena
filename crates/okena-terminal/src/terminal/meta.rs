@@ -1,6 +1,7 @@
 use alacritty_terminal::index::{Column, Line, Point};
 
 use super::Terminal;
+use super::scrollback::HistoryView;
 
 impl Terminal {
     /// Get the terminal title (from OSC sequences)
@@ -167,9 +168,10 @@ impl Terminal {
     /// handled via `display_offset` so history cells work too.
     pub fn hyperlink_at(&self, col: usize, visual_row: i32) -> Option<String> {
         let term = self.term.lock();
-        let display_offset = term.grid().display_offset() as i32;
-        let buffer_row = visual_row - display_offset;
-        let cell = &term.grid()[Point::new(Line(buffer_row), Column(col))];
+        let scrollback = self.scrollback.lock();
+        let view = HistoryView::new(&term, &scrollback);
+        let buffer_row = visual_row - view.display_offset() as i32;
+        let cell = view.cell(Point::new(Line(buffer_row), Column(col)));
         cell.hyperlink().map(|h| h.uri().to_owned())
     }
 
