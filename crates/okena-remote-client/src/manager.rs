@@ -676,15 +676,13 @@ impl RemoteConnectionManager {
             .and_then(|conn| conn.remote_state())
     }
 
+    /// Read from the last state the daemon sent, so a reconnect does not
+    /// briefly downgrade Start Page actions.
     pub fn supports_start_page(&self, connection_id: &str) -> bool {
         self.connections
             .get(connection_id)
-            .is_some_and(|connection| {
-                matches!(connection.status(), ConnectionStatus::Connected)
-                    && connection
-                        .remote_state()
-                        .is_some_and(|state| state.supports_start_page)
-            })
+            .and_then(|connection| connection.remote_state())
+            .is_some_and(|state| state.supports_start_page)
     }
 
     /// Auto-connect to all saved connections with valid tokens.
