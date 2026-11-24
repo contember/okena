@@ -1636,11 +1636,12 @@ pub fn apply_on_create(
     ShellType::for_command(script)
 }
 
-/// Separator that chains two startup commands for `shell` (`; ` for POSIX
-/// shells and PowerShell, ` & ` for cmd). Exposed so callers that need to run
-/// something *after* the user's `on_create` hook — e.g. resuming an agent
-/// session — can compose one command string for [`terminal_launch_plan`]
-/// instead of duplicating the per-dialect separator.
+/// Separator that chains two startup commands for `shell` (a newline for
+/// POSIX shells, `; ` for PowerShell and WSL, ` & ` for cmd). Exposed so
+/// callers that need to run something *after* the user's `on_create` hook —
+/// e.g. resuming an agent session or a Start Page button — can compose one
+/// command string for [`terminal_launch_plan`] instead of duplicating the
+/// per-dialect separator.
 pub fn startup_command_separator(shell: &ShellType) -> &'static str {
     terminal_launch_parts(shell).3
 }
@@ -1742,7 +1743,9 @@ fn terminal_launch_parts(shell: &ShellType) -> (String, Vec<String>, String, &'s
             program,
             args,
             format!("exec {}", shell.to_command_string()),
-            "; ",
+            // A newline, not `; `: a trailing `# comment` or `&` in the
+            // previous command must not swallow or break the next one.
+            "\n",
             true,
         )
     }
@@ -1893,6 +1896,45 @@ pub fn apply_shell_wrapper(
 mod tests {
     use super::*;
     use okena_state::WorktreeHooks;
+
+    /// A startup command ending in a comment or `&` must still hand off to
+    /// the interactive shell instead of swallowing or breaking the handoff.
+    #[cfg(unix)]
+    #[test]
+    fn posix_startup_command_with_comment_or_background_reaches_the_shell() {
+        use std::io::Write;
+        use std::process::Stdio;
+
+        let shell = ShellType::Custom {
+            path: "/bin/bash".into(),
+            args: vec!["--noprofile".into(), "--norc".into()],
+        };
+        let separator = startup_command_separator(&shell);
+        for command in ["echo started # note", "true &"] {
+            let composed = format!("echo hook{separator}{command}");
+            let plan = terminal_launch_plan(shell.clone(), None, Some(&composed), &HashMap::new());
+            let launch = plan.initial_command.expect("hook launch");
+            let mut child = std::process::Command::new(&launch.program)
+                .args(&launch.args)
+                .env_remove("ENV")
+                .env_remove("BASH_ENV")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .expect("start bash");
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(b"echo handoff-reached\nexit\n")
+                .unwrap();
+            let output = child.wait_with_output().unwrap();
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(stdout.starts_with("hook\n"), "{command}: {output:?}");
+            assert!(stdout.contains("handoff-reached"), "{command}: {output:?}");
+        }
+    }
 
     #[test]
     fn run_hook_sync_returns_ok_for_true() {
