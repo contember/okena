@@ -787,7 +787,7 @@ fn create_untracked_file_diff(repo_path: &Path, file_path: &str) -> Option<FileD
     let full_path = safe_repo_path(repo_path, file_path)?;
 
     // Check if it's a binary file (simple heuristic)
-    let content = match std::fs::read(&full_path) {
+    let content = match crate::repository::read_worktree_blob(&full_path) {
         Ok(bytes) => {
             // Check for binary content (null bytes in first 8KB)
             if bytes.iter().take(8192).any(|&b| b == 0) {
@@ -934,13 +934,20 @@ pub fn get_file_bytes_from_git(
 /// it is not a repository at all.
 ///
 /// Returns `None` if the resolved path escapes the root (e.g. via `../`).
+/// Only the parent directory is resolved: a symlink in the last component stays
+/// a link, which [`crate::repository::read_worktree_blob`] reads as git does.
 fn safe_repo_path(repo_path: &Path, file_path: &str) -> Option<PathBuf> {
     let root =
         crate::repository::get_repo_root(repo_path).unwrap_or_else(|| repo_path.to_path_buf());
-    let canonical = root.join(file_path).canonicalize().ok()?;
+    let joined = root.join(file_path);
+    let resolved = joined
+        .parent()?
+        .canonicalize()
+        .ok()?
+        .join(joined.file_name()?);
     let root_canonical = root.canonicalize().ok()?;
-    if canonical.starts_with(&root_canonical) {
-        Some(canonical)
+    if resolved.starts_with(&root_canonical) {
+        Some(resolved)
     } else {
         None
     }
@@ -954,7 +961,7 @@ pub fn get_file_from_working_tree(repo_path: &Path, file_path: &str) -> Option<S
 /// Get raw file bytes from the working tree.
 pub fn get_file_bytes_from_working_tree(repo_path: &Path, file_path: &str) -> Option<Vec<u8>> {
     let full_path = safe_repo_path(repo_path, file_path)?;
-    std::fs::read(full_path).ok()
+    crate::repository::read_worktree_blob(&full_path).ok()
 }
 
 /// Get both raw sides of a diff, using each side's own path for renames.
@@ -1051,6 +1058,43 @@ pub fn get_file_contents_for_diff(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn working_tree_reads_take_a_symlink_as_its_target_and_refuse_a_fifo() {
+        use crate::repository::test_support::{git_in, init_temp_repo, make_fifo, within_seconds};
+
+        let (_tmp, repo) = init_temp_repo();
+        std::os::unix::fs::symlink("target-a", repo.join("link")).unwrap();
+        git_in(&repo, &["add", "link"]);
+        git_in(&repo, &["commit", "-m", "add link"]);
+        std::fs::remove_file(repo.join("link")).unwrap();
+        std::os::unix::fs::symlink("/dev/zero", repo.join("link")).unwrap();
+        // A link to a file inside the repo still reads as the link, as git does.
+        std::os::unix::fs::symlink("file.txt", repo.join("inner-link")).unwrap();
+        std::os::unix::fs::symlink("/dev/zero", repo.join("untracked-link")).unwrap();
+        make_fifo(&repo.join("fifo"));
+
+        let path = repo.clone();
+        let (link, inner, fifo, diff) = within_seconds(10, move || {
+            (
+                get_file_bytes_from_working_tree(&path, "link"),
+                get_file_bytes_from_working_tree(&path, "inner-link"),
+                get_file_bytes_from_working_tree(&path, "fifo"),
+                get_diff(&path, DiffMode::WorkingTree).expect("working tree diff"),
+            )
+        });
+
+        assert_eq!(link.as_deref(), Some(b"/dev/zero".as_slice()));
+        assert_eq!(inner.as_deref(), Some(b"file.txt".as_slice()));
+        assert_eq!(fifo, None);
+        let untracked = diff
+            .files
+            .iter()
+            .find(|file| file.new_path.as_deref() == Some("untracked-link"))
+            .expect("untracked link listed");
+        assert_eq!((untracked.lines_added, untracked.lines_removed), (1, 0));
+    }
 
     #[test]
     fn get_file_from_git_reads_head_and_staged_versions() {

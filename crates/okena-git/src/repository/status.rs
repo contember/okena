@@ -448,7 +448,7 @@ pub(crate) fn worktree_diff(path: &Path) -> Option<WorktreeDiff> {
 /// grew the daemon until the OOM killer stopped it (#377). Other non-regular
 /// files (FIFOs, sockets, devices) have no content to diff, and opening a FIFO
 /// would block, so they are refused as `InvalidData`.
-fn read_worktree_blob(path: &Path) -> std::io::Result<Vec<u8>> {
+pub(crate) fn read_worktree_blob(path: &Path) -> std::io::Result<Vec<u8>> {
     let meta = std::fs::symlink_metadata(path)?;
     if meta.file_type().is_symlink() {
         let target = std::fs::read_link(path)?;
@@ -687,19 +687,9 @@ fn unpushed_commits(repo: &gix::Repository) -> Option<usize> {
 mod tests {
     use super::*;
     use crate::repository::test_support::{git_in, init_temp_repo, repo_with_origin};
-    use std::path::PathBuf;
-
-    /// Runs `f` on its own thread and fails the test if it does not finish in
-    /// time. A symlink to a device used to make the status walk read forever.
     #[cfg(unix)]
-    fn within_seconds<T: Send + 'static>(secs: u64, f: impl FnOnce() -> T + Send + 'static) -> T {
-        let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            let _ = tx.send(f());
-        });
-        rx.recv_timeout(std::time::Duration::from_secs(secs))
-            .expect("status walk did not finish: it read a device through a symlink")
-    }
+    use crate::repository::test_support::{make_fifo, within_seconds};
+    use std::path::PathBuf;
 
     #[cfg(unix)]
     #[test]
@@ -729,6 +719,49 @@ mod tests {
         let lines = within_seconds(10, move || untracked_line_count(&path, &path, "link"));
 
         assert_eq!(lines, 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn worktree_diff_does_not_read_through_a_recreated_symlink_to_a_device() {
+        let (_tmp, repo) = init_temp_repo();
+        std::os::unix::fs::symlink("/dev/zero", repo.join("link")).unwrap();
+        git_in(&repo, &["add", "link"]);
+        git_in(&repo, &["commit", "-m", "add link"]);
+        // Same target, new inode: the stat no longer matches the index, so the
+        // walk has to compare the link's content, which is its target path.
+        std::fs::remove_file(repo.join("link")).unwrap();
+        std::os::unix::fs::symlink("/dev/zero", repo.join("link")).unwrap();
+
+        let path = repo.clone();
+        let diff = within_seconds(10, move || worktree_diff(&path)).expect("status walk");
+
+        assert!(diff.tracked.is_empty(), "{:?}", diff.tracked);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn worktree_diff_keeps_listing_files_next_to_a_fifo() {
+        let (_tmp, repo) = init_temp_repo();
+        // A tracked file replaced by a FIFO: opening it would block the walk.
+        std::fs::remove_file(repo.join("file.txt")).unwrap();
+        make_fifo(&repo.join("file.txt"));
+        make_fifo(&repo.join("untracked-fifo"));
+        std::fs::write(repo.join("new.txt"), "a\nb\n").unwrap();
+
+        let path = repo.clone();
+        let (diff, fifo_lines, new_lines) = within_seconds(10, move || {
+            let diff = worktree_diff(&path);
+            let fifo_lines = untracked_line_count(&path, &path, "untracked-fifo");
+            let new_lines = untracked_line_count(&path, &path, "new.txt");
+            (diff, fifo_lines, new_lines)
+        });
+        let diff = diff.expect("status walk");
+
+        assert_eq!(diff.tracked, vec![("file.txt".to_string(), 0, 1)]);
+        assert!(diff.untracked.contains(&"new.txt".to_string()));
+        assert_eq!(fifo_lines, 0);
+        assert_eq!(new_lines, 2);
     }
 
     #[test]
