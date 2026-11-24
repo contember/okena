@@ -4,6 +4,7 @@ use super::{
     ActionResult, Workspace, resolve_new_project_file, resolve_project_file, validate_leaf_name,
 };
 use okena_core::api::{PathBreadcrumb, ResolvedPath, ResolvedPathKind};
+use okena_core::regular_file::ReadRegularFileError;
 use okena_terminal::TerminalsRegistry;
 use std::path::{Path, PathBuf};
 
@@ -59,21 +60,54 @@ pub(super) fn read_file(ws: &Workspace, project_id: String, relative_path: Strin
                 Ok(c) => c,
                 Err(e) => return ActionResult::Err(e),
             };
-            match std::fs::read_to_string(&canonical) {
-                Ok(content) => ActionResult::Ok(Some(serde_json::json!({ "content": content }))),
-                Err(e) => ActionResult::Err(format!("Cannot read file: {}", e)),
-            }
+            read_text_result(&canonical)
         }
         None => ActionResult::Err(format!("project not found: {}", project_id)),
     }
 }
 
-/// Server-side ceiling on bytes returned from ReadFileBytes. Mirrors the
-/// client's MAX_IMAGE_FILE_SIZE so a misbehaving or older client can't trick
-/// the server into reading and base64-encoding arbitrarily large files
+/// Server-side ceiling on bytes returned from the file read actions. Mirrors
+/// the client's MAX_RENDERED_FILE_SIZE so a misbehaving or older client can't
+/// trick the server into reading and base64-encoding arbitrarily large files
 /// (each request transiently holds raw + base64 + JSON copies, so the
 /// resident multiple is roughly 3-4× the file size).
 const MAX_READ_FILE_BYTES: u64 = 20 * 1024 * 1024;
+
+/// Reads a file for a viewer. A FIFO, a device or a symlink swapped in after
+/// the path was resolved is refused instead of blocking the daemon thread or
+/// growing its memory, and so is a file over [`MAX_READ_FILE_BYTES`].
+fn read_capped(path: &Path) -> Result<Vec<u8>, String> {
+    okena_core::regular_file::read(path, MAX_READ_FILE_BYTES).map_err(|error| match error {
+        ReadRegularFileError::TooLarge { len } => format!(
+            "File too large ({:.1} MB). Maximum is {} MB.",
+            len as f64 / 1024.0 / 1024.0,
+            MAX_READ_FILE_BYTES / 1024 / 1024
+        ),
+        error => format!("Cannot read file: {error}"),
+    })
+}
+
+fn read_text_result(path: &Path) -> ActionResult {
+    let content = read_capped(path).and_then(|bytes| {
+        String::from_utf8(bytes)
+            .map_err(|_| "Cannot read file: stream did not contain valid UTF-8".to_string())
+    });
+    match content {
+        Ok(content) => ActionResult::Ok(Some(serde_json::json!({ "content": content }))),
+        Err(error) => ActionResult::Err(error),
+    }
+}
+
+fn read_bytes_result(path: &Path) -> ActionResult {
+    use base64::Engine as _;
+    match read_capped(path) {
+        Ok(bytes) => {
+            let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
+            ActionResult::Ok(Some(serde_json::json!({ "content_b64": encoded })))
+        }
+        Err(error) => ActionResult::Err(error),
+    }
+}
 
 fn modified_at_millis(metadata: &std::fs::Metadata) -> Option<u64> {
     metadata
@@ -252,10 +286,7 @@ pub(super) fn read_terminal_file(
             Ok(file) => file,
             Err(error) => return ActionResult::Err(error),
         };
-    match std::fs::read_to_string(&file.canonical_path) {
-        Ok(content) => ActionResult::Ok(Some(serde_json::json!({ "content": content }))),
-        Err(error) => ActionResult::Err(format!("Cannot read file: {error}")),
-    }
+    read_text_result(Path::new(&file.canonical_path))
 }
 
 pub(super) fn read_terminal_file_bytes(
@@ -264,31 +295,12 @@ pub(super) fn read_terminal_file_bytes(
     terminal_id: String,
     path: String,
 ) -> ActionResult {
-    use base64::Engine as _;
     let file =
         match resolve_terminal_path(ws, terminals, &terminal_id, &path).and_then(require_file) {
             Ok(file) => file,
             Err(error) => return ActionResult::Err(error),
         };
-    if file.size > MAX_READ_FILE_BYTES {
-        return ActionResult::Err(format!(
-            "File too large ({:.1} MB). Maximum is {} MB.",
-            file.size as f64 / 1024.0 / 1024.0,
-            MAX_READ_FILE_BYTES / 1024 / 1024
-        ));
-    }
-    match std::fs::read(&file.canonical_path) {
-        Ok(bytes) if bytes.len() as u64 <= MAX_READ_FILE_BYTES => {
-            let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
-            ActionResult::Ok(Some(serde_json::json!({ "content_b64": encoded })))
-        }
-        Ok(bytes) => ActionResult::Err(format!(
-            "File too large ({:.1} MB). Maximum is {} MB.",
-            bytes.len() as f64 / 1024.0 / 1024.0,
-            MAX_READ_FILE_BYTES / 1024 / 1024
-        )),
-        Err(error) => ActionResult::Err(format!("Cannot read file: {error}")),
-    }
+    read_bytes_result(Path::new(&file.canonical_path))
 }
 
 pub(super) fn terminal_file_size(
@@ -387,41 +399,15 @@ pub(super) fn read_path_file(root: String, relative_path: String) -> ActionResul
         Ok(path) => path,
         Err(error) => return ActionResult::Err(error),
     };
-    match std::fs::read_to_string(path) {
-        Ok(content) => ActionResult::Ok(Some(serde_json::json!({ "content": content }))),
-        Err(error) => ActionResult::Err(format!("Cannot read file: {error}")),
-    }
+    read_text_result(&path)
 }
 
 pub(super) fn read_path_file_bytes(root: String, relative_path: String) -> ActionResult {
-    use base64::Engine as _;
     let path = match resolve_path_file(&root, &relative_path) {
         Ok(path) => path,
         Err(error) => return ActionResult::Err(error),
     };
-    let metadata = match std::fs::metadata(&path) {
-        Ok(metadata) => metadata,
-        Err(error) => return ActionResult::Err(format!("Cannot read file: {error}")),
-    };
-    if metadata.len() > MAX_READ_FILE_BYTES {
-        return ActionResult::Err(format!(
-            "File too large ({:.1} MB). Maximum is {} MB.",
-            metadata.len() as f64 / 1024.0 / 1024.0,
-            MAX_READ_FILE_BYTES / 1024 / 1024
-        ));
-    }
-    match std::fs::read(path) {
-        Ok(bytes) if bytes.len() as u64 <= MAX_READ_FILE_BYTES => {
-            let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
-            ActionResult::Ok(Some(serde_json::json!({ "content_b64": encoded })))
-        }
-        Ok(bytes) => ActionResult::Err(format!(
-            "File too large ({:.1} MB). Maximum is {} MB.",
-            bytes.len() as f64 / 1024.0 / 1024.0,
-            MAX_READ_FILE_BYTES / 1024 / 1024
-        )),
-        Err(error) => ActionResult::Err(format!("Cannot read file: {error}")),
-    }
+    read_bytes_result(&path)
 }
 
 pub(super) fn path_file_size(root: String, relative_path: String) -> ActionResult {
@@ -443,41 +429,13 @@ pub(super) fn read_file_bytes(
     project_id: String,
     relative_path: String,
 ) -> ActionResult {
-    use base64::Engine as _;
     match ws.project(&project_id) {
         Some(p) => {
             let canonical = match resolve_project_file(&p.path, &relative_path) {
                 Ok(c) => c,
                 Err(e) => return ActionResult::Err(e),
             };
-            // Enforce the cap from metadata before allocating; std::fs::read
-            // alone would happily pull a multi-GB file into memory.
-            match std::fs::metadata(&canonical) {
-                Ok(m) if m.len() > MAX_READ_FILE_BYTES => {
-                    return ActionResult::Err(format!(
-                        "File too large ({:.1} MB). Maximum is {} MB.",
-                        m.len() as f64 / 1024.0 / 1024.0,
-                        MAX_READ_FILE_BYTES / 1024 / 1024
-                    ));
-                }
-                Ok(_) => {}
-                Err(e) => return ActionResult::Err(format!("Cannot read file: {}", e)),
-            }
-            match std::fs::read(&canonical) {
-                Ok(bytes) => {
-                    if bytes.len() as u64 > MAX_READ_FILE_BYTES {
-                        // TOCTOU: file grew between stat and read.
-                        return ActionResult::Err(format!(
-                            "File too large ({:.1} MB). Maximum is {} MB.",
-                            bytes.len() as f64 / 1024.0 / 1024.0,
-                            MAX_READ_FILE_BYTES / 1024 / 1024
-                        ));
-                    }
-                    let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
-                    ActionResult::Ok(Some(serde_json::json!({ "content_b64": encoded })))
-                }
-                Err(e) => ActionResult::Err(format!("Cannot read file: {}", e)),
-            }
+            read_bytes_result(&canonical)
         }
         None => ActionResult::Err(format!("project not found: {}", project_id)),
     }
@@ -959,7 +917,7 @@ mod entry_mutation_tests {
         }
     }
 
-    fn workspace_with_project(path: &Path) -> Workspace {
+    pub(super) fn workspace_with_project(path: &Path) -> Workspace {
         let project = ProjectData {
             id: "p1".to_string(),
             name: "Project".to_string(),
@@ -1211,6 +1169,124 @@ mod entry_mutation_tests {
                 root.is_dir(),
                 "the project directory must keep its name after {relative_path:?}"
             );
+        }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod read_path_file_tests {
+    use super::entry_mutation_tests::workspace_with_project;
+    use super::{
+        ActionResult, MAX_READ_FILE_BYTES, read_file, read_file_bytes, read_path_file,
+        read_path_file_bytes,
+    };
+    use std::fs;
+    use std::path::Path;
+
+    /// Fails the test instead of hanging it when a read blocks or never ends.
+    fn within_seconds<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(f());
+        });
+        rx.recv_timeout(std::time::Duration::from_secs(10))
+            .expect("did not finish: it read a FIFO or a device")
+    }
+
+    fn make_fifo(path: &Path) {
+        let status = std::process::Command::new("mkfifo")
+            .arg(path)
+            .status()
+            .expect("run mkfifo");
+        assert!(status.success(), "mkfifo {}", path.display());
+    }
+
+    fn read_text(root: &Path, relative_path: &str) -> Result<String, String> {
+        let root = root.to_string_lossy().into_owned();
+        let relative_path = relative_path.to_string();
+        match within_seconds(move || read_path_file(root, relative_path)) {
+            ActionResult::Ok(Some(value)) => Ok(value["content"]
+                .as_str()
+                .expect("content is a string")
+                .to_string()),
+            ActionResult::Ok(None) => panic!("read returned no value"),
+            ActionResult::Err(error) => Err(error),
+        }
+    }
+
+    fn read_bytes_err(root: &Path, relative_path: &str) -> String {
+        let root = root.to_string_lossy().into_owned();
+        let relative_path = relative_path.to_string();
+        match within_seconds(move || read_path_file_bytes(root, relative_path)) {
+            ActionResult::Ok(_) => panic!("read succeeded but should have been refused"),
+            ActionResult::Err(error) => error,
+        }
+    }
+
+    #[test]
+    fn regular_file_is_read() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        fs::write(dir.path().join("notes.md"), "hello\n").expect("write file");
+        assert_eq!(read_text(dir.path(), "notes.md").as_deref(), Ok("hello\n"));
+    }
+
+    #[test]
+    fn fifo_is_refused_without_blocking() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        make_fifo(&dir.path().join("pipe"));
+        let error = read_text(dir.path(), "pipe").expect_err("a FIFO must be refused");
+        assert!(error.contains("not a regular file"), "got: {error}");
+        let error = read_bytes_err(dir.path(), "pipe");
+        assert!(error.contains("not a regular file"), "got: {error}");
+    }
+
+    #[test]
+    fn symlink_to_dev_zero_is_refused_without_reading() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::os::unix::fs::symlink("/dev/zero", dir.path().join("zero")).expect("symlink");
+        assert!(read_text(dir.path(), "zero").is_err());
+        read_bytes_err(dir.path(), "zero");
+        // A scope that contains the device itself, as a browser rooted at /dev.
+        let error = read_text(Path::new("/dev"), "zero").expect_err("a device must be refused");
+        assert!(error.contains("not a regular file"), "got: {error}");
+    }
+
+    #[test]
+    fn oversized_file_is_refused() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = fs::File::create(dir.path().join("big.log")).expect("create file");
+        file.set_len(MAX_READ_FILE_BYTES + 1)
+            .expect("grow sparse file");
+        let error =
+            read_text(dir.path(), "big.log").expect_err("an oversized file must be refused");
+        assert!(error.contains("File too large"), "got: {error}");
+        let error = read_bytes_err(dir.path(), "big.log");
+        assert!(error.contains("File too large"), "got: {error}");
+    }
+
+    /// ReadFile and ReadFileBytes resolve the path without an `is_file()`
+    /// check, so only the guard on the open handle stands between a FIFO in
+    /// the project and a blocked daemon thread.
+    #[test]
+    fn project_read_refuses_a_fifo_without_blocking() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        make_fifo(&dir.path().join("pipe"));
+        for bytes in [false, true] {
+            let root = dir.path().to_path_buf();
+            let result = within_seconds(move || {
+                let ws = workspace_with_project(&root);
+                if bytes {
+                    read_file_bytes(&ws, "p1".to_string(), "pipe".to_string())
+                } else {
+                    read_file(&ws, "p1".to_string(), "pipe".to_string())
+                }
+            });
+            match result {
+                ActionResult::Err(error) => {
+                    assert_eq!(error, "Cannot read file: not a regular file")
+                }
+                ActionResult::Ok(_) => panic!("a FIFO must be refused (bytes: {bytes})"),
+            }
         }
     }
 }

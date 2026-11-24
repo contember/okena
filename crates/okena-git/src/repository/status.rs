@@ -450,7 +450,7 @@ pub(crate) fn worktree_diff(path: &Path) -> Option<WorktreeDiff> {
 /// sockets, devices) have no content to diff and are refused as `InvalidData`.
 /// `..`, absolute and prefixed paths are refused as `InvalidInput`.
 pub(crate) fn read_worktree_blob(root: &Path, rela: &Path) -> std::io::Result<Vec<u8>> {
-    use std::io::{Error, ErrorKind, Read};
+    use std::io::{Error, ErrorKind};
     use std::path::Component;
 
     let mut path = root.to_path_buf();
@@ -478,32 +478,7 @@ pub(crate) fn read_worktree_blob(root: &Path, rela: &Path) -> std::io::Result<Ve
             .into_owned()
             .into());
     }
-    // Type and length come from the open file, so a swap after the check above
-    // can neither redirect the read nor make it endless.
-    let file = open_no_follow(&path)?;
-    let meta = file.metadata()?;
-    if !meta.is_file() {
-        return Err(Error::new(ErrorKind::InvalidData, "not a regular file"));
-    }
-    let mut bytes = Vec::new();
-    file.take(meta.len()).read_to_end(&mut bytes)?;
-    Ok(bytes)
-}
-
-/// Opens `path` for reading without following a symlink in its last component
-/// and without blocking on a FIFO that replaced a regular file.
-#[cfg(unix)]
-fn open_no_follow(path: &Path) -> std::io::Result<std::fs::File> {
-    use std::os::unix::fs::OpenOptionsExt;
-    std::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-        .open(path)
-}
-
-#[cfg(not(unix))]
-fn open_no_follow(path: &Path) -> std::io::Result<std::fs::File> {
-    std::fs::File::open(path)
+    Ok(okena_core::regular_file::read(&path, u64::MAX)?)
 }
 
 /// Line count of an untracked file listed in [`WorktreeDiff::untracked`]

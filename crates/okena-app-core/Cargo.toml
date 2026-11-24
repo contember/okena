@@ -46,3 +46,4 @@ percent-encoding = "2"
 [dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }
 anyhow = "1.0"
+tempfile = "3"
