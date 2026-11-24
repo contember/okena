@@ -1,8 +1,8 @@
 use alacritty_terminal::event::EventListener;
 use alacritty_terminal::grid::{Dimensions, Row};
 use alacritty_terminal::index::{Column, Line};
-use alacritty_terminal::term::Term;
 use alacritty_terminal::term::cell::{Cell, Flags};
+use alacritty_terminal::term::{Term, TermMode};
 use std::sync::atomic::Ordering;
 
 use super::Terminal;
@@ -57,9 +57,9 @@ impl Terminal {
         f: impl FnOnce(&HistoryView<'_, ZedEventListener>) -> R,
     ) -> R {
         self.drain_pending_output();
-        let term = self.term.lock();
+        let mut term = self.term.lock();
         let mut scrollback = self.scrollback.lock();
-        if settle && scrollback.settle(&term, true) {
+        if settle && scrollback.settle(&mut term, true) {
             self.content_generation.fetch_add(1, Ordering::Relaxed);
         }
         f(&HistoryView::new(&term, &scrollback))
@@ -70,12 +70,15 @@ impl Terminal {
     /// shows archived rows. Returns `true` while that reflow still waits, so
     /// the caller paints again.
     pub fn settle_scrolled_history(&self) -> bool {
-        let term = self.term.lock();
+        let mut term = self.term.lock();
         let mut scrollback = self.scrollback.lock();
-        if scrollback.archive_offset == 0 || !scrollback.reflow_pending() {
+        if scrollback.archive_offset == 0
+            || !scrollback.reflow_pending()
+            || term.mode().contains(TermMode::ALT_SCREEN)
+        {
             return false;
         }
-        if scrollback.settle(&term, false) {
+        if scrollback.settle(&mut term, false) {
             self.content_generation.fetch_add(1, Ordering::Relaxed);
             return false;
         }

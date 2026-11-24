@@ -44,9 +44,10 @@ write it to disk.
   through `with_settled_history` (copy, search, export, snapshots) reflow at
   once; a viewport showing archived rows reflows once the width has held for
   300 ms (`Terminal::settle_scrolled_history`, called by the renderer). Until
-  then archived rows render clipped or padded. Before the columns change,
-  `complete_archived_line` moves the rest of a line the archive ends in from
-  the grid into the archive, so no line is split between the two reflows.
+  then archived rows render clipped or padded, and in the alternate screen the
+  reflow waits for the primary one. Right before it reflows, the archive takes
+  in the rest of a line it ends in from the grid, so no line is split between
+  the two reflows.
 - CSI 3 J (outside the alternate screen) and RIS clear the archive.
 
 ## OSC sequences (sidecar)

@@ -121,9 +121,6 @@ impl Terminal {
         let mut term = self.term.lock();
         let mut scrollback = self.scrollback.lock();
         let old_cols = term.grid().columns();
-        if size.columns() != old_cols {
-            scrollback.complete_archived_line(&mut term);
-        }
         let before = scrollback.history_mark(&term);
         term.resize(size);
         if term.grid().columns() != old_cols {

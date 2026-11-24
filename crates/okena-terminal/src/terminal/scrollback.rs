@@ -126,18 +126,21 @@ impl Scrollback {
 
     /// Reflow the archive to the grid's width if a column change asked for it
     /// and the width has held for [`REFLOW_SETTLE`], or at once with `force`
-    /// (a read that must see every row at the current width). Keeps a view
-    /// scrolled into the archive at about the same place; an archived
-    /// selection no longer points at its rows and is dropped.
-    /// Returns whether the archive was reflowed.
-    pub(super) fn settle<L>(&mut self, term: &Term<L>, force: bool) -> bool {
+    /// (a read that must see every row at the current width). Waits while the
+    /// alternate screen hides the history. Keeps a view scrolled into the
+    /// archive at about the same place; an archived selection no longer points
+    /// at its rows and is dropped. Returns whether the archive was reflowed.
+    pub(super) fn settle<L: EventListener>(&mut self, term: &mut Term<L>, force: bool) -> bool {
         let Some(requested) = self.reflow_requested else {
             return false;
         };
-        if !force && requested.elapsed() < REFLOW_SETTLE {
+        if term.mode().contains(TermMode::ALT_SCREEN)
+            || (!force && requested.elapsed() < REFLOW_SETTLE)
+        {
             return false;
         }
         self.reflow_requested = None;
+        self.complete_archived_line(term);
         let before = self.archive.len();
         self.archive.reflow(term.grid().columns());
         let after = self.archive.len();
@@ -226,11 +229,10 @@ impl Scrollback {
         }
     }
 
-    /// Before a column change: when the archive ends in the middle of a line,
-    /// move the rest of it from the grid's history into the archive. alacritty
-    /// reflows only its grid, so a line split between the two would rewrap as
-    /// two lines.
-    pub(super) fn complete_archived_line<L: EventListener>(&mut self, term: &mut Term<L>) {
+    /// When the archive ends in the middle of a line, move the rest of it from
+    /// the grid's history into the archive, so the archive's reflow joins the
+    /// whole line. alacritty reflowed the grid's part as a line of its own.
+    fn complete_archived_line<L: EventListener>(&mut self, term: &mut Term<L>) {
         if term.mode().contains(TermMode::ALT_SCREEN) || !self.archive.newest_wraps() {
             return;
         }

@@ -422,7 +422,8 @@ fn a_resize_drag_does_not_reflow_the_archive_on_every_frame() {
 fn a_line_between_archive_and_grid_reflows_whole() {
     // 50 distinct chars, so a row's text occurs once.
     let long = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMN";
-    for cols in [12, 30] {
+    // The column change also while a full-screen program is open.
+    for (cols, alt_screen) in [(12, false), (30, false), (12, true)] {
         let terminal = terminal(1_000);
         feed_lines(&terminal, 0..100);
         terminal.process_output(format!("{long}\r\n").as_bytes());
@@ -439,7 +440,16 @@ fn a_line_between_archive_and_grid_reflows_whole() {
             &long[40..]
         );
 
-        resize_cols(&terminal, cols);
+        if alt_screen {
+            terminal.process_output(b"\x1b[?1049h");
+            resize_cols(&terminal, cols);
+            // The alternate screen hides the history; it reflows after.
+            assert_eq!(terminal.history_text(), "");
+            assert!(terminal.scrollback.lock().reflow_pending());
+            terminal.process_output(b"\x1b[?1049l");
+        } else {
+            resize_cols(&terminal, cols);
+        }
         let expected = format!("{}\n{long}\n{}", lines(0..=99), lines(100..=122));
         assert_eq!(terminal.history_text(), expected, "{cols}");
         terminal.select_all();

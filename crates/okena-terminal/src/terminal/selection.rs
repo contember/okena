@@ -14,7 +14,7 @@ impl Terminal {
     pub fn select_all(&self) {
         let mut term = self.term.lock();
         let mut scrollback = self.scrollback.lock();
-        self.settle_for_selection(&term, &mut scrollback);
+        self.settle_for_selection(&mut term, &mut scrollback);
         let rows = term.grid().screen_lines() as i32;
         let cols = term.grid().columns();
         let history = scrollback.history_size(&term) as i32;
@@ -38,7 +38,7 @@ impl Terminal {
 
     /// Lay archived rows out at the current width before a selection takes
     /// line numbers from them: a later reflow would renumber them.
-    fn settle_for_selection(&self, term: &Term<ZedEventListener>, scrollback: &mut Scrollback) {
+    fn settle_for_selection(&self, term: &mut Term<ZedEventListener>, scrollback: &mut Scrollback) {
         if scrollback.settle(term, true) {
             self.content_generation.fetch_add(1, Ordering::Relaxed);
         }
@@ -71,7 +71,7 @@ impl Terminal {
     ) {
         let mut term = self.term.lock();
         let mut scrollback = self.scrollback.lock();
-        self.settle_for_selection(&term, &mut scrollback);
+        self.settle_for_selection(&mut term, &mut scrollback);
 
         // When scrolled up, visual row 0 shows history (negative buffer lines).
         let buffer_row = row - scrollback.display_offset(&term) as i32;
