@@ -3,6 +3,7 @@ use crate::theme::theme;
 use crate::workspace::settings::CursorShape;
 use gpui::prelude::FluentBuilder;
 use gpui::*;
+use okena_terminal::terminal::scrollback_memory_bytes;
 
 use super::SettingsPanel;
 use super::components::*;
@@ -10,7 +11,51 @@ use super::components::*;
 /// Left indent of a setting that only applies while the toggle above it is on.
 const NESTED_SETTING_INDENT: Pixels = px(16.0);
 
+/// Width the scrollback cost is quoted at: terminals grow and shrink with the
+/// window, and a wide pane is the case worth warning about.
+const SCROLLBACK_COST_COLUMNS: u16 = 200;
+
+/// What a full scrollback of `lines` costs the daemon, per terminal and for the
+/// `open_terminals` the workspace holds now.
+fn scrollback_cost(lines: u32, open_terminals: usize) -> String {
+    let per_terminal = scrollback_memory_bytes(lines, SCROLLBACK_COST_COLUMNS);
+    let total = per_terminal.saturating_mul(open_terminals as u64);
+    let noun = if open_terminals == 1 {
+        "terminal"
+    } else {
+        "terminals"
+    };
+    format!(
+        "Daemon memory once full: {} per {SCROLLBACK_COST_COLUMNS}-column terminal, {} for the {open_terminals} open {noun}",
+        format_memory(per_terminal),
+        format_memory(total),
+    )
+}
+
+/// `bytes` in MB below a gigabyte, else in GB with one decimal.
+fn format_memory(bytes: u64) -> String {
+    const MB: u64 = 1024 * 1024;
+    const GB: u64 = 1024 * MB;
+    if bytes < GB {
+        format!("{} MB", (bytes + MB / 2) / MB)
+    } else {
+        let tenths = (bytes.saturating_mul(10) + GB / 2) / GB;
+        format!("{}.{} GB", tenths / 10, tenths % 10)
+    }
+}
+
 impl SettingsPanel {
+    /// Terminals of every project, shown or not: the daemon keeps a scrollback
+    /// for each of them.
+    fn open_terminal_count(&self, cx: &App) -> usize {
+        let workspace = self.workspace.read(cx);
+        workspace
+            .projects()
+            .iter()
+            .map(|project| workspace.all_terminal_ids_for_project(&project.id).len())
+            .sum()
+    }
+
     pub(super) fn render_terminal(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
         let s = settings_entity(cx).read(cx).settings.clone();
@@ -98,9 +143,10 @@ impl SettingsPanel {
                     |state, val, cx| state.set_cursor_blink(val, cx),
                     cx,
                 ))
-                .child(self.render_integer_stepper(
+                .child(self.render_integer_stepper_with_desc(
                     "scrollback",
                     "Scrollback Lines",
+                    &scrollback_cost(s.scrollback_lines, self.open_terminal_count(cx)),
                     s.scrollback_lines,
                     1000,
                     70.0,
@@ -217,5 +263,32 @@ impl SettingsPanel {
                 });
             }),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{format_memory, scrollback_cost};
+
+    #[test]
+    fn memory_reads_in_megabytes_below_a_gigabyte_and_in_gigabytes_above() {
+        assert_eq!(format_memory(0), "0 MB");
+        assert_eq!(format_memory(96 * 1024 * 1024), "96 MB");
+        assert_eq!(format_memory(1024 * 1024 * 1024 - 1), "1024 MB");
+        assert_eq!(format_memory(1024 * 1024 * 1024), "1.0 GB");
+        assert_eq!(format_memory(5_900_000_000), "5.5 GB");
+    }
+
+    #[test]
+    fn the_cost_scales_with_lines_and_open_terminals() {
+        // 10 000 lines x 200 columns x 24-byte cells.
+        assert_eq!(
+            scrollback_cost(10_000, 3),
+            "Daemon memory once full: 46 MB per 200-column terminal, 137 MB for the 3 open terminals"
+        );
+        assert_eq!(
+            scrollback_cost(10_000, 1),
+            "Daemon memory once full: 46 MB per 200-column terminal, 46 MB for the 1 open terminal"
+        );
     }
 }

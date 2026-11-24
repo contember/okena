@@ -55,7 +55,7 @@ The install script includes built-in auto-update support. On macOS and Linux, Ok
 - **Bracketed paste mode** - Proper multi-line paste handling with escape sequence injection protection
 - **Image paste** - Paste clipboard images (PrintScreen, Snipping Tool, browser "Copy image") into TUIs like Claude Code. On Windows in a WSL terminal this needs `wl-clipboard` installed inside the distro (`sudo apt install wl-clipboard`) so the image is forwarded to WSL's clipboard and attached as `[Image #N]`; without it, the bracketed paste falls back to a `/tmp/...` file-path reference
 - **Shift+Enter** - Send literal newline for multi-line input (useful for Claude Code, Python, etc.)
-- **Configurable scrollback** - 100 to 100,000 lines
+- **Configurable scrollback** - 100 to 20,000 lines
 - **Cursor blink** - Toggleable cursor blinking
 - **Bell notification** - Visual indicator when a terminal rings the bell
 - **Per-terminal shell selection** - Choose a different shell for each terminal

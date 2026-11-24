@@ -167,7 +167,7 @@ If the file contains invalid JSON, Okena recovers as many fields as possible and
 |-----|------|---------|-------------|
 | `cursor_style` | string | `"Block"` | Cursor shape: `"Block"`, `"Bar"`, or `"Underline"` |
 | `cursor_blink` | bool | `false` | Enable cursor blinking |
-| `scrollback_lines` | int | `10000` | Number of scrollback lines (100 - 100,000) |
+| `scrollback_lines` | int | `10000` | Number of scrollback lines (100 - 20,000) |
 | `default_shell` | string | `"Default"` | Shell for new terminals. `"Default"` uses the system shell. On Linux/macOS you can also use `"Bash"`, `"Zsh"`, `"Fish"`, etc. |
 | `show_shell_selector` | bool | `false` | Show shell picker in the terminal header |
 | `auto_hide_single_terminal_header` | bool | `false` | Hide the 28px terminal header for standalone terminals. Its actions remain available from the owning project's focused-terminal menu. Multi-tab headers remain visible. |

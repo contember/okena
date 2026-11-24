@@ -55,25 +55,28 @@ impl SettingsPanel {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let t = theme(cx);
+        settings_row(id.to_string(), label, &t, cx, has_border)
+            .child(integer_stepper(id, value, step, width, update_fn, cx))
+    }
 
-        settings_row(id.to_string(), label, &t, cx, has_border).child(stepper(
-            id,
-            format!("{}", value),
-            width,
-            &t,
-            cx,
-            move |dir, _, cx| {
-                let update_fn = update_fn.clone();
-                let next = if dir < 0 {
-                    value.saturating_sub(step)
-                } else {
-                    value.saturating_add(step)
-                };
-                settings_entity(cx).update(cx, |state, cx| {
-                    update_fn(state, next, cx);
-                });
-            },
-        ))
+    /// [`Self::render_integer_stepper`] with a description line under the label.
+    // GPUI render helper: params are render inputs (value, bounds, callbacks).
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn render_integer_stepper_with_desc(
+        &self,
+        id: &str,
+        label: &str,
+        desc: &str,
+        value: u32,
+        step: u32,
+        width: f32,
+        has_border: bool,
+        update_fn: impl Fn(&mut SettingsState, u32, &mut Context<SettingsState>) + 'static + Clone,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let t = theme(cx);
+        settings_row_with_desc(id.to_string(), label, desc, &t, cx, has_border)
+            .child(integer_stepper(id, value, step, width, update_fn, cx))
     }
 
     pub(super) fn render_toggle(
@@ -368,4 +371,33 @@ impl SettingsPanel {
                 )
             }))
     }
+}
+
+fn integer_stepper(
+    id: &str,
+    value: u32,
+    step: u32,
+    width: f32,
+    update_fn: impl Fn(&mut SettingsState, u32, &mut Context<SettingsState>) + 'static + Clone,
+    cx: &mut Context<SettingsPanel>,
+) -> Div {
+    let t = theme(cx);
+    stepper(
+        id,
+        format!("{}", value),
+        width,
+        &t,
+        cx,
+        move |dir, _, cx| {
+            let update_fn = update_fn.clone();
+            let next = if dir < 0 {
+                value.saturating_sub(step)
+            } else {
+                value.saturating_add(step)
+            };
+            settings_entity(cx).update(cx, |state, cx| {
+                update_fn(state, next, cx);
+            });
+        },
+    )
 }
