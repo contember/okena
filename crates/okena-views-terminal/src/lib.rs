@@ -95,10 +95,7 @@ pub trait ActionDispatch: Clone + 'static {
                     path.display()
                 );
             }
-            None => log::warn!(
-                "Buffer export unavailable for terminal {} (server needs a tmux session backend)",
-                terminal_id
-            ),
+            None => log::warn!("Buffer export unavailable for terminal {}", terminal_id),
         }
     }
 }

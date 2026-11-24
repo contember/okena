@@ -6808,6 +6808,49 @@ mod tests {
             .await;
     }
 
+    /// Without a tmux session to capture, an export returns the terminal's
+    /// whole history from memory, rows already moved to the compressed
+    /// archive included.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn export_without_a_tmux_capture_returns_the_archived_history() {
+        let h = harness();
+        let terminal = Arc::new(Terminal::new(
+            "long".to_string(),
+            TerminalSize::default(),
+            h.backend.transport(),
+            "/tmp".to_string(),
+        ));
+        let rows = okena_terminal::terminal::LIVE_HISTORY_LINES + 500;
+        let output: String = (1..=rows).map(|n| format!("row {n}\r\n")).collect();
+        terminal.process_output(output.as_bytes());
+        h.terminals.lock().insert("long".to_string(), terminal);
+        let (bridge_tx, bridge_rx) = bridge_channel();
+
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async move {
+                let handle = h.spawn_loop(bridge_rx);
+                let exported = request(
+                    &bridge_tx,
+                    RemoteCommand::Action(ActionRequest::ExportBuffer {
+                        terminal_id: "long".into(),
+                    }),
+                    "ExportBuffer",
+                )
+                .await;
+                let content = match exported {
+                    CommandResult::Ok(Some(v)) => v["content"].as_str().unwrap().to_string(),
+                    other => panic!("expected Ok(Some), got {other:?}"),
+                };
+                let expected: Vec<String> = (1..=rows).map(|n| format!("row {n}")).collect();
+                assert_eq!(content, expected.join("\n"));
+
+                drop(bridge_tx);
+                handle.await.expect("loop task joins");
+            })
+            .await;
+    }
+
     /// Show/hide and fullscreen aimed at a desktop's extra window are
     /// validated and accepted (the server pushes them to that desktop) without
     /// touching the daemon's own main window.

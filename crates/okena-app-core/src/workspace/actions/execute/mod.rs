@@ -254,7 +254,7 @@ pub fn execute_action(
             scrollback,
         } => terminal::read_content(ws, terminal_id, scrollback, backend, terminals, settings),
         ActionRequest::ExportBuffer { terminal_id } => {
-            terminal::export_buffer(terminal_id, backend)
+            terminal::export_buffer(ws, terminal_id, backend, terminals, settings)
         }
 
         // ── Tab / pane-move ops ──────────────────────────────────────

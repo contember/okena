@@ -339,18 +339,24 @@ pub(super) fn read_content(
     })
 }
 
-pub(super) fn export_buffer(terminal_id: String, backend: &dyn TerminalBackend) -> ActionResult {
-    match backend.capture_buffer(&terminal_id) {
-        Some(path) => {
-            // capture_buffer wrote a daemon-side temp file; read it back and
-            // drop it — the real export is the client's own copy.
-            let bytes = std::fs::read(&path).unwrap_or_default();
-            let _ = std::fs::remove_file(&path);
-            let content = String::from_utf8_lossy(&bytes).to_string();
-            ActionResult::Ok(Some(serde_json::json!({ "content": content })))
-        }
-        None => {
-            ActionResult::Err("buffer capture unavailable (requires a tmux session backend)".into())
-        }
+pub(super) fn export_buffer(
+    ws: &Workspace,
+    terminal_id: String,
+    backend: &dyn TerminalBackend,
+    terminals: &TerminalsRegistry,
+    settings: &AppSettings,
+) -> ActionResult {
+    if let Some(path) = backend.capture_buffer(&terminal_id) {
+        // capture_buffer wrote a daemon-side temp file; read it back and
+        // drop it — the real export is the client's own copy.
+        let bytes = std::fs::read(&path).unwrap_or_default();
+        let _ = std::fs::remove_file(&path);
+        let content = String::from_utf8_lossy(&bytes).to_string();
+        return ActionResult::Ok(Some(serde_json::json!({ "content": content })));
     }
+    // No tmux session to capture: export the terminal's own history, archived
+    // rows included, straight from memory.
+    with_ensured_terminal(ws, &terminal_id, backend, terminals, settings, |term| {
+        ActionResult::Ok(Some(serde_json::json!({ "content": term.history_text() })))
+    })
 }
