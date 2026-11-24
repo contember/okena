@@ -784,10 +784,8 @@ fn get_untracked_files(path: &Path) -> Vec<String> {
 
 /// Create a FileDiff for an untracked file (shows entire file as added).
 fn create_untracked_file_diff(repo_path: &Path, file_path: &str) -> Option<FileDiff> {
-    let full_path = safe_repo_path(repo_path, file_path)?;
-
     // Check if it's a binary file (simple heuristic)
-    let content = match std::fs::read(&full_path) {
+    let content = match read_repo_file(repo_path, file_path) {
         Ok(bytes) => {
             // Check for binary content (null bytes in first 8KB)
             if bytes.iter().take(8192).any(|&b| b == 0) {
@@ -925,25 +923,19 @@ pub fn get_file_bytes_from_git(
     }
 }
 
-/// Safely join a worktree-root-relative file path to its repository, rejecting
-/// path traversal attempts.
+/// Read a worktree-root-relative file of the repository containing `repo_path`.
 ///
 /// `repo_path` may be any directory inside the repository: diff paths are
 /// relative to the worktree root, so resolving them against a monorepo subdir
 /// project would read the wrong file (or none). Falls back to `repo_path` when
-/// it is not a repository at all.
-///
-/// Returns `None` if the resolved path escapes the root (e.g. via `../`).
-fn safe_repo_path(repo_path: &Path, file_path: &str) -> Option<PathBuf> {
+/// it is not a repository at all. A path that would leave the root (`..`, an
+/// absolute path, a symlinked directory) is refused by
+/// [`crate::repository::read_worktree_blob`], which also reads a symlink as git
+/// does: as its target path.
+fn read_repo_file(repo_path: &Path, file_path: &str) -> std::io::Result<Vec<u8>> {
     let root =
         crate::repository::get_repo_root(repo_path).unwrap_or_else(|| repo_path.to_path_buf());
-    let canonical = root.join(file_path).canonicalize().ok()?;
-    let root_canonical = root.canonicalize().ok()?;
-    if canonical.starts_with(&root_canonical) {
-        Some(canonical)
-    } else {
-        None
-    }
+    crate::repository::read_worktree_blob(&root, Path::new(file_path))
 }
 
 /// Get the full content of a file from the working tree (filesystem).
@@ -953,8 +945,7 @@ pub fn get_file_from_working_tree(repo_path: &Path, file_path: &str) -> Option<S
 
 /// Get raw file bytes from the working tree.
 pub fn get_file_bytes_from_working_tree(repo_path: &Path, file_path: &str) -> Option<Vec<u8>> {
-    let full_path = safe_repo_path(repo_path, file_path)?;
-    std::fs::read(full_path).ok()
+    read_repo_file(repo_path, file_path).ok()
 }
 
 /// Get both raw sides of a diff, using each side's own path for renames.
@@ -1051,6 +1042,43 @@ pub fn get_file_contents_for_diff(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn working_tree_reads_take_a_symlink_as_its_target_and_refuse_a_fifo() {
+        use crate::repository::test_support::{git_in, init_temp_repo, make_fifo, within_seconds};
+
+        let (_tmp, repo) = init_temp_repo();
+        std::os::unix::fs::symlink("target-a", repo.join("link")).unwrap();
+        git_in(&repo, &["add", "link"]);
+        git_in(&repo, &["commit", "-m", "add link"]);
+        std::fs::remove_file(repo.join("link")).unwrap();
+        std::os::unix::fs::symlink("/dev/zero", repo.join("link")).unwrap();
+        // A link to a file inside the repo still reads as the link, as git does.
+        std::os::unix::fs::symlink("file.txt", repo.join("inner-link")).unwrap();
+        std::os::unix::fs::symlink("/dev/zero", repo.join("untracked-link")).unwrap();
+        make_fifo(&repo.join("fifo"));
+
+        let path = repo.clone();
+        let (link, inner, fifo, diff) = within_seconds(10, move || {
+            (
+                get_file_bytes_from_working_tree(&path, "link"),
+                get_file_bytes_from_working_tree(&path, "inner-link"),
+                get_file_bytes_from_working_tree(&path, "fifo"),
+                get_diff(&path, DiffMode::WorkingTree).expect("working tree diff"),
+            )
+        });
+
+        assert_eq!(link.as_deref(), Some(b"/dev/zero".as_slice()));
+        assert_eq!(inner.as_deref(), Some(b"file.txt".as_slice()));
+        assert_eq!(fifo, None);
+        let untracked = diff
+            .files
+            .iter()
+            .find(|file| file.new_path.as_deref() == Some("untracked-link"))
+            .expect("untracked link listed");
+        assert_eq!((untracked.lines_added, untracked.lines_removed), (1, 0));
+    }
 
     #[test]
     fn get_file_from_git_reads_head_and_staged_versions() {
@@ -1405,23 +1433,7 @@ diff --git a/b.rs b/b.rs
     }
 
     #[test]
-    fn test_safe_repo_path_normal_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("src/main.rs");
-        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
-        std::fs::write(&file, "fn main() {}").unwrap();
-
-        let result = safe_repo_path(dir.path(), "src/main.rs");
-        assert!(result.is_some());
-        assert!(
-            result
-                .unwrap()
-                .starts_with(dir.path().canonicalize().unwrap())
-        );
-    }
-
-    #[test]
-    fn test_safe_repo_path_traversal_rejected() {
+    fn read_repo_file_resolves_against_the_worktree_root_and_refuses_escapes() {
         use crate::repository::test_support::init_temp_repo;
 
         // A real repository, so the guard is measured against the worktree
@@ -1429,31 +1441,43 @@ diff --git a/b.rs b/b.rs
         let (_tmp, repo) = init_temp_repo();
         let project = repo.join("packages").join("app");
         std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(repo.join("packages/app/main.rs"), "fn main() {}").unwrap();
 
-        assert!(safe_repo_path(&repo, "../../../etc/passwd").is_none());
-        // Escaping the root from inside a subdirectory project is rejected
-        // even though the path stays above the project.
-        assert!(safe_repo_path(&project, "../../../etc/passwd").is_none());
+        assert_eq!(
+            read_repo_file(&repo, "packages/app/main.rs")
+                .ok()
+                .as_deref(),
+            Some(b"fn main() {}".as_slice())
+        );
         // Climbing out of the project but staying in the repo is allowed:
         // repo-root-relative paths are the contract.
         assert_eq!(
-            safe_repo_path(&project, "file.txt"),
-            Some(repo.canonicalize().unwrap().join("file.txt"))
+            read_repo_file(&project, "file.txt").ok().as_deref(),
+            Some(b"x".as_slice())
         );
+        assert!(read_repo_file(&repo, "../../../etc/passwd").is_err());
+        // Escaping the root from inside a subdirectory project is rejected
+        // even though the path stays above the project.
+        assert!(read_repo_file(&project, "../../../etc/passwd").is_err());
+        assert!(read_repo_file(&repo, "/etc/passwd").is_err());
     }
 
+    #[cfg(unix)]
     #[test]
-    fn test_safe_repo_path_absolute_outside_rejected() {
-        let dir = tempfile::tempdir().unwrap();
-        // Absolute path outside repo
-        let result = safe_repo_path(dir.path(), "/etc/passwd");
-        // On Unix, join with an absolute path replaces the base entirely,
-        // so this should be rejected since /etc/passwd is outside the repo.
-        // On systems where /etc/passwd doesn't exist, canonicalize returns None → safe.
-        if let Some(path) = result {
-            // If it somehow resolved, it must still be inside the repo
-            assert!(path.starts_with(dir.path().canonicalize().unwrap()));
-        }
+    fn read_repo_file_does_not_follow_a_symlinked_directory_out_of_the_repo() {
+        use crate::repository::test_support::init_temp_repo;
+
+        let (_tmp, repo) = init_temp_repo();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("secret.txt"), "secret").unwrap();
+        std::os::unix::fs::symlink(outside.path(), repo.join("out")).unwrap();
+
+        let read = read_repo_file(&repo, "out/secret.txt");
+
+        assert_eq!(
+            read.map_err(|e| e.kind()),
+            Err(std::io::ErrorKind::NotFound)
+        );
     }
 
     #[test]

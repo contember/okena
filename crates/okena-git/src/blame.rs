@@ -101,7 +101,7 @@ pub fn get_blame(repo_path: &Path, relative_path: &str) -> Result<Vec<BlameLine>
     if !in_head {
         // File is untracked or freshly added — every working-tree line is
         // uncommitted. Read the WT contents and mark them all.
-        return Ok(all_uncommitted_from_wt(&workdir.join(relative_path)));
+        return Ok(all_uncommitted_from_wt(&workdir, relative_path));
     }
 
     let path_bstr: &BStr = BStr::new(relative_path.as_bytes());
@@ -148,8 +148,7 @@ pub fn get_blame(repo_path: &Path, relative_path: &str) -> Result<Vec<BlameLine>
     // Compare against working-tree contents. If they match, every line maps
     // 1-to-1 to head_blame. Otherwise diff to figure out which WT lines are
     // unchanged (use blame) versus newly inserted (mark uncommitted).
-    let wt_path = workdir.join(relative_path);
-    let wt_content = std::fs::read(&wt_path).ok();
+    let wt_content = crate::repository::read_worktree_blob(&workdir, Path::new(relative_path)).ok();
 
     let uncommitted = Arc::new(BlameCommit::uncommitted());
 
@@ -221,8 +220,9 @@ fn load_commit_meta(repo: &gix::Repository, id: ObjectId) -> Result<BlameCommit,
     })
 }
 
-fn all_uncommitted_from_wt(wt_path: &Path) -> Vec<BlameLine> {
-    let content = std::fs::read(wt_path).unwrap_or_default();
+fn all_uncommitted_from_wt(workdir: &Path, relative_path: &str) -> Vec<BlameLine> {
+    let content = crate::repository::read_worktree_blob(workdir, Path::new(relative_path))
+        .unwrap_or_default();
     let count = count_lines(&content);
     let uncommitted = Arc::new(BlameCommit::uncommitted());
     (0..count)
@@ -420,6 +420,34 @@ mod tests {
         let blame = get_blame(tmp.path(), "new.txt").expect("blame ok");
         assert_eq!(blame.len(), 3);
         assert!(blame.iter().all(|b| b.kind == BlameKind::Uncommitted));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn blame_reads_a_symlink_as_its_target_path() {
+        use crate::repository::test_support::{git_in, init_temp_repo, within_seconds};
+
+        let (_tmp, repo) = init_temp_repo();
+        std::os::unix::fs::symlink("target-a", repo.join("link")).unwrap();
+        git_in(&repo, &["add", "link"]);
+        git_in(&repo, &["commit", "-m", "add link"]);
+        std::fs::remove_file(repo.join("link")).unwrap();
+        std::os::unix::fs::symlink("/dev/zero", repo.join("link")).unwrap();
+        std::os::unix::fs::symlink("/dev/zero", repo.join("untracked-link")).unwrap();
+
+        let path = repo.clone();
+        let (tracked, untracked) = within_seconds(10, move || {
+            (
+                get_blame(&path, "link").expect("blame tracked link"),
+                get_blame(&path, "untracked-link").expect("blame untracked link"),
+            )
+        });
+
+        // One line each: the link's target path, not the device's content.
+        assert_eq!(tracked.len(), 1);
+        assert_eq!(tracked[0].kind, BlameKind::Uncommitted);
+        assert_eq!(untracked.len(), 1);
+        assert_eq!(untracked[0].kind, BlameKind::Uncommitted);
     }
 
     #[test]

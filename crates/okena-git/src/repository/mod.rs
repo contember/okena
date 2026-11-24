@@ -55,7 +55,7 @@ pub use status::{
     get_head_sha, get_head_snapshot, get_repo_poll_snapshot, get_status, has_uncommitted_changes,
     uncommitted_changes,
 };
-pub(crate) use status::{untracked_line_count, worktree_diff};
+pub(crate) use status::{read_worktree_blob, untracked_line_count, worktree_diff};
 pub use worktree::{
     OrphanedWorktree, VerifiedWorktree, WorktreeBranch, create_worktree,
     create_worktree_with_start_point, fetch_and_fast_forward, list_git_worktrees,
@@ -187,6 +187,30 @@ pub(crate) mod test_support {
         git_in(&repo, &["remote", "add", "origin", remote_str]);
         git_in(&repo, &["push", "-q", "origin", "main"]);
         (tmp, repo, remote_tmp)
+    }
+
+    /// Runs `f` on its own thread and fails the test if it does not finish in
+    /// time: reading a device or a FIFO in the worktree never ends.
+    #[cfg(unix)]
+    pub(crate) fn within_seconds<T: Send + 'static>(
+        secs: u64,
+        f: impl FnOnce() -> T + Send + 'static,
+    ) -> T {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(f());
+        });
+        rx.recv_timeout(std::time::Duration::from_secs(secs))
+            .expect("did not finish: it read a device or a FIFO in the worktree")
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn make_fifo(path: &Path) {
+        let status = std::process::Command::new("mkfifo")
+            .arg(path)
+            .status()
+            .expect("run mkfifo");
+        assert!(status.success(), "mkfifo {}", path.display());
     }
 }
 

@@ -35,6 +35,11 @@ Git status, diff parsing, and worktree operations for project directories.
   leaves `.git/index.lock` behind. Not gix's `Outcome::write_changes`: it
   writes back the index read before the walk and could undo a concurrent
   `git add`; `update-index` re-reads it under `index.lock`.
+- **Worktree content is read as git sees it**: read a worktree file through
+  `repository::read_worktree_blob(root, rela)`, never `std::fs::read`. A symlink
+  yields its target path (the blob git stores), a path under a symlinked
+  directory is `NotFound`, `..`/absolute paths and other non-regular files are
+  refused: a link to `/dev/zero` never reaches EOF, and opening a FIFO blocks.
 - **Worktree workflow**: Worktrees are managed as lightweight branch checkouts alongside the main repo.
 - **Diff views**: UI for diffs lives in `crates/okena-views-git/src/diff_viewer/`.
 - **The diff viewer loads per file**: `get_diff_files` lists the comparison
