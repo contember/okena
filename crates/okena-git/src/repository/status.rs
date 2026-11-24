@@ -416,7 +416,7 @@ pub(crate) fn worktree_diff(path: &Path) -> Option<WorktreeDiff> {
         }
 
         let head_blob = head_blob_bytes(head_entry.as_ref());
-        let worktree_blob = read_worktree_blob(&full_path);
+        let worktree_blob = read_worktree_blob(&workdir, &rela_path);
         let (added, removed) = tracked_line_counts(
             head_blob.as_deref().unwrap_or_default(),
             worktree_blob.as_deref().unwrap_or_default(),
@@ -442,25 +442,68 @@ pub(crate) fn worktree_diff(path: &Path) -> Option<WorktreeDiff> {
     })
 }
 
-/// Worktree content of `path` as git sees it, without following symlinks.
-/// Git stores a symlink as its target path, so that is what a symlink yields:
-/// reading through a link to a device such as `/dev/full` never reaches EOF and
-/// grew the daemon until the OOM killer stopped it (#377). Other non-regular
-/// files (FIFOs, sockets, devices) have no content to diff, and opening a FIFO
-/// would block, so they are refused as `InvalidData`.
-pub(crate) fn read_worktree_blob(path: &Path) -> std::io::Result<Vec<u8>> {
-    let meta = std::fs::symlink_metadata(path)?;
-    if meta.file_type().is_symlink() {
-        let target = std::fs::read_link(path)?;
-        return Ok(gix::path::into_bstr(target).into_owned().into());
+/// Worktree content of `rela` (relative to the worktree `root`) as git sees it,
+/// never reading through a symlink. A symlink yields its target path, the blob
+/// git stores for it: a link to `/dev/full` never reaches EOF and grew the
+/// daemon until the OOM killer stopped it (#377). A path under a symlinked
+/// directory is `NotFound`, as git treats it. Other non-regular files (FIFOs,
+/// sockets, devices) have no content to diff and are refused as `InvalidData`.
+/// `..`, absolute and prefixed paths are refused as `InvalidInput`.
+pub(crate) fn read_worktree_blob(root: &Path, rela: &Path) -> std::io::Result<Vec<u8>> {
+    use std::io::{Error, ErrorKind, Read};
+    use std::path::Component;
+
+    let mut path = root.to_path_buf();
+    let mut components = rela.components().peekable();
+    while let Some(component) = components.next() {
+        match component {
+            Component::Normal(name) => path.push(name),
+            Component::CurDir => continue,
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                return Err(Error::new(
+                    ErrorKind::InvalidInput,
+                    "path leaves the worktree",
+                ));
+            }
+        }
+        if components.peek().is_some() && std::fs::symlink_metadata(&path)?.file_type().is_symlink()
+        {
+            return Err(Error::from(ErrorKind::NotFound));
+        }
     }
+
+    if std::fs::symlink_metadata(&path)?.file_type().is_symlink() {
+        let target = gix::path::into_bstr(std::fs::read_link(&path)?);
+        return Ok(gix::path::to_unix_separators_on_windows(target)
+            .into_owned()
+            .into());
+    }
+    // Type and length come from the open file, so a swap after the check above
+    // can neither redirect the read nor make it endless.
+    let file = open_no_follow(&path)?;
+    let meta = file.metadata()?;
     if !meta.is_file() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "not a regular file",
-        ));
+        return Err(Error::new(ErrorKind::InvalidData, "not a regular file"));
     }
-    std::fs::read(path)
+    let mut bytes = Vec::new();
+    file.take(meta.len()).read_to_end(&mut bytes)?;
+    Ok(bytes)
+}
+
+/// Opens `path` for reading without following a symlink in its last component
+/// and without blocking on a FIFO that replaced a regular file.
+#[cfg(unix)]
+fn open_no_follow(path: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+}
+
+#[cfg(not(unix))]
+fn open_no_follow(path: &Path) -> std::io::Result<std::fs::File> {
+    std::fs::File::open(path)
 }
 
 /// Line count of an untracked file listed in [`WorktreeDiff::untracked`]
@@ -477,7 +520,7 @@ pub(crate) fn untracked_line_count(path: &Path, root: &Path, file: &str) -> usiz
         return lines;
     }
 
-    let read = read_worktree_blob(&full_path).and_then(|bytes| {
+    let read = read_worktree_blob(root, Path::new(file)).and_then(|bytes| {
         String::from_utf8(bytes)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
     });
@@ -737,6 +780,30 @@ mod tests {
         let diff = within_seconds(10, move || worktree_diff(&path)).expect("status walk");
 
         assert!(diff.tracked.is_empty(), "{:?}", diff.tracked);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn worktree_diff_does_not_read_under_a_directory_replaced_by_a_symlink() {
+        let (_tmp, repo) = init_temp_repo();
+        std::fs::create_dir(repo.join("p")).unwrap();
+        std::fs::write(repo.join("p/f.txt"), "one\n").unwrap();
+        git_in(&repo, &["add", "p/f.txt"]);
+        git_in(&repo, &["commit", "-m", "add p/f.txt"]);
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("f.txt"), "1\n2\n3\n4\n5\n").unwrap();
+        std::fs::remove_dir_all(repo.join("p")).unwrap();
+        std::os::unix::fs::symlink(outside.path(), repo.join("p")).unwrap();
+
+        let diff = worktree_diff(&repo).expect("status walk");
+
+        // Git does not look past the link: the tracked file is gone, as in
+        // `git diff --numstat`, and the outside file is never read.
+        assert!(
+            diff.tracked.contains(&("p/f.txt".to_string(), 0, 1)),
+            "{:?}",
+            diff.tracked
+        );
     }
 
     #[cfg(unix)]

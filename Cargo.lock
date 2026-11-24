@@ -6900,6 +6900,7 @@ name = "okena-git"
 version = "0.1.0"
 dependencies = [
  "gix",
+ "libc",
  "log",
  "okena-core",
  "okena-transport",
