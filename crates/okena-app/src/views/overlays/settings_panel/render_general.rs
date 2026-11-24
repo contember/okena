@@ -149,21 +149,32 @@ impl SettingsPanel {
             .child(section)
             .child(section_header("File Opener", &t, cx))
             .child(
-                section_container(&t).child(
-                    settings_input_row(
-                        "file-opener-command",
-                        "Editor Command",
-                        "Command to open file paths (empty = system default)",
-                        &t,
-                        cx,
-                        false,
-                    )
+                section_container(&t)
                     .child(
-                        input_box(&t).child(
-                            SimpleInput::new(&self.file_opener_input).text_size(ui_text_md(cx)),
+                        settings_input_row(
+                            "file-opener-command",
+                            "Editor Command",
+                            "Command to open file paths (empty = system default)",
+                            &t,
+                            cx,
+                            true,
+                        )
+                        .child(
+                            input_box(&t).child(
+                                SimpleInput::new(&self.file_opener_input)
+                                    .text_size(ui_text_md(cx)),
+                            ),
                         ),
-                    ),
-                ),
+                    )
+                    .child(Self::render_toggle_with_desc(
+                        "close-viewer-on-open-externally",
+                        "Close Viewer After Opening Externally",
+                        "Clicking \"Open externally\" in the file viewer also closes the viewer",
+                        s.close_file_viewer_on_open_externally,
+                        false,
+                        |state, val, cx| state.set_close_file_viewer_on_open_externally(val, cx),
+                        cx,
+                    )),
             )
             .child(section_header("Notifications", &t, cx))
             .child({
