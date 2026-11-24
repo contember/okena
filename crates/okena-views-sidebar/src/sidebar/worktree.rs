@@ -98,6 +98,7 @@ impl Sidebar {
                         layout: None,
                         terminal_name: None,
                         wait: false,
+                        start_page: false,
                     },
                     cx,
                 );

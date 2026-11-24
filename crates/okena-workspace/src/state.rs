@@ -2934,12 +2934,14 @@ mod workspace_tests {
             },
             state: Some(StateResponse {
                 state_version: 1,
+                supports_start_page: false,
                 projects: vec![ApiProject {
                     id: "p1".to_string(),
                     name: "proj-p1".to_string(),
                     path: "/srv/p1".to_string(),
                     show_in_overview: true,
                     layout: Some(ApiLayoutNode::Terminal {
+                        start_page: None,
                         terminal_id: Some("t1".to_string()),
                         minimized: false,
                         detached: false,
@@ -3345,6 +3347,7 @@ mod workspace_tests {
             path: "/tmp/test".to_string(),
             layout: Some(LayoutNode::Terminal {
                 terminal_id: Some(format!("term_{}", id)),
+                start_page: None,
                 pending_agent_resume: None,
                 minimized: false,
                 detached: false,
@@ -3398,6 +3401,7 @@ mod workspace_tests {
                 .iter()
                 .map(|tid| LayoutNode::Terminal {
                     terminal_id: Some((*tid).to_string()),
+                    start_page: None,
                     pending_agent_resume: None,
                     minimized: false,
                     detached: false,
@@ -3793,6 +3797,7 @@ mod workspace_tests {
             children: vec![
                 LayoutNode::Terminal {
                     terminal_id: Some("t1".to_string()),
+                    start_page: None,
                     pending_agent_resume: None,
                     minimized: false,
                     detached: true,
@@ -3801,6 +3806,7 @@ mod workspace_tests {
                 },
                 LayoutNode::Terminal {
                     terminal_id: Some("t2".to_string()),
+                    start_page: None,
                     pending_agent_resume: None,
                     minimized: false,
                     detached: false,
@@ -4515,6 +4521,7 @@ mod gpui_tests {
             path: "/tmp/test".to_string(),
             layout: Some(LayoutNode::Terminal {
                 terminal_id: Some(format!("term_{}", id)),
+                start_page: None,
                 pending_agent_resume: None,
                 minimized: false,
                 detached: false,
@@ -4562,6 +4569,7 @@ mod gpui_tests {
     fn pane(terminal_id: &str) -> LayoutNode {
         LayoutNode::Terminal {
             terminal_id: Some(terminal_id.to_string()),
+            start_page: None,
             pending_agent_resume: None,
             minimized: false,
             detached: false,
@@ -4707,6 +4715,7 @@ mod gpui_tests {
             },
             state: Some(StateResponse {
                 state_version: 1,
+                supports_start_page: false,
                 projects: projects
                     .iter()
                     .map(|(id, layout)| ApiProject {
@@ -4750,6 +4759,7 @@ mod gpui_tests {
 
     fn api_terminal(id: &str) -> ApiLayoutNode {
         ApiLayoutNode::Terminal {
+            start_page: None,
             terminal_id: Some(id.to_string()),
             minimized: false,
             detached: false,

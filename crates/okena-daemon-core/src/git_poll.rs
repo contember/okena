@@ -1190,6 +1190,7 @@ mod tests {
             path: "/tmp".to_string(),
             layout: Some(okena_state::LayoutNode::Terminal {
                 terminal_id: Some(terminal_id.to_string()),
+                start_page: None,
                 pending_agent_resume: None,
                 minimized: false,
                 detached: false,

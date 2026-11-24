@@ -480,7 +480,7 @@ pub fn apply_remote_snapshot(
             Some(layout) => layout,
             None => continue,
         };
-        let new_ids = layout.collect_terminal_ids();
+        let new_ids = layout.collect_pane_ids();
         // Find the first terminal ID that wasn't present when the
         // CreateTerminal action originated in this window.
         let old_set: HashSet<&str> = pending_focus
@@ -635,6 +635,7 @@ mod tests {
 
     fn terminal(id: &str) -> ApiLayoutNode {
         ApiLayoutNode::Terminal {
+            start_page: None,
             terminal_id: Some(id.to_string()),
             minimized: false,
             detached: false,
@@ -651,6 +652,7 @@ mod tests {
     ) -> StateResponse {
         StateResponse {
             state_version: 1,
+            supports_start_page: false,
             projects,
             focused_project_id: None,
             fullscreen_terminal: None,

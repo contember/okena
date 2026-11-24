@@ -1276,6 +1276,7 @@ mod tests {
             path: "/tmp/project-one".into(),
             layout: Some(LayoutNode::Terminal {
                 terminal_id: Some(terminal_id.into()),
+                start_page: None,
                 pending_agent_resume: None,
                 minimized: false,
                 detached: false,

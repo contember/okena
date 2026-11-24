@@ -589,12 +589,13 @@ fn main() {
         }));
 
         // Register extension settings store (bridge for extensions and view crates to read/write settings).
-        // Known namespaces ("terminal", "git") map to/from individual AppSettings fields.
+        // Known namespaces map to individual AppSettings fields.
         // Unknown namespaces fall back to the generic extension_settings map.
         cx.set_global(okena_extensions::ExtensionSettingsStore::new(
             |namespace, cx| {
                 let s = settings::settings_entity(cx).read(cx);
                 match namespace {
+                    "start_page_buttons" => serde_json::to_value(&s.settings.start_page_buttons).ok(),
                     "terminal" => {
                         serde_json::to_value(&okena_views_terminal::TerminalViewSettings {
                             font_size: s.settings.font_size,

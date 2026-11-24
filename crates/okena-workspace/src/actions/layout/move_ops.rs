@@ -71,11 +71,6 @@ impl Workspace {
             None => return,
         };
 
-        // Only-terminal check: don't move if it's the only terminal
-        if layout.collect_terminal_ids().len() <= 1 {
-            return;
-        }
-
         // Find source path
         let source_path = match layout.find_terminal_path(source_terminal_id) {
             Some(p) => p,
@@ -340,9 +335,9 @@ impl Workspace {
     /// A terminal already in `tabs`, used to find that group again once removal
     /// has shifted paths. `None` unless `tabs` really is a tab group.
     ///
-    /// A direct child is preferred: a terminal nested in a child container would
+    /// A direct child is preferred: a pane nested in a child container would
     /// re-resolve to that container instead of the group the drop targeted.
-    fn tab_group_reference_terminal(tabs: &LayoutNode, exclude: &str) -> Option<String> {
+    fn tab_group_reference_pane(tabs: &LayoutNode, exclude: &str) -> Option<String> {
         let LayoutNode::Tabs { children, .. } = tabs else {
             return None;
         };
@@ -350,16 +345,17 @@ impl Workspace {
             .iter()
             .find_map(|child| match child {
                 LayoutNode::Terminal {
-                    terminal_id: Some(id),
+                    terminal_id,
+                    start_page,
                     ..
-                } if id != exclude => Some(id.clone()),
+                } => terminal_id
+                    .as_deref()
+                    .or_else(|| start_page.as_ref().map(|page| page.id.as_str()))
+                    .filter(|id| *id != exclude)
+                    .map(str::to_owned),
                 _ => None,
             })
-            .or_else(|| {
-                tabs.collect_terminal_ids()
-                    .into_iter()
-                    .find(|id| id != exclude)
-            })
+            .or_else(|| tabs.collect_pane_ids().into_iter().find(|id| id != exclude))
     }
 
     /// Path of the innermost `Tabs` node containing `path` — the tab group the
@@ -469,10 +465,10 @@ impl Workspace {
         }
 
         // Reject a destination that is not a tab group, and take a reference
-        // terminal from it so the group can be found again after removal.
-        let reference_tid = match layout
+        // pane from it so the group can be found again after removal.
+        let reference_pane_id = match layout
             .get_at_path(tabs_path)
-            .and_then(|node| Self::tab_group_reference_terminal(node, terminal_id))
+            .and_then(|node| Self::tab_group_reference_pane(node, terminal_id))
         {
             Some(id) => id,
             None => return,
@@ -495,7 +491,7 @@ impl Workspace {
                 return;
             }
 
-            let ref_path = match moved.find_terminal_path(&reference_tid) {
+            let ref_path = match moved.find_terminal_path(&reference_pane_id) {
                 Some(p) => p,
                 None => return,
             };
@@ -711,12 +707,20 @@ mod tests {
     fn terminal(id: &str) -> LayoutNode {
         LayoutNode::Terminal {
             terminal_id: Some(id.to_string()),
+            start_page: None,
             pending_agent_resume: None,
             minimized: false,
             detached: false,
             shell_type: ShellType::Default,
             zoom_level: 1.0,
         }
+    }
+
+    fn start_page(id: &str) -> LayoutNode {
+        LayoutNode::new_start_page(okena_core::api::StartPage {
+            id: id.to_string(),
+            cwd: format!("/tmp/{id}"),
+        })
     }
 
     fn split(children: Vec<LayoutNode>) -> LayoutNode {
@@ -773,6 +777,61 @@ mod tests {
             .and_then(|p| p.layout.as_ref())
             .map(LayoutNode::collect_terminal_ids)
             .unwrap_or_default()
+    }
+
+    #[test]
+    fn pane_move_between_two_pending_start_pages() {
+        let mut ws = workspace(vec![project(
+            "p1",
+            split(vec![start_page("a"), start_page("b")]),
+        )]);
+
+        ws.move_pane(
+            &mut FocusManager::new(),
+            "p1",
+            "a",
+            "p1",
+            "b",
+            DropZone::Center,
+            &mut TestCx,
+        );
+
+        assert_eq!(
+            ws.project("p1").unwrap().layout,
+            Some(LayoutNode::Tabs {
+                children: vec![start_page("b"), start_page("a")],
+                active_tab: 1,
+            }),
+        );
+    }
+
+    #[test]
+    fn pane_can_move_into_a_tab_group_of_pending_start_pages() {
+        let mut ws = workspace(vec![project(
+            "p1",
+            split(vec![
+                tabs(vec![start_page("a"), start_page("b")]),
+                start_page("c"),
+            ]),
+        )]);
+
+        ws.move_terminal_to_tab_group(
+            &mut FocusManager::new(),
+            "p1",
+            "c",
+            "p1",
+            &[0],
+            Some(1),
+            &mut TestCx,
+        );
+
+        assert_eq!(
+            ws.project("p1").unwrap().layout,
+            Some(LayoutNode::Tabs {
+                children: vec![start_page("a"), start_page("c"), start_page("b")],
+                active_tab: 1,
+            }),
+        );
     }
 
     #[test]

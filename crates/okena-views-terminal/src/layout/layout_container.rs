@@ -1,12 +1,15 @@
 //! Recursive layout container that renders terminal/split/tabs nodes
 
 use crate::ActionDispatch;
+use crate::layout::navigation::{
+    NavigationDirection, PaneNavigator, deregister_pane_bounds, register_pane_bounds,
+};
 use crate::layout::pane_drag::{DropZone, PaneDrag, PaneMoveState, is_move_target};
 use crate::layout::split_pane::{ActiveDrag, render_split_divider};
 use crate::layout::terminal_pane::TerminalPane;
 use gpui::prelude::*;
 use gpui::*;
-use okena_core::api::ActionRequest;
+use okena_core::api::{ActionRequest, StartPage};
 use okena_files::theme::theme;
 use okena_terminal::TerminalsRegistry;
 use okena_terminal::backend::TerminalBackend;
@@ -118,6 +121,9 @@ pub struct LayoutContainer<D: ActionDispatch> {
     pub(super) backend: Arc<dyn TerminalBackend>,
     pub(super) terminals: TerminalsRegistry,
     terminal_pane: Option<Entity<TerminalPane<D>>>,
+    start_page_focus: Option<FocusHandle>,
+    pub(super) new_tip_card: fn(&mut App) -> AnyView,
+    tip_card: Option<AnyView>,
     pub(super) child_containers: HashMap<Vec<usize>, Entity<LayoutContainer<D>>>,
     pub(super) container_bounds_ref: Rc<RefCell<Bounds<Pixels>>>,
     pub(super) drop_animation: Option<(usize, f32)>,
@@ -129,6 +135,22 @@ pub struct LayoutContainer<D: ActionDispatch> {
     pub(super) action_dispatcher: Option<D>,
     pub(super) tab_scroll_handle: ScrollHandle,
     pub(super) last_scrolled_to_tab: Option<usize>,
+}
+
+impl<D: ActionDispatch> LayoutContainer<D> {
+    fn clear_start_page_focus(&mut self) -> bool {
+        if self.start_page_focus.take().is_none() {
+            return false;
+        }
+        deregister_pane_bounds(self.window_id, &self.project_id, &self.layout_path);
+        true
+    }
+}
+
+impl<D: ActionDispatch> Drop for LayoutContainer<D> {
+    fn drop(&mut self) {
+        self.clear_start_page_focus();
+    }
 }
 
 impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
@@ -147,6 +169,7 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
         active_drag: ActiveDrag,
         pane_move: Entity<PaneMoveState>,
         action_dispatcher: Option<D>,
+        new_tip_card: fn(&mut App) -> AnyView,
         cx: &mut Context<Self>,
     ) -> Self {
         cx.observe(&pane_move, |_this, _state, cx| cx.notify())
@@ -162,6 +185,9 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
             backend,
             terminals,
             terminal_pane: None,
+            start_page_focus: None,
+            new_tip_card,
+            tip_card: None,
             child_containers: HashMap::new(),
             container_bounds_ref: Rc::new(RefCell::new(Bounds {
                 origin: Point::default(),
@@ -288,6 +314,9 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
     }
 
     pub(super) fn deregister_resize_viewers(&mut self, cx: &mut Context<Self>) {
+        if self.clear_start_page_focus() {
+            cx.notify();
+        }
         if let Some(pane) = self.terminal_pane.clone() {
             pane.update(cx, |pane, cx| pane.deregister_resize_viewer(cx));
         }
@@ -379,15 +408,223 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
         cx.notify();
     }
 
+    fn pane_navigator(&self) -> PaneNavigator<'_> {
+        PaneNavigator {
+            workspace: &self.workspace,
+            focus_manager: &self.focus_manager,
+            window_id: self.window_id,
+            project_id: &self.project_id,
+            layout_path: &self.layout_path,
+        }
+    }
+
+    fn render_start_page(
+        &mut self,
+        page: &StartPage,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        use crate::actions::{
+            AddTab, CloseTerminal, FocusDown, FocusLeft, FocusNextTerminal, FocusPrevTerminal,
+            FocusRight, FocusUp, SplitHorizontal, SplitVertical,
+        };
+
+        let t = theme(cx);
+        let focus = self
+            .start_page_focus
+            .get_or_insert_with(|| cx.focus_handle())
+            .clone();
+        let fm = self.focus_manager.read(cx);
+        if !fm.is_modal()
+            && fm.is_focused(&self.project_id, &self.layout_path)
+            && !focus.contains_focused(window, cx)
+        {
+            window.focus(&focus, cx);
+        }
+
+        let buttons = cx
+            .global::<okena_extensions::ExtensionSettingsStore>()
+            .get("start_page_buttons", cx)
+            .and_then(|value| {
+                serde_json::from_value::<Vec<okena_workspace::settings::StartPageButton>>(value)
+                    .ok()
+            })
+            .unwrap_or_default();
+        let page_id = page.id.clone();
+        let default_launch = super::start_page::launch_request(
+            &self.project_id,
+            Some(&page.id),
+            okena_core::shell::ShellType::Default,
+            None,
+        );
+        let keyboard_focus = focus.clone();
+        let map_handle = focus.clone();
+        let window_id = self.window_id;
+        let project_id = self.project_id.clone();
+        let layout_path = self.layout_path.clone();
+        let tip = self
+            .tip_card
+            .get_or_insert_with(|| (self.new_tip_card)(cx))
+            .clone();
+        div()
+            .id("terminal-start-page")
+            .relative()
+            .size_full()
+            .overflow_y_scroll()
+            .bg(rgb(t.bg_primary))
+            .track_focus(&focus)
+            .tab_stop(true)
+            .key_context("TerminalPane")
+            .child(
+                canvas(
+                    move |bounds, _, _| {
+                        register_pane_bounds(
+                            window_id,
+                            project_id.clone(),
+                            layout_path.clone(),
+                            bounds,
+                            Some(map_handle.clone()),
+                        );
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .inset_0()
+                .size_full(),
+            )
+            .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
+                let key = &event.keystroke;
+                let plain = key.modifiers == Modifiers::default();
+                let shift = key.modifiers
+                    == Modifiers {
+                        shift: true,
+                        ..Default::default()
+                    };
+                match key.key.as_str() {
+                    "enter" if plain && keyboard_focus.is_focused(window) => {
+                        if !event.is_held
+                            && let Some(dispatcher) = &this.action_dispatcher
+                        {
+                            dispatcher.dispatch(default_launch.clone(), cx);
+                        }
+                    }
+                    "tab" if plain => window.focus_next(cx),
+                    "tab" if shift => window.focus_prev(cx),
+                    _ => return,
+                }
+                cx.stop_propagation();
+            }))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, window, cx| {
+                    window.focus(&focus, cx);
+                    let project_id = this.project_id.clone();
+                    let layout_path = this.layout_path.clone();
+                    let workspace = this.workspace.clone();
+                    this.focus_manager.update(cx, |fm, cx| {
+                        workspace.update(cx, |ws, cx| {
+                            ws.set_focused_terminal(fm, project_id, layout_path, cx);
+                        });
+                        cx.notify();
+                    });
+                }),
+            )
+            .on_action(cx.listener(|this, _: &FocusLeft, window, cx| {
+                this.pane_navigator()
+                    .in_direction(NavigationDirection::Left, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &FocusRight, window, cx| {
+                this.pane_navigator()
+                    .in_direction(NavigationDirection::Right, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &FocusUp, window, cx| {
+                this.pane_navigator()
+                    .in_direction(NavigationDirection::Up, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &FocusDown, window, cx| {
+                this.pane_navigator()
+                    .in_direction(NavigationDirection::Down, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &FocusNextTerminal, window, cx| {
+                this.pane_navigator().sequential(true, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &FocusPrevTerminal, window, cx| {
+                this.pane_navigator().sequential(false, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &SplitVertical, _, cx| {
+                if let Some(dispatcher) = &this.action_dispatcher {
+                    dispatcher.split_terminal(
+                        &this.project_id,
+                        &this.layout_path,
+                        SplitDirection::Vertical,
+                        cx,
+                    );
+                }
+            }))
+            .on_action(cx.listener(|this, _: &SplitHorizontal, _, cx| {
+                if let Some(dispatcher) = &this.action_dispatcher {
+                    dispatcher.split_terminal(
+                        &this.project_id,
+                        &this.layout_path,
+                        SplitDirection::Horizontal,
+                        cx,
+                    );
+                }
+            }))
+            .on_action(cx.listener(|this, _: &AddTab, _, cx| {
+                if let Some(dispatcher) = &this.action_dispatcher {
+                    dispatcher.add_tab(&this.project_id, &this.layout_path, false, cx);
+                }
+            }))
+            .on_action(cx.listener(move |this, _: &CloseTerminal, _, cx| {
+                if let Some(dispatcher) = &this.action_dispatcher {
+                    dispatcher.dispatch(
+                        ActionRequest::CloseTerminal {
+                            project_id: this.project_id.clone(),
+                            terminal_id: page_id.clone(),
+                        },
+                        cx,
+                    );
+                }
+            }))
+            .child(super::start_page::render_start_page_content(
+                &self.project_id,
+                Some(&page.id),
+                Some(&buttons),
+                self.action_dispatcher.as_ref(),
+                tip,
+                cx,
+            ))
+    }
+
     fn render_terminal(
         &mut self,
         terminal_id: Option<String>,
+        start_page: Option<StartPage>,
         minimized: bool,
         detached: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        self.ensure_terminal_pane(terminal_id.clone(), minimized, detached, cx);
+        let (pane_id, content) = if let Some(page) = start_page.as_ref() {
+            if let Some(pane) = self.terminal_pane.take() {
+                pane.update(cx, |pane, cx| pane.deregister_resize_viewer(cx));
+            }
+            (
+                Some(page.id.clone()),
+                Some(self.render_start_page(page, window, cx).into_any_element()),
+            )
+        } else {
+            self.clear_start_page_focus();
+            self.tip_card = None;
+            self.ensure_terminal_pane(terminal_id.clone(), minimized, detached, cx);
+            let terminal = self.terminal_pane.clone().map(|pane| {
+                AnyView::from(pane)
+                    .cached(StyleRefinement::default().size_full())
+                    .into_any_element()
+            });
+            (terminal_id.clone(), terminal)
+        };
 
         let in_tab_group = self.is_in_tab_group(cx);
         let is_zoomed = terminal_id.as_ref().is_some_and(|tid| {
@@ -401,11 +638,12 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
         // A compact grid tile's project header carries this title bar.
         if !in_tab_group
             && !is_zoomed
-            && !self
-                .workspace
-                .read(cx)
-                .is_compact_tile(self.window_id, &self.project_id)
-            && !crate::terminal_view_settings(cx).auto_hide_single_terminal_header
+            && (start_page.is_some()
+                || (!self
+                    .workspace
+                    .read(cx)
+                    .is_compact_tile(self.window_id, &self.project_id)
+                    && !crate::terminal_view_settings(cx).auto_hide_single_terminal_header))
         {
             container = container.child(self.render_standalone_tab_bar(window, cx));
         }
@@ -415,10 +653,8 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
                 .flex_1()
                 .min_h_0()
                 .relative()
-                .when_some(self.terminal_pane.clone(), |d, pane| {
-                    d.child(AnyView::from(pane).cached(StyleRefinement::default().size_full()))
-                })
-                .child(self.render_drop_zones(terminal_id, cx, &self.active_drag.clone())),
+                .children(content)
+                .child(self.render_drop_zones(pane_id, cx, &self.active_drag.clone())),
         )
     }
 
@@ -608,6 +844,7 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
                             self.active_drag.clone(),
                             self.pane_move.clone(),
                             self.action_dispatcher.clone(),
+                            self.new_tip_card,
                             cx,
                         )
                     })
@@ -689,6 +926,7 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
                             self.active_drag.clone(),
                             self.pane_move.clone(),
                             self.action_dispatcher.clone(),
+                            self.new_tip_card,
                             cx,
                         )
                     })
@@ -769,6 +1007,8 @@ impl<D: ActionDispatch + Send + Sync> Render for LayoutContainer<D> {
                 }
             }
             Some(LayoutNode::Split { .. }) | Some(LayoutNode::Tabs { .. }) => {
+                self.clear_start_page_focus();
+                self.tip_card = None;
                 if let Some(pane) = self.terminal_pane.take() {
                     pane.update(cx, |pane, cx| pane.deregister_resize_viewer(cx));
                 }
@@ -776,6 +1016,7 @@ impl<D: ActionDispatch + Send + Sync> Render for LayoutContainer<D> {
             None => {
                 self.deregister_resize_viewers(cx);
                 self.terminal_pane = None;
+                self.tip_card = None;
                 self.child_containers.clear();
             }
         }
@@ -783,11 +1024,12 @@ impl<D: ActionDispatch + Send + Sync> Render for LayoutContainer<D> {
         match layout {
             Some(LayoutNode::Terminal {
                 terminal_id,
+                start_page,
                 minimized,
                 detached,
                 ..
             }) => self
-                .render_terminal(terminal_id.clone(), minimized, detached, window, cx)
+                .render_terminal(terminal_id, start_page, minimized, detached, window, cx)
                 .into_any_element(),
 
             Some(LayoutNode::Split {

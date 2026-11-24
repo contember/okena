@@ -1,6 +1,7 @@
 #[derive(Clone, PartialEq)]
 pub(in crate::views::overlays) enum SettingsCategory {
     General,
+    StartPage,
     Font,
     Terminal,
     Worktree,
@@ -16,6 +17,7 @@ impl SettingsCategory {
     pub(super) fn label(&self) -> &str {
         match self {
             Self::General => "General",
+            Self::StartPage => "Start Page",
             Self::Font => "Font",
             Self::Terminal => "Terminal",
             Self::Worktree => "Worktree",
@@ -30,6 +32,7 @@ impl SettingsCategory {
     pub(super) fn all() -> &'static [SettingsCategory] {
         &[
             Self::General,
+            Self::StartPage,
             Self::Font,
             Self::Terminal,
             Self::Worktree,

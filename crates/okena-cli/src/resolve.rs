@@ -410,6 +410,7 @@ mod tests {
 
     fn term(id: &str) -> ApiLayoutNode {
         ApiLayoutNode::Terminal {
+            start_page: None,
             terminal_id: Some(id.into()),
             minimized: false,
             detached: false,
@@ -481,6 +482,7 @@ mod tests {
     fn state_with(projects: Vec<ApiProject>, windows: Vec<ApiWindow>) -> StateResponse {
         StateResponse {
             state_version: 1,
+            supports_start_page: false,
             projects,
             focused_project_id: None,
             fullscreen_terminal: None,

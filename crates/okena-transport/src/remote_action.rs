@@ -701,6 +701,7 @@ mod tests {
             layout: None,
             terminal_name: None,
             wait,
+            start_page: false,
         };
         assert_eq!(
             client_kind_for(&create(true)),

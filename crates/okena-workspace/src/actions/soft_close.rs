@@ -607,6 +607,7 @@ mod tests {
     fn term(id: &str) -> LayoutNode {
         LayoutNode::Terminal {
             terminal_id: Some(id.to_string()),
+            start_page: None,
             pending_agent_resume: None,
             minimized: false,
             detached: false,

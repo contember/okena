@@ -523,6 +523,7 @@ impl WindowView {
                             layout: None,
                             terminal_name: None,
                             wait: false,
+                            start_page: false,
                         },
                         cx,
                     );
@@ -539,6 +540,7 @@ impl WindowView {
                 if let Some(dispatcher) = self.dispatcher_for_project(project_id, cx) {
                     dispatcher.dispatch(
                         ActionRequest::CreateTerminal {
+                            start_page: false,
                             project_id: project_id.clone(),
                         },
                         cx,
@@ -703,6 +705,7 @@ impl WindowView {
                             parent_project_id: parent_project_id.clone(),
                             worktree_path: worktree_path.clone(),
                             branch: branch.clone(),
+                            start_page: false,
                         },
                         cx,
                     );
@@ -990,8 +993,8 @@ impl WindowView {
                 tab_index,
             } => {
                 let terminal_ids =
-                    collect_tab_terminal_ids(&self.workspace, project_id, layout_path, cx);
-                if let Some(tid) = terminal_ids.get(*tab_index).cloned()
+                    collect_tab_pane_ids(&self.workspace, project_id, layout_path, cx);
+                if let Some(tid) = terminal_ids.get(*tab_index).and_then(|id| id.clone())
                     && let Some(dispatcher) = self.dispatcher_for_project(project_id, cx)
                 {
                     dispatcher.dispatch(
@@ -1009,12 +1012,12 @@ impl WindowView {
                 tab_index,
             } => {
                 let terminal_ids =
-                    collect_tab_terminal_ids(&self.workspace, project_id, layout_path, cx);
+                    collect_tab_pane_ids(&self.workspace, project_id, layout_path, cx);
                 let to_close: Vec<String> = terminal_ids
                     .into_iter()
                     .enumerate()
                     .filter(|(i, _)| *i != *tab_index)
-                    .map(|(_, id)| id)
+                    .filter_map(|(_, id)| id)
                     .collect();
                 if !to_close.is_empty()
                     && let Some(dispatcher) = self.dispatcher_for_project(project_id, cx)
@@ -1034,8 +1037,12 @@ impl WindowView {
                 tab_index,
             } => {
                 let terminal_ids =
-                    collect_tab_terminal_ids(&self.workspace, project_id, layout_path, cx);
-                let to_close: Vec<String> = terminal_ids.into_iter().skip(tab_index + 1).collect();
+                    collect_tab_pane_ids(&self.workspace, project_id, layout_path, cx);
+                let to_close: Vec<String> = terminal_ids
+                    .into_iter()
+                    .skip(tab_index + 1)
+                    .flatten()
+                    .collect();
                 if !to_close.is_empty()
                     && let Some(dispatcher) = self.dispatcher_for_project(project_id, cx)
                 {
@@ -1591,16 +1598,13 @@ impl WindowView {
     }
 }
 
-/// Collect terminal IDs from children of a Tabs node at the given layout path.
-///
-/// Each child subtree is traversed with `collect_terminal_ids()`, so nested
-/// splits/tabs within a tab are handled correctly. Returns one entry per child.
-fn collect_tab_terminal_ids(
+/// Collect the first pane ID in each tab, preserving tab indices for id-less panes.
+fn collect_tab_pane_ids(
     workspace: &Entity<Workspace>,
     project_id: &str,
     layout_path: &[usize],
     cx: &Context<WindowView>,
-) -> Vec<String> {
+) -> Vec<Option<String>> {
     let ws = workspace.read(cx);
     let Some(project) = ws.project(project_id) else {
         return Vec::new();
@@ -1612,17 +1616,11 @@ fn collect_tab_terminal_ids(
         return Vec::new();
     };
     match node {
-        LayoutNode::Tabs { children, .. } => {
-            children
-                .iter()
-                .filter_map(|child| {
-                    // For simple Terminal children, get the ID directly.
-                    // For nested structures, get the first terminal ID.
-                    child.collect_terminal_ids().into_iter().next()
-                })
-                .collect()
-        }
-        LayoutNode::Terminal { terminal_id, .. } => terminal_id.iter().cloned().collect(),
+        LayoutNode::Tabs { children, .. } => children
+            .iter()
+            .map(|child| child.collect_pane_ids().into_iter().next())
+            .collect(),
+        LayoutNode::Terminal { .. } => vec![node.collect_pane_ids().into_iter().next()],
         _ => Vec::new(),
     }
 }

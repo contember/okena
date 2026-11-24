@@ -170,6 +170,7 @@ mod tests {
     fn make_state(projects: Vec<ApiProject>) -> StateResponse {
         StateResponse {
             state_version: 1,
+            supports_start_page: false,
             projects,
             focused_project_id: None,
             fullscreen_terminal: None,
@@ -190,6 +191,7 @@ mod tests {
             None
         } else if terminal_ids.len() == 1 {
             Some(ApiLayoutNode::Terminal {
+                start_page: None,
                 terminal_id: Some(terminal_ids[0].to_string()),
                 minimized: false,
                 detached: false,
@@ -204,6 +206,7 @@ mod tests {
                 children: terminal_ids
                     .iter()
                     .map(|tid| ApiLayoutNode::Terminal {
+                        start_page: None,
                         terminal_id: Some(tid.to_string()),
                         minimized: false,
                         detached: false,
@@ -393,6 +396,7 @@ mod tests {
             active_tab: 0,
             children: vec![
                 ApiLayoutNode::Terminal {
+                    start_page: None,
                     terminal_id: Some("t1".to_string()),
                     minimized: false,
                     detached: false,
@@ -401,6 +405,7 @@ mod tests {
                     rows: None,
                 },
                 ApiLayoutNode::Terminal {
+                    start_page: None,
                     terminal_id: None,
                     minimized: false,
                     detached: false,
@@ -413,6 +418,7 @@ mod tests {
                     sizes: vec![50.0, 50.0],
                     children: vec![
                         ApiLayoutNode::Terminal {
+                            start_page: None,
                             terminal_id: Some("t2".to_string()),
                             minimized: false,
                             detached: false,
@@ -421,6 +427,7 @@ mod tests {
                             rows: None,
                         },
                         ApiLayoutNode::Terminal {
+                            start_page: None,
                             terminal_id: Some("t3".to_string()),
                             minimized: false,
                             detached: false,
@@ -448,6 +455,7 @@ mod tests {
                 sizes: vec![50.0, 50.0],
                 children: vec![
                     ApiLayoutNode::Terminal {
+                        start_page: None,
                         terminal_id: Some("t1".into()),
                         minimized: false,
                         detached: false,
@@ -456,6 +464,7 @@ mod tests {
                         rows: Some(40),
                     },
                     ApiLayoutNode::Terminal {
+                        start_page: None,
                         terminal_id: Some("t2".into()),
                         minimized: false,
                         detached: false,

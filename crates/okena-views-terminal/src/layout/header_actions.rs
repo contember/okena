@@ -97,6 +97,7 @@ pub(crate) fn render_action_buttons<D: ActionDispatch + Send + Sync>(
             if let Some(ref dispatcher) = ctx_split_v.action_dispatcher {
                 dispatcher.dispatch(
                     okena_core::api::ActionRequest::SplitTerminal {
+                        start_page: false,
                         project_id: ctx_split_v.project_id.clone(),
                         path: ctx_split_v.layout_path.clone(),
                         direction: SplitDirection::Vertical,
@@ -123,6 +124,7 @@ pub(crate) fn render_action_buttons<D: ActionDispatch + Send + Sync>(
             if let Some(ref dispatcher) = ctx_split_h.action_dispatcher {
                 dispatcher.dispatch(
                     okena_core::api::ActionRequest::SplitTerminal {
+                        start_page: false,
                         project_id: ctx_split_h.project_id.clone(),
                         path: ctx_split_h.layout_path.clone(),
                         direction: SplitDirection::Horizontal,

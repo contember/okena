@@ -7,6 +7,7 @@ use okena_terminal::shell_config::ShellType;
 fn terminal_node(id: &str) -> LayoutNode {
     LayoutNode::Terminal {
         terminal_id: Some(id.to_string()),
+        start_page: None,
         pending_agent_resume: None,
         minimized: false,
         detached: false,

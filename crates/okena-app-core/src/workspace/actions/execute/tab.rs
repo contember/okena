@@ -19,6 +19,7 @@ pub(super) fn add_tab(
     project_id: String,
     path: Vec<usize>,
     in_group: bool,
+    start_page: bool,
     backend: &dyn TerminalBackend,
     terminals: &TerminalsRegistry,
     settings: &AppSettings,
@@ -27,10 +28,22 @@ pub(super) fn add_tab(
     // Inherit the source group/terminal's live cwd (captured before the layout
     // mutation) so the new tab opens in the same directory.
     let inherit_cwd = super::inherited_cwd(ws, terminals, &project_id, &path);
+    let leaf = match super::terminal::interactive_leaf(
+        ws,
+        &project_id,
+        inherit_cwd.as_deref(),
+        start_page,
+    ) {
+        Ok(leaf) => leaf,
+        Err(error) => return error,
+    };
     if in_group {
-        ws.add_tab_to_group(focus_manager, &project_id, &path, cx);
+        ws.add_tab_to_group_with_leaf(focus_manager, &project_id, &path, leaf, cx);
     } else {
-        ws.add_tab(focus_manager, &project_id, &path, cx);
+        ws.add_tab_with_leaf(focus_manager, &project_id, &path, leaf, cx);
+    }
+    if start_page {
+        return ActionResult::Ok(None);
     }
     spawn_uninitialized_terminals(
         ws,

@@ -649,7 +649,14 @@ async fn send_mobile_action(conn_id: &str, action: ActionRequest) -> Result<(), 
 /// Create a new terminal in the given project.
 #[uniffi::export(async_runtime = "tokio")]
 pub async fn create_terminal(conn_id: String, project_id: String) -> Result<(), MobileFfiError> {
-    send_mobile_action(&conn_id, ActionRequest::CreateTerminal { project_id }).await
+    send_mobile_action(
+        &conn_id,
+        ActionRequest::CreateTerminal {
+            start_page: false,
+            project_id,
+        },
+    )
+    .await
 }
 
 /// Close a terminal in the given project.
@@ -759,6 +766,7 @@ pub async fn split_terminal(
     send_mobile_action(
         &conn_id,
         ActionRequest::SplitTerminal {
+            start_page: false,
             project_id,
             path: path.into_iter().map(|v| v as usize).collect(),
             direction: dir,
@@ -954,7 +962,15 @@ pub async fn add_project(
     name: String,
     path: String,
 ) -> Result<(), MobileFfiError> {
-    send_mobile_action(&conn_id, ActionRequest::AddProject { name, path }).await
+    send_mobile_action(
+        &conn_id,
+        ActionRequest::AddProject {
+            start_page: false,
+            name,
+            path,
+        },
+    )
+    .await
 }
 
 /// Set project color (named color, e.g. "blue"; unknown → default).
@@ -1046,6 +1062,7 @@ pub async fn add_tab(
     send_mobile_action(
         &conn_id,
         ActionRequest::AddTab {
+            start_page: false,
             project_id,
             path: path.into_iter().map(|v| v as usize).collect(),
             in_group,

@@ -587,6 +587,45 @@ mod tests {
     }
 
     #[test]
+    fn start_page_settings_round_trip_in_button_order() {
+        use okena_core::shell::ShellType;
+        use okena_workspace::settings::StartPageButton;
+
+        let mut legacy = shared(&AppSettings::default());
+        let legacy = legacy.as_object_mut().unwrap();
+        legacy.remove("show_start_page");
+        legacy.remove("start_page_buttons");
+        let previous: AppSettings = serde_json::from_value(json!(legacy)).unwrap();
+        assert!(!previous.show_start_page);
+        assert!(previous.start_page_buttons.is_empty());
+
+        let mut edited = previous.clone();
+        edited.show_start_page = true;
+        edited.start_page_buttons = vec![
+            StartPageButton {
+                name: "Check status".into(),
+                command: "git status --short".into(),
+                shell: None,
+            },
+            StartPageButton {
+                name: "Open build shell".into(),
+                command: "echo ready".into(),
+                shell: Some(ShellType::Custom {
+                    path: "/bin/zsh".into(),
+                    args: vec!["-l".into()],
+                }),
+            },
+        ];
+        edited.start_page_buttons.swap(0, 1);
+        let patch = settings_delta(&shared(&previous), &shared(&edited));
+        let saved = preview_settings_patch(&previous, patch).unwrap();
+        let reloaded: AppSettings =
+            serde_json::from_str(&serde_json::to_string(&saved).unwrap()).unwrap();
+        assert!(reloaded.show_start_page);
+        assert_eq!(reloaded.start_page_buttons, edited.start_page_buttons);
+    }
+
+    #[test]
     fn settings_delta_carries_only_the_changed_field() {
         let previous = AppSettings::default();
         let mut next = previous.clone();

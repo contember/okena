@@ -1,76 +1,23 @@
 //! Terminal pane navigation, search, and key handling.
 
 use crate::ActionDispatch;
-use crate::layout::navigation::{NavigationDirection, PaneBounds, get_pane_map};
+use crate::layout::navigation::{NavigationDirection, PaneNavigator};
 use gpui::*;
 use okena_terminal::input::{
     KeyEncodeOptions, KeyEvent, KeyModifiers, consumes_composed_text, key_to_bytes,
 };
-use okena_workspace::state::LayoutNode;
 
 use super::TerminalPane;
 
 impl<D: ActionDispatch + Send + Sync> TerminalPane<D> {
-    /// Try to switch to an adjacent tab within a Tabs node.
-    /// Returns true if a tab switch happened, false if at edge or not in a tab group.
-    fn try_switch_tab(&mut self, next: bool, cx: &mut Context<Self>) -> bool {
-        if self.layout_path.is_empty() {
-            return false;
+    fn pane_navigator(&self) -> PaneNavigator<'_> {
+        PaneNavigator {
+            workspace: &self.workspace,
+            focus_manager: &self.focus_manager,
+            window_id: self.window_id,
+            project_id: &self.project_id,
+            layout_path: &self.layout_path,
         }
-
-        let parent_path = &self.layout_path[..self.layout_path.len() - 1];
-        let current_tab_index = self.layout_path[self.layout_path.len() - 1];
-
-        let tab_count = {
-            let ws = self.workspace.read(cx);
-            ws.project(&self.project_id).and_then(|p| {
-                p.layout.as_ref().and_then(|layout| {
-                    layout.get_at_path(parent_path).and_then(|node| match node {
-                        LayoutNode::Tabs { children, .. } => Some(children.len()),
-                        _ => None,
-                    })
-                })
-            })
-        };
-
-        let num_tabs = match tab_count.filter(|&n| n > 1) {
-            Some(n) => n,
-            None => return false,
-        };
-
-        let at_edge = if next {
-            current_tab_index == num_tabs - 1
-        } else {
-            current_tab_index == 0
-        };
-
-        if at_edge {
-            return false;
-        }
-
-        let new_tab = if next {
-            current_tab_index + 1
-        } else {
-            current_tab_index - 1
-        };
-        let project_id = self.project_id.clone();
-        let mut new_layout_path = parent_path.to_vec();
-        new_layout_path.push(new_tab);
-
-        let workspace = self.workspace.clone();
-        self.focus_manager.update(cx, |fm, cx| {
-            workspace.update(cx, |ws, cx| {
-                ws.set_active_tab(
-                    &project_id,
-                    &new_layout_path[..new_layout_path.len() - 1],
-                    new_tab,
-                    cx,
-                );
-                ws.set_focused_terminal(fm, project_id, new_layout_path, cx);
-            });
-            cx.notify();
-        });
-        true
     }
 
     pub(super) fn handle_navigation(
@@ -79,27 +26,7 @@ impl<D: ActionDispatch + Send + Sync> TerminalPane<D> {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // Left/Right: try switching tabs first, fall through to spatial nav at edges
-        if matches!(
-            direction,
-            NavigationDirection::Left | NavigationDirection::Right
-        ) {
-            let next = matches!(direction, NavigationDirection::Right);
-            if self.try_switch_tab(next, cx) {
-                return;
-            }
-        }
-
-        let pane_map = get_pane_map(self.window_id);
-
-        let source = match pane_map.find_pane(&self.project_id, &self.layout_path) {
-            Some(pane) => pane.clone(),
-            None => return,
-        };
-
-        if let Some(target) = pane_map.find_nearest_in_direction(&source, direction) {
-            self.focus_target(target, window, cx);
-        }
+        self.pane_navigator().in_direction(direction, window, cx);
     }
 
     pub(super) fn handle_sequential_navigation(
@@ -108,41 +35,7 @@ impl<D: ActionDispatch + Send + Sync> TerminalPane<D> {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.try_switch_tab(next, cx) {
-            return;
-        }
-
-        let pane_map = get_pane_map(self.window_id);
-
-        let source = match pane_map.find_pane(&self.project_id, &self.layout_path) {
-            Some(pane) => pane.clone(),
-            None => return,
-        };
-
-        let target = if next {
-            pane_map.find_next_pane(&source)
-        } else {
-            pane_map.find_prev_pane(&source)
-        };
-
-        if let Some(ref target) = target {
-            self.focus_target(target, window, cx);
-        }
-    }
-
-    fn focus_target(&self, target: &PaneBounds, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(ref fh) = target.focus_handle {
-            window.focus(fh, cx);
-        }
-        let target_project = target.project_id.clone();
-        let target_path = target.layout_path.clone();
-        let workspace = self.workspace.clone();
-        self.focus_manager.update(cx, |fm, cx| {
-            workspace.update(cx, |ws, cx| {
-                ws.set_focused_terminal(fm, target_project, target_path, cx);
-            });
-            cx.notify();
-        });
+        self.pane_navigator().sequential(next, window, cx);
     }
 
     pub(super) fn start_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {

@@ -1294,7 +1294,10 @@ impl Render for WindowView {
                 }
                 if let Some(dispatcher) = this.dispatcher_for_project(&project_id, cx) {
                     dispatcher.dispatch(
-                        okena_core::api::ActionRequest::CreateTerminal { project_id },
+                        okena_core::api::ActionRequest::CreateTerminal {
+                            start_page: false,
+                            project_id,
+                        },
                         cx,
                     );
                 }

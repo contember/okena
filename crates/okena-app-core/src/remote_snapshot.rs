@@ -209,6 +209,7 @@ pub fn build_state_response(
 
     StateResponse {
         state_version,
+        supports_start_page: true,
         projects,
         focused_project_id,
         fullscreen_terminal: fullscreen,

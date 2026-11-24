@@ -91,16 +91,38 @@ pub fn execute_action(
 ) -> ActionResult {
     match action {
         // ── Terminal ops ─────────────────────────────────────────────
-        ActionRequest::CreateTerminal { project_id } => terminal::create(
+        ActionRequest::LaunchStartPage {
+            project_id,
+            page_id,
+            shell,
+            command,
+        } => terminal::launch_start_page(
             ws,
             focus_manager,
             project_id,
+            page_id,
+            shell,
+            command,
+            backend,
+            terminals,
+            settings,
+            cx,
+        ),
+        ActionRequest::CreateTerminal {
+            start_page,
+            project_id,
+        } => terminal::create(
+            ws,
+            focus_manager,
+            project_id,
+            start_page,
             backend,
             terminals,
             settings,
             cx,
         ),
         ActionRequest::SplitTerminal {
+            start_page,
             project_id,
             path,
             direction,
@@ -110,6 +132,7 @@ pub fn execute_action(
             project_id,
             path,
             direction,
+            start_page,
             backend,
             terminals,
             settings,
@@ -230,12 +253,14 @@ pub fn execute_action(
             parent_project_id,
             worktree_path,
             branch,
+            start_page,
         } => project::add_discovered_worktree(
             ws,
             window_id,
             parent_project_id,
             worktree_path,
             branch,
+            start_page,
             backend,
             terminals,
             settings,
@@ -259,6 +284,7 @@ pub fn execute_action(
 
         // ── Tab / pane-move ops ──────────────────────────────────────
         ActionRequest::AddTab {
+            start_page,
             project_id,
             path,
             in_group,
@@ -268,6 +294,7 @@ pub fn execute_action(
             project_id,
             path,
             in_group,
+            start_page,
             backend,
             terminals,
             settings,
@@ -537,16 +564,22 @@ pub fn execute_action(
         } => files::create_directory(ws, project_id, relative_path),
 
         // ── Project / folder / worktree ops ──────────────────────────
-        ActionRequest::AddProject { name, path } => {
-            project::add_project(ws, window_id, name, path, backend, terminals, settings, cx)
-        }
+        ActionRequest::AddProject {
+            start_page,
+            name,
+            path,
+        } => project::add_project(
+            ws, window_id, name, path, start_page, backend, terminals, settings, cx,
+        ),
         ActionRequest::CloneProject {
+            start_page,
             url,
             parent_dir,
             directory,
             name,
         } => project::clone_project(
-            ws, window_id, url, parent_dir, directory, name, backend, terminals, settings, cx,
+            ws, window_id, url, parent_dir, directory, name, start_page, backend, terminals,
+            settings, cx,
         ),
         ActionRequest::ReorderProjectInFolder {
             folder_id,
@@ -641,7 +674,7 @@ pub fn execute_action(
             project::set_worktree_color_override(ws, project_id, color, cx)
         }
         // `window` is desktop placement, applied by the desktop's push handler.
-        // This path creates synchronously, so `wait` changes nothing.
+        // This path creates synchronously. `wait` still requests a running terminal.
         ActionRequest::CreateWorktree {
             project_id,
             branch,
@@ -649,7 +682,8 @@ pub fn execute_action(
             window: _,
             layout,
             terminal_name,
-            wait: _,
+            wait,
+            start_page,
         } => project::create_worktree(
             ws,
             window_id,
@@ -658,6 +692,7 @@ pub fn execute_action(
             create_branch,
             layout,
             terminal_name,
+            start_page && !wait,
             backend,
             terminals,
             settings,
@@ -743,7 +778,11 @@ pub fn ensure_terminal(
     for project in &ws.data().projects {
         if let Some(layout) = &project.layout
             && let Some(path) = layout.find_terminal_path(terminal_id)
-            && let Some(LayoutNode::Terminal { shell_type, .. }) = layout.get_at_path(&path)
+            && let Some(LayoutNode::Terminal {
+                shell_type,
+                start_page: None,
+                ..
+            }) = layout.get_at_path(&path)
         {
             let shell = shell_type
                 .clone()
@@ -785,7 +824,7 @@ fn effective_terminal_launch(
     global_default_shell: &ShellType,
     shell_wrapper: Option<&str>,
     on_create: Option<&str>,
-    // Command to run after `on_create`, currently only an agent-session resume.
+    // Command to run after `on_create`: an agent-session resume or a Start Page button.
     // Composed into the same shell line so the pane still hands off to an
     // interactive shell once it exits.
     startup_command: Option<&str>,
@@ -928,10 +967,14 @@ pub(super) fn inherited_cwd(
     let layout = ws.project(project_id)?.layout.as_ref()?;
     let node = layout.get_at_path(path)?;
     let rel = node.find_visible_terminal_path();
+    let visible = node.get_at_path(&rel)?;
+    if let Some(page) = visible.start_page() {
+        return Some(page.cwd.clone());
+    }
     let LayoutNode::Terminal {
         terminal_id: Some(terminal_id),
         ..
-    } = node.get_at_path(&rel)?
+    } = visible
     else {
         return None;
     };
@@ -949,6 +992,38 @@ pub fn spawn_uninitialized_terminals(
     // the caller passes the source terminal's live cwd so the new one opens
     // "here". `None` → the project path (fresh projects, worktrees, sessions).
     inherit_cwd: Option<String>,
+    cx: &mut impl WorkspaceCx,
+) -> ActionResult {
+    spawn_terminals(
+        ws,
+        project_id,
+        backend,
+        terminals,
+        settings,
+        inherit_cwd,
+        None,
+        cx,
+    )
+}
+
+struct StartPageSelection {
+    path: Vec<usize>,
+    shell: ShellType,
+    command: Option<String>,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn spawn_terminals(
+    ws: &mut Workspace,
+    project_id: &str,
+    backend: &dyn TerminalBackend,
+    terminals: &TerminalsRegistry,
+    settings: &AppSettings,
+    // When a new terminal is created next to an existing one (split / add-tab),
+    // the caller passes the source terminal's live cwd so the new one opens
+    // "here". `None` → the project path (fresh projects, worktrees, sessions).
+    inherit_cwd: Option<String>,
+    selection: Option<StartPageSelection>,
     cx: &mut impl WorkspaceCx,
 ) -> ActionResult {
     // Don't spawn terminals for projects whose worktree is still being created
@@ -976,7 +1051,9 @@ pub fn spawn_uninitialized_terminals(
         .map(|p| p.hooks.clone());
     let project_default_shell = project.default_shell.clone();
     let mut uninitialized = Vec::new();
-    if let Some(layout) = &project.layout {
+    if let Some(choice) = &selection {
+        uninitialized.push((choice.path.clone(), choice.shell.clone()));
+    } else if let Some(layout) = &project.layout {
         collect_uninitialized_terminals_with_shell(layout, vec![], &mut uninitialized);
     }
     log::info!(
@@ -1030,21 +1107,35 @@ pub fn spawn_uninitialized_terminals(
         if let Some(ref command) = resume_command {
             log::info!("agent-resume: project={project_id} path={path:?} command={command}");
         }
+        let startup_command = selection
+            .as_ref()
+            .and_then(|choice| choice.command.as_deref())
+            .or(resume_command.as_deref());
         let plan = effective_terminal_launch(
             shell_type,
             project_default_shell.as_ref(),
             &global_default,
             shell_wrapper.as_deref(),
             on_create_cmd.as_deref(),
-            resume_command.as_deref(),
+            startup_command,
             &env,
         )
         .for_project(&root_project_id);
 
         match backend.create_terminal_with_plan(&spawn_cwd, &plan) {
             Ok(terminal_id) => {
+                if let Some(choice) = &selection {
+                    ws.finish_start_page(
+                        project_id,
+                        &path,
+                        choice.shell.clone(),
+                        terminal_id.clone(),
+                        cx,
+                    );
+                } else {
+                    ws.set_terminal_id(project_id, &path, terminal_id.clone(), cx);
+                }
                 ws.take_pending_agent_resume(project_id, &path);
-                ws.set_terminal_id(project_id, &path, terminal_id.clone(), cx);
                 if let Some(session) = pending_session {
                     ws.set_agent_session(project_id, &terminal_id, session, cx);
                 }
@@ -1160,6 +1251,7 @@ fn collect_uninitialized_terminals_with_shell(
     match node {
         LayoutNode::Terminal {
             terminal_id: None,
+            start_page: None,
             shell_type,
             ..
         } => {
@@ -1268,10 +1360,18 @@ mod reconnect_shell_tests {
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
 
-    struct StubTransport;
+    #[derive(Default)]
+    struct StubTransport {
+        input: Mutex<Vec<(String, Vec<u8>)>>,
+    }
 
     impl TerminalTransport for StubTransport {
-        fn send_input(&self, _terminal_id: &str, _data: &[u8]) {}
+        fn send_input(&self, terminal_id: &str, data: &[u8]) {
+            self.input
+                .lock()
+                .unwrap()
+                .push((terminal_id.to_owned(), data.to_vec()));
+        }
         fn resize(&self, _terminal_id: &str, _cols: u16, _rows: u16) {}
         fn uses_mouse_backend(&self) -> bool {
             false
@@ -1280,6 +1380,8 @@ mod reconnect_shell_tests {
 
     #[derive(Default)]
     pub(super) struct RecordingBackend {
+        input_transport: Arc<StubTransport>,
+        spawn_cwds: Mutex<Vec<String>>,
         created_shells: Mutex<Vec<Option<ShellType>>>,
         reconnected_shells: Mutex<Vec<Option<ShellType>>>,
         pub(super) plans: Mutex<Vec<TerminalLaunchPlan>>,
@@ -1291,7 +1393,7 @@ mod reconnect_shell_tests {
 
     impl TerminalBackend for RecordingBackend {
         fn transport(&self) -> Arc<dyn TerminalTransport> {
-            Arc::new(StubTransport)
+            self.input_transport.clone()
         }
 
         fn create_terminal(&self, _cwd: &str, shell: Option<&ShellType>) -> anyhow::Result<String> {
@@ -1304,9 +1406,10 @@ mod reconnect_shell_tests {
 
         fn create_terminal_with_plan(
             &self,
-            _cwd: &str,
+            cwd: &str,
             plan: &TerminalLaunchPlan,
         ) -> anyhow::Result<String> {
+            self.spawn_cwds.lock().unwrap().push(cwd.to_owned());
             self.plans.lock().expect("plan lock").push(plan.clone());
             if self
                 .fail_next_spawn
@@ -1407,6 +1510,211 @@ mod reconnect_shell_tests {
         }
     }
 
+    #[test]
+    fn start_page_split_targets_one_pane_in_the_inherited_directory() {
+        use super::{ActionRequest, ActionResult, WindowId, execute_action};
+        let mut ws = workspace_with_terminal(ShellType::Default, None, Some("source"), None);
+        let backend = RecordingBackend::default();
+        let terminals: TerminalsRegistry = Arc::new(Default::default());
+        terminals.lock().insert(
+            "source".into(),
+            Arc::new(okena_terminal::terminal::Terminal::new(
+                "source".into(),
+                Default::default(),
+                backend.transport(),
+                "/project/nested".into(),
+            )),
+        );
+        let mut focus = crate::workspace::focus::FocusManager::default();
+        let mut settings = super::AppSettings::default();
+        settings.hooks.terminal.on_create = Some("echo hook".into());
+        let mut run = |request, ws: &mut Workspace| {
+            execute_action(
+                request,
+                ws,
+                WindowId::Main,
+                &mut focus,
+                &backend,
+                &terminals,
+                &settings,
+                &mut TestCx,
+            )
+        };
+        run(
+            ActionRequest::SplitTerminal {
+                start_page: true,
+                project_id: "project".into(),
+                path: vec![],
+                direction: okena_core::types::SplitDirection::Horizontal,
+            },
+            &mut ws,
+        );
+        let page = ws
+            .project("project")
+            .unwrap()
+            .layout
+            .as_ref()
+            .unwrap()
+            .get_at_path(&[1])
+            .unwrap()
+            .start_page()
+            .unwrap()
+            .clone();
+        assert_eq!(page.cwd, "/project/nested");
+        assert!(backend.plans.lock().unwrap().is_empty());
+        assert!(backend.input_transport.input.lock().unwrap().is_empty());
+
+        let shell_path = if cfg!(windows) { "cmd.exe" } else { "/bin/sh" }.to_owned();
+        let selected = ShellType::Custom {
+            path: shell_path,
+            args: vec![],
+        };
+        let choose = ActionRequest::LaunchStartPage {
+            project_id: "project".into(),
+            page_id: Some(page.id.clone()),
+            shell: selected.clone(),
+            command: Some("my-alias --check".into()),
+        };
+        backend
+            .fail_next_spawn
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        assert!(matches!(run(choose.clone(), &mut ws), ActionResult::Err(_)));
+        assert!(
+            ws.project("project")
+                .unwrap()
+                .layout
+                .as_ref()
+                .unwrap()
+                .find_terminal_path(&page.id)
+                .is_some()
+        );
+        assert_eq!(terminals.lock().len(), 1);
+        assert!(backend.input_transport.input.lock().unwrap().is_empty());
+
+        assert!(matches!(run(choose.clone(), &mut ws), ActionResult::Ok(_)));
+        assert!(matches!(run(choose, &mut ws), ActionResult::Ok(_)));
+        let layout = ws.project("project").unwrap().layout.as_ref().unwrap();
+        assert_eq!(layout.find_terminal_path("terminal"), Some(vec![1]));
+        assert_eq!(layout.find_terminal_path("source"), Some(vec![0]));
+        assert_eq!(backend.created_shells.lock().unwrap().len(), 1);
+        assert_eq!(
+            backend.spawn_cwds.lock().unwrap().last().unwrap(),
+            "/project/nested"
+        );
+        let plan = backend.plans.lock().unwrap().last().unwrap().clone();
+        assert_eq!(plan.route, selected);
+        let body = plan.initial_command.unwrap().args.join(" ");
+        assert!(body.find("echo hook").unwrap() < body.find("my-alias --check").unwrap());
+        assert!(backend.input_transport.input.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn start_page_empty_project_clicks_are_idempotent() {
+        use super::{ActionRequest, ActionResult, WindowId, execute_action};
+        let mut ws = workspace_with_terminal(ShellType::Default, None, None, None);
+        ws.with_project("project", &mut TestCx, |p| {
+            p.layout = None;
+            true
+        });
+        let backend = RecordingBackend::default();
+        let terminals: TerminalsRegistry = Arc::new(Default::default());
+        let mut focus = crate::workspace::focus::FocusManager::default();
+        let settings = super::AppSettings::default();
+        let action = ActionRequest::LaunchStartPage {
+            project_id: "project".into(),
+            page_id: None,
+            shell: Default::default(),
+            command: None,
+        };
+        for _ in 0..2 {
+            let result = execute_action(
+                action.clone(),
+                &mut ws,
+                WindowId::Main,
+                &mut focus,
+                &backend,
+                &terminals,
+                &settings,
+                &mut TestCx,
+            );
+            assert!(matches!(result, ActionResult::Ok(_)));
+        }
+        assert_eq!(backend.created_shells.lock().unwrap().len(), 1);
+        assert_eq!(
+            ws.project("project")
+                .unwrap()
+                .layout
+                .as_ref()
+                .unwrap()
+                .find_terminal_path("terminal"),
+            Some(vec![])
+        );
+    }
+
+    #[test]
+    fn start_page_close_before_selection_and_ordinary_tab_creation() {
+        use super::{ActionRequest, ActionResult, WindowId, execute_action};
+        let mut ws = workspace_with_terminal(ShellType::Default, None, Some("source"), None);
+        let backend = RecordingBackend::default();
+        let terminals: TerminalsRegistry = Arc::new(Default::default());
+        let mut focus = crate::workspace::focus::FocusManager::default();
+        let settings = super::AppSettings::default();
+        let mut run = |request, ws: &mut Workspace| {
+            execute_action(
+                request,
+                ws,
+                WindowId::Main,
+                &mut focus,
+                &backend,
+                &terminals,
+                &settings,
+                &mut TestCx,
+            )
+        };
+        let tab = |start_page| ActionRequest::AddTab {
+            start_page,
+            project_id: "project".into(),
+            path: vec![],
+            in_group: false,
+        };
+        run(tab(true), &mut ws);
+        let id = ws
+            .project("project")
+            .unwrap()
+            .layout
+            .as_ref()
+            .unwrap()
+            .get_at_path(&[1])
+            .unwrap()
+            .start_page()
+            .unwrap()
+            .id
+            .clone();
+        run(
+            ActionRequest::CloseTerminal {
+                project_id: "project".into(),
+                terminal_id: id.clone(),
+            },
+            &mut ws,
+        );
+        assert!(matches!(
+            run(
+                ActionRequest::LaunchStartPage {
+                    project_id: "project".into(),
+                    page_id: Some(id),
+                    shell: Default::default(),
+                    command: None
+                },
+                &mut ws
+            ),
+            ActionResult::Ok(_)
+        ));
+        assert!(backend.plans.lock().unwrap().is_empty());
+        run(tab(false), &mut ws);
+        assert_eq!(backend.created_shells.lock().unwrap().len(), 1);
+        assert_eq!(terminals.lock().len(), 1);
+    }
+
     pub(super) fn workspace_with_terminal(
         shell_type: ShellType,
         default_shell: Option<ShellType>,
@@ -1419,6 +1727,7 @@ mod reconnect_shell_tests {
             path: "/project".into(),
             layout: Some(LayoutNode::Terminal {
                 terminal_id: terminal_id.map(str::to_string),
+                start_page: None,
                 pending_agent_resume,
                 shell_type,
                 minimized: false,
@@ -1871,6 +2180,7 @@ mod agent_resume_tests {
         let pending_leaf = data.projects[0].layout.take().unwrap();
         let live_leaf = LayoutNode::Terminal {
             terminal_id: Some("survivor".into()),
+            start_page: None,
             pending_agent_resume: None,
             minimized: false,
             detached: false,

@@ -501,6 +501,7 @@ mod tests {
             layout: None,
             terminal_name: None,
             wait: false,
+            start_page: false,
         }
     }
 

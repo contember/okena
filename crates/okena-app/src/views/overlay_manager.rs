@@ -1571,6 +1571,18 @@ impl OverlayManager {
         self.close_modal(cx);
         self.close_all_context_menus(cx);
 
+        let is_start_page = self.workspace.read(cx).project(&project_id)
+            .and_then(|project| project.layout.as_ref())
+            .and_then(|layout| layout.get_at_path(&layout_path))
+            .is_some_and(|node| matches!(node,
+                okena_workspace::state::LayoutNode::Terminal { start_page: Some(page), .. } if page.id == terminal_id
+            ));
+
+        let current_name = if is_start_page {
+            "Start Page".to_owned()
+        } else {
+            current_name
+        };
         let menu = cx.new(|cx| {
             TerminalMenu::new(
                 terminal_id,
@@ -1581,6 +1593,7 @@ impl OverlayManager {
                 current_shell,
                 can_export_buffer,
                 has_bell,
+                is_start_page,
                 invocation,
                 cx,
             )
@@ -1675,6 +1688,7 @@ impl OverlayManager {
                 self.emit_project_action(
                     project_id,
                     ActionRequest::SplitTerminal {
+                        start_page: false,
                         project_id: project_id.clone(),
                         path: layout_path.clone(),
                         direction: *direction,

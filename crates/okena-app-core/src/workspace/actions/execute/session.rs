@@ -165,6 +165,10 @@ fn prepare_layout_terminals(
 ) {
     match node {
         LayoutNode::Terminal {
+            start_page: Some(_),
+            ..
+        } => {}
+        LayoutNode::Terminal {
             terminal_id,
             shell_type,
             pending_agent_resume,
@@ -1170,6 +1174,25 @@ mod tests {
     }
 
     #[test]
+    fn start_page_restoration_reserves_no_terminal_process() {
+        let mut incoming = project("incoming", "old-hook", None);
+        incoming.layout = Some(LayoutNode::new_start_page(okena_core::api::StartPage {
+            id: "waiting".into(),
+            cwd: "/project/subdir".into(),
+        }));
+        let prepared = prepare_workspace_replacement(data(incoming), &AppSettings::default());
+        assert!(prepared.ordinary.is_empty());
+        let page = prepared.data.projects[0]
+            .layout
+            .as_ref()
+            .unwrap()
+            .start_page()
+            .unwrap();
+        assert_eq!(page.id, "waiting");
+        assert_eq!(page.cwd, "/project/subdir");
+    }
+
+    #[test]
     fn replacement_kills_stale_hooks_and_runs_project_open_lifecycle() {
         let backend = Arc::new(RecordingBackend {
             next_id: AtomicUsize::new(1),
@@ -1226,6 +1249,7 @@ mod tests {
         let mut cx = TestCx { runner, monitor };
         let terminal_node = |id: &str| LayoutNode::Terminal {
             terminal_id: Some(id.to_string()),
+            start_page: None,
             pending_agent_resume: None,
             shell_type: ShellType::Default,
             minimized: false,
@@ -1326,6 +1350,7 @@ mod tests {
         failed.path = failed_cwd.to_string_lossy().into_owned();
         failed.layout = Some(LayoutNode::Terminal {
             terminal_id: None,
+            start_page: None,
             pending_agent_resume: None,
             shell_type: ShellType::Default,
             minimized: false,
@@ -1340,6 +1365,7 @@ mod tests {
         successful.path = successful_cwd.to_string_lossy().into_owned();
         successful.layout = Some(LayoutNode::Terminal {
             terminal_id: None,
+            start_page: None,
             pending_agent_resume: None,
             shell_type: ShellType::Default,
             minimized: false,

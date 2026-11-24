@@ -526,6 +526,15 @@ impl StatusBoardSettings {
 /// Current settings schema version - increment when making breaking changes
 pub const SETTINGS_VERSION: u32 = 3;
 
+/// User-defined command offered when opening an interactive terminal.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct StartPageButton {
+    pub name: String,
+    pub command: String,
+    pub shell: Option<okena_core::shell::ShellType>,
+}
+
 /// App settings (persisted separately from workspace)
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AppSettings {
@@ -611,6 +620,10 @@ pub struct AppSettings {
     /// Default shell type for new terminals
     #[serde(default)]
     pub default_shell: ShellType,
+    #[serde(default)]
+    pub show_start_page: bool,
+    #[serde(default)]
+    pub start_page_buttons: Vec<StartPageButton>,
     /// Show shell selector in terminal header (default: false)
     #[serde(default)]
     pub show_shell_selector: bool,
@@ -863,6 +876,8 @@ impl Default for AppSettings {
             scrollback_lines: default_scrollback_lines(),
             terminal_close_grace_secs: default_terminal_close_grace_secs(),
             default_shell: ShellType::default(),
+            show_start_page: false,
+            start_page_buttons: Vec::new(),
             show_shell_selector: false,
             auto_hide_single_terminal_header: false,
             show_terminal_name_when_inactive: false,

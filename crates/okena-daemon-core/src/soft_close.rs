@@ -143,6 +143,7 @@ mod tests {
             path: "/tmp".to_string(),
             layout: Some(LayoutNode::Terminal {
                 terminal_id: Some("t1".to_string()),
+                start_page: None,
                 pending_agent_resume: None,
                 minimized: false,
                 detached: false,

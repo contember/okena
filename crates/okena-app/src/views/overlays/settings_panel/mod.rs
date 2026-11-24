@@ -14,6 +14,7 @@ mod render_font;
 mod render_general;
 mod render_hooks;
 mod render_paired_devices;
+mod render_start_page;
 mod render_terminal;
 mod render_worktree;
 mod sidebar;
@@ -68,6 +69,9 @@ pub struct SettingsPanel {
     pub(super) shell_button_bounds: Option<Bounds<Pixels>>,
     pub(super) session_backend_button_bounds: Option<Bounds<Pixels>>,
     pub(super) available_shells: Vec<AvailableShell>,
+    start_page_shell_dropdown_open: bool,
+    start_page_shell_button_bounds: Option<Bounds<Pixels>>,
+    start_page_button_draft: Option<render_start_page::StartPageButtonDraft>,
     // Global hook inputs
     pub(super) hook_project_open: Entity<SimpleInputState>,
     pub(super) hook_project_close: Entity<SimpleInputState>,
@@ -904,6 +908,9 @@ impl SettingsPanel {
             shell_button_bounds: None,
             session_backend_button_bounds: None,
             available_shells: available_shells(),
+            start_page_shell_dropdown_open: false,
+            start_page_shell_button_bounds: None,
+            start_page_button_draft: None,
             hook_project_open,
             hook_project_close,
             hook_worktree_create,
@@ -1014,6 +1021,7 @@ impl SettingsPanel {
     }
 
     pub(super) fn close_all_dropdowns(&mut self) {
+        self.start_page_shell_dropdown_open = false;
         self.font_dropdown_open = None;
         self.shell_dropdown_open = false;
         self.session_backend_dropdown_open = false;
@@ -1024,6 +1032,7 @@ impl SettingsPanel {
         self.font_dropdown_open.is_some()
             || self.shell_dropdown_open
             || self.session_backend_dropdown_open
+            || self.start_page_shell_dropdown_open
             || self.project_dropdown_open
     }
 
@@ -1314,6 +1323,7 @@ impl SettingsPanel {
     fn render_content(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let content = match &self.active_category {
             SettingsCategory::General => self.render_general(cx).into_any_element(),
+            SettingsCategory::StartPage => self.render_start_page(cx).into_any_element(),
             SettingsCategory::Font => self.render_font(cx).into_any_element(),
             SettingsCategory::Terminal => self.render_terminal(cx).into_any_element(),
             SettingsCategory::Worktree => self.render_worktree(cx).into_any_element(),
@@ -1498,6 +1508,17 @@ impl Render for SettingsPanel {
                             modal.child(dropdown_anchored_below(
                                 bounds,
                                 self.render_shell_dropdown_overlay(&current, cx),
+                            ))
+                        },
+                    )
+                    .when_some(
+                        self.start_page_shell_dropdown_open
+                            .then_some(self.start_page_shell_button_bounds)
+                            .flatten(),
+                        |modal, bounds| {
+                            modal.child(dropdown_anchored_below(
+                                bounds,
+                                self.render_start_page_shell_overlay(cx),
                             ))
                         },
                     )

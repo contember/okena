@@ -1394,6 +1394,7 @@ mod tests {
         });
         let project_layout = LayoutNode::Terminal {
             terminal_id: Some("remote:local-daemon:t1".to_string()),
+            start_page: None,
             pending_agent_resume: None,
             minimized: true,
             detached: false,
@@ -1517,6 +1518,7 @@ mod tests {
                 "p1".to_string(),
                 LayoutNode::Terminal {
                     terminal_id: Some("t1".to_string()),
+                    start_page: None,
                     pending_agent_resume: None,
                     minimized: true,
                     detached: false,
@@ -1944,6 +1946,7 @@ mod tests {
         let mut project = make_project("p1");
         project.layout = Some(LayoutNode::Terminal {
             terminal_id: Some("tid1".to_string()),
+            start_page: None,
             pending_agent_resume: None,
             minimized: true,
             detached: true,
@@ -1994,6 +1997,7 @@ mod tests {
             children: vec![
                 LayoutNode::Terminal {
                     terminal_id: Some("tid0".to_string()),
+                    start_page: None,
                     pending_agent_resume: None,
                     minimized: false,
                     detached: false,
@@ -2002,6 +2006,7 @@ mod tests {
                 },
                 LayoutNode::Terminal {
                     terminal_id: Some("tid1".to_string()),
+                    start_page: None,
                     pending_agent_resume: None,
                     minimized: false,
                     detached: false,
@@ -2147,6 +2152,7 @@ mod tests {
             children: vec![
                 LayoutNode::Terminal {
                     terminal_id: Some("regular-term".to_string()),
+                    start_page: None,
                     pending_agent_resume: None,
                     minimized: false,
                     detached: false,
@@ -2155,6 +2161,7 @@ mod tests {
                 },
                 LayoutNode::Terminal {
                     terminal_id: Some("hook-term".to_string()),
+                    start_page: None,
                     pending_agent_resume: None,
                     minimized: false,
                     detached: false,
@@ -2712,6 +2719,7 @@ mod tests {
             let mut project = make_project("p1");
             project.layout = Some(LayoutNode::Terminal {
                 terminal_id: terminal_id.map(str::to_string),
+                start_page: None,
                 pending_agent_resume: Some(agent_session(session_id)),
                 minimized: false,
                 detached: false,
@@ -2773,6 +2781,7 @@ mod tests {
         let mut project = make_project("p1");
         project.layout = Some(LayoutNode::Terminal {
             terminal_id: Some("t1".to_string()),
+            start_page: None,
             pending_agent_resume: None,
             minimized: false,
             detached: false,
@@ -3255,6 +3264,7 @@ mod tests {
         });
         wt.layout = Some(LayoutNode::Terminal {
             terminal_id: Some("stale-layout".to_string()),
+            start_page: None,
             pending_agent_resume: None,
             minimized: false,
             detached: false,
@@ -3337,6 +3347,7 @@ mod tests {
         });
         worktree.layout = Some(LayoutNode::Terminal {
             terminal_id: Some("layout".to_string()),
+            start_page: None,
             pending_agent_resume: None,
             minimized: false,
             detached: false,
@@ -3393,6 +3404,7 @@ mod tests {
         });
         worktree.layout = Some(LayoutNode::Terminal {
             terminal_id: Some("layout".to_string()),
+            start_page: None,
             pending_agent_resume: None,
             minimized: false,
             detached: false,

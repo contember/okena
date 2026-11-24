@@ -7,6 +7,33 @@ use crate::state::{LayoutNode, Workspace};
 use okena_terminal::shell_config::ShellType;
 
 impl Workspace {
+    /// Publish the selected shell only after its PTY was created successfully.
+    pub fn finish_start_page(
+        &mut self,
+        project_id: &str,
+        path: &[usize],
+        shell: ShellType,
+        id: String,
+        cx: &mut impl WorkspaceCx,
+    ) {
+        self.with_project(project_id, cx, |project| {
+            let layout = project.layout.get_or_insert_with(LayoutNode::new_terminal);
+            if let Some(LayoutNode::Terminal {
+                terminal_id,
+                shell_type,
+                start_page,
+                ..
+            }) = layout.get_at_path_mut(path)
+            {
+                *terminal_id = Some(id);
+                *shell_type = shell;
+                *start_page = None;
+                return true;
+            }
+            false
+        });
+    }
+
     /// Set terminal ID at a layout path
     pub fn set_terminal_id(
         &mut self,

@@ -102,6 +102,7 @@ pub struct TerminalMenu {
     can_export_buffer: bool,
     /// Set by the host, which owns the terminals and so the bell state.
     has_bell: bool,
+    is_start_page: bool,
     invocation: TerminalMenuInvocation,
     /// Mirrors the terminal header: the shell chip is opt-in via `show_shell_selector`.
     /// Read once on open — the settings lookup is a serde round-trip, and this view
@@ -123,6 +124,7 @@ impl TerminalMenu {
         current_shell: ShellType,
         can_export_buffer: bool,
         has_bell: bool,
+        is_start_page: bool,
         invocation: TerminalMenuInvocation,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -137,6 +139,7 @@ impl TerminalMenu {
             current_shell,
             can_export_buffer,
             has_bell,
+            is_start_page,
             invocation,
             show_shell_selector,
             focus_handle,
@@ -227,7 +230,8 @@ impl Render for TerminalMenu {
         }
 
         let position = self.position;
-        let include_content_actions = self.invocation.includes_content_actions();
+        let include_content_actions =
+            !self.is_start_page && self.invocation.includes_content_actions();
         let include_primary_actions = self.invocation.includes_primary_actions();
         let has_bell = self.has_bell;
         let (has_selection, link_url) = match &self.invocation {
@@ -238,29 +242,31 @@ impl Render for TerminalMenu {
             TerminalMenuInvocation::Header { .. } => (false, None),
         };
 
-        let buffer_items: Vec<SubmenuItem> =
-            buffer_actions(include_content_actions, self.can_export_buffer)
-                .into_iter()
-                .map(|action| {
-                    SubmenuItem::new(
-                        action.id(),
-                        action.icon(),
-                        action.label(),
-                        cx.listener(move |this: &mut Self, _, _window, cx| match action {
-                            BufferAction::SelectAll => cx.emit(TerminalMenuEvent::SelectAll {
-                                terminal_id: this.terminal_id.clone(),
-                            }),
-                            BufferAction::Clear => cx.emit(TerminalMenuEvent::Clear {
-                                terminal_id: this.terminal_id.clone(),
-                            }),
-                            BufferAction::Export => cx.emit(TerminalMenuEvent::ExportBuffer {
-                                project_id: this.project_id.clone(),
-                                terminal_id: this.terminal_id.clone(),
-                            }),
-                        }),
-                    )
-                })
-                .collect();
+        let buffer_items: Vec<SubmenuItem> = buffer_actions(
+            include_content_actions,
+            self.can_export_buffer && !self.is_start_page,
+        )
+        .into_iter()
+        .map(|action| {
+            SubmenuItem::new(
+                action.id(),
+                action.icon(),
+                action.label(),
+                cx.listener(move |this: &mut Self, _, _window, cx| match action {
+                    BufferAction::SelectAll => cx.emit(TerminalMenuEvent::SelectAll {
+                        terminal_id: this.terminal_id.clone(),
+                    }),
+                    BufferAction::Clear => cx.emit(TerminalMenuEvent::Clear {
+                        terminal_id: this.terminal_id.clone(),
+                    }),
+                    BufferAction::Export => cx.emit(TerminalMenuEvent::ExportBuffer {
+                        project_id: this.project_id.clone(),
+                        terminal_id: this.terminal_id.clone(),
+                    }),
+                }),
+            )
+        })
+        .collect();
         let buffer_group = Submenu::new("terminal-menu-buffer", "icons/file.svg", "Buffer")
             .items(buffer_items)
             .render(&mut self.submenus, &t, window, cx);
@@ -298,23 +304,26 @@ impl Render for TerminalMenu {
                         // renames, the chip switches shell.
                         .child(
                             menu_header("icons/terminal.svg", &t)
-                                .child(
-                                    menu_header_name(
-                                        "terminal-menu-rename",
-                                        self.current_name.clone(),
-                                        &t,
+                                .when(self.is_start_page, |header| header.child("Start Page"))
+                                .when(!self.is_start_page, |header| {
+                                    header.child(
+                                        menu_header_name(
+                                            "terminal-menu-rename",
+                                            self.current_name.clone(),
+                                            &t,
+                                        )
+                                        .on_click(
+                                            cx.listener(|this, _, _window, cx| {
+                                                cx.emit(TerminalMenuEvent::RenameTerminal {
+                                                    project_id: this.project_id.clone(),
+                                                    terminal_id: this.terminal_id.clone(),
+                                                    current_name: this.current_name.clone(),
+                                                });
+                                            }),
+                                        ),
                                     )
-                                    .on_click(cx.listener(
-                                        |this, _, _window, cx| {
-                                            cx.emit(TerminalMenuEvent::RenameTerminal {
-                                                project_id: this.project_id.clone(),
-                                                terminal_id: this.terminal_id.clone(),
-                                                current_name: this.current_name.clone(),
-                                            });
-                                        },
-                                    )),
-                                )
-                                .when(self.show_shell_selector, |header| {
+                                })
+                                .when(self.show_shell_selector && !self.is_start_page, |header| {
                                     header.child(
                                         shell_indicator_chip(
                                             "terminal-menu-change-shell",
@@ -469,43 +478,49 @@ impl Render for TerminalMenu {
                                 ))
                         })
                         .child(menu_section("Pane", &t))
-                        .child(
-                            menu_item(
-                                "terminal-menu-zoom",
-                                "icons/fullscreen.svg",
-                                "Zoom Terminal",
-                                &t,
+                        .when(!self.is_start_page, |menu| {
+                            menu.child(
+                                menu_item(
+                                    "terminal-menu-zoom",
+                                    "icons/fullscreen.svg",
+                                    "Zoom Terminal",
+                                    &t,
+                                )
+                                .on_click(cx.listener(
+                                    |this, _, _window, cx| {
+                                        cx.emit(TerminalMenuEvent::ZoomTerminal {
+                                            project_id: this.project_id.clone(),
+                                            terminal_id: this.terminal_id.clone(),
+                                        });
+                                    },
+                                )),
                             )
-                            .on_click(cx.listener(
-                                |this, _, _window, cx| {
-                                    cx.emit(TerminalMenuEvent::ZoomTerminal {
-                                        project_id: this.project_id.clone(),
-                                        terminal_id: this.terminal_id.clone(),
-                                    });
-                                },
-                            )),
-                        )
-                        .child(
-                            menu_item(
-                                "terminal-menu-minimize",
-                                "icons/minimize.svg",
-                                "Minimize Terminal",
-                                &t,
+                            .child(
+                                menu_item(
+                                    "terminal-menu-minimize",
+                                    "icons/minimize.svg",
+                                    "Minimize Terminal",
+                                    &t,
+                                )
+                                .on_click(cx.listener(
+                                    |this, _, _window, cx| {
+                                        cx.emit(TerminalMenuEvent::MinimizeTerminal {
+                                            project_id: this.project_id.clone(),
+                                            terminal_id: this.terminal_id.clone(),
+                                        });
+                                    },
+                                )),
                             )
-                            .on_click(cx.listener(
-                                |this, _, _window, cx| {
-                                    cx.emit(TerminalMenuEvent::MinimizeTerminal {
-                                        project_id: this.project_id.clone(),
-                                        terminal_id: this.terminal_id.clone(),
-                                    });
-                                },
-                            )),
-                        )
+                        })
                         .child(
                             menu_item(
                                 "terminal-menu-move",
                                 "icons/unfold-vertical.svg",
-                                "Move Terminal…",
+                                if self.is_start_page {
+                                    "Move Start Page…"
+                                } else {
+                                    "Move Terminal…"
+                                },
                                 &t,
                             )
                             .on_click(cx.listener(
@@ -519,22 +534,24 @@ impl Render for TerminalMenu {
                                 },
                             )),
                         )
-                        .child(
-                            menu_item(
-                                "terminal-menu-detach",
-                                "icons/detach.svg",
-                                "Detach to Window",
-                                &t,
+                        .when(!self.is_start_page, |menu| {
+                            menu.child(
+                                menu_item(
+                                    "terminal-menu-detach",
+                                    "icons/detach.svg",
+                                    "Detach to Window",
+                                    &t,
+                                )
+                                .on_click(cx.listener(
+                                    |this, _, _window, cx| {
+                                        cx.emit(TerminalMenuEvent::Detach {
+                                            project_id: this.project_id.clone(),
+                                            layout_path: this.layout_path.clone(),
+                                        });
+                                    },
+                                )),
                             )
-                            .on_click(cx.listener(
-                                |this, _, _window, cx| {
-                                    cx.emit(TerminalMenuEvent::Detach {
-                                        project_id: this.project_id.clone(),
-                                        layout_path: this.layout_path.clone(),
-                                    });
-                                },
-                            )),
-                        )
+                        })
                         .when(include_content_actions, |menu| {
                             menu.child(
                                 menu_item(
@@ -556,10 +573,10 @@ impl Render for TerminalMenu {
                                 )),
                             )
                         })
-                        .child(menu_separator(&t))
+                        .when(!self.is_start_page, |menu| menu.child(menu_separator(&t)))
                         // Keep the shell picker reachable when its header chip is hidden,
                         // but group the fallback command with the bottom utility actions.
-                        .when(!self.show_shell_selector, |menu| {
+                        .when(!self.is_start_page && !self.show_shell_selector, |menu| {
                             menu.child(
                                 menu_item(
                                     "terminal-menu-change-shell",
@@ -584,7 +601,11 @@ impl Render for TerminalMenu {
                                 menu_item_with_color(
                                     "terminal-menu-close",
                                     "icons/close.svg",
-                                    "Close Terminal",
+                                    if self.is_start_page {
+                                        "Close Start Page"
+                                    } else {
+                                        "Close Terminal"
+                                    },
                                     t.error,
                                     t.error,
                                     &t,
@@ -744,6 +765,7 @@ mod tests {
                     gpui::Point::default(),
                     "Terminal".into(),
                     okena_terminal::shell_config::ShellType::Default,
+                    false,
                     false,
                     false,
                     invocation,

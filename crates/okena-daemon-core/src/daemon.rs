@@ -954,6 +954,7 @@ mod shutdown_tests {
             path: "/tmp".to_string(),
             layout: Some(okena_state::LayoutNode::Terminal {
                 terminal_id: Some("layout".to_string()),
+                start_page: None,
                 pending_agent_resume: None,
                 minimized: false,
                 detached: false,
@@ -1144,6 +1145,7 @@ mod shutdown_tests {
             path: "/tmp".to_string(),
             layout: Some(okena_state::LayoutNode::Terminal {
                 terminal_id: Some("ordinary".to_string()),
+                start_page: None,
                 pending_agent_resume: None,
                 minimized: false,
                 detached: false,

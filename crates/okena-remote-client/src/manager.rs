@@ -155,6 +155,29 @@ fn merge_settings_patches(base: &mut serde_json::Value, newer: serde_json::Value
     }
 }
 
+fn action_for_daemon(
+    mut action: ActionRequest,
+    supports_start_page: bool,
+) -> Result<ActionRequest, &'static str> {
+    if supports_start_page {
+        return Ok(action);
+    }
+    action.set_show_start_page(false);
+    match action {
+        ActionRequest::LaunchStartPage {
+            project_id,
+            page_id: None,
+            shell: okena_core::shell::ShellType::Default,
+            command: None,
+        } => Ok(ActionRequest::CreateTerminal {
+            project_id,
+            start_page: false,
+        }),
+        ActionRequest::LaunchStartPage { .. } => Err("Start Page is unavailable on this daemon"),
+        _ => Ok(action),
+    }
+}
+
 async fn send_queued_action(
     connection_id: &str,
     queued: QueuedAction,
@@ -653,6 +676,15 @@ impl RemoteConnectionManager {
             .and_then(|conn| conn.remote_state())
     }
 
+    /// Read from the last state the daemon sent, so a reconnect does not
+    /// briefly downgrade Start Page actions.
+    pub fn supports_start_page(&self, connection_id: &str) -> bool {
+        self.connections
+            .get(connection_id)
+            .and_then(|connection| connection.remote_state())
+            .is_some_and(|state| state.supports_start_page)
+    }
+
     /// Auto-connect to all saved connections with valid tokens.
     pub fn auto_connect_all(&mut self, cx: &mut Context<Self>) {
         let settings = load_settings();
@@ -707,6 +739,13 @@ impl RemoteConnectionManager {
     ///
     /// Fire-and-forget from the UI thread, but FIFO within each connection.
     pub fn send_action(&self, connection_id: &str, action: ActionRequest, cx: &mut Context<Self>) {
+        let action = match action_for_daemon(action, self.supports_start_page(connection_id)) {
+            Ok(action) => action,
+            Err(error) => {
+                ToastManager::error(error.to_string(), cx);
+                return;
+            }
+        };
         let config = match self.connections.get(connection_id) {
             Some(conn) => conn.config().clone(),
             None => {
@@ -821,6 +860,10 @@ impl RemoteConnectionManager {
     ) -> gpui::Task<Result<serde_json::Value, String>> {
         let Some(connection) = self.connections.get(connection_id) else {
             return Task::ready(Err(format!("Connection {connection_id} not found")));
+        };
+        let action = match action_for_daemon(action, self.supports_start_page(connection_id)) {
+            Ok(action) => action,
+            Err(error) => return Task::ready(Err(error.to_string())),
         };
         let config = connection.config().clone();
         let Some(token) = config.effective_auth_token() else {
@@ -1428,6 +1471,43 @@ mod tests {
     use std::io::{BufRead, BufReader, Read, Write};
     use std::net::{TcpListener, TcpStream};
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn old_daemon_keeps_legacy_terminal_actions() {
+        use okena_core::shell::ShellType;
+
+        let action = ActionRequest::CreateTerminal {
+            project_id: "p1".into(),
+            start_page: true,
+        };
+        let legacy = super::action_for_daemon(action.clone(), false).unwrap();
+        assert_eq!(
+            serde_json::to_value(legacy).unwrap(),
+            json!({ "action": "create_terminal", "project_id": "p1" })
+        );
+        assert!(matches!(
+            super::action_for_daemon(action, true).unwrap(),
+            ActionRequest::CreateTerminal {
+                start_page: true,
+                ..
+            }
+        ));
+
+        let launch = |command| ActionRequest::LaunchStartPage {
+            project_id: "p1".into(),
+            page_id: None,
+            shell: ShellType::Default,
+            command,
+        };
+        assert!(matches!(
+            super::action_for_daemon(launch(None), false).unwrap(),
+            ActionRequest::CreateTerminal {
+                start_page: false,
+                ..
+            }
+        ));
+        assert!(super::action_for_daemon(launch(Some("echo original".into())), false).is_err());
+    }
 
     fn accept_until(listener: &TcpListener, deadline: Instant) -> TcpStream {
         loop {
