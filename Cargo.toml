@@ -119,9 +119,7 @@ jemalloc = ["dep:tikv-jemallocator"]
 # https://nnethercote.github.io/dh_view/dh_view.html).
 dhat-heap = ["dep:dhat"]
 
-# Dev and test builds keep line tables only: panics and backtraces still show
-# file:line, but a worktree's target/ is 14-26% smaller and edit rebuilds
-# are faster. Debugger session with variables: CARGO_PROFILE_DEV_DEBUG=full.
+# Line tables keep file:line in backtraces at a fraction of full debuginfo's size.
 [profile.dev]
 debug = "line-tables-only"
 
