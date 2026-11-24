@@ -20,10 +20,11 @@ Wraps `alacritty_terminal` for ANSI processing and `portable-pty` for cross-plat
 
 alacritty stores every history cell as a 24-byte `Cell`, so history costs
 `lines x columns x 24 B` per terminal, in the daemon and again in each client
-mirror. The grid therefore keeps only `LIVE_HISTORY_LINES` (1,000) history rows;
-older rows move into `terminal/archive.rs` (text plus attribute runs, deflated
-in 256-row blocks). The archive is memory only: terminal output holds secrets,
-never write it to disk.
+mirror. The grid therefore keeps only `LIVE_HISTORY_LINES` (1,000) history rows
+(alacritty's storage keeps up to 1,000 more allocated as spare); older rows
+move into `terminal/archive.rs` (text plus attribute runs, deflated in 256-row
+blocks). The archive is memory only: terminal output holds secrets, never
+write it to disk.
 
 - `terminal/scrollback.rs` — `Scrollback` (archive, view offset into it, the
   history-wide selection) and `HistoryView`, the one read path over grid and
@@ -38,8 +39,12 @@ never write it to disk.
 - Selection: alacritty's `term.selection` mirrors the history selection while
   both ends are in the grid; once an end is archived, `history_selection.rs`
   (a port of alacritty's range and text rules) resolves it.
-- Archived rows are not reflowed on resize: a read clips or pads them to the
-  current width. CSI 3 J (outside the alternate screen) and RIS clear the archive.
+- A column change reflows archived rows like alacritty's grid, but only once
+  the width holds for 300 ms (`Scrollback::settle`; a full archive takes tens
+  of ms). Until then rows read clipped or padded, except through
+  `with_settled_history` (copy, search, export, snapshots) and while the
+  viewport shows archived rows, which reflow at once.
+- CSI 3 J (outside the alternate screen) and RIS clear the archive.
 
 ## OSC sequences (sidecar)
 

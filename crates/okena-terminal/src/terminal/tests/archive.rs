@@ -355,19 +355,106 @@ fn shrinking_the_scrollback_drops_the_oldest_archived_rows() {
     assert_eq!(terminal.scroll_info().0, 310 + ROWS);
 }
 
-#[test]
-fn a_resize_keeps_the_archive_at_the_width_it_was_written() {
-    let terminal = filled();
+fn resize_cols(terminal: &Terminal, cols: u16) {
     terminal.resize(TerminalSize {
-        cols: 6,
+        cols,
         rows: ROWS as u16,
         cell_width: 8.0,
         cell_height: 16.0,
     });
+}
+
+#[test]
+fn a_narrower_screen_reflows_archived_rows() {
+    let terminal = filled();
+    resize_cols(&terminal, 6);
     assert_eq!(grid_history(&terminal), LIVE);
     terminal.scroll_to(usize::MAX);
-    // An archived row is clipped to the narrower screen, not reflowed.
-    assert_eq!(visible_rows(&terminal)[0], "line 0");
-    assert_eq!(visible_rows(&terminal)[1], "line 1");
-    assert!(terminal.history_text().starts_with(&lines(0..=9)));
+    // `line 10` and up wrap onto a second row, as the grid's rows do.
+    assert_eq!(
+        visible_rows(&terminal),
+        ["line 0", "line 1", "line 2", "line 3", "line 4"]
+    );
+    terminal.scroll_to(terminal.display_offset() - 10);
+    assert_eq!(visible_rows(&terminal)[..3], ["line 1", "0", "line 1"]);
+    assert_eq!(terminal.history_text(), lines(0..=299));
+}
+
+#[test]
+fn archived_rows_read_whole_after_narrowing_and_widening_again() {
+    let terminal = filled();
+    resize_cols(&terminal, 6);
+    feed_lines(&terminal, 300..400);
+    resize_cols(&terminal, COLS as u16);
+
+    terminal.select_all();
+    assert_eq!(
+        terminal.get_selected_text().as_deref(),
+        Some(&*format!("{}\n", lines(0..=399)))
+    );
+    assert_eq!(terminal.search_grid("line 310", true, false).len(), 1);
+    assert_eq!(terminal.history_text(), lines(0..=399));
+}
+
+#[test]
+fn the_archive_reflows_when_a_read_needs_it() {
+    let terminal = filled();
+    resize_cols(&terminal, 6);
+    // A resize at the bottom of the terminal leaves the archive alone.
+    let rows_at_resize = terminal.scroll_info().0;
+    // A read that needs every row reflows it: archived `line 10`..`line 275`
+    // take two rows each at 6 columns.
+    assert_eq!(terminal.history_text(), lines(0..=299));
+    assert_eq!(terminal.scroll_info().0, rows_at_resize + 266);
+}
+
+#[test]
+fn a_synchronized_update_drains_like_plain_output() {
+    let output: String = (0..300).map(|i| format!("line {i}\r\n")).collect();
+    for split in [None, Some(1_000)] {
+        let terminal = terminal(1_000);
+        let bytes = format!("\x1b[?2026h{output}\x1b[?2026l");
+        match split {
+            None => terminal.process_output(bytes.as_bytes()),
+            Some(at) => {
+                terminal.process_output(&bytes.as_bytes()[..at]);
+                terminal.process_output(&bytes.as_bytes()[at..]);
+            }
+        }
+        assert_eq!(grid_history(&terminal), LIVE, "{split:?}");
+        assert_eq!(terminal.history_text(), lines(0..=299), "{split:?}");
+    }
+}
+
+#[test]
+fn a_burst_past_the_grid_limit_keeps_the_newest_rows() {
+    // 30 lines of history: 20 live, room for 10 more before alacritty drops.
+    let terminal = terminal(30);
+    feed_lines(&terminal, 0..10);
+    feed_lines(&terminal, 10..200);
+    assert_eq!(terminal.scroll_info().0, 30 + ROWS);
+    terminal.scroll_to(usize::MAX);
+    assert_eq!(visible_rows(&terminal)[0], "line 166");
+    assert_eq!(terminal.history_text(), lines(166..=199));
+}
+
+#[test]
+fn an_erase_of_the_saved_lines_with_a_subparameter_drops_the_archive() {
+    let terminal = filled();
+    terminal.process_output(b"\x1b[3:1J");
+    assert_eq!(terminal.scroll_info().0, ROWS);
+}
+
+#[test]
+fn a_selection_a_scroll_region_moves_stays_alacrittys() {
+    let terminal = filled();
+    // Rows 1-3 scroll; row 4 stays.
+    terminal.process_output(b"\x1b[1;4r\x1b[4;1H");
+    terminal.start_selection(0, 1, Side::Left);
+    terminal.update_selection(3, 4, Side::Right);
+    terminal.end_selection();
+    terminal.process_output(b"a\r\nb\r\n");
+    let alacritty = terminal.with_content(|term| term.selection_to_string());
+    assert!(alacritty.is_some());
+    assert_eq!(terminal.get_selected_text(), alacritty);
 }

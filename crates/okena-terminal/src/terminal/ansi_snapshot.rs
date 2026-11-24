@@ -46,7 +46,7 @@ impl Terminal {
     /// a TUI inside the user's own terminal. Replay cannot leave the host's
     /// alternate screen, erase its scrollback, or install the remote's modes.
     pub fn render_snapshot_for_host_screen(&self) -> Vec<u8> {
-        self.with_history(|view| write_grid(view, SnapshotTarget::HostScreen))
+        self.with_settled_history(|view| write_grid(view, SnapshotTarget::HostScreen))
     }
 }
 

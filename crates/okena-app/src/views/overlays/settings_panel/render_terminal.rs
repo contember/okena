@@ -281,15 +281,15 @@ mod tests {
 
     #[test]
     fn the_cost_scales_with_lines_and_open_terminals() {
-        // 1 000 live rows x 200 columns x 24-byte cells, 9 000 archived rows
-        // at up to a byte a cell.
+        // 1 000 live rows and alacritty's 1 000 spare rows x 200 columns x
+        // 24-byte cells, 9 000 archived rows at up to a byte a cell.
         assert_eq!(
             scrollback_cost(10_000, 3),
-            "Daemon memory once full: up to 6 MB per 200-column terminal, 19 MB for the 3 open terminals"
+            "Daemon memory once full: up to 11 MB per 200-column terminal, 33 MB for the 3 open terminals"
         );
         assert_eq!(
             scrollback_cost(10_000, 1),
-            "Daemon memory once full: up to 6 MB per 200-column terminal, 6 MB for the 1 open terminal"
+            "Daemon memory once full: up to 11 MB per 200-column terminal, 11 MB for the 1 open terminal"
         );
         // Under the live rows everything sits in the grid.
         assert_eq!(

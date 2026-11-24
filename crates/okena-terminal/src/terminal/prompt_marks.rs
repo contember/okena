@@ -11,6 +11,15 @@ use super::types::{PromptMark, PromptMarkKind};
 /// Ring buffer of recent OSC 133 marks plus a scroll tracker. Mark lines use
 /// the history-wide numbering (see `scrollback.rs`), so a mark keeps its line
 /// when its row moves from the grid into the compressed archive.
+///
+/// **History-limit caveat**: the tracker counts the rows that entered the
+/// history by watching its size grow. Rows alacritty drops at its own limit
+/// inside one parser step do not count, so marks drift by that many lines:
+/// with `scrollback_lines` at or below the live rows (the grid is the whole
+/// history and stays full), or when one step adds more rows than the grid has
+/// room for above the live rows (a large synchronized update). A resize that
+/// reflows rows moves them without moving the marks. Treat marks older than
+/// such an event as approximate.
 pub(crate) struct PromptTracker {
     marks: VecDeque<PromptMark>,
     /// Oldest-first ring buffer cap. Shells that run thousands of commands
@@ -135,12 +144,14 @@ impl Perform for PromptSidecarPerform {
         &mut self,
         params: &alacritty_terminal::vte::Params,
         intermediates: &[u8],
-        _ignore: bool,
+        ignore: bool,
         action: char,
     ) {
+        // vte's own reading: the first subparameter of the first parameter.
         if action == 'J'
+            && !ignore
             && intermediates.is_empty()
-            && params.iter().next().is_some_and(|param| param == [3])
+            && matches!(params.iter().next(), Some(&[3, ..]))
         {
             self.history_erase = Some(HistoryErase::SavedLines);
         }

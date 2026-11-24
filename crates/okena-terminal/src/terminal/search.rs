@@ -110,7 +110,7 @@ impl Terminal {
 
         let mut matches = Vec::new();
 
-        self.with_history(|view| {
+        self.with_settled_history(|view| {
             let screen_lines = view.screen_lines() as i32;
             let history_size = view.history_size() as i32;
             let cols = view.columns();

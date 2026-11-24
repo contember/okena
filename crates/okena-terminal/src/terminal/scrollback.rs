@@ -7,6 +7,7 @@
 //! from the grid into the archive.
 
 use std::borrow::Cow;
+use std::time::{Duration, Instant};
 
 use alacritty_terminal::event::EventListener;
 use alacritty_terminal::grid::{Dimensions, Row, Scroll};
@@ -18,8 +19,12 @@ use alacritty_terminal::term::{Term, TermMode};
 use super::archive::ScrollbackArchive;
 
 /// History rows kept in alacritty's grid; older rows move to the archive.
-/// Every grid row costs `columns x 24 B` whatever it holds.
+/// Every grid row costs `columns x 24 B` whatever it holds, and the grid keeps
+/// up to 1 000 more allocated as spare.
 pub const LIVE_HISTORY_LINES: usize = 1_000;
+
+/// How long the columns must hold before the archive reflows to them.
+const REFLOW_SETTLE: Duration = Duration::from_millis(300);
 
 /// A selection endpoint on the history-wide line numbering.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -72,6 +77,9 @@ pub(super) struct Scrollback {
     /// History rows the grid keeps before moving older ones to the archive.
     live_lines: usize,
     pub(super) selection: Option<HistorySelection>,
+    /// When the columns last changed while archived rows were laid out at
+    /// another width; `None` once the archive matches the grid.
+    reflow_requested: Option<Instant>,
 }
 
 impl Scrollback {
@@ -83,6 +91,7 @@ impl Scrollback {
             archive_offset: 0,
             live_lines,
             selection: None,
+            reflow_requested: None,
         }
     }
 
@@ -90,6 +99,42 @@ impl Scrollback {
         self.live_lines = live_cap.min(total_lines);
         self.archive.set_capacity(total_lines - self.live_lines);
         self.archive_offset = self.archive_offset.min(self.archive.len());
+    }
+
+    /// The columns changed: lay the archive out at the new width once they
+    /// settle. Reflowing a full archive takes tens of milliseconds, too long
+    /// for every frame of a resize drag.
+    pub(super) fn request_reflow(&mut self) {
+        if self.archive.len() > 0 {
+            self.reflow_requested = Some(Instant::now());
+        }
+    }
+
+    /// Reflow the archive to the grid's width if a column change asked for it
+    /// and the width has held for [`REFLOW_SETTLE`], or at once with `force`
+    /// (a read that must see every row at the current width). Keeps a view
+    /// scrolled into the archive at about the same place; an archived
+    /// selection no longer points at its rows and is dropped.
+    /// Returns whether the archive was reflowed.
+    pub(super) fn settle<L>(&mut self, term: &Term<L>, force: bool) -> bool {
+        let Some(requested) = self.reflow_requested else {
+            return false;
+        };
+        if !force && requested.elapsed() < REFLOW_SETTLE {
+            return false;
+        }
+        self.reflow_requested = None;
+        let before = self.archive.len();
+        self.archive.reflow(term.grid().columns());
+        let after = self.archive.len();
+        if before > 0 && self.archive_offset > 0 {
+            let scaled = self.archive_offset as u128 * after as u128 / before as u128;
+            self.archive_offset = usize::try_from(scaled).unwrap_or(after).min(after);
+        }
+        if self.archived_selection(term).is_some() {
+            self.selection = None;
+        }
+        true
     }
 
     /// History rows seen by the viewport: none in the alternate screen, whose
@@ -135,6 +180,7 @@ impl Scrollback {
     /// and every resize, so the grid never holds more than the live lines plus
     /// what one step pushed.
     pub(super) fn drain<L: EventListener>(&mut self, term: &mut Term<L>) {
+        self.settle(term, false);
         if term.mode().contains(TermMode::ALT_SCREEN) {
             return;
         }
@@ -172,6 +218,7 @@ impl Scrollback {
     pub(super) fn clear_archive<L>(&mut self, term: &Term<L>) {
         self.archive.clear();
         self.archive_offset = 0;
+        self.reflow_requested = None;
         if self
             .selection
             .is_some_and(|selection| !in_grid(&selection, term))

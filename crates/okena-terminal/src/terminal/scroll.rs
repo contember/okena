@@ -33,11 +33,36 @@ impl Terminal {
     }
 
     /// Access the whole history, grid and compressed archive, after draining
-    /// pending output like [`Terminal::with_content`].
+    /// pending output like [`Terminal::with_content`]. Right after a column
+    /// change archived rows may still read clipped or padded; see
+    /// [`Terminal::with_settled_history`].
     pub fn with_history<R>(&self, f: impl FnOnce(&HistoryView<'_, ZedEventListener>) -> R) -> R {
+        self.history_view(false, f)
+    }
+
+    /// [`Terminal::with_history`] with every archived row laid out at the
+    /// current width, for reads whose text must be whole: copy, search,
+    /// export, snapshots.
+    pub fn with_settled_history<R>(
+        &self,
+        f: impl FnOnce(&HistoryView<'_, ZedEventListener>) -> R,
+    ) -> R {
+        self.history_view(true, f)
+    }
+
+    fn history_view<R>(
+        &self,
+        settle: bool,
+        f: impl FnOnce(&HistoryView<'_, ZedEventListener>) -> R,
+    ) -> R {
         self.drain_pending_output();
         let term = self.term.lock();
-        let scrollback = self.scrollback.lock();
+        let mut scrollback = self.scrollback.lock();
+        // A viewport showing archived rows shows them at the current width.
+        let settle = settle || scrollback.archive_offset > 0;
+        if scrollback.settle(&term, settle) {
+            self.content_generation.fetch_add(1, Ordering::Relaxed);
+        }
         f(&HistoryView::new(&term, &scrollback))
     }
 
@@ -49,13 +74,13 @@ impl Terminal {
     /// The last `count` rows of scrollback and screen as text, so content
     /// taller than the pane reads in full. Trailing empty rows are cut first.
     pub fn tail_text(&self, count: usize) -> String {
-        self.with_history(|view| tail_text(view, count))
+        self.with_settled_history(|view| tail_text(view, count))
     }
 
     /// The whole history and screen as text, oldest first. Archived rows keep
     /// the width they were archived with; soft-wrapped rows join into one line.
     pub fn history_text(&self) -> String {
-        self.with_history(|view| {
+        self.with_settled_history(|view| {
             let mut text = String::new();
             let mut joined = false;
             view.for_each_full_row(|row| {

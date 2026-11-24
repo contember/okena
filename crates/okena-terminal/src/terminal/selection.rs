@@ -1,17 +1,20 @@
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::index::{Column, Line, Point, Side};
 use alacritty_terminal::selection::SelectionType;
-use alacritty_terminal::term::TermMode;
 use alacritty_terminal::term::cell::Flags;
+use alacritty_terminal::term::{Term, TermMode};
+use std::sync::atomic::Ordering;
 
 use super::Terminal;
-use super::scrollback::{HistorySelection, HistoryView, SelectionPoint};
+use super::event_listener::ZedEventListener;
+use super::scrollback::{HistorySelection, HistoryView, Scrollback, SelectionPoint};
 
 impl Terminal {
     /// Select the whole history and screen.
     pub fn select_all(&self) {
         let mut term = self.term.lock();
         let mut scrollback = self.scrollback.lock();
+        self.settle_for_selection(&term, &mut scrollback);
         let rows = term.grid().screen_lines() as i32;
         let cols = term.grid().columns();
         let history = scrollback.history_size(&term) as i32;
@@ -31,6 +34,14 @@ impl Terminal {
         state.start = None;
         state.end = None;
         state.is_selecting = false;
+    }
+
+    /// Lay archived rows out at the current width before a selection takes
+    /// line numbers from them: a later reflow would renumber them.
+    fn settle_for_selection(&self, term: &Term<ZedEventListener>, scrollback: &mut Scrollback) {
+        if scrollback.settle(term, true) {
+            self.content_generation.fetch_add(1, Ordering::Relaxed);
+        }
     }
 
     /// Start selection at a point
@@ -60,6 +71,7 @@ impl Terminal {
     ) {
         let mut term = self.term.lock();
         let mut scrollback = self.scrollback.lock();
+        self.settle_for_selection(&term, &mut scrollback);
 
         // When scrolled up, visual row 0 shows history (negative buffer lines).
         let buffer_row = row - scrollback.display_offset(&term) as i32;
@@ -123,7 +135,7 @@ impl Terminal {
 
     /// Get selected text
     pub fn get_selected_text(&self) -> Option<String> {
-        self.with_history(|view| match view.archived_selection() {
+        self.with_settled_history(|view| match view.archived_selection() {
             Some(selection) => view.selection_text(&selection),
             None => view.term().selection_to_string(),
         })

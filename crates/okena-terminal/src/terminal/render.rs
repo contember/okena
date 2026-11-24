@@ -16,7 +16,8 @@ impl Terminal {
         let mut slow = okena_core::timing::SlowGuard::new("Terminal::render_snapshot");
         self.drain_pending_output();
         let term = self.term.lock();
-        let scrollback = self.scrollback.lock();
+        let mut scrollback = self.scrollback.lock();
+        scrollback.settle(&term, true);
         let mut bytes = grid_to_ansi(&HistoryView::new(&term, &scrollback));
         drop(scrollback);
         // A newly attached/reconnected client may never see another title OSC

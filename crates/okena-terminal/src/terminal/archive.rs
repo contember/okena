@@ -10,7 +10,7 @@ use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::io::{Read, Write};
 
-use alacritty_terminal::grid::Row;
+use alacritty_terminal::grid::{GridCell, Row};
 use alacritty_terminal::index::Column;
 use alacritty_terminal::term::cell::{Cell, Flags, Hyperlink};
 use alacritty_terminal::vte::ansi::{Color, NamedColor, Rgb};
@@ -123,6 +123,49 @@ impl ScrollbackArchive {
         self.open_offsets.clear();
         self.front = self.end;
         *self.cache.get_mut() = None;
+    }
+
+    /// Lay every archived line out `cols` wide, as alacritty reflows its grid
+    /// on a column change: soft-wrapped rows join into their line and wrap
+    /// again at the new width. Rows past the capacity drop, oldest first.
+    pub(super) fn reflow(&mut self, cols: usize) {
+        if cols == 0 || self.len() == 0 {
+            return;
+        }
+        let mut out = ScrollbackArchive::new(self.capacity);
+        // Rows archived later keep counting from here.
+        out.front = self.end;
+        out.end = self.end;
+        let mut rewrap = Rewrap::new(cols);
+        self.for_each_row(|row| {
+            let len = row.len();
+            let wrapped = len > 0 && row[Column(len - 1)].flags.contains(Flags::WRAPLINE);
+            let mut end = len;
+            if wrapped {
+                // A wide char that did not fit left a spacer in the last cell.
+                if row[Column(len - 1)]
+                    .flags
+                    .contains(Flags::LEADING_WIDE_CHAR_SPACER)
+                {
+                    end -= 1;
+                }
+            } else {
+                while end > 0 && row[Column(end - 1)].is_empty() {
+                    end -= 1;
+                }
+            }
+            for col in 0..end {
+                let mut cell = row[Column(col)].clone();
+                cell.flags.remove(Flags::WRAPLINE);
+                rewrap.put(cell, &mut out);
+            }
+            if !wrapped {
+                rewrap.end_line(&mut out);
+            }
+        });
+        // The newest archived line may go on in the grid.
+        rewrap.end_wrapped(&mut out);
+        *self = out;
     }
 
     /// The row `back` rows above the newest archived row (0 = newest), laid
@@ -247,6 +290,60 @@ impl ScrollbackArchive {
             self.open.clear();
             self.open_offsets.clear();
         }
+    }
+}
+
+/// Lays cells out in rows of a fixed width, wrapping like alacritty.
+struct Rewrap {
+    row: Row<Cell>,
+    col: usize,
+    cols: usize,
+}
+
+impl Rewrap {
+    fn new(cols: usize) -> Self {
+        Self {
+            row: Row::new(cols),
+            col: 0,
+            cols,
+        }
+    }
+
+    fn put(&mut self, cell: Cell, out: &mut ScrollbackArchive) {
+        let wide = cell.flags.contains(Flags::WIDE_CHAR);
+        let wide_misfit = wide && self.cols > 1 && self.col == self.cols - 1;
+        if self.col == self.cols || wide_misfit {
+            if wide_misfit {
+                let spacer = &mut self.row[Column(self.col)];
+                spacer.c = ' ';
+                spacer.flags = Flags::LEADING_WIDE_CHAR_SPACER;
+            }
+            self.row[Column(self.cols - 1)]
+                .flags
+                .insert(Flags::WRAPLINE);
+            self.flush(out);
+        }
+        self.row[Column(self.col)] = cell;
+        self.col += 1;
+    }
+
+    fn end_line(&mut self, out: &mut ScrollbackArchive) {
+        self.flush(out);
+    }
+
+    fn end_wrapped(&mut self, out: &mut ScrollbackArchive) {
+        if self.col > 0 {
+            self.row[Column(self.cols - 1)]
+                .flags
+                .insert(Flags::WRAPLINE);
+            self.flush(out);
+        }
+    }
+
+    fn flush(&mut self, out: &mut ScrollbackArchive) {
+        out.push(&self.row);
+        self.row = Row::new(self.cols);
+        self.col = 0;
     }
 }
 
@@ -673,6 +770,67 @@ mod tests {
         assert!(!wide[Column(11)].flags.contains(Flags::WRAPLINE));
         assert!(wide[Column(19)].flags.contains(Flags::WRAPLINE));
         assert_eq!(wide[Column(12)], Cell::default());
+    }
+
+    fn row_texts(archive: &ScrollbackArchive) -> Vec<String> {
+        let mut texts = Vec::new();
+        archive.for_each_row(|row| {
+            let text: String = (0..row.len())
+                .map(|col| &row[Column(col)])
+                .filter(|cell| !cell.flags.contains(Flags::WIDE_CHAR_SPACER))
+                .map(|cell| cell.c)
+                .collect();
+            texts.push(text.trim_end().to_owned());
+        });
+        texts
+    }
+
+    #[test]
+    fn a_reflow_rewraps_lines_like_alacritty() {
+        // 12 columns: a wrapped line, a wide char at the wrap, a blank line.
+        let rows = rows_of("abcdefghijklmnop\r\nxy\u{65e5}\u{672c}z\r\n\r\nend");
+        let mut archive = archived(&rows[..5]);
+
+        archive.reflow(3);
+        assert_eq!(
+            row_texts(&archive),
+            [
+                "abc",
+                "def",
+                "ghi",
+                "jkl",
+                "mno",
+                "p",
+                "xy",
+                "\u{65e5}",
+                "\u{672c}z",
+                "",
+                "end"
+            ]
+        );
+        // The wide char that did not fit left a leading spacer and wrapped.
+        let mut third_col = Vec::new();
+        archive.for_each_row(|row| third_col.push(row[Column(2)].flags));
+        assert!(third_col[6].contains(Flags::LEADING_WIDE_CHAR_SPACER | Flags::WRAPLINE));
+
+        // Back at the first width the rows are what they were.
+        archive.reflow(12);
+        assert_eq!(read_back(&archive, 12), rows[..5]);
+    }
+
+    #[test]
+    fn a_reflow_keeps_the_last_line_open_into_the_grid() {
+        // The newest archived row wraps on into a row still in the grid.
+        let rows = rows_of("abcdefghijklmnop");
+        let mut archive = archived(&rows[..1]);
+        archive.reflow(5);
+        assert_eq!(row_texts(&archive), ["abcde", "fghij", "kl"]);
+        let mut last = None;
+        archive.for_each_row(|row| last = Some(row[Column(4)].flags));
+        assert_eq!(
+            last.map(|flags| flags.contains(Flags::WRAPLINE)),
+            Some(true)
+        );
     }
 
     #[test]

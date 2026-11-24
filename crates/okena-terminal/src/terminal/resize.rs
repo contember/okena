@@ -115,8 +115,8 @@ impl Terminal {
         self.content_generation.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Resize the grid, then move history a reflow pushed past the live rows
-    /// into the archive. Archived rows keep the width they were written at.
+    /// Resize the grid and reflow the archive with it, then move history the
+    /// reflow pushed past the live rows into the archive.
     fn resize_term(&self, size: TermSize) {
         let mut term = self.term.lock();
         let mut scrollback = self.scrollback.lock();
@@ -125,8 +125,9 @@ impl Terminal {
         term.resize(size);
         if term.grid().columns() != old_cols {
             // alacritty drops its selection on a column change; so does the
-            // history-wide one.
+            // history-wide one. Archived rows reflow like the grid's.
             scrollback.selection = None;
+            scrollback.request_reflow();
         } else {
             let rows = scrollback.rows_entered(&term, before);
             scrollback.follow_output(&term, rows);

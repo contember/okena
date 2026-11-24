@@ -62,14 +62,21 @@ pub const MAX_SCROLLBACK_LINES: u32 = 20_000;
 /// a tenth of a byte.
 const ARCHIVED_CELL_BYTES: u64 = 1;
 
+/// Rows alacritty's grid storage keeps allocated beyond its history: it grows
+/// and frees rows in chunks of this many, so draining to the live rows leaves
+/// up to one chunk spare.
+const GRID_SPARE_ROWS: u64 = 1_000;
+
 /// Upper estimate of what a full scrollback of `lines` costs one terminal `cols`
-/// wide: the live rows of alacritty's grid at a full `Cell` each, whatever the
-/// cell holds, and the older rows compressed in the archive.
+/// wide: the live rows of alacritty's grid, plus its spare chunk once rows are
+/// drained, at a full `Cell` each whatever the cell holds, and the older rows
+/// compressed in the archive.
 pub fn scrollback_memory_bytes(lines: u32, cols: u16) -> u64 {
     let cell = std::mem::size_of::<alacritty_terminal::term::cell::Cell>() as u64;
     let live = u64::from(lines).min(super::scrollback::LIVE_HISTORY_LINES as u64);
     let archived = u64::from(lines) - live;
-    (live * cell + archived * ARCHIVED_CELL_BYTES) * u64::from(cols)
+    let spare = if archived > 0 { GRID_SPARE_ROWS } else { 0 };
+    ((live + spare) * cell + archived * ARCHIVED_CELL_BYTES) * u64::from(cols)
 }
 
 /// Process-wide scrollback depth applied to terminals built without explicit
