@@ -14,7 +14,7 @@ use okena_core::theme::FolderColor;
 use okena_terminal::TerminalsRegistry;
 use okena_terminal::backend::{TerminalBackend, TerminalLaunchPlan};
 use okena_terminal::terminal::{Terminal, TerminalSize};
-use okena_workspace::actions::worktree::LinkedCheckout;
+use okena_workspace::actions::worktree::{LinkedCheckout, WorktreePlacement};
 use okena_workspace::context::WorkspaceCx;
 use okena_workspace::hook_monitor::HookStatus;
 use std::sync::Arc;
@@ -85,6 +85,74 @@ pub(super) fn add_project(
             "terminal_ids": [],
         }))),
         err => err,
+    }
+}
+
+/// `AddProject` with `nest_worktree`: a path in a linked worktree goes under
+/// the project of its repository's main checkout, anything else is added like
+/// [`add_project`]. The reply names the parent (`parent_project_id`), or why a
+/// linked worktree stayed top-level (`not_nested`).
+pub(super) fn add_project_nesting_worktree(
+    ws: &mut Workspace,
+    window_id: WindowId,
+    name: String,
+    path: String,
+    start_page: bool,
+    backend: &dyn TerminalBackend,
+    terminals: &TerminalsRegistry,
+    settings: &AppSettings,
+    cx: &mut impl WorkspaceCx,
+) -> ActionResult {
+    match ws.worktree_placement(std::path::Path::new(&path)) {
+        WorktreePlacement::NotLinked => add_project(
+            ws, window_id, name, path, start_page, backend, terminals, settings, cx,
+        ),
+        WorktreePlacement::TopLevel { reason } => with_reply_field(
+            add_project(
+                ws, window_id, name, path, start_page, backend, terminals, settings, cx,
+            ),
+            "not_nested",
+            reason,
+        ),
+        WorktreePlacement::Nest { parent_id, found } => {
+            let worktree_path = found.worktree_path.clone();
+            let added = ws.add_found_worktree(found, &parent_id, window_id);
+            let started = start_tracked_worktree(
+                ws,
+                added,
+                &parent_id,
+                &worktree_path,
+                start_page,
+                backend,
+                terminals,
+                settings,
+                cx,
+            );
+            with_reply_field(started, "parent_project_id", parent_id)
+        }
+    }
+}
+
+/// Add `value` under `key` to a successful object reply.
+fn with_reply_field(result: ActionResult, key: &str, value: String) -> ActionResult {
+    match result {
+        ActionResult::Ok(Some(serde_json::Value::Object(mut map))) => {
+            map.insert(key.to_string(), serde_json::Value::String(value));
+            ActionResult::Ok(Some(serde_json::Value::Object(map)))
+        }
+        other => other,
+    }
+}
+
+pub(super) fn set_project_parent(
+    ws: &mut Workspace,
+    project_id: String,
+    parent_project_id: Option<String>,
+    cx: &mut impl WorkspaceCx,
+) -> ActionResult {
+    match ws.set_project_parent(&project_id, parent_project_id.as_deref(), cx) {
+        Ok(()) => ActionResult::Ok(None),
+        Err(error) => ActionResult::Err(error),
     }
 }
 
@@ -505,6 +573,11 @@ pub(super) fn create_worktree(
     };
     let project_path = std::path::PathBuf::from(&project.path);
     let (git_root, subdir) = okena_git::resolve_git_root_and_subdir(&project_path);
+    if let Err(error) =
+        ws.ensure_branch_free_for_worktree(&project_id, &git_root, &branch, create_branch)
+    {
+        return ActionResult::Err(error);
+    }
     let path_template = settings.worktree.path_template.clone();
     let (worktree_path, wt_project_path) =
         okena_git::compute_target_paths(&git_root, &subdir, &path_template, &branch);
@@ -578,14 +651,40 @@ pub(super) fn add_discovered_worktree(
     if ws.project(&parent_project_id).is_none() {
         return project_not_found(&parent_project_id);
     }
-    let new_id =
-        match ws.add_discovered_worktree(&worktree_path, &branch, &parent_project_id, window_id) {
-            Ok(id) => id,
-            Err(error) => return ActionResult::Err(error),
-        };
+    let added = ws.add_discovered_worktree(&worktree_path, &branch, &parent_project_id, window_id);
+    start_tracked_worktree(
+        ws,
+        added,
+        &parent_project_id,
+        &worktree_path,
+        start_page,
+        backend,
+        terminals,
+        settings,
+        cx,
+    )
+}
+
+/// Link the worktree row `added` just made to its parent and start its first
+/// pane. Replies with `project_id` and `terminal_id`.
+fn start_tracked_worktree(
+    ws: &mut Workspace,
+    added: Result<String, String>,
+    parent_project_id: &str,
+    worktree_path: &str,
+    start_page: bool,
+    backend: &dyn TerminalBackend,
+    terminals: &TerminalsRegistry,
+    settings: &AppSettings,
+    cx: &mut impl WorkspaceCx,
+) -> ActionResult {
+    let new_id = match added {
+        Ok(id) => id,
+        Err(error) => return ActionResult::Err(error),
+    };
     // Tracking it again is the user's answer to an earlier untrack.
-    ws.undismiss_worktree(std::path::Path::new(&worktree_path));
-    ws.add_to_worktree_ids(&parent_project_id, &new_id);
+    ws.undismiss_worktree(std::path::Path::new(worktree_path));
+    ws.add_to_worktree_ids(parent_project_id, &new_id);
     if start_page {
         ws.defer_initial_terminals(&new_id, cx);
     }
@@ -1338,6 +1437,73 @@ mod hook_action_tests {
             .collect();
         assert!(pages.iter().all(|page| page.cwd == cwd));
         assert_ne!(pages[0].id, pages[1].id);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    fn add_nesting(workspace: &mut Workspace, path: &std::path::Path) -> serde_json::Value {
+        let mut cx = TestCx {
+            monitor: HookMonitor::new(),
+        };
+        let result = super::add_project_nesting_worktree(
+            workspace,
+            crate::workspace::state::WindowId::Main,
+            "given name".to_string(),
+            path.to_string_lossy().into_owned(),
+            false,
+            &RecordingBackend::default(),
+            &TerminalsRegistry::default(),
+            &AppSettings::default(),
+            &mut cx,
+        );
+        let ActionResult::Ok(Some(reply)) = result else {
+            panic!("expected a reply naming the new project");
+        };
+        reply
+    }
+
+    #[test]
+    fn adding_a_linked_worktree_as_a_project_nests_it_under_its_main_checkout() {
+        let (dir, worktree) = linked_worktree_fixture("nest-add");
+        let main = std::fs::canonicalize(dir.join("main")).unwrap();
+        let mut data = workspace_with_hook("hook-1").data().clone();
+        data.projects[0].path = main.to_string_lossy().into_owned();
+        let mut workspace = Workspace::new(data);
+
+        let reply = add_nesting(&mut workspace, &worktree);
+        assert_eq!(reply["parent_project_id"], "p1");
+        assert!(reply.get("not_nested").is_none());
+        let id = reply["project_id"].as_str().unwrap().to_string();
+        let row = workspace.project(&id).unwrap();
+        let metadata = row.worktree_info.as_ref().expect("a worktree row");
+        assert_eq!(metadata.branch_name, "topic");
+        assert_eq!(row.path, worktree.to_string_lossy());
+        assert!(!reply["terminal_id"].is_null(), "it starts a terminal");
+        assert!(workspace.project("p1").unwrap().worktree_ids.contains(&id));
+        assert!(!workspace.data().project_order.contains(&id));
+
+        // The main checkout itself is an ordinary project.
+        let reply = add_nesting(&mut workspace, &main.join("packages/app"));
+        assert!(reply.get("parent_project_id").is_none());
+        assert!(reply.get("not_nested").is_none());
+        let id = reply["project_id"].as_str().unwrap();
+        assert!(workspace.project(id).unwrap().worktree_info.is_none());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_linked_worktree_without_its_parent_project_is_added_top_level_with_the_reason() {
+        let (dir, worktree) = linked_worktree_fixture("nest-orphan");
+        let mut workspace = workspace_with_hook("hook-1");
+
+        let reply = add_nesting(&mut workspace, &worktree);
+        assert!(reply.get("parent_project_id").is_none());
+        let reason = reply["not_nested"].as_str().expect("why it was not nested");
+        assert!(reason.contains("no project"), "{reason}");
+        let id = reply["project_id"].as_str().unwrap();
+        let row = workspace.project(id).unwrap();
+        assert!(row.worktree_info.is_none());
+        assert_eq!(row.name, "given name");
+        assert!(workspace.data().project_order.iter().any(|p| p == id));
         let _ = std::fs::remove_dir_all(dir);
     }
 

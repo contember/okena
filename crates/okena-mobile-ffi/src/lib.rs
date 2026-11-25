@@ -968,6 +968,7 @@ pub async fn add_project(
             start_page: false,
             name,
             path,
+            nest_worktree: false,
         },
     )
     .await

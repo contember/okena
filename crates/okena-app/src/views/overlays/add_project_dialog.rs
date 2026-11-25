@@ -261,6 +261,7 @@ impl AddProjectDialog {
                 start_page: false,
                 name: name.clone(),
                 path: path.clone(),
+                nest_worktree: false,
             },
             name,
             Some(path),

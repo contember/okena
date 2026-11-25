@@ -3676,17 +3676,27 @@ pub async fn daemon_command_loop(
                                 let (git_root, subdir) = okena_git::resolve_git_root_and_subdir(
                                     std::path::Path::new(&p.path),
                                 );
+                                // Refused here, before the optimistic row: a
+                                // background failure reaches a caller without
+                                // `wait` only as a toast.
+                                ws.ensure_branch_free_for_worktree(
+                                    &project_id,
+                                    &git_root,
+                                    &branch,
+                                    create_branch,
+                                )?;
                                 let (worktree_path, wt_project_path) =
                                     okena_git::compute_target_paths(
                                         &git_root, &subdir, &template, &branch,
                                     );
-                                (git_root, worktree_path, wt_project_path)
+                                Ok((git_root, worktree_path, wt_project_path))
                             })
                         };
 
                         match prepared {
                             None => CommandResult::Err(format!("project not found: {project_id}")),
-                            Some((git_root, worktree_path, wt_project_path)) => {
+                            Some(Err(error)) => CommandResult::Err(error),
+                            Some(Ok((git_root, worktree_path, wt_project_path))) => {
                                 // OPTIMISTIC CREATE (symmetric with the optimistic close):
                                 // register the worktree row NOW — deferred hooks, no
                                 // terminals, layout stays None so the client renders the
@@ -11043,6 +11053,65 @@ mod tests {
                 handle.await.expect("loop task joins");
             })
             .await;
+    }
+
+    /// A branch checked out in another worktree is refused before the
+    /// optimistic row exists, so a caller without `wait` gets the reason too.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn create_worktree_refuses_a_checked_out_branch_up_front() {
+        let repo = TempRepo::new();
+        let checkout = repo.0.with_extension("feat");
+        let out = std::process::Command::new("git")
+            .args(["worktree", "add", "-q", "-b", "feat"])
+            .arg(&checkout)
+            .current_dir(&repo.0)
+            .output()
+            .expect("run git");
+        assert!(out.status.success(), "git worktree add failed");
+
+        let h = harness();
+        *h.workspace.lock() = Workspace::new(split_parent_workspace(&repo, None));
+        let projects_before = h.workspace.lock().data().projects.len();
+        let workspace = h.workspace.clone();
+        let (bridge_tx, bridge_rx) = bridge_channel();
+
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async move {
+                let handle = h.spawn_loop(bridge_rx);
+                let create = |branch: &str| {
+                    RemoteCommand::Action(ActionRequest::CreateWorktree {
+                        project_id: "p1".to_string(),
+                        branch: branch.to_string(),
+                        create_branch: false,
+                        window: None,
+                        layout: None,
+                        terminal_name: None,
+                        wait: false,
+                        start_page: false,
+                    })
+                };
+                let refused = request(&bridge_tx, create("feat"), "feat").await;
+                let CommandResult::Err(message) = &refused else {
+                    panic!("expected a refusal, got {refused:?}");
+                };
+                assert!(
+                    message.contains("'feat' is already checked out"),
+                    "{message}"
+                );
+                assert!(message.contains("okena project add"), "{message}");
+                let refused = request(&bridge_tx, create("main"), "main").await;
+                assert!(
+                    matches!(&refused, CommandResult::Err(m) if m.contains("main checkout")),
+                    "{refused:?}"
+                );
+                drop(bridge_tx);
+                handle.await.expect("loop task joins");
+            })
+            .await;
+
+        assert_eq!(workspace.lock().data().projects.len(), projects_before);
+        std::fs::remove_dir_all(&checkout).ok();
     }
 
     /// `--new-branch` on a branch that already exists checks it out where it
