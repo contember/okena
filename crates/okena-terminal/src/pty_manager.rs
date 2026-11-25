@@ -1275,12 +1275,7 @@ impl PtyManager {
                     let handles = [cancel.as_raw_handle(), process.as_raw_handle()];
                     // SAFETY: both handles stay open throughout the wait.
                     let result = unsafe {
-                        WaitForMultipleObjects(
-                            u32::try_from(handles.len()).expect("two wait handles"),
-                            handles.as_ptr(),
-                            0,
-                            INFINITE,
-                        )
+                        WaitForMultipleObjects(handles.len() as u32, handles.as_ptr(), 0, INFINITE)
                     };
                     if result == WAIT_OBJECT_0 {
                         return;
