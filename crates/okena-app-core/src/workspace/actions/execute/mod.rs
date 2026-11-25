@@ -2039,8 +2039,9 @@ mod agent_resume_tests {
             "resume command missing from {args:?}"
         );
         // The pane keeps a shell after the agent exits.
+        let handoff = if cfg!(windows) { "cmd.exe /K" } else { "exec " };
         assert!(
-            args.iter().any(|a| a.contains("exec")),
+            args.iter().any(|a| a.contains(handoff)),
             "startup command must hand off to a shell: {args:?}"
         );
     }

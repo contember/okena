@@ -46,4 +46,5 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage
 # gpui (verified: zero `Compiling gpui`); the dependency only appears in the
 # `cargo tree` metadata graph, not in any compiled artifact.
 [dev-dependencies]
+dunce = "1"
 gpui = { workspace = true, features = ["test-support"] }

@@ -133,13 +133,13 @@ fn build_process_tree_windows() -> HashMap<u32, Vec<u32>> {
         }
         let fields: Vec<&str> = trimmed.split(',').collect();
         // CSV: Node,ParentProcessId,ProcessId
-        if fields.len() >= 3 {
-            if let (Ok(ppid), Ok(pid)) = (
+        if fields.len() >= 3
+            && let (Ok(ppid), Ok(pid)) = (
                 fields[1].trim().parse::<u32>(),
                 fields[2].trim().parse::<u32>(),
-            ) {
-                tree.entry(ppid).or_default().push(pid);
-            }
+            )
+        {
+            tree.entry(ppid).or_default().push(pid);
         }
     }
     tree

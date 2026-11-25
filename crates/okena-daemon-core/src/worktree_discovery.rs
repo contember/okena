@@ -489,7 +489,7 @@ mod tests {
 
     fn repo() -> Repo {
         let dir = tempfile::tempdir().unwrap();
-        let root = std::fs::canonicalize(dir.path()).unwrap().join("repo");
+        let root = canonical(dir.path()).join("repo");
         std::fs::create_dir_all(&root).unwrap();
         git(&root, &["init", "-q", "-b", "main"]);
         // A global `commit.gpgsign` would send every parallel test through
@@ -568,10 +568,10 @@ mod tests {
         ))
     }
 
-    fn discovered_paths(plan: &ScanPlan) -> Vec<&str> {
+    fn discovered_paths(plan: &ScanPlan) -> Vec<&Path> {
         plan.discovered
             .iter()
-            .map(|found| found.worktree.worktree_path.as_str())
+            .map(|found| Path::new(&found.worktree.worktree_path))
             .collect()
     }
 
@@ -592,7 +592,7 @@ mod tests {
 
         let plan = plan(&repo.workspace());
 
-        assert_eq!(discovered_paths(&plan), vec![session.as_str()]);
+        assert_eq!(discovered_paths(&plan), vec![Path::new(&session)]);
         assert_eq!(plan.discovered[0].parent_id, "parent");
         assert_eq!(plan.discovered[0].worktree.branch, "worktree-fix-login");
     }
@@ -611,7 +611,7 @@ mod tests {
 
         let plan = plan(&workspace);
 
-        assert_eq!(discovered_paths(&plan), vec![new.as_str()]);
+        assert_eq!(discovered_paths(&plan), vec![Path::new(&new)]);
         assert!(plan.gone_dismissals.is_empty());
     }
 
@@ -656,9 +656,12 @@ mod tests {
 
         let plan = plan(&Workspace::new(data));
 
-        assert_eq!(discovered_paths(&plan), vec![new.as_str()]);
+        assert_eq!(discovered_paths(&plan), vec![Path::new(&new)]);
         assert_eq!(plan.discovered[0].parent_id, "root");
-        assert_eq!(plan.discovered[0].worktree.project_path, new);
+        assert_eq!(
+            Path::new(&plan.discovered[0].worktree.project_path),
+            Path::new(&new)
+        );
     }
 
     #[test]
@@ -698,7 +701,7 @@ mod tests {
         let plan = plan(&workspace);
 
         assert!(
-            !discovered_paths(&plan).contains(&nested.as_str()),
+            !discovered_paths(&plan).contains(&Path::new(&nested)),
             "{:?}",
             plan.discovered
         );
@@ -715,7 +718,7 @@ mod tests {
 
         let rows = child_rows(&workspace);
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].path, new);
+        assert_eq!(Path::new(&rows[0].path), Path::new(&new));
         assert!(rows[0].layout.is_none(), "no pane waiting for a PTY");
         let parent = workspace.project("parent").unwrap();
         assert_eq!(parent.worktree_ids, vec![rows[0].id.clone()]);

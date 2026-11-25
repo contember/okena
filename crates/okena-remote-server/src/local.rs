@@ -19,6 +19,7 @@ use okena_transport::client::{LOCAL_DAEMON_CONNECTION_ID, LocalEndpoint, RemoteC
 use okena_workspace::persistence::config_dir;
 use rand::Rng as _;
 use serde::Deserialize;
+#[cfg(unix)]
 use sha2::{Digest, Sha256};
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::{Path, PathBuf};
@@ -1169,6 +1170,8 @@ fn blocking_client_and_url(
     path: &str,
     local_endpoint: Option<&LocalEndpoint>,
 ) -> (reqwest::blocking::Client, String) {
+    #[cfg(not(unix))]
+    let _ = local_endpoint;
     #[cfg(unix)]
     if let Some(LocalEndpoint::UnixSocket { path: socket_path }) = local_endpoint {
         if local_socket_dir_is_private(socket_path) {

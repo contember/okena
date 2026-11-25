@@ -7114,6 +7114,7 @@ dependencies = [
  "serde",
  "serde_json",
  "uuid",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -7300,6 +7301,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "dirs 5.0.1",
+ "dunce",
  "fs2",
  "gpui-fast",
  "libc",

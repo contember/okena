@@ -133,7 +133,9 @@ impl RemoteServer {
             );
         }
 
-        let mut local_endpoint = crate::local::default_local_endpoint();
+        let local_endpoint = crate::local::default_local_endpoint();
+        #[cfg(unix)]
+        let mut local_endpoint = local_endpoint;
         #[cfg(unix)]
         let local_listener = match &local_endpoint {
             Some(LocalEndpoint::UnixSocket { path }) => {

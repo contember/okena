@@ -259,6 +259,30 @@ pub(crate) fn single_threaded<'repo, P: gix::Progress>(
     platform.index_worktree_options_mut(|opts| opts.thread_limit = Some(1))
 }
 
+/// Git's slash-delimited path prefix for untracked files inside the queried project.
+pub(crate) fn untracked_prefix(query_path: &Path, workdir: &Path) -> String {
+    let canonical_query = query_path
+        .canonicalize()
+        .unwrap_or_else(|_| query_path.to_path_buf());
+    let canonical_workdir = workdir
+        .canonicalize()
+        .unwrap_or_else(|_| workdir.to_path_buf());
+    canonical_query
+        .strip_prefix(&canonical_workdir)
+        .ok()
+        .map(|p| {
+            let path = p.to_string_lossy();
+            let path =
+                gix::path::to_unix_separators_on_windows(gix::bstr::BStr::new(path.as_bytes()));
+            if path.is_empty() {
+                String::new()
+            } else {
+                format!("{path}/")
+            }
+        })
+        .unwrap_or_default()
+}
+
 /// List untracked files honoring `.gitignore`, scoped to the subtree at
 /// `query_path` but named the way git names them: **relative to the worktree
 /// root**, so a monorepo subdir project's untracked paths share one base with
@@ -273,26 +297,7 @@ pub(crate) fn list_untracked_files(query_path: &Path) -> Option<Vec<String>> {
     let repo = open(query_path)?;
     let workdir = repo.workdir()?;
 
-    // Compute the prefix from workdir to query_path. Empty when query_path
-    // is the workdir itself.
-    let canonical_query = query_path
-        .canonicalize()
-        .unwrap_or_else(|_| query_path.to_path_buf());
-    let canonical_workdir = workdir
-        .canonicalize()
-        .unwrap_or_else(|_| workdir.to_path_buf());
-    let prefix: String = canonical_query
-        .strip_prefix(&canonical_workdir)
-        .ok()
-        .map(|p| {
-            let s = p.to_string_lossy().to_string();
-            if s.is_empty() {
-                String::new()
-            } else {
-                format!("{}/", s)
-            }
-        })
-        .unwrap_or_default();
+    let prefix = untracked_prefix(query_path, workdir);
 
     let platform = match repo.status(gix::progress::Discard) {
         Ok(p) => p,
@@ -428,6 +433,7 @@ mod tests {
     }
 
     /// Worktree paths whose content differs from the index, per gix status.
+    #[cfg(unix)]
     fn changed_paths(repo: &Path) -> Vec<String> {
         let repo = open(repo).expect("open repo");
         single_threaded(repo.status(gix::progress::Discard).expect("status"))
@@ -552,6 +558,7 @@ mod tests {
     /// A repo whose `*.bin` files go through a `clean` filter that logs each run
     /// to the returned file. Every tracked file is dated two minutes back, so
     /// none of them is racy against the index.
+    #[cfg(unix)]
     fn repo_with_logging_clean_filter() -> (tempfile::TempDir, PathBuf, PathBuf) {
         let (tmp, repo) = init_temp_repo();
         let log = repo.join(".git").join("clean-runs");
@@ -583,6 +590,7 @@ mod tests {
         (tmp, repo, log)
     }
 
+    #[cfg(unix)]
     fn clean_runs(log: &Path) -> usize {
         std::fs::read_to_string(log)
             .map(|s| s.lines().count())
@@ -590,6 +598,7 @@ mod tests {
     }
 
     /// How a status walk of `repo` judged its tracked files.
+    #[cfg(unix)]
     fn tracked_file_stats(repo: &Path) -> gix::status::plumbing::index_as_worktree::Outcome {
         let repo = open(repo).expect("open repo");
         let mut iter = single_threaded(repo.status(gix::progress::Discard).expect("status"))
@@ -608,6 +617,7 @@ mod tests {
 
     /// Poll, let the index refresh it triggers finish, and poll again: only the
     /// first poll may run the clean filter.
+    #[cfg(unix)]
     fn assert_only_the_first_poll_cleans(repo: &Path, log: &Path) {
         let _ = crate::repository::get_status(repo);
         wait_for_index_refresh(repo);

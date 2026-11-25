@@ -148,6 +148,7 @@ pub(crate) mod test_support {
                 .expect("git command failed")
         };
         r(&["init", "-b", "main"]);
+        git_in(&repo, &["config", "core.autocrlf", "false"]);
         std::fs::write(repo.join("file.txt"), "x").unwrap();
         r(&["add", "."]);
         r(&["-c", "commit.gpgsign=false", "commit", "-m", "init"]);

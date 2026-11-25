@@ -4751,7 +4751,7 @@ mod gpui_tests {
             assert_eq!(ws.project("root").unwrap().path, path_str(&moved));
             assert_eq!(
                 ws.project("nested").unwrap().path,
-                path_str(&moved.join("packages/app"))
+                path_str(&moved.join("packages").join("app"))
             );
         });
         std::fs::remove_dir_all(moved.parent().unwrap()).ok();

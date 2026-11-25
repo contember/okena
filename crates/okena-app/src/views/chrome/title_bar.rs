@@ -337,6 +337,8 @@ impl Render for TitleBar {
                         #[cfg(target_os = "linux")]
                         window.zoom_window();
                     }
+                    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+                    let _ = window;
                 })
             })
             .child(

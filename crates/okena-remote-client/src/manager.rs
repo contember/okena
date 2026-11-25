@@ -1512,7 +1512,17 @@ mod tests {
     fn accept_until(listener: &TcpListener, deadline: Instant) -> TcpStream {
         loop {
             match listener.accept() {
-                Ok((stream, _)) => return stream,
+                Ok((stream, _)) => {
+                    // Winsock inherits the listener's nonblocking mode. The
+                    // HTTP request parser below expects blocking reads.
+                    stream.set_nonblocking(false).unwrap();
+                    let remaining = deadline
+                        .saturating_duration_since(Instant::now())
+                        .max(Duration::from_millis(1));
+                    stream.set_read_timeout(Some(remaining)).unwrap();
+                    stream.set_write_timeout(Some(remaining)).unwrap();
+                    return stream;
+                }
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                     assert!(Instant::now() < deadline, "timed out waiting for request");
                     std::thread::sleep(Duration::from_millis(5));
@@ -1527,7 +1537,11 @@ mod tests {
         let mut content_length = 0;
         loop {
             let mut line = String::new();
-            reader.read_line(&mut line).unwrap();
+            assert_ne!(
+                reader.read_line(&mut line).unwrap(),
+                0,
+                "connection closed before the HTTP headers ended"
+            );
             if line == "\r\n" {
                 break;
             }

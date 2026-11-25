@@ -1,4 +1,6 @@
-use crate::client::config::{LOCAL_DAEMON_CONNECTION_ID, LocalEndpoint, RemoteConnectionConfig};
+#[cfg(any(unix, test))]
+use crate::client::config::LocalEndpoint;
+use crate::client::config::{LOCAL_DAEMON_CONNECTION_ID, RemoteConnectionConfig};
 use crate::client::id::make_prefixed_id;
 use crate::client::state::{
     collect_all_terminal_ids, collect_state_terminal_ids, collect_terminal_sizes, diff_states,
@@ -3428,8 +3430,13 @@ mod tests {
     }
 
     #[test]
-    fn plain_http_and_unix_transports_have_no_certificate_to_adopt() {
+    fn plain_http_has_no_certificate_to_adopt() {
         assert!(!needs_certificate_adoption(&tls_config(None), false));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_transport_has_no_certificate_to_adopt() {
         assert!(!needs_certificate_adoption(
             &config(LOCAL_DAEMON_CONNECTION_ID, unix_endpoint()),
             true
