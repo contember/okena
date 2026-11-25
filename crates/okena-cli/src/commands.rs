@@ -1333,13 +1333,17 @@ pub fn cli_project_add(
         }
     };
 
-    // A worktree row cannot live in a folder, so `--folder` keeps it top-level.
-    let body = serde_json::json!({
+    let mut body = serde_json::json!({
         "action": "add_project",
         "name": project_name,
         "path": abs_str,
-        "nest_worktree": !top_level && folder.is_none(),
     });
+    // A worktree row cannot live in a folder, so `--folder` keeps it top-level.
+    // Sent only when on: a daemon older than the field refuses unknown fields,
+    // and `--top-level` must keep working against it.
+    if !top_level && folder.is_none() {
+        body["nest_worktree"] = serde_json::Value::Bool(true);
+    }
     let resp = match api_action(&token, &body.to_string()) {
         Ok(r) => r,
         Err(e) => {
