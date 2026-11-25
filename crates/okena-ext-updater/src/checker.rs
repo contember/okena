@@ -35,6 +35,8 @@ pub struct RevertRelease {
     pub config_snapshot: Option<okena_core::profiles::ConfigSnapshot>,
     #[serde(default)]
     pub legacy_nightly: bool,
+    #[serde(default)]
+    pub newer: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -141,7 +143,7 @@ fn package_offer(release: &serde_json::Value, app_version: &str) -> Result<Optio
     Ok(stable_offer(release, app_version, false)?.filter(|_| has_archive))
 }
 
-/// List published versions available for manual installation in the selected channel.
+/// List published versions available for manual installation.
 pub async fn list_revert_releases(
     app_version: String,
     channel: UpdateChannel,
@@ -171,17 +173,52 @@ pub async fn list_release_notes(
     })
 }
 
-/// Revalidate the exact, selected-channel target before downloading.
+/// Revalidate the exact, selected version before downloading.
 pub async fn release_for_revert(
     app_version: String,
     target: String,
     channel: UpdateChannel,
-) -> Result<ReleaseAsset> {
-    smol::unblock(move || match channel {
-        UpdateChannel::Release => release_for_revert_blocking(&app_version, &target),
-        UpdateChannel::Nightly => {
-            nightly_for_revert(&app_version, &target, BUILD_INFO.nightly.as_ref())
-        }
+) -> Result<(ReleaseAsset, bool)> {
+    smol::unblock(move || {
+        let running = BUILD_INFO.nightly.as_ref();
+        let (asset, published_at) =
+            if channel == UpdateChannel::Nightly && nightly_tag_parts(&target).is_some() {
+                nightly_for_revert(&app_version, &target, running)
+            } else {
+                release_for_revert_with(
+                    &app_version,
+                    &target,
+                    channel,
+                    running.is_some(),
+                    |url, label| fetch_json(url, &app_version, label),
+                    fetch_release_file,
+                )
+            }?;
+        let current = Version::parse(&app_version).context("invalid current version")?;
+        let target_version = Version::parse(&asset.version).ok();
+        let running_release =
+            if history_needs_publication(target_version.as_ref(), &current, running.is_some()) {
+                let tag = running.map_or_else(|| format!("v{current}"), |build| build.tag.clone());
+                fetch_json(
+                    &format!("{RELEASES_URL}/tags/{tag}"),
+                    &app_version,
+                    "updater.revert.running_release",
+                )
+                .ok()
+            } else {
+                None
+            };
+        let running_publication = running_release
+            .as_ref()
+            .and_then(|release| history_running_publication(release, &current, running));
+        let newer = history_install_is_newer(
+            target_version.as_ref(),
+            &current,
+            running.is_some(),
+            &published_at,
+            running_publication,
+        );
+        Ok((asset, newer))
     })
     .await
 }
@@ -499,21 +536,88 @@ fn catalog_for_channel(
     snapshots: Option<&okena_core::profiles::ProfilePaths>,
     fetch: impl Fn(&str) -> Result<Vec<u8>> + Sync,
 ) -> Result<ReleaseCatalog> {
-    let releases = match channel {
-        UpdateChannel::Release => {
-            let current = Version::parse(app_version).context("invalid current version")?;
-            releases
-                .iter()
-                .filter_map(|release| catalog_release(release, &current, snapshots))
-                .collect()
+    let current = Version::parse(app_version).context("invalid current version")?;
+    let mut versions: Vec<_> = releases
+        .iter()
+        .filter_map(|release| {
+            catalog_release(release, &current, channel, running.is_some(), snapshots)
+        })
+        .collect();
+    if channel == UpdateChannel::Nightly {
+        match nightly_catalog(releases, running, &fetch) {
+            Ok(nightlies) => versions.extend(nightlies),
+            Err(error) if versions.is_empty() => return Err(error),
+            Err(error) => log::warn!("Could not load nightly history: {error}"),
         }
-        UpdateChannel::Nightly => nightly_catalog(releases, running, &fetch)?,
-    };
+        let running_publication = releases
+            .iter()
+            .find_map(|release| history_running_publication(release, &current, running));
+        for row in &mut versions {
+            row.newer = history_install_is_newer(
+                Version::parse(&row.version).ok().as_ref(),
+                &current,
+                running.is_some(),
+                &row.published_at,
+                running_publication,
+            );
+        }
+        // GitHub publishes UTC timestamps in a fixed-width RFC 3339 format.
+        versions.sort_by(|a, b| b.published_at.cmp(&a.published_at));
+    }
     Ok(ReleaseCatalog {
         current_version: app_version.to_owned(),
         channel,
-        releases,
+        releases: versions,
     })
+}
+
+fn history_needs_publication(
+    target: Option<&Version>,
+    current: &Version,
+    running_nightly: bool,
+) -> bool {
+    match target {
+        Some(target) => running_nightly && target == current,
+        None => !running_nightly,
+    }
+}
+
+fn history_install_is_newer(
+    target: Option<&Version>,
+    current: &Version,
+    running_nightly: bool,
+    target_publication: &str,
+    running_publication: Option<&str>,
+) -> bool {
+    target.is_some_and(|version| version > current)
+        || (history_needs_publication(target, current, running_nightly)
+            && running_publication.is_some_and(|published_at| target_publication > published_at))
+}
+
+fn history_running_publication<'a>(
+    release: &'a serde_json::Value,
+    current: &Version,
+    running: Option<&NightlyBuild>,
+) -> Option<&'a str> {
+    if let Some(running) = running {
+        let nightly = PublishedNightly::from_release(release)?;
+        // Unlike legacy-nightly eligibility, comparison with a stable release
+        // uses the actual publication time even when the build crosses midnight.
+        return (nightly.tag == running.tag && nightly.sha == running.sha)
+            .then_some(nightly.published_at);
+    }
+    if is_stable_release(release)
+        && release["tag_name"]
+            .as_str()
+            .and_then(parse_release_version)
+            .as_ref()
+            == Some(current)
+    {
+        return release["published_at"]
+            .as_str()
+            .filter(|date| !date.is_empty());
+    }
+    None
 }
 
 fn nightly_catalog(
@@ -593,6 +697,7 @@ fn nightly_catalog(
             asset_name: platform_asset_name().to_owned(),
             config_snapshot: None,
             legacy_nightly: run == NightlyHistoryOrder::Legacy,
+            newer: false,
         })
         .collect())
 }
@@ -658,7 +763,7 @@ fn nightly_for_revert(
     app_version: &str,
     target: &str,
     running: Option<&NightlyBuild>,
-) -> Result<ReleaseAsset> {
+) -> Result<(ReleaseAsset, String)> {
     anyhow::ensure!(nightly_tag_parts(target).is_some(), "invalid nightly tag");
     let response = fetch_json(
         &format!("{RELEASES_URL}/tags/{target}"),
@@ -687,13 +792,20 @@ fn nightly_for_revert(
         .as_ref()
         .zip(running)
         .and_then(|(release, running)| running_nightly_publication(release, running));
-    resolve_nightly_revert(
+    let asset = resolve_nightly_revert(
         &response,
         target,
         running,
         running_publication,
         fetch_release_file,
-    )
+    )?;
+    Ok((
+        asset,
+        response["published_at"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned(),
+    ))
 }
 
 fn resolve_nightly_revert(
@@ -778,25 +890,18 @@ fn release_note(version: &Version, release: &serde_json::Value) -> ReleaseNote {
     }
 }
 
-fn release_for_revert_blocking(app_version: &str, target: &str) -> Result<ReleaseAsset> {
-    release_for_revert_with(
-        app_version,
-        target,
-        |url, label| fetch_json(url, app_version, label),
-        fetch_release_file,
-    )
-}
-
 fn release_for_revert_with(
     app_version: &str,
     target: &str,
+    channel: UpdateChannel,
+    running_nightly: bool,
     fetch_release: impl FnOnce(&str, &'static str) -> Result<serde_json::Value>,
     fetch: impl FnMut(&str) -> Result<Vec<u8>>,
-) -> Result<ReleaseAsset> {
+) -> Result<(ReleaseAsset, String)> {
     let target = Version::parse(target).context("invalid target version")?;
     let current = Version::parse(app_version).context("invalid current version")?;
-    if target >= current {
-        anyhow::bail!("revert target v{target} must be older than v{current}");
+    if !stable_history_target(&target, &current, channel, running_nightly) {
+        anyhow::bail!("release v{target} is unavailable for manual installation from v{current}");
     }
     let response = fetch_release(
         &format!("{RELEASES_URL}/tags/v{target}"),
@@ -812,8 +917,15 @@ fn release_for_revert_with(
     {
         anyhow::bail!("release v{target} is not stable");
     }
-    release_asset(&response, &target, fetch)?
-        .with_context(|| format!("release v{target} has no asset for this platform"))
+    let asset = release_asset(&response, &target, fetch)?
+        .with_context(|| format!("release v{target} has no asset for this platform"))?;
+    Ok((
+        asset,
+        response["published_at"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned(),
+    ))
 }
 
 fn fetch_json(url: &str, app_version: &str, label: &'static str) -> Result<serde_json::Value> {
@@ -864,9 +976,24 @@ fn release_asset(
     }))
 }
 
+fn stable_history_target(
+    version: &Version,
+    current: &Version,
+    channel: UpdateChannel,
+    running_nightly: bool,
+) -> bool {
+    version.pre.is_empty()
+        && match channel {
+            UpdateChannel::Release => version < current,
+            UpdateChannel::Nightly => running_nightly || version != current,
+        }
+}
+
 fn catalog_release(
     release: &serde_json::Value,
     current: &Version,
+    channel: UpdateChannel,
+    running_nightly: bool,
     paths: Option<&okena_core::profiles::ProfilePaths>,
 ) -> Option<RevertRelease> {
     if !is_stable_release(release) {
@@ -874,7 +1001,7 @@ fn catalog_release(
     }
     let tag = release["tag_name"].as_str()?;
     let version = Version::parse(tag.strip_prefix('v').unwrap_or(tag)).ok()?;
-    if !version.pre.is_empty() || version >= *current {
+    if !stable_history_target(&version, current, channel, running_nightly) {
         return None;
     }
     // Only releases that publish checksums can be installed, so only those are offered.
@@ -884,6 +1011,7 @@ fn catalog_release(
     let version = version.to_string();
     Some(RevertRelease {
         legacy_nightly: false,
+        newer: false,
         config_snapshot: paths
             .and_then(|paths| okena_core::profiles::config_snapshot_for_version(paths, &version)),
         version,
@@ -982,7 +1110,7 @@ mod tests {
         let current = Version::parse("0.27.0").unwrap();
         let offered = |version, draft, prerelease, has_asset| {
             let release = with_checksums(release(version, draft, prerelease, has_asset));
-            catalog_release(&release, &current, None).is_some()
+            catalog_release(&release, &current, UpdateChannel::Release, false, None).is_some()
         };
         assert!(offered("0.26.0", false, false, true));
         assert!(!offered("0.28.0", false, false, true));
@@ -999,7 +1127,9 @@ mod tests {
         for prerelease in [true, false] {
             let mut nightly = release("0.26.0", false, prerelease, true);
             nightly["tag_name"] = "nightly-20261120-50c64ec".into();
-            assert!(catalog_release(&nightly, &current, None).is_none());
+            assert!(
+                catalog_release(&nightly, &current, UpdateChannel::Release, false, None).is_none()
+            );
             assert!(published_notes(std::slice::from_ref(&nightly)).is_empty());
             assert!(
                 stable_update_asset(&nightly, "0.27.0", true, |_| {
@@ -1075,17 +1205,29 @@ mod tests {
         let current = Version::parse("0.42.0").unwrap();
         let no_sums = |_: &str| -> Result<Vec<u8>> { panic!("no SHA256SUMS asset to fetch") };
         assert!(stable_update_asset(&unverifiable, "0.39.0", false, no_sums).is_err());
-        assert!(catalog_release(&unverifiable, &current, None).is_none());
-        let error =
-            release_for_revert_with("0.42.0", "0.40.0", |_, _| Ok(unverifiable.clone()), no_sums)
-                .unwrap_err();
+        assert!(
+            catalog_release(&unverifiable, &current, UpdateChannel::Release, false, None).is_none()
+        );
+        let error = release_for_revert_with(
+            "0.42.0",
+            "0.40.0",
+            UpdateChannel::Release,
+            false,
+            |_, _| Ok(unverifiable.clone()),
+            no_sums,
+        )
+        .unwrap_err();
         assert!(error.to_string().contains("SHA256SUMS"), "{error}");
 
         let verifiable = with_checksums(release("0.40.0", false, false, true));
-        assert!(catalog_release(&verifiable, &current, None).is_some());
-        let revert = release_for_revert_with(
+        assert!(
+            catalog_release(&verifiable, &current, UpdateChannel::Release, false, None).is_some()
+        );
+        let (revert, _) = release_for_revert_with(
             "0.42.0",
             "0.40.0",
+            UpdateChannel::Release,
+            false,
             |_, _| Ok(verifiable.clone()),
             stable_sums,
         )
@@ -1094,8 +1236,15 @@ mod tests {
 
         let unlisted = |_: &str| Ok(format!("{}  other.zip\n", "ab".repeat(32)).into_bytes());
         assert!(
-            release_for_revert_with("0.42.0", "0.40.0", |_, _| Ok(verifiable.clone()), unlisted)
-                .is_err()
+            release_for_revert_with(
+                "0.42.0",
+                "0.40.0",
+                UpdateChannel::Release,
+                false,
+                |_, _| Ok(verifiable.clone()),
+                unlisted
+            )
+            .is_err()
         );
     }
 
@@ -1336,10 +1485,10 @@ mod tests {
     }
 
     #[test]
-    fn history_uses_the_selected_channel_and_lists_only_older_nightly_runs() {
+    fn nightly_history_interleaves_stable_releases_and_older_nightly_runs_by_publication() {
         let running_fixture = nightly_fixture("3333333", 23);
         let running: NightlyBuild = serde_json::from_slice(&running_fixture.1).unwrap();
-        let fixtures = [
+        let mut fixtures = [
             nightly_fixture("1111111", 19),
             running_fixture,
             nightly_fixture("2222222", 22),
@@ -1347,7 +1496,16 @@ mod tests {
             legacy_fixture("20261121", "5555555"),
             legacy_fixture("20261122", "6666666"),
         ];
-        let mut releases = vec![with_checksums(release("0.41.0", false, false, true))];
+        let mut releases = vec![
+            with_checksums(release("0.44.0", false, false, true)),
+            with_checksums(release("0.42.0", false, false, true)),
+            with_checksums(release("0.41.0", false, false, true)),
+        ];
+        fixtures[0].0["published_at"] = "2026-11-22T11:00:00Z".into();
+        fixtures[2].0["published_at"] = "2026-11-22T11:50:00Z".into();
+        fixtures[4].0["published_at"] = "2026-11-21T23:00:00Z".into();
+        releases[0]["published_at"] = "2026-11-23T12:00:00Z".into();
+        releases[1]["published_at"] = "2026-11-22T11:30:00Z".into();
         releases.extend(fixtures.iter().map(|fixture| fixture.0.clone()));
 
         let stable = catalog_for_channel(
@@ -1381,9 +1539,12 @@ mod tests {
                 .map(|row| row.version.as_str())
                 .collect::<Vec<_>>(),
             [
+                "0.44.0",
                 "nightly-20261122-2222222",
+                "0.42.0",
                 "nightly-20261122-1111111",
-                "nightly-20261121-5555555"
+                "nightly-20261121-5555555",
+                "0.41.0",
             ],
         );
         assert!(
@@ -1392,9 +1553,32 @@ mod tests {
                 .iter()
                 .all(|row| row.config_snapshot.is_none())
         );
-        assert!(!nightly.releases[0].legacy_nightly);
-        assert!(nightly.releases[2].legacy_nightly);
+        assert!(!nightly.releases[1].legacy_nightly);
+        assert!(nightly.releases[4].legacy_nightly);
+        assert!(nightly.releases[0].newer);
+        assert!(nightly.releases[1..].iter().all(|row| !row.newer));
 
+        // Releasing the same version after the running nightly is an upgrade.
+        releases[1]["published_at"] = "2026-11-22T12:10:00Z".into();
+        let after_stable_release = catalog_for_channel(
+            &releases,
+            "0.42.0",
+            UpdateChannel::Nightly,
+            Some(&running),
+            None,
+            |url| history_fixture_asset(&fixtures, url),
+        )
+        .unwrap();
+        assert!(
+            after_stable_release
+                .releases
+                .iter()
+                .any(|row| row.version == "0.42.0" && row.newer)
+        );
+
+        let mut current_release = with_checksums(release("0.43.0", false, false, true));
+        current_release["published_at"] = "2026-11-22T11:30:00Z".into();
+        releases.push(current_release);
         let stable_running = catalog_for_channel(
             &releases,
             "0.43.0",
@@ -1405,7 +1589,95 @@ mod tests {
         )
         .unwrap();
         assert_eq!(stable_running.current_version, "0.43.0");
-        assert_eq!(stable_running.releases.len(), 6);
+        assert_eq!(stable_running.releases.len(), 9);
+        assert!(
+            stable_running
+                .releases
+                .iter()
+                .any(|row| row.version == "nightly-20261122-2222222" && row.newer)
+        );
+        assert!(
+            stable_running
+                .releases
+                .iter()
+                .any(|row| row.version == "nightly-20261122-1111111" && !row.newer)
+        );
+    }
+
+    #[test]
+    fn equal_version_needs_proof_of_publication_order() {
+        let mut fixture = nightly_fixture("3333333", 23);
+        let running: NightlyBuild = serde_json::from_slice(&fixture.1).unwrap();
+        let current = Version::new(0, 42, 0);
+        let target_publication = "2026-11-23T00:06:00Z";
+
+        assert!(!history_install_is_newer(
+            Some(&current),
+            &current,
+            true,
+            target_publication,
+            None,
+        ));
+        fixture.0["published_at"] = "2026-11-23T00:05:00Z".into();
+        let published_at = history_running_publication(&fixture.0, &current, Some(&running));
+        assert_eq!(published_at, Some("2026-11-23T00:05:00Z"));
+        assert!(history_install_is_newer(
+            Some(&current),
+            &current,
+            true,
+            target_publication,
+            published_at,
+        ));
+    }
+
+    #[test]
+    fn stable_versions_are_available_when_nightly_metadata_is_unreachable() {
+        let fixtures = [
+            with_checksums(release("0.44.0", false, false, true)),
+            nightly_fixture("1111111", 19).0,
+        ];
+        let catalog = catalog_for_channel(
+            &fixtures,
+            "0.43.0",
+            UpdateChannel::Nightly,
+            None,
+            None,
+            |_| anyhow::bail!("nightly asset request failed"),
+        )
+        .unwrap();
+        assert_eq!(catalog.releases.len(), 1);
+        assert_eq!(catalog.releases[0].version, "0.44.0");
+        assert!(catalog.releases[0].newer);
+    }
+
+    #[test]
+    fn newer_stable_can_be_installed_explicitly_while_following_nightly() {
+        let release = with_checksums(release("0.44.0", false, false, true));
+        let (asset, _) = release_for_revert_with(
+            "0.43.0",
+            "0.44.0",
+            UpdateChannel::Nightly,
+            true,
+            |url, _| {
+                assert!(url.ends_with("/tags/v0.44.0"));
+                Ok(release.clone())
+            },
+            stable_sums,
+        )
+        .unwrap();
+        assert_eq!(asset.version, "0.44.0");
+
+        assert!(
+            release_for_revert_with(
+                "0.43.0",
+                "0.44.0",
+                UpdateChannel::Release,
+                false,
+                |_, _| panic!("Release history cannot install a newer target"),
+                stable_sums,
+            )
+            .is_err()
+        );
     }
 
     #[test]

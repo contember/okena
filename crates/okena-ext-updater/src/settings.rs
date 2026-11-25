@@ -22,7 +22,7 @@ enum CatalogState {
 
 #[derive(Clone)]
 enum InstallSelection {
-    PreviousRelease(String),
+    CatalogVersion(String),
     StableReturn(String),
 }
 
@@ -162,10 +162,10 @@ impl UpdaterSettingsView {
     fn selected_install(
         &self,
         cx: &App,
-    ) -> Option<(InstallSelection, Option<ConfigSnapshot>, bool)> {
+    ) -> Option<(InstallSelection, Option<ConfigSnapshot>, bool, bool)> {
         let selection = self.selection.clone()?;
-        let (config, legacy_nightly) = match &selection {
-            InstallSelection::PreviousRelease(version) => {
+        let (config, legacy_nightly, newer) = match &selection {
+            InstallSelection::CatalogVersion(version) => {
                 let CatalogState::Loaded(catalog) = &self.catalog else {
                     return None;
                 };
@@ -173,7 +173,11 @@ impl UpdaterSettingsView {
                     .releases
                     .iter()
                     .find(|release| &release.version == version)?;
-                (release.config_snapshot.clone(), release.legacy_nightly)
+                (
+                    release.config_snapshot.clone(),
+                    release.legacy_nightly,
+                    release.newer,
+                )
             }
             InstallSelection::StableReturn(version) => {
                 let snapshot = cx.try_global::<GlobalUpdateInfo>()?.0.snapshot();
@@ -182,10 +186,10 @@ impl UpdaterSettingsView {
                 {
                     return None;
                 }
-                (snapshot.stable_return_config, false)
+                (snapshot.stable_return_config, false, false)
             }
         };
-        Some((selection, config, legacy_nightly))
+        Some((selection, config, legacy_nightly, newer))
     }
 
     fn render_status(&self, t: &ThemeColors, cx: &App) -> Option<AnyElement> {
@@ -533,7 +537,7 @@ impl UpdaterSettingsView {
             .child(
                 button(
                     ElementId::Name(format!("select-revert-{version}").into()),
-                    "Revert",
+                    if release.newer { "Install" } else { "Revert" },
                     t,
                 )
                 .when(!can_revert, |button| button.opacity(0.45).cursor_default())
@@ -544,7 +548,7 @@ impl UpdaterSettingsView {
                         {
                             return;
                         }
-                        this.selection = Some(InstallSelection::PreviousRelease(version.clone()));
+                        this.selection = Some(InstallSelection::CatalogVersion(version.clone()));
                         this.keep_config = keep_config;
                         this.request_error = None;
                         cx.notify();
@@ -559,18 +563,25 @@ impl UpdaterSettingsView {
         selection: InstallSelection,
         snapshot: Option<ConfigSnapshot>,
         legacy_nightly: bool,
+        newer: bool,
         t: &ThemeColors,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let nightly_target = matches!(
+            &selection,
+            InstallSelection::CatalogVersion(version) if version.starts_with("nightly-")
+        );
         let (version, title, action) = match &selection {
-            InstallSelection::PreviousRelease(version) => (
+            InstallSelection::CatalogVersion(version) => (
                 crate::update_version_label(version),
-                if self.catalog_channel == UpdateChannel::Nightly {
+                if newer {
+                    "Confirm version installation"
+                } else if nightly_target {
                     "Confirm nightly revert"
                 } else {
                     "Confirm version revert"
                 },
-                "Revert to",
+                if newer { "Install" } else { "Revert to" },
             ),
             InstallSelection::StableReturn(version) => (
                 crate::update_version_label(version),
@@ -579,10 +590,9 @@ impl UpdaterSettingsView {
             ),
         };
         let restore_config = snapshot.is_some() && !self.keep_config;
-        let historical = matches!(&selection, InstallSelection::PreviousRelease(_));
-        let stable_to_nightly = historical
-            && self.catalog_channel == UpdateChannel::Nightly
-            && BUILD_INFO.nightly.is_none();
+        let historical = matches!(&selection, InstallSelection::CatalogVersion(_));
+        let stable_to_nightly = nightly_target && !newer && BUILD_INFO.nightly.is_none();
+        let channel = self.catalog_channel;
         let request = self.catalog_request;
         let block_reason = historical.then(|| Self::revert_block_reason(cx)).flatten();
         let can_submit = !self.submitting && block_reason.is_none();
@@ -602,7 +612,11 @@ impl UpdaterSettingsView {
                                 div()
                                     .text_size(ui_text(13.0, cx))
                                     .text_color(rgb(t.text_primary))
-                                    .child(format!("Install Okena {version}")),
+                                    .child(if historical && !newer {
+                                        format!("Revert Okena to {version}")
+                                    } else {
+                                        format!("Install Okena {version}")
+                                    }),
                             )
                             .child(
                                 div()
@@ -712,10 +726,11 @@ impl UpdaterSettingsView {
                                             let selection = selection.clone();
                                             this.submit(
                                                 move || match selection {
-                                                    InstallSelection::PreviousRelease(version) => {
+                                                    InstallSelection::CatalogVersion(version) => {
                                                         crate::daemon_client::request_revert(
                                                             &version,
                                                             !restore_config,
+                                                            channel,
                                                         )
                                                     }
                                                     InstallSelection::StableReturn(version) => {
@@ -826,8 +841,8 @@ impl UpdaterSettingsView {
 impl Render for UpdaterSettingsView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
-        if let Some((selection, config, legacy_nightly)) = self.selected_install(cx) {
-            return self.render_confirmation(selection, config, legacy_nightly, &t, cx);
+        if let Some((selection, config, legacy_nightly, newer)) = self.selected_install(cx) {
+            return self.render_confirmation(selection, config, legacy_nightly, newer, &t, cx);
         }
         self.selection = None;
 
@@ -884,18 +899,11 @@ impl Render for UpdaterSettingsView {
                         "Earlier stable releases",
                         "No older compatible releases found.",
                     ),
-                    UpdateChannel::Nightly if BUILD_INFO.nightly.is_some() => (
-                        "Earlier nightly builds",
-                        "No older compatible nightly builds found.",
-                    ),
-                    UpdateChannel::Nightly => (
-                        "Available nightly builds",
-                        "No compatible nightly builds found.",
-                    ),
+                    UpdateChannel::Nightly => {
+                        ("Available versions", "No compatible versions found.")
+                    }
                 };
-                let mut next = content
-                    .child(self.render_current(catalog, &t, cx))
-                    .child(section_header(heading, &t, cx));
+                let mut next = content.child(self.render_current(catalog, &t, cx));
                 let is_homebrew = cx
                     .try_global::<GlobalUpdateInfo>()
                     .is_some_and(|global| global.0.is_homebrew());
@@ -912,32 +920,35 @@ impl Render for UpdaterSettingsView {
                                 ),
                         ),
                     );
-                } else if catalog.releases.is_empty() {
-                    next = next.child(
-                        div()
-                            .mx(px(16.0))
-                            .text_size(ui_text_md(cx))
-                            .text_color(rgb(t.text_muted))
-                            .child(empty),
-                    );
                 } else {
                     let block_reason = Self::revert_block_reason(cx);
                     let can_revert = !self.submitting && block_reason.is_none();
                     next = next.children(
                         block_reason.map(|reason| Self::render_revert_block(reason, &t, cx)),
                     );
-                    let count = catalog.releases.len();
-                    let mut releases = section_container(&t);
-                    for (index, release) in catalog.releases.iter().enumerate() {
-                        releases = releases.child(self.render_release_row(
-                            release,
-                            index + 1 == count,
-                            can_revert,
-                            &t,
-                            cx,
-                        ));
+                    next = next.child(section_header(heading, &t, cx));
+                    if catalog.releases.is_empty() {
+                        next = next.child(
+                            div()
+                                .mx(px(16.0))
+                                .text_size(ui_text_md(cx))
+                                .text_color(rgb(t.text_muted))
+                                .child(empty),
+                        );
+                    } else {
+                        let count = catalog.releases.len();
+                        let mut releases = section_container(&t);
+                        for (index, release) in catalog.releases.iter().enumerate() {
+                            releases = releases.child(self.render_release_row(
+                                release,
+                                index + 1 == count,
+                                can_revert,
+                                &t,
+                                cx,
+                            ));
+                        }
+                        next = next.child(releases);
                     }
-                    next = next.child(releases);
                 }
                 next
             }

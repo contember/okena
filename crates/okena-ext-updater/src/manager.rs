@@ -156,11 +156,11 @@ async fn run_revert_inner(
     );
     anyhow::ensure!(!info.is_cancelled(token), "version revert cancelled");
     let channel = info.snapshot().channel;
-    let release =
+    let (release, newer) =
         crate::checker::release_for_revert(info.app_version(), version.to_owned(), channel).await?;
     let path = download(info, token, release).await?;
     let result = match info.begin_revert_install(token, version.to_owned()) {
-        Ok(()) => install(info, version, &path, restore_config, true).await,
+        Ok(()) => install(info, version, &path, restore_config, !newer).await,
         Err(error) => Err(error),
     };
     crate::downloader::discard_download(&path);

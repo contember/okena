@@ -26,6 +26,19 @@ pub struct NightlyBuild {
 }
 
 impl BuildInfo {
+    /// Keep the binary's identity and the selected update channel distinct.
+    pub fn status_label(&self, nightly_channel: bool) -> String {
+        if !nightly_channel || self.nightly.is_some() {
+            return self.version.clone();
+        }
+        match option_env!("OKENA_BUILD_SHA")
+            .filter(|sha| sha.len() == 40 && sha.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        {
+            Some(sha) => format!("{} · {} · Nightly channel", self.version, &sha[..7]),
+            None => format!("{} · Nightly channel", self.version),
+        }
+    }
+
     fn new(base_version: &str, manifest: &str) -> Self {
         if manifest.is_empty() {
             return Self {

@@ -35,6 +35,10 @@ impl Preference {
             revision: self.revision.wrapping_add(1),
         }
     }
+
+    pub fn is_implicit(self) -> bool {
+        self.revision == 0
+    }
 }
 
 /// Both binaries share one installation directory. A portable preview gets its own preference.
