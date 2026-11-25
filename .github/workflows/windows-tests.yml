@@ -1,0 +1,59 @@
+name: Windows tests
+
+# `cargo test --workspace` on native Windows. Too slow for every PR, so it runs
+# on main and once a day; `check-windows` in build.yml stays the PR gate.
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: '43 3 * * *'
+
+permissions:
+  contents: read
+
+# Same CARGO_*/RUST* set as build.yml: rust-cache hashes it into the cache key,
+# so a different set would miss the `check-windows` cache restored below.
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  CARGO_NET_RETRY: 10
+  RUSTUP_MAX_RETRIES: 10
+  CARGO_PROFILE_DEV_DEBUG: 0
+
+jobs:
+  test-windows:
+    runs-on: windows-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.98.1"
+
+      # Restore-only: the repo's Actions cache is at GitHub's 10 GB limit, and a
+      # separate multi-GB test cache would evict main's other caches.
+      - name: Setup Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: x86_64-pc-windows-msvc-check
+          save-if: false
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+
+      # okena-remote-server embeds web/dist through RustEmbed.
+      - name: Build web client
+        run: cd web && bun install --frozen-lockfile && bun run build
+
+      # `cargo test` never builds another package's bin as a plain binary, so
+      # the end-to-end tests that drive the TUI would skip themselves.
+      - name: Build the TUI binary the end-to-end tests drive
+        run: cargo build -p okena-tui
+
+      - name: Run tests
+        env:
+          OKENA_REQUIRE_TUI: 1
+        run: cargo test --workspace --no-fail-fast
