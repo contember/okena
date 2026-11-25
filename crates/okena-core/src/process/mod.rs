@@ -495,8 +495,10 @@ mod tests {
         let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let sink_seen = seen.clone();
         super::run(
+            // printf writes the CRs itself: Git for Windows' bash drops raw CRs
+            // from a `-c` script.
             super::CommandSpec::new("sh")
-                .args(["-c", "printf 'a: 10%%\rb: 50%%\rc: 100%%\n' >&2"])
+                .args(["-c", r"printf 'a: 10%%\rb: 50%%\rc: 100%%\n' >&2"])
                 .on_stderr_line(move |line| {
                     sink_seen.lock().expect("lock").push(line.to_string());
                 }),
