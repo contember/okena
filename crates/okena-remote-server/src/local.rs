@@ -1168,10 +1168,12 @@ fn blocking_client_and_url(
     host: &str,
     port: u16,
     path: &str,
-    _local_endpoint: Option<&LocalEndpoint>,
+    local_endpoint: Option<&LocalEndpoint>,
 ) -> (reqwest::blocking::Client, String) {
+    #[cfg(not(unix))]
+    let _ = local_endpoint;
     #[cfg(unix)]
-    if let Some(LocalEndpoint::UnixSocket { path: socket_path }) = _local_endpoint {
+    if let Some(LocalEndpoint::UnixSocket { path: socket_path }) = local_endpoint {
         if local_socket_dir_is_private(socket_path) {
             let client = reqwest::blocking::Client::builder()
                 .unix_socket(socket_path.as_str())
