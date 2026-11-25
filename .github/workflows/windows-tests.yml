@@ -23,7 +23,8 @@ env:
 jobs:
   test-windows:
     runs-on: windows-latest
-    timeout-minutes: 20
+    # Took 11.7 min (9 min of it compiling the test profile from scratch); ~30 % headroom.
+    timeout-minutes: 15
 
     steps:
       - uses: actions/checkout@v4
