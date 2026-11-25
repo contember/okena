@@ -23,8 +23,8 @@ env:
 jobs:
   test-windows:
     runs-on: windows-latest
-    # Took 11.7 min (9 min of it compiling the test profile from scratch); ~30 % headroom.
-    timeout-minutes: 15
+    # Warm 11.7 min; a cold-cache run of the same tests (plus clippy) 13.0 min; ~30 % headroom.
+    timeout-minutes: 17
 
     steps:
       - uses: actions/checkout@v4
