@@ -1414,11 +1414,16 @@ mod tests {
         }
     }
 
+    fn transcript_path(session: &str) -> String {
+        let prefix = if cfg!(windows) { "C:/" } else { "/" };
+        format!("{prefix}home/u/.claude/projects/p/{session}.jsonl")
+    }
+
     fn event(name: &str) -> serde_json::Value {
         json!({
             "hook_event_name": name,
             "session_id": "s1",
-            "transcript_path": "/home/u/.claude/projects/p/s1.jsonl"
+            "transcript_path": transcript_path("s1")
         })
     }
 
@@ -2885,7 +2890,8 @@ mod tests {
             .expect("valid event");
         let mut start = event("SessionStart");
         start["session_id"] = json!("s2");
-        start["transcript_path"] = json!("/home/u/.claude/projects/p/s2.jsonl");
+        let current_transcript = transcript_path("s2");
+        start["transcript_path"] = json!(current_transcript);
         hub.hook_event(hook("t1", start)).expect("valid event");
         let mut ask = permission("Bash", json!({"command": "ls"}));
         ask["session_id"] = json!("s2");
@@ -2910,7 +2916,7 @@ mod tests {
             .and_then(|terminal| terminal.transcript_path.clone());
         assert_eq!(
             transcript_path.as_deref(),
-            Some("/home/u/.claude/projects/p/s2.jsonl")
+            Some(current_transcript.as_str())
         );
     }
 

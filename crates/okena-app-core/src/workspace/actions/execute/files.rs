@@ -813,8 +813,12 @@ pub(super) fn create_directory(
 
 #[cfg(test)]
 mod terminal_path_tests {
-    use super::{expand_terminal_path, path_breadcrumbs};
-    use std::path::{Path, PathBuf};
+    use super::expand_terminal_path;
+    #[cfg(unix)]
+    use super::path_breadcrumbs;
+    #[cfg(unix)]
+    use std::path::Path;
+    use std::path::PathBuf;
 
     #[test]
     fn relative_path_uses_terminal_cwd() {

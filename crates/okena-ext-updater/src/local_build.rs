@@ -204,18 +204,21 @@ mod tests {
 
     #[test]
     fn detects_debug_and_release_binaries_inside_workspace_target() {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .unwrap()
-            .parent()
-            .unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        std::fs::write(root.join("Cargo.toml"), []).unwrap();
+        std::fs::create_dir(root.join(".git")).unwrap();
+        let target = root.join("target");
         for profile in ["debug", "release"] {
-            let executable = root.join("target").join(profile).join(binary_name());
-            let checkout = detect_local_checkout_from(&executable, root, None, None).unwrap();
+            let profile_dir = target.join(profile);
+            std::fs::create_dir_all(&profile_dir).unwrap();
+            let executable = profile_dir.join(binary_name());
+            std::fs::write(&executable, []).unwrap();
+            let checkout = detect_local_checkout_from(&executable, &root, None, None).unwrap();
             assert_eq!(checkout.root(), root);
             assert_eq!(
                 checkout.release_executable(),
-                root.join("target").join("release").join(binary_name())
+                target.join("release").join(binary_name())
             );
         }
     }

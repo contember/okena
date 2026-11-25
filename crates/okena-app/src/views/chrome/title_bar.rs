@@ -330,12 +330,12 @@ impl Render for TitleBar {
                         let _ = (this, window);
                     }
                 }))
-                .on_click(|event: &ClickEvent, window, _| {
+                .on_click(|event: &ClickEvent, _window, _| {
                     if event.click_count() == 2 {
                         #[cfg(target_os = "macos")]
-                        window.titlebar_double_click();
+                        _window.titlebar_double_click();
                         #[cfg(target_os = "linux")]
-                        window.zoom_window();
+                        _window.zoom_window();
                     }
                 })
             })

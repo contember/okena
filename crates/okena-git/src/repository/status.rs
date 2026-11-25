@@ -339,20 +339,7 @@ pub(crate) fn worktree_diff(path: &Path) -> Option<WorktreeDiff> {
 
     // Prefix from workdir down to the queried path, scoping untracked entries
     // to the (possibly monorepo-subdir) project. Both lists stay repo-relative.
-    let canonical_query = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-    let canonical_workdir = workdir.canonicalize().unwrap_or_else(|_| workdir.clone());
-    let untracked_prefix: String = canonical_query
-        .strip_prefix(&canonical_workdir)
-        .ok()
-        .map(|p| {
-            let s = p.to_string_lossy().to_string();
-            if s.is_empty() {
-                String::new()
-            } else {
-                format!("{}/", s)
-            }
-        })
-        .unwrap_or_default();
+    let untracked_prefix = crate::gix_helpers::untracked_prefix(path, &workdir);
 
     // One parallel HEAD → index → worktree walk. Rename tracking is disabled to
     // match `--no-renames`: a rename surfaces as a delete of the old path plus

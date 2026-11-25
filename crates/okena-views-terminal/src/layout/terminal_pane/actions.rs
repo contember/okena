@@ -871,6 +871,7 @@ mod tests {
 
     /// Names a shell must hand back byte for byte. Control characters are
     /// refused outright, so none appears here.
+    #[cfg(unix)]
     const ROUND_TRIP_PATHS: [&str; 13] = [
         "/tmp/a b.txt",
         "/tmp/it's.txt",

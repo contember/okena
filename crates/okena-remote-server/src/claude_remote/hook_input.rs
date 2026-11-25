@@ -118,10 +118,15 @@ mod tests {
 
     #[test]
     fn parses_permission_request() {
+        let transcript_path = if cfg!(windows) {
+            "C:/home/u/.claude/projects/p/s1.jsonl"
+        } else {
+            "/home/u/.claude/projects/p/s1.jsonl"
+        };
         let input = HookInput::parse(&json!({
             "hook_event_name": "PermissionRequest",
             "session_id": "s1",
-            "transcript_path": "/home/u/.claude/projects/p/s1.jsonl",
+            "transcript_path": transcript_path,
             "tool_name": "Bash",
             "tool_input": {"command": "ls"},
             "permission_suggestions": [{"type": "addRules"}],
@@ -131,10 +136,7 @@ mod tests {
 
         assert_eq!(input.event, HookEvent::PermissionRequest);
         assert_eq!(input.session_id.as_deref(), Some("s1"));
-        assert_eq!(
-            input.transcript_path.as_deref(),
-            Some("/home/u/.claude/projects/p/s1.jsonl")
-        );
+        assert_eq!(input.transcript_path.as_deref(), Some(transcript_path));
         assert_eq!(input.tool_name.as_deref(), Some("Bash"));
         assert_eq!(input.tool_input, json!({"command": "ls"}));
         assert_eq!(input.permission_suggestions.len(), 1);

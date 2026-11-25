@@ -7048,11 +7048,13 @@ mod tests {
 
     /// Reports `shell_pid` as every terminal's foreground shell and counts the
     /// lookups.
+    #[cfg(unix)]
     struct ShellPidBackend {
         shell_pid: u32,
         foreground_lookups: Arc<std::sync::atomic::AtomicUsize>,
     }
 
+    #[cfg(unix)]
     impl TerminalBackend for ShellPidBackend {
         fn transport(&self) -> Arc<dyn TerminalTransport> {
             Arc::new(StubTransport)

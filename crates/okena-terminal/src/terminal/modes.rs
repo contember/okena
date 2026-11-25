@@ -28,6 +28,7 @@ impl TerminalModeState {
     const REPORT_ALTERNATE_KEYS: u32 = 1 << 17;
     const REPORT_ALL_KEYS_AS_ESC: u32 = 1 << 18;
     const REPORT_ASSOCIATED_TEXT: u32 = 1 << 19;
+    #[cfg(any(unix, test))]
     const ALL: u32 = (1 << 20) - 1;
 
     pub(super) fn from_term_mode(mode: &TermMode) -> Self {
@@ -70,10 +71,12 @@ impl TerminalModeState {
         Self(bits)
     }
 
+    #[cfg(any(unix, test))]
     pub(crate) fn encode(self) -> String {
         format!("{:x}", self.0)
     }
 
+    #[cfg(any(unix, test))]
     pub(crate) fn decode(value: &str) -> Option<Self> {
         let bits = u32::from_str_radix(value.trim(), 16).ok()?;
         (bits & !Self::ALL == 0).then_some(Self(bits))

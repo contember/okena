@@ -1340,6 +1340,12 @@ fn test_osc52_write_is_dropped_without_a_clipboard() {
 
 // ── Agent status (OSC 9001) ──────────────────────────────────────────────
 
+const TRANSCRIPT_PATH: &str = if cfg!(windows) {
+    "C:/tmp/t.jsonl"
+} else {
+    "/tmp/t.jsonl"
+};
+
 fn b64(s: &str) -> String {
     use base64::Engine as _;
     base64::engine::general_purpose::STANDARD.encode(s)
@@ -1617,14 +1623,14 @@ fn test_agent_session_captured_from_label_and_survives_clear() {
 
     let uuid = "3b9c1f2a-4d5e-6f70-8a9b-0c1d2e3f4a5b";
     let lbl = b64(&format!(
-        r#"{{"agent":"claude-code","session_id":"{uuid}","transcript_path":"/tmp/t.jsonl"}}"#
+        r#"{{"agent":"claude-code","session_id":"{uuid}","transcript_path":"{TRANSCRIPT_PATH}"}}"#
     ));
     terminal.process_output(format!("\x1b]9001;st=working;lbl={lbl}\x07").as_bytes());
 
     let session = terminal.agent_session().expect("session captured");
     assert_eq!(session.agent, "claude-code");
     assert_eq!(session.session_id, uuid);
-    assert_eq!(session.transcript_path.as_deref(), Some("/tmp/t.jsonl"));
+    assert_eq!(session.transcript_path.as_deref(), Some(TRANSCRIPT_PATH));
     assert!(terminal.take_agent_session_dirty());
     assert!(!terminal.take_agent_session_dirty());
 
@@ -1775,7 +1781,7 @@ fn test_agent_session_keeps_transcript_path_across_partial_updates() {
 
     let uuid = "3b9c1f2a-4d5e-6f70-8a9b-0c1d2e3f4a5b";
     let with_path = b64(&format!(
-        r#"{{"agent":"claude-code","session_id":"{uuid}","transcript_path":"/tmp/t.jsonl"}}"#
+        r#"{{"agent":"claude-code","session_id":"{uuid}","transcript_path":"{TRANSCRIPT_PATH}"}}"#
     ));
     terminal.process_output(format!("\x1b]9001;st=working;lbl={with_path}\x07").as_bytes());
     assert!(terminal.take_agent_session_dirty());
@@ -1791,7 +1797,7 @@ fn test_agent_session_keeps_transcript_path_across_partial_updates() {
             .agent_session()
             .and_then(|s| s.transcript_path)
             .as_deref(),
-        Some("/tmp/t.jsonl"),
+        Some(TRANSCRIPT_PATH),
     );
     // Unchanged session — nothing to re-persist.
     assert!(!terminal.take_agent_session_dirty());
@@ -1974,7 +1980,7 @@ fn test_agent_session_rejects_unbounded_agent_and_transcript_path() {
 
     let long_path = format!(
         "{}{}",
-        if cfg!(windows) { "C:\\" } else { "/" },
+        if cfg!(windows) { "C:/" } else { "/" },
         "p".repeat(okena_core::agent_session::MAX_TRANSCRIPT_PATH_LEN)
     );
     let lbl = b64(&format!(

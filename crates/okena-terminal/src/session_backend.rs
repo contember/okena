@@ -1149,6 +1149,7 @@ fn terminate_dtach_process_tree(socket_path: &std::path::PathBuf, session_name: 
 /// Minimum age before a `tm-*.sock` file is a GC candidate. A socket created
 /// just before this scan may not yet appear in the process/socket snapshot, so
 /// treat recent files as live.
+#[cfg(unix)]
 const DTACH_SOCKET_GC_MIN_AGE: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// Whether a filename matches the dtach/tmux socket naming scheme (`tm-*.sock`).
@@ -1599,8 +1600,8 @@ pub fn cleanup_stale_dtach_sockets() {
 pub fn resolve_for_wsl(distro: Option<&str>, preference: SessionBackend) -> ResolvedBackend {
     use std::sync::LazyLock;
 
-    static CACHE: LazyLock<Mutex<HashMap<(Option<String>, SessionBackend), ResolvedBackend>>> =
-        LazyLock::new(|| Mutex::new(HashMap::new()));
+    type BackendCache = Mutex<HashMap<(Option<String>, SessionBackend), ResolvedBackend>>;
+    static CACHE: LazyLock<BackendCache> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
     let key = (distro.map(|s| s.to_string()), preference);
     let cache = CACHE.lock().unwrap_or_else(|poisoned| {
