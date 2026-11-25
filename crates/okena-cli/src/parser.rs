@@ -601,18 +601,26 @@ pub enum ServiceCmd {
 #[derive(Subcommand)]
 pub enum ProjectCmd {
     /// Add a project at <path>
+    ///
+    /// A path in a linked git worktree goes under the project of its
+    /// repository's main checkout, like a worktree Okena created.
     Add {
         /// Path to the project directory (relative paths resolve against CWD)
         path: String,
-        /// Display name (defaults to the path's basename)
+        /// Display name (defaults to the path's basename; a nested worktree
+        /// shows its branch)
         #[arg(long)]
         name: Option<String>,
         /// Add hidden (not shown in the overview)
         #[arg(long)]
         hidden: bool,
-        /// Move into a folder (by name or id) after adding
+        /// Move into a folder (by name or id) after adding; implies --top-level
         #[arg(long)]
         folder: Option<String>,
+        /// Add a linked worktree as its own project instead of under the
+        /// project of its repository
+        #[arg(long)]
+        top_level: bool,
     },
     /// Clone a git repository and add the checkout as a project
     Clone {
@@ -673,6 +681,21 @@ pub enum ProjectCmd {
     Focus {
         /// Project (id / name / path)
         project: String,
+    },
+    /// Move a project under a parent as one of its worktrees, keeping its
+    /// terminals running
+    ///
+    /// The project must be in a linked git worktree of the repository whose
+    /// main checkout holds <parent>. Nothing on disk changes.
+    SetParent {
+        /// Project to move (id / name / path)
+        project: String,
+        /// New parent project (id / name / path)
+        #[arg(required_unless_present = "top_level", conflicts_with = "top_level")]
+        parent: Option<String>,
+        /// Make it a top-level project again
+        #[arg(long)]
+        top_level: bool,
     },
 }
 
@@ -944,6 +967,57 @@ mod tests {
                 .expect("version exits via an error");
             assert_eq!(kind, clap::error::ErrorKind::DisplayVersion, "{form}");
         }
+    }
+
+    #[test]
+    fn project_set_parent_takes_a_parent_or_top_level_but_not_both() {
+        let parent_of = |args: &[&str]| {
+            let cli = Cli::try_parse_from(args).expect("parses");
+            let Command::Project {
+                cmd:
+                    ProjectCmd::SetParent {
+                        project,
+                        parent,
+                        top_level,
+                    },
+            } = cli.command
+            else {
+                panic!("expected project set-parent");
+            };
+            (project, parent, top_level)
+        };
+        assert_eq!(
+            parent_of(&["okena", "project", "set-parent", "wt", "repo"]),
+            ("wt".to_string(), Some("repo".to_string()), false)
+        );
+        assert_eq!(
+            parent_of(&["okena", "project", "set-parent", "wt", "--top-level"]),
+            ("wt".to_string(), None, true)
+        );
+        for bad in [
+            &["okena", "project", "set-parent", "wt"][..],
+            &[
+                "okena",
+                "project",
+                "set-parent",
+                "wt",
+                "repo",
+                "--top-level",
+            ],
+        ] {
+            assert!(Cli::try_parse_from(bad).is_err(), "{bad:?}");
+        }
+
+        let cli = Cli::try_parse_from(["okena", "project", "add", ".", "--top-level"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Project {
+                cmd: ProjectCmd::Add {
+                    top_level: true,
+                    ..
+                }
+            }
+        ));
     }
 
     #[test]
