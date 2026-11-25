@@ -1127,7 +1127,7 @@ impl PtyManager {
             let handle = child
                 .as_raw_handle()
                 .ok_or_else(|| anyhow::anyhow!("ConPTY child did not provide a process handle"))?;
-            // The portable-pty child owns this handle and is still alive here.
+            // SAFETY: the portable-pty child owns this handle and is still alive here.
             let owned: OwnedHandle =
                 unsafe { BorrowedHandle::borrow_raw(handle) }.try_clone_to_owned()?;
             Arc::new(owned)
@@ -1275,7 +1275,12 @@ impl PtyManager {
                     let handles = [cancel.as_raw_handle(), process.as_raw_handle()];
                     // SAFETY: both handles stay open throughout the wait.
                     let result = unsafe {
-                        WaitForMultipleObjects(handles.len() as u32, handles.as_ptr(), 0, INFINITE)
+                        WaitForMultipleObjects(
+                            u32::try_from(handles.len()).expect("two wait handles"),
+                            handles.as_ptr(),
+                            0,
+                            INFINITE,
+                        )
                     };
                     if result == WAIT_OBJECT_0 {
                         return;
@@ -1295,7 +1300,8 @@ impl PtyManager {
                             .filter(|handle| handle.generation == generation)
                             .and_then(|handle| handle.master.take());
                         // ConPTY can keep the output pipe open after the child exits.
-                        // Close it outside all locks while the reader drains output.
+                        // Close it outside all locks while the reader drains output; this
+                        // also ends other processes still attached to the pseudoconsole.
                         drop(master);
                     }
                 })?;

@@ -722,11 +722,10 @@ fn run_hook_sync(
         // exec_id not needed — PTY hooks are finished via finish_by_terminal_id
         let _ = monitor.record_start(hook_type, command, project_name, Some(terminal_id.clone()));
 
-        // Bound the in-process regression test independently of the production timeout.
-        let timeout = std::time::Duration::from_secs(if cfg!(test) { 20 } else { 300 });
+        // Register exit waiter and block until the PTY process exits (5 min timeout)
         let rx = exit_reservation.bind(&terminal_id);
 
-        let exit_code = match rx.recv_timeout(timeout) {
+        let exit_code = match rx.recv_timeout(std::time::Duration::from_secs(300)) {
             Ok(exit_code) => exit_code,
             Err(error) => {
                 monitor.cancel_exit_waiter(&terminal_id);
