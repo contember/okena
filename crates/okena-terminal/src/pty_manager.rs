@@ -17,7 +17,7 @@ use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
-#[cfg(test)]
+#[cfg(all(test, unix))]
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
@@ -241,6 +241,10 @@ impl PtyInstances {
 /// Shared shutdown coordination between reader/writer threads
 struct PtyShutdownState {
     broken: AtomicBool,
+    #[cfg(windows)]
+    exit_cancel: std::sync::OnceLock<Arc<std::os::windows::io::OwnedHandle>>,
+    #[cfg(windows)]
+    child_exited: AtomicBool,
     #[cfg(unix)]
     io_waker: Mutex<Option<std::os::unix::net::UnixStream>>,
     terminal_id: String,
@@ -251,6 +255,10 @@ impl PtyShutdownState {
     fn new(terminal_id: String, generation: PtyGeneration) -> Self {
         Self {
             broken: AtomicBool::new(false),
+            #[cfg(windows)]
+            exit_cancel: Default::default(),
+            #[cfg(windows)]
+            child_exited: AtomicBool::new(false),
             #[cfg(unix)]
             io_waker: Mutex::new(None),
             terminal_id,
@@ -263,11 +271,18 @@ impl PtyShutdownState {
     }
 
     fn mark_broken(&self) {
-        if self.broken.swap(true, Ordering::Relaxed) {
-            return;
+        #[cfg(not(unix))]
+        self.broken.store(true, Ordering::Relaxed);
+        #[cfg(windows)]
+        if let Some(cancel) = self.exit_cancel.get() {
+            use std::os::windows::io::AsRawHandle;
+            // SAFETY: shutdown state owns the cancellation event for this PTY.
+            unsafe { windows_sys::Win32::System::Threading::SetEvent(cancel.as_raw_handle()) };
         }
         #[cfg(unix)]
-        if let Some(waker) = self.io_waker.lock().as_mut() {
+        if !self.broken.swap(true, Ordering::Relaxed)
+            && let Some(waker) = self.io_waker.lock().as_mut()
+        {
             // Nonblocking, one byte only. Leaving it unread wakes both the
             // reader and writer without periodic polling or cross-thread close.
             let _ = waker.write_all(&[1]);
@@ -517,8 +532,8 @@ impl TeardownTracker {
 /// Handle to a single PTY process
 struct PtyHandle {
     generation: PtyGeneration,
-    /// `Option` so teardown (`shutdown_handle`) and the `Drop` backstop can both
-    /// `take()` it idempotently to close the PTY and unblock the reader thread.
+    /// Taken once to close the PTY and unblock the reader, either on teardown
+    /// or when the Windows child has exited.
     master: Option<Box<dyn MasterPty + Send>>,
     child: Box<dyn Child + Send + Sync>,
     /// Private `forkpty` session used to find descendants after the shell exits.
@@ -601,7 +616,7 @@ pub struct PtyManager {
     /// destructive flush can observe every live CWD-owning child through the tracker.
     reaper_tx: Option<Sender<ReaperJob>>,
     teardown_tracker: Arc<TeardownTracker>,
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     reaper_worker_count: Arc<AtomicUsize>,
 }
 
@@ -643,17 +658,17 @@ impl PtyManager {
         // teardown workers, these may wait forever, so no job is allowed to make
         // a new thread here. The tracker remains pending until each handle exits.
         let (reaper_tx, reaper_rx) = async_channel::unbounded::<ReaperJob>();
-        #[cfg(test)]
+        #[cfg(all(test, unix))]
         let reaper_worker_count = Arc::new(AtomicUsize::new(0));
         for i in 0..REAPER_WORKERS {
             let rx = reaper_rx.clone();
             let tracker = Arc::clone(&teardown_tracker);
-            #[cfg(test)]
+            #[cfg(all(test, unix))]
             let worker_count = Arc::clone(&reaper_worker_count);
             if let Err(e) = std::thread::Builder::new()
                 .name(format!("pty-reaper-{i}"))
                 .spawn(move || {
-                    #[cfg(test)]
+                    #[cfg(all(test, unix))]
                     worker_count.fetch_add(1, Ordering::Release);
                     while let Ok(mut job) = rx.recv_blocking() {
                         let id = job.handle.shutdown.terminal_id.clone();
@@ -720,7 +735,7 @@ impl PtyManager {
                 teardown_tx: Some(teardown_tx),
                 reaper_tx: Some(reaper_tx),
                 teardown_tracker,
-                #[cfg(test)]
+                #[cfg(all(test, unix))]
                 reaper_worker_count,
             },
             rx,
@@ -820,7 +835,7 @@ impl PtyManager {
         }
         // Panes on Windows have no scope.
         #[cfg(not(unix))]
-        drop(limits);
+        let _ = limits;
     }
 
     fn session_backend(&self) -> ResolvedBackend {
@@ -1105,6 +1120,20 @@ impl PtyManager {
 
         // Spawn the process
         let child = pair.slave.spawn_command(cmd)?;
+        #[cfg(windows)]
+        let process = {
+            use std::os::windows::io::{BorrowedHandle, OwnedHandle};
+
+            let handle = child
+                .as_raw_handle()
+                .ok_or_else(|| anyhow::anyhow!("ConPTY child did not provide a process handle"))?;
+            // The portable-pty child owns this handle and is still alive here.
+            let owned: OwnedHandle =
+                unsafe { BorrowedHandle::borrow_raw(handle) }.try_clone_to_owned()?;
+            Arc::new(owned)
+        };
+        #[cfg(windows)]
+        drop(pair.slave);
         #[cfg(target_os = "linux")]
         if reattaching_dtach {
             self.adopt_dtach_session(terminal_id);
@@ -1123,7 +1152,15 @@ impl PtyManager {
         #[cfg(not(unix))]
         let (reader, writer) = (pair.master.try_clone_reader()?, pair.master.take_writer()?);
         let writer: Arc<Mutex<Box<dyn Write + Send>>> = Arc::new(Mutex::new(writer));
+        #[cfg(not(windows))]
         let child_pid = child.process_id();
+        #[cfg(not(windows))]
+        let exit_code = move || child_pid.and_then(wait_for_exit_code);
+        #[cfg(windows)]
+        let exit_code = {
+            let process = Arc::clone(&process);
+            move || windows_exit_code(&process)
+        };
 
         // Spawn reader thread with panic guard
         let tx = self.event_tx.clone();
@@ -1150,7 +1187,7 @@ impl PtyManager {
                         reader,
                         tx,
                         reader_shutdown,
-                        child_pid,
+                        exit_code,
                         output_sink,
                         reader_instances,
                     );
@@ -1205,7 +1242,67 @@ impl PtyManager {
                 }
             })?;
 
-        // Publish the generation and handle before either worker can emit an event.
+        #[cfg(windows)]
+        let exit_watch_start = {
+            use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+            use windows_sys::Win32::Foundation::WAIT_OBJECT_0;
+            use windows_sys::Win32::System::Threading::{
+                CreateEventW, INFINITE, WaitForMultipleObjects,
+            };
+
+            // SAFETY: no custom security attributes and no name. The returned
+            // handle is uniquely owned by the caller when creation succeeds.
+            let cancel = unsafe { CreateEventW(std::ptr::null(), 1, 0, std::ptr::null()) };
+            if cancel.is_null() {
+                return Err(std::io::Error::last_os_error().into());
+            }
+            // SAFETY: CreateEventW returned a non-null owned handle.
+            let cancel = Arc::new(unsafe { OwnedHandle::from_raw_handle(cancel) });
+            shutdown
+                .exit_cancel
+                .set(Arc::clone(&cancel))
+                .map_err(|_| anyhow::anyhow!("ConPTY exit cancellation already initialized"))?;
+            let (start_tx, start_rx) = mpsc::channel::<()>();
+            let terminals = Arc::downgrade(&self.terminals);
+            let shutdown = Arc::clone(&shutdown);
+            let id = terminal_id.to_string();
+            std::thread::Builder::new()
+                .name("pty-exit".into())
+                .spawn(move || {
+                    if start_rx.recv().is_err() {
+                        return;
+                    }
+                    let handles = [cancel.as_raw_handle(), process.as_raw_handle()];
+                    // SAFETY: both handles stay open throughout the wait.
+                    let result = unsafe {
+                        WaitForMultipleObjects(handles.len() as u32, handles.as_ptr(), 0, INFINITE)
+                    };
+                    if result == WAIT_OBJECT_0 {
+                        return;
+                    }
+                    if result != WAIT_OBJECT_0 + 1 {
+                        log::warn!(
+                            "ConPTY child wait failed: {}",
+                            std::io::Error::last_os_error()
+                        );
+                        return;
+                    }
+                    shutdown.child_exited.store(true, Ordering::Release);
+                    if let Some(terminals) = terminals.upgrade() {
+                        let master = terminals
+                            .lock()
+                            .get_mut(&id)
+                            .filter(|handle| handle.generation == generation)
+                            .and_then(|handle| handle.master.take());
+                        // ConPTY can keep the output pipe open after the child exits.
+                        // Close it outside all locks while the reader drains output.
+                        drop(master);
+                    }
+                })?;
+            start_tx
+        };
+
+        // Publish the generation and handle before workers can emit events.
         // Taking the locks in lifecycle order keeps exit cleanup from observing a
         // generation without its handle.
         let mut instances = self.instances.lock();
@@ -1238,6 +1335,8 @@ impl PtyManager {
         self.instance_changed.notify_all();
         let _ = reader_start_tx.send(());
         let _ = writer_start_tx.send(());
+        #[cfg(windows)]
+        let _ = exit_watch_start.send(());
 
         Ok(())
     }
@@ -1507,7 +1606,7 @@ impl PtyManager {
         mut reader: Box<dyn Read + Send>,
         tx: Sender<PtyEvent>,
         shutdown: Arc<PtyShutdownState>,
-        child_pid: Option<u32>,
+        exit_code: impl Fn() -> Option<u32>,
         output_sink: Option<Arc<dyn PtyOutputSink>>,
         instances: Arc<Mutex<PtyInstances>>,
     ) {
@@ -1521,11 +1620,10 @@ impl PtyManager {
             match reader.read(&mut buf) {
                 Ok(0) => {
                     // EOF - process exited, try to get exit code
-                    let exit_code = child_pid.and_then(wait_for_exit_code);
                     let _ = tx.send_blocking(PtyEvent::Exit {
                         terminal_id,
                         generation: shutdown.generation,
-                        exit_code,
+                        exit_code: exit_code(),
                     });
                     break;
                 }
@@ -1570,11 +1668,10 @@ impl PtyManager {
                         break;
                     }
                     log::error!("PTY read error: {}", e);
-                    let exit_code = child_pid.and_then(wait_for_exit_code);
                     let _ = tx.send_blocking(PtyEvent::Exit {
                         terminal_id,
                         generation: shutdown.generation,
-                        exit_code,
+                        exit_code: exit_code(),
                     });
                     break;
                 }
@@ -1602,6 +1699,12 @@ impl PtyManager {
             drop(w);
             if let Err(e) = written {
                 if shutdown.is_broken() {
+                    break;
+                }
+                #[cfg(windows)]
+                if shutdown.child_exited.load(Ordering::Acquire) {
+                    // Closing ConPTY breaks input while its final output is
+                    // still readable. The reader owns the actual exit event.
                     break;
                 }
                 log::error!("Failed to write to PTY {}: {}", terminal_id, e);
@@ -2228,56 +2331,56 @@ impl PtyManager {
         #[cfg(windows)]
         {
             let terminals = self.terminals.lock();
-            if let Some(handle) = terminals.get(terminal_id) {
-                if matches!(handle.wsl_backend, Some(ResolvedBackend::Tmux)) {
-                    let session_name = ResolvedBackend::Tmux.session_name(terminal_id);
-                    let output_path = std::env::temp_dir().join(format!(
-                        "terminal-{}.txt",
-                        &terminal_id[..8.min(terminal_id.len())]
-                    ));
-                    let distro = handle.wsl_distro.clone();
-                    drop(terminals); // Release lock before subprocess call
+            if let Some(handle) = terminals.get(terminal_id)
+                && matches!(handle.wsl_backend, Some(ResolvedBackend::Tmux))
+            {
+                let session_name = ResolvedBackend::Tmux.session_name(terminal_id);
+                let output_path = std::env::temp_dir().join(format!(
+                    "terminal-{}.txt",
+                    &terminal_id[..8.min(terminal_id.len())]
+                ));
+                let distro = handle.wsl_distro.clone();
+                drop(terminals); // Release lock before subprocess call
 
-                    let mut cmd = crate::process::command("wsl.exe");
-                    if let Some(d) = &distro {
-                        cmd.args(["-d", d]);
-                    }
-                    cmd.args([
-                        "--",
-                        "tmux",
-                        "capture-pane",
-                        "-t",
-                        &session_name,
-                        "-p",
-                        "-S",
-                        "-",
-                    ]);
-                    return match crate::process::safe_output(&mut cmd) {
-                        Ok(output) if output.status.success() => {
-                            match std::fs::write(&output_path, &output.stdout) {
-                                Ok(_) => {
-                                    log::info!("Captured WSL terminal buffer to {:?}", output_path);
-                                    Some(output_path)
-                                }
-                                Err(e) => {
-                                    log::error!("Failed to write capture file: {}", e);
-                                    None
-                                }
+                let mut cmd = crate::process::command("wsl.exe");
+                if let Some(d) = &distro {
+                    cmd.args(["-d", d]);
+                }
+                cmd.args([
+                    "--",
+                    "tmux",
+                    "capture-pane",
+                    "-t",
+                    &session_name,
+                    "-p",
+                    "-S",
+                    "-",
+                ]);
+                return match crate::process::safe_output(&mut cmd) {
+                    Ok(output) if output.status.success() => {
+                        match std::fs::write(&output_path, &output.stdout) {
+                            Ok(_) => {
+                                log::info!("Captured WSL terminal buffer to {:?}", output_path);
+                                Some(output_path)
+                            }
+                            Err(e) => {
+                                log::error!("Failed to write capture file: {}", e);
+                                None
                             }
                         }
-                        Ok(output) => {
-                            log::error!(
-                                "WSL tmux capture-pane failed: {}",
-                                String::from_utf8_lossy(&output.stderr)
-                            );
-                            None
-                        }
-                        Err(e) => {
-                            log::error!("Failed to run WSL tmux capture-pane: {}", e);
-                            None
-                        }
-                    };
-                }
+                    }
+                    Ok(output) => {
+                        log::error!(
+                            "WSL tmux capture-pane failed: {}",
+                            String::from_utf8_lossy(&output.stderr)
+                        );
+                        None
+                    }
+                    Err(e) => {
+                        log::error!("Failed to run WSL tmux capture-pane: {}", e);
+                        None
+                    }
+                };
             }
         }
 
@@ -2452,8 +2555,26 @@ impl Drop for PtyManager {
     }
 }
 
+#[cfg(windows)]
+fn windows_exit_code(process: &std::os::windows::io::OwnedHandle) -> Option<u32> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Foundation::WAIT_OBJECT_0;
+    use windows_sys::Win32::System::Threading::{GetExitCodeProcess, WaitForSingleObject};
+
+    // SAFETY: the handle is owned by the caller, and the status pointer is
+    // valid for a u32. A signaled handle disambiguates exit code STILL_ACTIVE.
+    unsafe {
+        if WaitForSingleObject(process.as_raw_handle(), 100) != WAIT_OBJECT_0 {
+            return None;
+        }
+        let mut status = 0;
+        (GetExitCodeProcess(process.as_raw_handle(), &mut status) != 0).then_some(status)
+    }
+}
+
 /// Try to retrieve the exit code for a process that has exited.
 /// Uses `waitpid` on Unix to get the actual exit status.
+#[cfg(not(windows))]
 fn wait_for_exit_code(pid: u32) -> Option<u32> {
     #[cfg(unix)]
     {
@@ -2690,11 +2811,6 @@ fn first_proc_child(pid: u32) -> Option<u32> {
         .and_then(|s| s.trim().parse().ok())
 }
 
-#[cfg(not(unix))]
-fn first_proc_child(_pid: u32) -> Option<u32> {
-    None
-}
-
 /// Resolve the slave device path for a pty master.
 ///
 /// Uses portable-pty's cached name (resolved once via the reentrant
@@ -2786,6 +2902,111 @@ mod tests {
         assert!(instances.is_current("t1", current));
         assert!(instances.claim_exit("t1", current));
         assert!(!instances.claim_exit("t1", current));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn conpty_drains_output_before_reporting_the_child_exit_code() {
+        let (manager, events) = PtyManager::new(SessionBackend::None);
+        let shell = ShellType::Custom {
+            path: "cmd.exe".into(),
+            args: vec![
+                "/D".into(),
+                "/C".into(),
+                "echo final-output & exit /b 7".into(),
+            ],
+        };
+        let cwd = std::env::temp_dir();
+        let id = manager
+            .create_terminal_with_shell(cwd.to_str().unwrap(), Some(&shell))
+            .expect("create ConPTY");
+
+        // Feed ConPTY's startup queries through the same emulator used by the daemon.
+        let manager = Arc::new(manager);
+        let terminal = crate::terminal::Terminal::new(
+            id.clone(),
+            Default::default(),
+            manager.clone(),
+            cwd.to_string_lossy().into_owned(),
+        );
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let mut output = Vec::new();
+        loop {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "ConPTY stays open after child exit"
+            );
+            match events.try_recv() {
+                Ok(PtyEvent::Data { data, .. }) => {
+                    terminal.process_output(&data);
+                    output.extend(data);
+                }
+                Ok(PtyEvent::Exit {
+                    terminal_id,
+                    generation,
+                    exit_code,
+                }) => {
+                    assert_eq!(terminal_id, id);
+                    assert_eq!(exit_code, Some(7));
+                    assert!(String::from_utf8_lossy(&output).contains("final-output"));
+                    assert!(manager.cleanup_exited(&id, generation));
+                    break;
+                }
+                Err(async_channel::TryRecvError::Empty) => {
+                    std::thread::sleep(Duration::from_millis(10))
+                }
+                Err(error) => panic!("ConPTY event channel closed: {error}"),
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn conpty_input_closure_after_child_exit_does_not_interrupt_the_reader() {
+        struct ClosedInput;
+
+        impl Write for ClosedInput {
+            fn write(&mut self, _bytes: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::ErrorKind::BrokenPipe.into())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        for child_exited in [false, true] {
+            let terminal_id = String::from("conpty");
+            let shutdown = Arc::new(PtyShutdownState::new(terminal_id.clone(), PtyGeneration(1)));
+            shutdown.child_exited.store(child_exited, Ordering::Release);
+            let queue = Arc::new(PtyWriteQueue::new());
+            assert_eq!(queue.push_input(b"pending input"), Queued::Ok);
+            let (tx, events) = async_channel::bounded(1);
+            let writer: Box<dyn Write + Send> = Box::new(ClosedInput);
+            PtyManager::write_loop(
+                Arc::new(Mutex::new(writer)),
+                queue,
+                shutdown.clone(),
+                tx,
+                terminal_id,
+            );
+
+            assert_eq!(shutdown.is_broken(), !child_exited);
+            if child_exited {
+                assert!(
+                    events.try_recv().is_err(),
+                    "only the reader reports natural exit"
+                );
+            } else {
+                assert!(matches!(
+                    events.try_recv(),
+                    Ok(PtyEvent::Exit {
+                        exit_code: None,
+                        ..
+                    })
+                ));
+            }
+        }
     }
 
     #[cfg(windows)]
@@ -3681,7 +3902,7 @@ mod tests {
             Box::new(std::io::Cursor::new(b"stale".to_vec())),
             tx,
             shutdown,
-            None,
+            || None,
             Some(sink.clone()),
             instances,
         );

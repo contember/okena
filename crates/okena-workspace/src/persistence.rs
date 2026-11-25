@@ -142,9 +142,11 @@ fn acquire_instance_lock_at(lock_path: PathBuf) -> Result<LockGuard> {
     file.sync_data()?;
 
     Ok(LockGuard {
+        #[cfg(not(windows))]
         path: lock_path,
+        #[cfg(not(windows))]
         identity,
-        file: Some(file),
+        file,
     })
 }
 
@@ -152,21 +154,28 @@ pub fn instance_lock_pid(content: &str) -> Option<u32> {
     content.trim().split(':').next()?.parse().ok()
 }
 
-/// Guard that keeps the OS lock held and removes only its own lock file.
+/// Guard that holds the OS lock and clears the owner record on release.
 pub struct LockGuard {
+    #[cfg(not(windows))]
     path: PathBuf,
+    #[cfg(not(windows))]
     identity: String,
-    file: Option<File>,
+    file: File,
 }
 
 impl Drop for LockGuard {
     fn drop(&mut self) {
+        #[cfg(not(windows))]
         if std::fs::read_to_string(&self.path).is_ok_and(|content| content == self.identity) {
             let _ = std::fs::remove_file(&self.path);
         }
-        if let Some(file) = self.file.take() {
-            let _ = fs2::FileExt::unlock(&file);
+        #[cfg(windows)]
+        {
+            // An open observer can keep a deleted file in delete-pending state.
+            // Keep the path reopenable and clear its owner while we still hold the lock.
+            let _ = self.file.set_len(0);
         }
+        let _ = fs2::FileExt::unlock(&self.file);
     }
 }
 
@@ -215,14 +224,13 @@ pub(crate) fn validate_workspace_data(
     // This must run BEFORE clearing terminal IDs so we can check WSL backend availability.
     #[cfg(windows)]
     for project in &mut data.projects {
-        if project.default_shell.is_none() {
-            if let Some((distro, _)) =
+        if project.default_shell.is_none()
+            && let Some((distro, _)) =
                 okena_terminal::shell_config::parse_wsl_unc_path(&project.path)
-            {
-                project.default_shell = Some(okena_terminal::shell_config::ShellType::Wsl {
-                    distro: Some(distro),
-                });
-            }
+        {
+            project.default_shell = Some(okena_terminal::shell_config::ShellType::Wsl {
+                distro: Some(distro),
+            });
         }
     }
 
@@ -1366,11 +1374,32 @@ mod tests {
         };
         assert!(error.to_string().contains("Another Okena instance"));
 
+        #[cfg(windows)]
+        let observer = File::open(&path).expect("concurrent observer opens lock file");
         drop(first);
+        #[cfg(not(windows))]
         assert!(!path.exists(), "owner removes its lock file");
+        #[cfg(windows)]
+        assert!(
+            std::fs::read(&path)
+                .expect("owner record is readable")
+                .is_empty()
+        );
+
         let second = acquire_instance_lock_at(path.clone()).expect("lock after release");
         drop(second);
+        #[cfg(not(windows))]
         assert!(!path.exists());
+        #[cfg(windows)]
+        {
+            assert!(
+                std::fs::read(&path)
+                    .expect("owner record is readable")
+                    .is_empty()
+            );
+            drop(observer);
+            std::fs::remove_file(path).expect("remove test lock file");
+        }
     }
 
     #[test]
@@ -1807,7 +1836,9 @@ mod tests {
             // fixture built from it writes rows the registry can never match
             // and the recovery under test never runs. Start from the resolved
             // path, which is what a checkout anywhere else already is.
-            let root = std::fs::canonicalize(&root).expect("resolve fixture root");
+            // Resolve Windows short names too. Dunce keeps the resulting
+            // drive path compatible with the Git CLI.
+            let root = dunce::canonicalize(&root).expect("resolve fixture root");
             Self { root }
         }
 
@@ -2985,8 +3016,8 @@ mod tests {
             .find(|project| project.id == "wt1")
             .expect("legacy monorepo worktree kept");
         assert_eq!(
-            wt.worktree_info.as_ref().unwrap().worktree_path,
-            checkout.to_string_lossy()
+            Path::new(&wt.worktree_info.as_ref().unwrap().worktree_path),
+            checkout
         );
     }
 
@@ -3030,8 +3061,8 @@ mod tests {
             .find(|project| project.id == "outer1")
             .expect("live worktree kept");
         assert_eq!(
-            outer_row.worktree_info.as_ref().unwrap().worktree_path,
-            outer.to_string_lossy()
+            Path::new(&outer_row.worktree_info.as_ref().unwrap().worktree_path),
+            outer
         );
     }
 

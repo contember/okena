@@ -375,7 +375,7 @@ fn safe_hook_environment(env_vars: &HashMap<String, String>) -> Vec<(String, Str
 fn rerunnable_hook_command(command: &str, env_vars: &HashMap<String, String>) -> String {
     #[cfg(windows)]
     {
-        return windows_encoded_hook_command(command, env_vars);
+        windows_encoded_hook_command(command, env_vars)
     }
     #[cfg(not(windows))]
     {
@@ -722,10 +722,11 @@ fn run_hook_sync(
         // exec_id not needed — PTY hooks are finished via finish_by_terminal_id
         let _ = monitor.record_start(hook_type, command, project_name, Some(terminal_id.clone()));
 
-        // Register exit waiter and block until the PTY process exits (5 min timeout)
+        // Bound the in-process regression test independently of the production timeout.
+        let timeout = std::time::Duration::from_secs(if cfg!(test) { 20 } else { 300 });
         let rx = exit_reservation.bind(&terminal_id);
 
-        let exit_code = match rx.recv_timeout(std::time::Duration::from_secs(300)) {
+        let exit_code = match rx.recv_timeout(timeout) {
             Ok(exit_code) => exit_code,
             Err(error) => {
                 monitor.cancel_exit_waiter(&terminal_id);
@@ -1684,18 +1685,16 @@ pub fn terminal_launch_plan(
 fn terminal_launch_parts(shell: &ShellType) -> (String, Vec<String>, String, &'static str, bool) {
     #[cfg(windows)]
     match shell {
-        ShellType::Cmd | ShellType::Default => {
-            return (
-                "cmd.exe".to_string(),
-                vec!["/D".to_string(), "/S".to_string(), "/C".to_string()],
-                "cmd.exe /K".to_string(),
-                " & ",
-                true,
-            );
-        }
+        ShellType::Cmd | ShellType::Default => (
+            "cmd.exe".to_string(),
+            vec!["/D".to_string(), "/S".to_string(), "/C".to_string()],
+            "cmd.exe /K".to_string(),
+            " & ",
+            true,
+        ),
         ShellType::PowerShell { core } => {
             let program = if *core { "pwsh.exe" } else { "powershell.exe" };
-            return (
+            (
                 program.to_string(),
                 vec![
                     "-NoLogo".to_string(),
@@ -1705,27 +1704,25 @@ fn terminal_launch_parts(shell: &ShellType) -> (String, Vec<String>, String, &'s
                 format!("{program} -NoLogo -NoExit"),
                 "; ",
                 false,
-            );
+            )
         }
-        ShellType::Wsl { .. } => {
-            return (
-                "sh".to_string(),
-                vec!["-lc".to_string()],
-                "exec \"${SHELL:-sh}\"".to_string(),
-                "; ",
-                true,
-            );
-        }
+        ShellType::Wsl { .. } => (
+            "sh".to_string(),
+            vec!["-lc".to_string()],
+            "exec \"${SHELL:-sh}\"".to_string(),
+            "; ",
+            true,
+        ),
         ShellType::Custom { path, args } => {
             let mut command_args = args.clone();
             command_args.push("-ic".to_string());
-            return (
+            (
                 path.clone(),
                 command_args,
                 format!("exec {}", shell.to_command_string()),
                 "; ",
                 true,
-            );
+            )
         }
     }
 
@@ -1961,18 +1958,39 @@ mod tests {
         let terminals: TerminalsRegistry = Default::default();
         let runner = HookRunner::new(backend, terminals.clone());
         let event_monitor = monitor.clone();
+        let event_transport = pty_manager.clone();
+        let drain = events.clone();
         let event_thread = std::thread::spawn(move || {
-            loop {
-                if let PtyEvent::Exit {
-                    terminal_id,
-                    exit_code,
-                    ..
-                } = events.recv_blocking().expect("receive hook PTY event")
-                {
-                    event_monitor.notify_exit(&terminal_id, exit_code);
-                    return terminal_id;
+            let mut terminal = None;
+            while let Ok(event) = drain.recv_blocking() {
+                match event {
+                    PtyEvent::Data {
+                        terminal_id, data, ..
+                    } => {
+                        // The hook fixture has no daemon PTY loop. Use a real
+                        // emulator to handle terminal queries in its place.
+                        terminal
+                            .get_or_insert_with(|| {
+                                Terminal::new(
+                                    terminal_id,
+                                    TerminalSize::default(),
+                                    event_transport.clone(),
+                                    ".".into(),
+                                )
+                            })
+                            .process_output(&data);
+                    }
+                    PtyEvent::Exit {
+                        terminal_id,
+                        exit_code,
+                        ..
+                    } => {
+                        event_monitor.notify_exit(&terminal_id, exit_code);
+                        return Some(terminal_id);
+                    }
                 }
             }
+            None
         });
 
         let result = run_hook_sync(
@@ -1985,7 +2003,11 @@ mod tests {
             "p1",
             "p1",
         );
-        let terminal_id = event_thread.join().expect("event thread joins");
+        events.close();
+        let terminal_id = event_thread
+            .join()
+            .expect("event thread joins")
+            .expect("hook reports its PTY exit");
 
         assert!(matches!(result, Err(message) if message == "Hook failed (exit 7)"));
         assert!(!terminals.lock().contains_key(&terminal_id));
@@ -2601,10 +2623,9 @@ mod tests {
         let bytes = base64::engine::general_purpose::STANDARD
             .decode(encoded)
             .expect("base64 command");
-        let utf16: Vec<u16> = bytes
-            .chunks_exact(2)
-            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
-            .collect();
+        let (pairs, remainder) = bytes.as_chunks::<2>();
+        assert!(remainder.is_empty());
+        let utf16: Vec<u16> = pairs.iter().copied().map(u16::from_le_bytes).collect();
         let script = String::from_utf16(&utf16).expect("UTF-16LE command");
 
         assert!(!script.contains(hostile));
