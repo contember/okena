@@ -48,12 +48,7 @@ jobs:
       - name: Build web client
         run: cd web && bun install --frozen-lockfile && bun run build
 
-      # `cargo test` never builds another package's bin as a plain binary, so
-      # the end-to-end tests that drive the TUI would skip themselves.
-      - name: Build the TUI binary the end-to-end tests drive
-        run: cargo build -p okena-tui
-
+      # No okena-tui build or OKENA_REQUIRE_* here, unlike the Linux job: the
+      # tests those guard are cfg(unix).
       - name: Run tests
-        env:
-          OKENA_REQUIRE_TUI: 1
         run: cargo test --workspace --no-fail-fast
