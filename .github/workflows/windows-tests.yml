@@ -23,7 +23,8 @@ env:
 jobs:
   test-windows:
     runs-on: windows-latest
-    timeout-minutes: 20
+    # Warm 11.7 min; a cold-cache run of the same tests plus clippy and a TUI build 13.0 min; ~30 % headroom.
+    timeout-minutes: 17
 
     steps:
       - uses: actions/checkout@v4
