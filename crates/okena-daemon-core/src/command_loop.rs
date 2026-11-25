@@ -50,9 +50,10 @@ use okena_app_core::remote_snapshot::build_state_response;
 #[cfg(test)]
 use okena_app_core::workspace::actions::execute::apply_loaded_session;
 use okena_app_core::workspace::actions::execute::{
-    PreparedContentSearch, begin_workspace_replacement, cleanup_stale_prepared_terminal_launches,
-    cleanup_stale_workspace_replacement, clear_failed_terminal_launch_reservations, delete_project,
-    ensure_terminal, ensure_workspace_replacement_allowed, execute_action,
+    PreparedContentSearch, add_project_nesting_worktree, begin_workspace_replacement,
+    cleanup_stale_prepared_terminal_launches, cleanup_stale_workspace_replacement,
+    clear_failed_terminal_launch_reservations, delete_project, ensure_terminal,
+    ensure_workspace_replacement_allowed, execute_action,
     execute_prepared_content_search_with_cancellation, fail_workspace_replacement,
     finish_workspace_replacement, import_workspace_data, load_session_data_for_shell,
     materialize_prepared_terminal_launches, materialize_workspace_replacement,
@@ -78,7 +79,7 @@ use okena_workspace::actions::project::ProjectDirectoryRenamePlan;
 use okena_workspace::actions::soft_close::{
     begin_soft_close_flow, close_now_flow, probe_busy, undo_soft_close_flow,
 };
-use okena_workspace::actions::worktree::{LinkedCheckout, WorktreeRemovalPlan};
+use okena_workspace::actions::worktree::{LinkedCheckout, WorktreeRemovalPlan, worktree_placement};
 use okena_workspace::context::WorkspaceCx;
 use okena_workspace::focus::FocusManager;
 use okena_workspace::persistence::AppSettings;
@@ -3676,22 +3677,24 @@ pub async fn daemon_command_loop(
                                 let (git_root, subdir) = okena_git::resolve_git_root_and_subdir(
                                     std::path::Path::new(&p.path),
                                 );
-                                // Refused here, before the optimistic row: a
-                                // background failure reaches a caller without
-                                // `wait` only as a toast.
-                                ws.ensure_branch_free_for_worktree(
-                                    &project_id,
-                                    &git_root,
-                                    &branch,
-                                    create_branch,
-                                )?;
                                 let (worktree_path, wt_project_path) =
                                     okena_git::compute_target_paths(
                                         &git_root, &subdir, &template, &branch,
                                     );
-                                Ok((git_root, worktree_path, wt_project_path))
+                                (git_root, worktree_path, wt_project_path)
                             })
                         };
+                        // Refused here, before the optimistic row: a background
+                        // failure reaches a caller without `wait` only as a toast.
+                        let prepared =
+                            prepared.map(|(git_root, worktree_path, wt_project_path)| {
+                                match okena_git::branch_in_use(&git_root, &branch, create_branch) {
+                                    Some(in_use) => Err(workspace
+                                        .lock()
+                                        .branch_in_use_message(&project_id, &in_use)),
+                                    None => Ok((git_root, worktree_path, wt_project_path)),
+                                }
+                            });
 
                         match prepared {
                             None => CommandResult::Err(format!("project not found: {project_id}")),
@@ -4271,6 +4274,50 @@ pub async fn daemon_command_loop(
                             result
                         });
                         continue;
+                    }
+
+                    // ── Add a project that may nest: read repositories off the lock ──
+                    ActionRequest::AddProject {
+                        start_page,
+                        name,
+                        path,
+                        nest_worktree: true,
+                    } => {
+                        let app_settings = settings.lock().clone();
+                        let candidates = workspace.lock().worktree_parent_candidates();
+                        let placement = {
+                            let path = path.clone();
+                            let candidates = candidates.clone();
+                            runtime
+                                .spawn_blocking(move || {
+                                    worktree_placement(std::path::Path::new(&path), &candidates)
+                                })
+                                .await
+                                .ok()
+                        };
+                        run_main_workspace_mutation(
+                            &workspace,
+                            &backend,
+                            &terminals,
+                            &workspace_tick,
+                            &hook_runner,
+                            &hook_monitor,
+                            |ws, deferred_backend, cx| {
+                                add_project_nesting_worktree(
+                                    ws,
+                                    WindowId::Main,
+                                    name,
+                                    path,
+                                    start_page,
+                                    placement.map(|placement| (candidates, placement)),
+                                    deferred_backend,
+                                    &terminals,
+                                    &app_settings,
+                                    cx,
+                                )
+                                .into_command_result()
+                            },
+                        )
                     }
 
                     // ── Delete project: resolve its checkout off the lock ────────

@@ -24,8 +24,10 @@ pub struct DiscoveredWorktree {
 }
 
 impl DiscoveredWorktree {
-    /// `git_root` and `subdir` are the parent project's, as
-    /// [`okena_git::resolve_git_root_and_subdir`] returns them.
+    /// `git_root` is the parent project's repository root, as
+    /// [`okena_git::resolve_git_root_and_subdir`] returns it; `subdir` is
+    /// where the project sits inside the checkout: the parent's for a
+    /// discovered worktree, the added path's for `project add`.
     pub fn new(
         worktree_path: &str,
         branch: &str,
@@ -1693,12 +1695,21 @@ impl Workspace {
     }
 }
 
+/// A project that may take worktree rows: local, top-level, and not being
+/// created or closed. Copied out under the workspace lock, so that the
+/// repository reads of [`worktree_placement`] can run without it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct WorktreeParentCandidate {
+    pub id: String,
+    pub path: String,
+}
+
 /// Where a path added as a project belongs, when it is a linked worktree.
 #[derive(Clone, Debug, PartialEq)]
 pub enum WorktreePlacement {
     /// Not a linked worktree: an ordinary top-level project.
     NotLinked,
-    /// A linked worktree of the repository whose main checkout is the
+    /// A linked worktree of the repository whose main checkout holds the
     /// project `parent_id`.
     Nest {
         parent_id: String,
@@ -1708,68 +1719,98 @@ pub enum WorktreePlacement {
     TopLevel { reason: String },
 }
 
-/// Worktree parentage of existing rows: where a new path goes, moving a row
-/// between parents, and the branch a worktree add cannot take.
-impl Workspace {
-    /// Find the project `path` nests under when it lies in a linked worktree.
-    ///
-    /// The parent is a local top-level project whose path is in the main
-    /// checkout of the same repository (same common Git directory), the rule
-    /// worktree discovery uses. Among several (monorepo packages), the one at
-    /// the same subdirectory wins, else the first in sidebar order. Reads the
-    /// repositories of `path` and of every candidate.
-    pub fn worktree_placement(&self, path: &std::path::Path) -> WorktreePlacement {
-        let Some(linked) = okena_git::linked_worktree_checkout(path) else {
-            return WorktreePlacement::NotLinked;
+/// Find the candidate `path` nests under when it lies in a linked worktree.
+///
+/// The parent is a candidate in the main checkout of the same repository
+/// (same common Git directory), as for worktree discovery. Unlike discovery,
+/// the path added stays the row's path, so among several candidates
+/// (monorepo packages) the one at the same subdirectory wins, then the
+/// deepest one enclosing it, then the first. Reads the repositories of
+/// `path` and of every candidate.
+pub fn worktree_placement(
+    path: &std::path::Path,
+    candidates: &[WorktreeParentCandidate],
+) -> WorktreePlacement {
+    let Some(linked) = okena_git::linked_worktree_checkout(path) else {
+        return WorktreePlacement::NotLinked;
+    };
+    let root = canonical_path(&linked.root);
+    let Some(branch) = linked.branch else {
+        return WorktreePlacement::TopLevel {
+            reason: format!(
+                "the worktree at {} has a detached HEAD; check out a branch, then nest it with `okena project set-parent`",
+                root.display()
+            ),
         };
-        let root = canonical_path(&linked.root);
-        let Some(branch) = linked.branch else {
-            return WorktreePlacement::TopLevel {
-                reason: format!(
-                    "the worktree at {} has a detached HEAD; check out a branch, then nest it with `okena project set-parent`",
-                    root.display()
-                ),
-            };
+    };
+    let Some(main_checkout) = linked.main_checkout else {
+        return WorktreePlacement::TopLevel {
+            reason: format!(
+                "its repository {} is bare, so no project is its main checkout",
+                linked.common_dir.display()
+            ),
         };
-        let Some(main_checkout) = linked.main_checkout else {
-            return WorktreePlacement::TopLevel {
-                reason: format!(
-                    "its repository {} is bare, so no project is its main checkout",
-                    linked.common_dir.display()
-                ),
-            };
-        };
-        let subdir = canonical_path(path)
-            .strip_prefix(&root)
-            .map(std::path::Path::to_path_buf)
-            .unwrap_or_default();
-        let root = root.to_string_lossy().into_owned();
+    };
+    let subdir = canonical_path(path)
+        .strip_prefix(&root)
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_default();
+    let root = root.to_string_lossy().into_owned();
 
-        let mut first = None;
-        for project in self.projects_in_sidebar_order() {
-            if !self.can_parent_worktrees(project) {
-                continue;
-            }
-            let project_path = std::path::Path::new(&project.path);
-            if !is_main_checkout_of(project_path, &linked.common_dir) {
-                continue;
-            }
-            let (git_root, parent_subdir) = okena_git::resolve_git_root_and_subdir(project_path);
-            let placement = WorktreePlacement::Nest {
-                parent_id: project.id.clone(),
-                found: DiscoveredWorktree::new(&root, &branch, &git_root, &subdir),
-            };
-            if parent_subdir == subdir {
-                return placement;
-            }
-            first.get_or_insert(placement);
+    let mut enclosing: Option<(usize, WorktreePlacement)> = None;
+    let mut first = None;
+    for candidate in candidates {
+        let candidate_path = std::path::Path::new(&candidate.path);
+        if !is_main_checkout_of(candidate_path, &linked.common_dir) {
+            continue;
         }
-        first.unwrap_or_else(|| WorktreePlacement::TopLevel {
+        let (git_root, parent_subdir) = okena_git::resolve_git_root_and_subdir(candidate_path);
+        let placement = WorktreePlacement::Nest {
+            parent_id: candidate.id.clone(),
+            found: DiscoveredWorktree::new(&root, &branch, &git_root, &subdir),
+        };
+        if parent_subdir == subdir {
+            return placement;
+        }
+        if subdir.starts_with(&parent_subdir) {
+            let depth = parent_subdir.components().count();
+            if enclosing.as_ref().is_none_or(|(best, _)| depth > *best) {
+                enclosing = Some((depth, placement));
+            }
+        } else if first.is_none() {
+            first = Some(placement);
+        }
+    }
+    enclosing
+        .map(|(_, placement)| placement)
+        .or(first)
+        .unwrap_or_else(|| WorktreePlacement::TopLevel {
             reason: format!(
                 "no project is its repository's main checkout {}; add that, then nest this one with `okena project set-parent`",
                 main_checkout.display()
             ),
         })
+}
+
+/// Worktree parentage of existing rows: where a new path goes, moving a row
+/// between parents, and the branch a worktree add cannot take.
+impl Workspace {
+    /// The projects that may take worktree rows, in sidebar order.
+    pub fn worktree_parent_candidates(&self) -> Vec<WorktreeParentCandidate> {
+        self.projects_in_sidebar_order()
+            .into_iter()
+            .filter(|project| self.can_parent_worktrees(project))
+            .map(|project| WorktreeParentCandidate {
+                id: project.id.clone(),
+                path: project.path.clone(),
+            })
+            .collect()
+    }
+
+    /// [`worktree_placement`] against the current candidates. Reads the
+    /// repositories while the caller holds the workspace.
+    pub fn worktree_placement(&self, path: &std::path::Path) -> WorktreePlacement {
+        worktree_placement(path, &self.worktree_parent_candidates())
     }
 
     /// Make `project_id` a worktree of `parent_id`, or with `None` a
@@ -1918,6 +1959,11 @@ impl Workspace {
     /// Put a top-level `project_id` right after `anchor` (in its folder when
     /// it has one), or last when there is no anchor.
     fn place_after(&mut self, project_id: &str, anchor: Option<&str>) {
+        // A row orphaned by its parent's deletion is in `project_order` already.
+        self.data.project_order.retain(|id| id != project_id);
+        for folder in &mut self.data.folders {
+            folder.project_ids.retain(|id| id != project_id);
+        }
         let id = project_id.to_string();
         if let Some(anchor) = anchor {
             for folder in &mut self.data.folders {
@@ -1959,50 +2005,45 @@ impl Workspace {
         ordered
     }
 
-    /// Refuse a worktree add for `branch` that git would refuse because the
-    /// branch is checked out already, and say how to use that checkout.
-    pub fn ensure_branch_free_for_worktree(
+    /// What to tell a worktree add that git would refuse because `in_use`
+    /// has its branch checked out, with how to use that checkout instead.
+    /// Resolves project paths on disk; it runs only on that refusal.
+    pub fn branch_in_use_message(
         &self,
         parent_id: &str,
-        git_root: &std::path::Path,
-        branch: &str,
-        create_branch: bool,
-    ) -> Result<(), String> {
-        let Some((branch, checkout)) = okena_git::branch_in_use(git_root, branch, create_branch)
-        else {
-            return Ok(());
-        };
+        in_use: &okena_git::BranchInUse,
+    ) -> String {
         let head = format!(
-            "Branch '{branch}' is already checked out at {}",
-            checkout.display()
+            "Branch '{}' is already checked out at {}",
+            in_use.branch,
+            in_use.checkout.display()
         );
-        if okena_git::linked_worktree_checkout(&checkout).is_none() {
-            return Err(format!(
+        if in_use.main_checkout {
+            return format!(
                 "{head}, the repository's main checkout; git checks a branch out in one worktree at a time"
-            ));
+            );
         }
-        let identity = Self::physical_path_identity(&checkout);
+        let checkout = canonical_path(&in_use.checkout);
         let owner = self.data.projects.iter().find(|project| {
-            Self::physical_path_identity(std::path::Path::new(&project.path)) == identity
+            canonical_path(std::path::Path::new(&project.path)).starts_with(&checkout)
                 || project.worktree_info.as_ref().is_some_and(|wt| {
-                    Self::physical_path_identity(std::path::Path::new(&wt.worktree_path))
-                        == identity
+                    canonical_path(std::path::Path::new(&wt.worktree_path)) == checkout
                 })
         });
         let parent_id = self
             .project(parent_id)
             .map_or(parent_id, |parent| parent.root_project_id());
-        Err(match owner {
+        match owner {
             None => format!(
                 "{head}, a worktree Okena does not track. Add it instead: okena project add {}",
-                okena_core::shell::shell_quote(&checkout.to_string_lossy())
+                okena_core::shell::shell_quote(&in_use.checkout.to_string_lossy())
             ),
             Some(owner) if owner.worktree_info.is_none() => format!(
                 "{head}, the project '{}'. Nest it under its parent instead: okena project set-parent {} {parent_id}",
                 owner.name, owner.id
             ),
             Some(owner) => format!("{head}, the worktree '{}'", owner.name),
-        })
+        }
     }
 }
 
@@ -2933,11 +2974,31 @@ mod worktree_parent_tests {
     }
 
     #[test]
-    fn a_monorepo_worktree_nests_under_the_package_at_the_same_subdirectory() {
+    fn a_monorepo_worktree_nests_under_the_package_at_the_same_or_an_enclosing_directory() {
         let scratch = Scratch::new();
         let repo = repo(&scratch);
         let wt = scratch.0.join("wt-feat");
         worktree(&repo, &wt, "feat");
+        std::fs::create_dir_all(wt.join("packages/c")).unwrap();
+        let with_root = workspace(vec![
+            project("b", &repo.join("packages/b")),
+            project("root", &repo),
+            project("a", &repo.join("packages/a")),
+        ]);
+        assert_eq!(
+            nest_parent(&with_root.worktree_placement(&wt)),
+            Some("root")
+        );
+        assert_eq!(
+            nest_parent(&with_root.worktree_placement(&wt.join("packages/c"))),
+            Some("root"),
+            "the project enclosing the path, not a sibling package"
+        );
+        assert_eq!(
+            nest_parent(&with_root.worktree_placement(&wt.join("packages/a"))),
+            Some("a")
+        );
+
         let ws = workspace(vec![
             project("b", &repo.join("packages/b")),
             project("a", &repo.join("packages/a")),
@@ -3082,6 +3143,55 @@ mod worktree_parent_tests {
     }
 
     #[test]
+    fn a_row_orphaned_by_its_parent_goes_back_to_the_top_level_once() {
+        let scratch = Scratch::new();
+        let repo = repo(&scratch);
+        let wt = scratch.0.join("wt-feat");
+        worktree(&repo, &wt, "feat");
+        let mut ws = workspace(vec![project("parent", &repo), project("wt", &wt)]);
+        ws.set_project_parent("wt", Some("parent"), &mut TestCx)
+            .expect("nest");
+        // What deleting the parent leaves: the row back in `project_order`,
+        // still pointing at the parent that is gone.
+        ws.data.projects.retain(|p| p.id != "parent");
+        ws.data.project_order = vec!["wt".to_string()];
+
+        ws.set_project_parent("wt", None, &mut TestCx)
+            .expect("back to the top level");
+        assert_eq!(ws.data().project_order, vec!["wt"]);
+        assert!(ws.project("wt").unwrap().worktree_info.is_none());
+    }
+
+    #[test]
+    fn a_moved_row_survives_a_save_and_load() {
+        let scratch = Scratch::new();
+        let repo = repo(&scratch);
+        let wt = scratch.0.join("wt-feat");
+        worktree(&repo, &wt, "feat");
+        let mut ws = workspace(vec![project("parent", &repo), project("wt", &wt)]);
+        ws.set_project_parent("wt", Some("parent"), &mut TestCx)
+            .expect("nest");
+
+        let json = serde_json::to_string(ws.data()).unwrap();
+        let mut loaded: WorkspaceData = serde_json::from_str(&json).unwrap();
+        crate::persistence::validate_workspace_data(
+            &mut loaded,
+            false,
+            okena_terminal::session_backend::SessionBackend::None,
+        );
+        crate::persistence::sync_worktrees(&mut loaded);
+        let loaded = Workspace::new(loaded);
+        assert_eq!(loaded.data().project_order, vec!["parent"]);
+        assert_eq!(loaded.project("parent").unwrap().worktree_ids, vec!["wt"]);
+        // Branch and main repository are runtime fields, not persisted.
+        let metadata = |ws: &Workspace| {
+            let wt = ws.project("wt").unwrap().worktree_info.clone().unwrap();
+            (wt.parent_project_id, wt.worktree_path, wt.custom_name)
+        };
+        assert_eq!(metadata(&loaded), metadata(&ws));
+    }
+
+    #[test]
     fn a_checked_out_branch_is_refused_with_how_to_use_its_checkout() {
         let scratch = Scratch::new();
         let repo = repo(&scratch);
@@ -3090,10 +3200,16 @@ mod worktree_parent_tests {
         let tracked = scratch.0.join("wt-tracked");
         worktree(&repo, &tracked, "tracked");
         git(&repo, &["branch", "free"]);
-        let ws = workspace(vec![project("parent", &repo), project("top", &tracked)]);
-        let check = |branch: &str, create: bool| {
-            ws.ensure_branch_free_for_worktree("parent", &repo, branch, create)
-        };
+        std::fs::create_dir_all(tracked.join("pkg")).unwrap();
+        let ws = workspace(vec![
+            project("parent", &repo),
+            project("top", &tracked.join("pkg")),
+        ]);
+        let check =
+            |branch: &str, create: bool| match okena_git::branch_in_use(&repo, branch, create) {
+                Some(in_use) => Err(ws.branch_in_use_message("parent", &in_use)),
+                None => Ok(()),
+            };
 
         let main = check("main", false).unwrap_err();
         assert!(main.contains("'main' is already checked out"), "{main}");

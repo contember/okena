@@ -547,11 +547,11 @@ fn add_worktree(
     }
 
     if let BranchAttachment::Existing(name) = attachment
-        && let Some(path) = branch_checkout(Path::new(repo_str), name)
+        && let Some(in_use) = branch_checkout(Path::new(repo_str), name)
     {
         return Err(GitError::BranchCheckedOut {
-            branch: name.clone(),
-            path,
+            branch: in_use.branch,
+            path: in_use.checkout,
         });
     }
 
@@ -559,22 +559,39 @@ fn add_worktree(
     require_success(output)
 }
 
-/// The checkout (main or linked) that has the local `branch` checked out.
-fn branch_checkout(repo_path: &Path, branch: &str) -> Option<PathBuf> {
-    list_git_worktrees(repo_path)
-        .into_iter()
-        .find(|(_, checked_out)| checked_out == branch)
-        .map(|(path, _)| PathBuf::from(path))
+/// A local branch checked out in one of a repository's worktrees.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BranchInUse {
+    pub branch: String,
+    pub checkout: PathBuf,
+    /// The checkout is the repository's main one, not a linked worktree.
+    pub main_checkout: bool,
 }
 
-/// The local branch a worktree add for `branch` would check out, with the
-/// checkout that already has it, resolved the way [`create_worktree`]
+/// The checkout (main or linked) that has the local `branch` checked out.
+fn branch_checkout(repo_path: &Path, branch: &str) -> Option<BranchInUse> {
+    let repo = crate::gix_helpers::open(repo_path)?;
+    let in_use = |checkout: PathBuf, main_checkout| BranchInUse {
+        branch: branch.to_string(),
+        checkout,
+        main_checkout,
+    };
+    if let Ok(main) = gix::open(repo.common_dir())
+        && head_branch_short(&main).as_deref() == Some(branch)
+        && let Some(workdir) = main.workdir()
+    {
+        return Some(in_use(workdir.to_path_buf(), true));
+    }
+    linked_worktrees_with_branch(&repo)
+        .into_iter()
+        .find(|(_, checked_out)| checked_out == branch)
+        .map(|(path, _)| in_use(PathBuf::from(path), false))
+}
+
+/// The local branch a worktree add for `branch` would check out, when a
+/// checkout has it already, resolved the way [`create_worktree`]
 /// (`create_branch`) resolves it. `None` when the add would not collide.
-pub fn branch_in_use(
-    repo_path: &Path,
-    branch: &str,
-    create_branch: bool,
-) -> Option<(String, PathBuf)> {
+pub fn branch_in_use(repo_path: &Path, branch: &str, create_branch: bool) -> Option<BranchInUse> {
     let attachment = if create_branch {
         existing_branch_for_new(repo_path, branch)?.0
     } else {
@@ -583,7 +600,7 @@ pub fn branch_in_use(
     let BranchAttachment::Existing(name) = attachment else {
         return None;
     };
-    branch_checkout(repo_path, &name).map(|path| (name, path))
+    branch_checkout(repo_path, &name)
 }
 
 /// A linked worktree's checkout, seen from a path inside it.
@@ -1172,10 +1189,17 @@ mod tests {
         }
         assert!(!target.exists(), "nothing is checked out on refusal");
 
-        assert_eq!(
-            branch_in_use(&repo, "feat", false).map(|(branch, path)| (branch, canonical(&path))),
-            Some(("feat".to_string(), canonical(&feat)))
-        );
+        let in_use = branch_in_use(&repo, "feat", false).expect("feat is checked out");
+        assert_eq!(in_use.branch, "feat");
+        assert_eq!(canonical(&in_use.checkout), canonical(&feat));
+        assert!(!in_use.main_checkout);
+        let main = branch_in_use(&repo, "main", false).expect("main is checked out");
+        assert!(main.main_checkout);
+        assert_eq!(canonical(&main.checkout), canonical(&repo));
+        // A linked checkout whose directory is gone is still no main checkout.
+        std::fs::remove_dir_all(&feat).unwrap();
+        let gone = branch_in_use(&repo, "feat", false).expect("still registered");
+        assert!(!gone.main_checkout);
         assert_eq!(branch_in_use(&repo, "free", false), None);
         assert_eq!(branch_in_use(&repo, "brand-new", true), None);
         create_worktree(&repo, "free", &target, false).expect("a free branch still works");

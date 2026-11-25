@@ -57,8 +57,8 @@ pub use status::{
 };
 pub(crate) use status::{read_worktree_blob, untracked_line_count, worktree_diff};
 pub use worktree::{
-    LinkedWorktreeCheckout, OrphanedWorktree, VerifiedWorktree, WorktreeBranch, branch_in_use,
-    create_worktree, create_worktree_with_start_point, fetch_and_fast_forward,
+    BranchInUse, LinkedWorktreeCheckout, OrphanedWorktree, VerifiedWorktree, WorktreeBranch,
+    branch_in_use, create_worktree, create_worktree_with_start_point, fetch_and_fast_forward,
     linked_worktree_checkout, list_git_worktrees, list_linked_git_worktrees,
     list_linked_worktree_paths, move_worktree, remove_orphaned_worktree, remove_worktree,
     remove_worktree_fast, verify_linked_worktree_fresh, verify_orphaned_worktree,

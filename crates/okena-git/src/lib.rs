@@ -19,7 +19,7 @@ pub use diff::{
 pub use error::{GitError, GitResult};
 pub use file_history::{FileHistoryEntry, get_file_history};
 pub use repository::{
-    BranchDetail, BranchList, CloneProgress, DirtyCheck, HeadSnapshot, IndexStamp,
+    BranchDetail, BranchInUse, BranchList, CloneProgress, DirtyCheck, HeadSnapshot, IndexStamp,
     LinkedWorktreeCheckout, OrphanedWorktree, RepoPollSnapshot, UpstreamState, VerifiedWorktree,
     WorktreeBranch, branch_in_use, checkout_local_branch, checkout_remote_branch, clone_dir_name,
     clone_repository, compute_target_paths, count_ahead_behind, count_unpushed_commits,

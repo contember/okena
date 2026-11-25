@@ -14,7 +14,9 @@ use okena_core::theme::FolderColor;
 use okena_terminal::TerminalsRegistry;
 use okena_terminal::backend::{TerminalBackend, TerminalLaunchPlan};
 use okena_terminal::terminal::{Terminal, TerminalSize};
-use okena_workspace::actions::worktree::{LinkedCheckout, WorktreePlacement};
+use okena_workspace::actions::worktree::{
+    LinkedCheckout, WorktreeParentCandidate, WorktreePlacement,
+};
 use okena_workspace::context::WorkspaceCx;
 use okena_workspace::hook_monitor::HookStatus;
 use std::sync::Arc;
@@ -92,18 +94,27 @@ pub(super) fn add_project(
 /// the project of its repository's main checkout, anything else is added like
 /// [`add_project`]. The reply names the parent (`parent_project_id`), or why a
 /// linked worktree stayed top-level (`not_nested`).
-pub(super) fn add_project_nesting_worktree(
+///
+/// `resolved` is a placement worked out off the lock for the candidates it
+/// names; it is worked out again here when they no longer match, or when the
+/// caller has none.
+pub fn add_project_nesting_worktree(
     ws: &mut Workspace,
     window_id: WindowId,
     name: String,
     path: String,
     start_page: bool,
+    resolved: Option<(Vec<WorktreeParentCandidate>, WorktreePlacement)>,
     backend: &dyn TerminalBackend,
     terminals: &TerminalsRegistry,
     settings: &AppSettings,
     cx: &mut impl WorkspaceCx,
 ) -> ActionResult {
-    match ws.worktree_placement(std::path::Path::new(&path)) {
+    let placement = match resolved {
+        Some((candidates, placement)) if candidates == ws.worktree_parent_candidates() => placement,
+        _ => ws.worktree_placement(std::path::Path::new(&path)),
+    };
+    match placement {
         WorktreePlacement::NotLinked => add_project(
             ws, window_id, name, path, start_page, backend, terminals, settings, cx,
         ),
@@ -573,10 +584,8 @@ pub(super) fn create_worktree(
     };
     let project_path = std::path::PathBuf::from(&project.path);
     let (git_root, subdir) = okena_git::resolve_git_root_and_subdir(&project_path);
-    if let Err(error) =
-        ws.ensure_branch_free_for_worktree(&project_id, &git_root, &branch, create_branch)
-    {
-        return ActionResult::Err(error);
+    if let Some(in_use) = okena_git::branch_in_use(&git_root, &branch, create_branch) {
+        return ActionResult::Err(ws.branch_in_use_message(&project_id, &in_use));
     }
     let path_template = settings.worktree.path_template.clone();
     let (worktree_path, wt_project_path) =
@@ -1450,6 +1459,7 @@ mod hook_action_tests {
             "given name".to_string(),
             path.to_string_lossy().into_owned(),
             false,
+            None,
             &RecordingBackend::default(),
             &TerminalsRegistry::default(),
             &AppSettings::default(),

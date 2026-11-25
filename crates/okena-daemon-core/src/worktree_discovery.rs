@@ -18,7 +18,9 @@ use std::time::Duration;
 
 use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
 use okena_hooks::{HookMonitor, HookRunner};
-use okena_workspace::actions::worktree::{DiscoveredWorktree, linked_checkout_root};
+use okena_workspace::actions::worktree::{
+    DiscoveredWorktree, WorktreeParentCandidate, linked_checkout_root,
+};
 use okena_workspace::persistence::AppSettings;
 use okena_workspace::state::{
     ClaimedWorktreeRoot, PhysicalPathIdentity, ProjectData, WindowId, Workspace,
@@ -172,41 +174,13 @@ impl WorkspaceShape {
             dismissed: data.dismissed_worktree_paths.clone(),
         }
     }
-
-    /// Projects as the sidebar lists them: `project_order`, with each folder
-    /// expanded in place. A project missing from both comes last.
-    fn in_sidebar_order(&self) -> Vec<&ProjectShape> {
-        let mut ordered = Vec::new();
-        let mut placed = HashSet::new();
-        for entry in &self.project_order {
-            let ids = match self
-                .folders
-                .iter()
-                .find(|(folder_id, _)| folder_id == entry)
-            {
-                Some((_, project_ids)) => project_ids.as_slice(),
-                None => std::slice::from_ref(entry),
-            };
-            for id in ids {
-                if let Some(project) = self.projects.iter().find(|project| &project.id == id)
-                    && placed.insert(id.as_str())
-                {
-                    ordered.push(project);
-                }
-            }
-        }
-        ordered.extend(
-            self.projects
-                .iter()
-                .filter(|project| !placed.contains(project.id.as_str())),
-        );
-        ordered
-    }
 }
 
 /// Everything a scan needs from the workspace, copied out under the lock.
 struct ScanInput {
     shape: WorkspaceShape,
+    /// Projects that may take worktree rows, in sidebar order.
+    parents: Vec<WorktreeParentCandidate>,
     /// Projects whose create or close is in flight, to resolve their claims.
     busy: Vec<ProjectData>,
     ignore: Vec<String>,
@@ -225,6 +199,7 @@ impl ScanInput {
             .collect();
         Self {
             shape,
+            parents: workspace.worktree_parent_candidates(),
             busy,
             ignore,
         }
@@ -263,11 +238,7 @@ fn plan_scan(input: ScanInput) -> ScanPlan {
 
 fn discover(input: &ScanInput) -> Vec<Discovered> {
     let shape = &input.shape;
-    let parents: Vec<&ProjectShape> = shape
-        .in_sidebar_order()
-        .into_iter()
-        .filter(|project| project.recorded_checkout.is_none() && !project.remote && !project.busy)
-        .collect();
+    let parents = &input.parents;
     if parents.is_empty() {
         return Vec::new();
     }
