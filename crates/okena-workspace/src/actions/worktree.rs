@@ -2023,6 +2023,11 @@ impl Workspace {
                 "{head}, the repository's main checkout; git checks a branch out in one worktree at a time"
             );
         }
+        if !in_use.checkout.exists() {
+            return format!(
+                "{head}, a worktree whose directory is gone; run `git worktree prune` in the repository, then try again"
+            );
+        }
         let checkout = canonical_path(&in_use.checkout);
         let owner = self.data.projects.iter().find(|project| {
             canonical_path(std::path::Path::new(&project.path)).starts_with(&checkout)
@@ -3229,5 +3234,9 @@ mod worktree_parent_tests {
 
         assert_eq!(check("free", false), Ok(()));
         assert_eq!(check("brand-new", true), Ok(()));
+
+        std::fs::remove_dir_all(&untracked).unwrap();
+        let error = check("untracked", false).unwrap_err();
+        assert!(error.contains("git worktree prune"), "{error}");
     }
 }

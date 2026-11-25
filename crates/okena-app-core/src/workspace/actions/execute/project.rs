@@ -874,7 +874,9 @@ mod hook_action_tests {
     use okena_terminal::backend::{TerminalBackend, TerminalLaunchPlan};
     use okena_terminal::shell_config::ShellType;
     use okena_terminal::terminal::TerminalTransport;
-    use okena_workspace::actions::worktree::LinkedCheckout;
+    use okena_workspace::actions::worktree::{
+        LinkedCheckout, WorktreeParentCandidate, WorktreePlacement,
+    };
     use okena_workspace::context::WorkspaceCx;
     use okena_workspace::hook_monitor::{HookMonitor, HookStatus};
     use okena_workspace::hooks::HookRunner;
@@ -1450,6 +1452,14 @@ mod hook_action_tests {
     }
 
     fn add_nesting(workspace: &mut Workspace, path: &std::path::Path) -> serde_json::Value {
+        add_nesting_resolved(workspace, path, None)
+    }
+
+    fn add_nesting_resolved(
+        workspace: &mut Workspace,
+        path: &std::path::Path,
+        resolved: Option<(Vec<WorktreeParentCandidate>, WorktreePlacement)>,
+    ) -> serde_json::Value {
         let mut cx = TestCx {
             monitor: HookMonitor::new(),
         };
@@ -1459,7 +1469,7 @@ mod hook_action_tests {
             "given name".to_string(),
             path.to_string_lossy().into_owned(),
             false,
-            None,
+            resolved,
             &RecordingBackend::default(),
             &TerminalsRegistry::default(),
             &AppSettings::default(),
@@ -1497,6 +1507,38 @@ mod hook_action_tests {
         assert!(reply.get("not_nested").is_none());
         let id = reply["project_id"].as_str().unwrap();
         assert!(workspace.project(id).unwrap().worktree_info.is_none());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_placement_resolved_off_the_lock_is_used_only_while_its_candidates_hold() {
+        let (dir, worktree) = linked_worktree_fixture("nest-resolved");
+        let main = std::fs::canonicalize(dir.join("main")).unwrap();
+        let mut data = workspace_with_hook("hook-1").data().clone();
+        data.projects[0].path = main.to_string_lossy().into_owned();
+        let mut workspace = Workspace::new(data);
+        let stand_in = || WorktreePlacement::TopLevel {
+            reason: "resolved off the lock".to_string(),
+        };
+
+        // Candidates unchanged: the resolved placement is used as it is.
+        let current = workspace.worktree_parent_candidates();
+        let reply = add_nesting_resolved(&mut workspace, &worktree, Some((current, stand_in())));
+        assert_eq!(reply["not_nested"], "resolved off the lock");
+        let id = reply["project_id"].as_str().unwrap().to_string();
+        let mut cx = TestCx {
+            monitor: HookMonitor::new(),
+        };
+        workspace.delete_project(
+            &mut FocusManager::default(),
+            &id,
+            &HooksConfig::default(),
+            &mut cx,
+        );
+
+        // Candidates changed since: it is worked out again under the lock.
+        let reply = add_nesting_resolved(&mut workspace, &worktree, Some((Vec::new(), stand_in())));
+        assert_eq!(reply["parent_project_id"], "p1");
         let _ = std::fs::remove_dir_all(dir);
     }
 
