@@ -42,6 +42,11 @@ pub enum GitError {
     #[error("invalid repository URL: {0}")]
     InvalidUrl(String),
 
+    /// The branch a worktree would check out is checked out in another
+    /// worktree already; git allows a branch in one worktree at a time.
+    #[error("branch '{branch}' is already checked out at '{path}'")]
+    BranchCheckedOut { branch: String, path: PathBuf },
+
     /// Clone target directory already exists and is not empty.
     #[error("directory '{path}' already exists and is not empty")]
     CloneTargetExists { path: PathBuf },

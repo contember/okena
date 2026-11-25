@@ -33,7 +33,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 pub use project::{
-    MAX_FINISHED_HOOK_TERMINALS, delete_project, evict_stale_hook_terminals, teardown_hook_terminal,
+    MAX_FINISHED_HOOK_TERMINALS, add_project_nesting_worktree, delete_project,
+    evict_stale_hook_terminals, teardown_hook_terminal,
 };
 
 pub use files::{
@@ -568,9 +569,22 @@ pub fn execute_action(
             start_page,
             name,
             path,
+            nest_worktree: false,
         } => project::add_project(
             ws, window_id, name, path, start_page, backend, terminals, settings, cx,
         ),
+        ActionRequest::AddProject {
+            start_page,
+            name,
+            path,
+            nest_worktree: true,
+        } => project::add_project_nesting_worktree(
+            ws, window_id, name, path, start_page, None, backend, terminals, settings, cx,
+        ),
+        ActionRequest::SetProjectParent {
+            project_id,
+            parent_project_id,
+        } => project::set_project_parent(ws, project_id, parent_project_id, cx),
         ActionRequest::CloneProject {
             start_page,
             url,

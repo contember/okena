@@ -546,8 +546,96 @@ fn add_worktree(
         }
     }
 
+    if let BranchAttachment::Existing(name) = attachment
+        && let Some(in_use) = branch_checkout(Path::new(repo_str), name)
+    {
+        return Err(GitError::BranchCheckedOut {
+            branch: in_use.branch,
+            path: in_use.checkout,
+        });
+    }
+
     let output = safe_output(command("git").args(&args))?;
     require_success(output)
+}
+
+/// A local branch checked out in one of a repository's worktrees.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BranchInUse {
+    pub branch: String,
+    pub checkout: PathBuf,
+    /// The checkout is the repository's main one, not a linked worktree.
+    pub main_checkout: bool,
+}
+
+/// The checkout (main or linked) that has the local `branch` checked out.
+fn branch_checkout(repo_path: &Path, branch: &str) -> Option<BranchInUse> {
+    let repo = crate::gix_helpers::open(repo_path)?;
+    let in_use = |checkout: PathBuf, main_checkout| BranchInUse {
+        branch: branch.to_string(),
+        checkout,
+        main_checkout,
+    };
+    if let Ok(main) = gix::open(repo.common_dir())
+        && head_branch_short(&main).as_deref() == Some(branch)
+        && let Some(workdir) = main.workdir()
+    {
+        return Some(in_use(workdir.to_path_buf(), true));
+    }
+    linked_worktrees_with_branch(&repo)
+        .into_iter()
+        .find(|(_, checked_out)| checked_out == branch)
+        .map(|(path, _)| in_use(PathBuf::from(path), false))
+}
+
+/// The local branch a worktree add for `branch` would check out, when a
+/// checkout has it already, resolved the way [`create_worktree`]
+/// (`create_branch`) resolves it. `None` when the add would not collide.
+pub fn branch_in_use(repo_path: &Path, branch: &str, create_branch: bool) -> Option<BranchInUse> {
+    let attachment = if create_branch {
+        existing_branch_for_new(repo_path, branch)?.0
+    } else {
+        resolve_existing_branch(repo_path, branch).ok()?
+    };
+    let BranchAttachment::Existing(name) = attachment else {
+        return None;
+    };
+    branch_checkout(repo_path, &name)
+}
+
+/// A linked worktree's checkout, seen from a path inside it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LinkedWorktreeCheckout {
+    /// The checkout's root directory.
+    pub root: PathBuf,
+    /// The repository's shared Git directory, canonical.
+    pub common_dir: PathBuf,
+    /// `None` on a detached HEAD.
+    pub branch: Option<String>,
+    /// The repository's main checkout; `None` for a bare repository.
+    pub main_checkout: Option<PathBuf>,
+}
+
+/// The linked worktree `path` lies in, or `None` for a path outside Git, in
+/// a main checkout or in a submodule (whose `.git` file points at its own
+/// repository, not at a worktree of another one).
+pub fn linked_worktree_checkout(path: &Path) -> Option<LinkedWorktreeCheckout> {
+    let repo = crate::gix_helpers::open(path)?;
+    let root = repo.workdir()?.to_path_buf();
+    let canonical = |dir: &Path| std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+    let common_dir = canonical(repo.common_dir());
+    if canonical(repo.git_dir()) == common_dir {
+        return None;
+    }
+    let main_checkout = gix::open(repo.common_dir())
+        .ok()
+        .and_then(|main| main.workdir().map(Path::to_path_buf));
+    Some(LinkedWorktreeCheckout {
+        root,
+        common_dir,
+        branch: head_branch_short(&repo),
+        main_checkout,
+    })
 }
 
 /// Create a new worktree with an optional pre-fetched start point.
@@ -981,6 +1069,140 @@ mod tests {
         assert_eq!(branches, vec!["feat"]);
         // Asked from inside the linked worktree, the answer is the same.
         assert_eq!(list_linked_git_worktrees(&wt_path), entries);
+    }
+
+    fn canonical(path: &Path) -> PathBuf {
+        std::fs::canonicalize(path).expect("canonicalize test path")
+    }
+
+    #[test]
+    fn linked_worktree_checkout_answers_only_inside_a_linked_worktree() {
+        let (_tmp, repo) = init_temp_repo();
+        let wt_tmp = tempfile::tempdir().expect("create worktree tempdir");
+        let wt_path = wt_tmp.path().join("wt-feat");
+        git_in(
+            &repo,
+            &["worktree", "add", wt_path.to_str().unwrap(), "-b", "feat"],
+        );
+        std::fs::create_dir(wt_path.join("sub")).unwrap();
+
+        assert_eq!(linked_worktree_checkout(&repo), None, "main checkout");
+        assert_eq!(linked_worktree_checkout(wt_tmp.path()), None, "outside git");
+
+        let linked = linked_worktree_checkout(&wt_path).expect("linked worktree");
+        assert_eq!(canonical(&linked.root), canonical(&wt_path));
+        assert_eq!(linked.common_dir, canonical(&repo.join(".git")));
+        assert_eq!(linked.branch.as_deref(), Some("feat"));
+        assert_eq!(
+            linked.main_checkout.as_deref().map(canonical),
+            Some(canonical(&repo))
+        );
+        // A directory inside the checkout resolves to the same checkout.
+        assert_eq!(linked_worktree_checkout(&wt_path.join("sub")), Some(linked));
+    }
+
+    #[test]
+    fn linked_worktree_checkout_reports_a_detached_head_and_a_bare_repository() {
+        let (_tmp, repo) = init_temp_repo();
+        let bare_tmp = tempfile::tempdir().expect("create bare tempdir");
+        let bare = bare_tmp.path().join("repo.git");
+        git_in(
+            &repo,
+            &[
+                "clone",
+                "--bare",
+                repo.to_str().unwrap(),
+                bare.to_str().unwrap(),
+            ],
+        );
+        let wt_path = bare_tmp.path().join("main");
+        git_in(
+            &bare,
+            &["worktree", "add", wt_path.to_str().unwrap(), "main"],
+        );
+        let detached = bare_tmp.path().join("detached");
+        git_in(
+            &bare,
+            &[
+                "worktree",
+                "add",
+                "--detach",
+                detached.to_str().unwrap(),
+                "main",
+            ],
+        );
+
+        let linked = linked_worktree_checkout(&wt_path).expect("worktree of a bare repo");
+        assert_eq!(linked.common_dir, canonical(&bare));
+        assert_eq!(linked.main_checkout, None, "a bare repository has none");
+        assert_eq!(linked.branch.as_deref(), Some("main"));
+
+        let detached = linked_worktree_checkout(&detached).expect("detached worktree");
+        assert_eq!(detached.branch, None);
+    }
+
+    #[test]
+    fn linked_worktree_checkout_ignores_a_submodule() {
+        let (_tmp, repo) = init_temp_repo();
+        let (_sub_tmp, sub_source) = init_temp_repo();
+        git_in(
+            &repo,
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                sub_source.to_str().unwrap(),
+                "sub",
+            ],
+        );
+        assert!(repo.join("sub/.git").is_file(), "submodule has a .git file");
+        assert_eq!(linked_worktree_checkout(&repo.join("sub")), None);
+    }
+
+    #[test]
+    fn create_worktree_refuses_a_branch_checked_out_elsewhere() {
+        let (_tmp, repo) = init_temp_repo();
+        let wt_tmp = tempfile::tempdir().expect("create worktree tempdir");
+        let feat = wt_tmp.path().join("wt-feat");
+        git_in(
+            &repo,
+            &["worktree", "add", feat.to_str().unwrap(), "-b", "feat"],
+        );
+        git_in(&repo, &["branch", "free"]);
+
+        let target = wt_tmp.path().join("again");
+        match create_worktree(&repo, "main", &target, false) {
+            Err(GitError::BranchCheckedOut { branch, path }) => {
+                assert_eq!(branch, "main");
+                assert_eq!(canonical(&path), canonical(&repo));
+            }
+            other => panic!("expected BranchCheckedOut, got {other:?}"),
+        }
+        // `--new-branch` on an existing local branch attaches it, so it collides too.
+        match create_worktree(&repo, "feat", &target, true) {
+            Err(GitError::BranchCheckedOut { branch, path }) => {
+                assert_eq!(branch, "feat");
+                assert_eq!(canonical(&path), canonical(&feat));
+            }
+            other => panic!("expected BranchCheckedOut, got {other:?}"),
+        }
+        assert!(!target.exists(), "nothing is checked out on refusal");
+
+        let in_use = branch_in_use(&repo, "feat", false).expect("feat is checked out");
+        assert_eq!(in_use.branch, "feat");
+        assert_eq!(canonical(&in_use.checkout), canonical(&feat));
+        assert!(!in_use.main_checkout);
+        let main = branch_in_use(&repo, "main", false).expect("main is checked out");
+        assert!(main.main_checkout);
+        assert_eq!(canonical(&main.checkout), canonical(&repo));
+        // A linked checkout whose directory is gone is still no main checkout.
+        std::fs::remove_dir_all(&feat).unwrap();
+        let gone = branch_in_use(&repo, "feat", false).expect("still registered");
+        assert!(!gone.main_checkout);
+        assert_eq!(branch_in_use(&repo, "free", false), None);
+        assert_eq!(branch_in_use(&repo, "brand-new", true), None);
+        create_worktree(&repo, "free", &target, false).expect("a free branch still works");
     }
 
     #[test]

@@ -1307,6 +1307,7 @@ pub fn cli_project_add(
     name: Option<&str>,
     hidden: bool,
     folder: Option<&str>,
+    top_level: bool,
     window: Option<&str>,
 ) -> i32 {
     // Canonicalize the path to an absolute path (resolve relative to CWD).
@@ -1332,11 +1333,17 @@ pub fn cli_project_add(
         }
     };
 
-    let body = serde_json::json!({
+    let mut body = serde_json::json!({
         "action": "add_project",
         "name": project_name,
         "path": abs_str,
     });
+    // A worktree row cannot live in a folder, so `--folder` keeps it top-level.
+    // Sent only when on: a daemon older than the field refuses unknown fields,
+    // and `--top-level` must keep working against it.
+    if !top_level && folder.is_none() {
+        body["nest_worktree"] = serde_json::Value::Bool(true);
+    }
     let resp = match api_action(&token, &body.to_string()) {
         Ok(r) => r,
         Err(e) => {
@@ -1353,6 +1360,35 @@ pub fn cli_project_add(
         }
     };
     println!("{project_id}");
+    if let Some(parent_id) = v.get("parent_project_id").and_then(|x| x.as_str()) {
+        let parent = fetch_state(&token)
+            .ok()
+            .and_then(|state| {
+                state
+                    .projects
+                    .iter()
+                    .find(|p| p.id == parent_id)
+                    .map(|p| p.name.clone())
+            })
+            .unwrap_or_else(|| parent_id.to_string());
+        eprintln!(
+            "Added as a worktree of '{parent}'. Pass --top-level to add a linked worktree as its own project."
+        );
+        // The daemon labels a nested worktree by its branch; an explicit name wins.
+        if let Some(name) = name {
+            let rename = serde_json::json!({
+                "action": "rename_project",
+                "project_id": project_id,
+                "name": name,
+            });
+            if let Err(e) = api_action(&token, &rename.to_string()) {
+                eprintln!("Warning: failed to name the worktree: {e}");
+                return 1;
+            }
+        }
+    } else if let Some(reason) = v.get("not_nested").and_then(|x| x.as_str()) {
+        eprintln!("Added as a top-level project: {reason}.");
+    }
     project_add_followups(&token, &project_id, hidden, folder, window)
 }
 
@@ -1567,6 +1603,21 @@ pub fn cli_project_color(project: &str, color: &str) -> i32 {
             "action": "set_project_color",
             "project_id": p.id,
             "color": color,
+        }))
+    })
+}
+
+/// `okena project set-parent <project> (<parent> | --top-level)`
+pub fn cli_project_set_parent(project: &str, parent: Option<&str>) -> i32 {
+    with_state_post(|state| {
+        let p = resolve::resolve_project(state, project)?;
+        let parent_id = parent
+            .map(|parent| resolve::resolve_project(state, parent).map(|p| p.id.clone()))
+            .transpose()?;
+        Ok(serde_json::json!({
+            "action": "set_project_parent",
+            "project_id": p.id,
+            "parent_project_id": parent_id,
         }))
     })
 }

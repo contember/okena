@@ -256,9 +256,15 @@ fn dispatch(cli: Cli) -> i32 {
                 name,
                 hidden,
                 folder,
-            } => {
-                commands::cli_project_add(&path, name.as_deref(), hidden, folder.as_deref(), window)
-            }
+                top_level,
+            } => commands::cli_project_add(
+                &path,
+                name.as_deref(),
+                hidden,
+                folder.as_deref(),
+                top_level,
+                window,
+            ),
             ProjectCmd::Clone {
                 url,
                 into,
@@ -281,6 +287,11 @@ fn dispatch(cli: Cli) -> i32 {
             ProjectCmd::Rename { project, name } => commands::cli_project_rename(&project, &name),
             ProjectCmd::Color { project, color } => commands::cli_project_color(&project, &color),
             ProjectCmd::Focus { project } => commands::cli_project_focus(&project, window),
+            ProjectCmd::SetParent {
+                project,
+                parent,
+                top_level: _,
+            } => commands::cli_project_set_parent(&project, parent.as_deref()),
         },
 
         Command::Worktree { cmd } => match cmd {

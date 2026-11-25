@@ -1176,6 +1176,13 @@ pub enum ActionRequest {
         start_page: bool,
         name: String,
         path: String,
+        /// A `path` in a linked git worktree goes under the project of its
+        /// repository's main checkout instead of the top level, labelled by
+        /// its branch (`name` is not used then). The reply carries
+        /// `parent_project_id` when it did, `not_nested` with the reason when
+        /// the path is a linked worktree that stayed top-level.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        nest_worktree: bool,
     },
     /// Clone `url` into `parent_dir`/`directory` and add the checkout as a
     /// project. The parent and the directory name travel separately so the
@@ -1256,6 +1263,13 @@ pub enum ActionRequest {
         branch: String,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         start_page: bool,
+    },
+    /// Make a project a worktree of `parent_project_id`, or with `None` a
+    /// top-level project again. The project keeps its id, layout and running
+    /// terminals; nothing on disk changes.
+    SetProjectParent {
+        project_id: String,
+        parent_project_id: Option<String>,
     },
     /// Rerun a lifecycle-hook terminal. The daemon kills the old PTY, spawns a
     /// fresh shell at the hook's cwd, and re-types the stored command — command
@@ -1724,6 +1738,27 @@ impl ApiLayoutNode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn add_project_without_nesting_keeps_the_old_wire_form() {
+        let old: ActionRequest = serde_json::from_value(serde_json::json!({
+            "action": "add_project",
+            "name": "p",
+            "path": "/p",
+        }))
+        .expect("old request parses");
+        assert!(matches!(
+            old,
+            ActionRequest::AddProject {
+                nest_worktree: false,
+                ..
+            }
+        ));
+        assert_eq!(
+            serde_json::to_value(&old).unwrap(),
+            serde_json::json!({"action": "add_project", "name": "p", "path": "/p"})
+        );
+    }
 
     #[test]
     fn create_worktree_without_the_new_fields_keeps_the_old_wire_form() {
@@ -2286,6 +2321,21 @@ mod tests {
                 start_page: false,
                 name: "My Project".into(),
                 path: "/home/user/projects/my-project".into(),
+                nest_worktree: false,
+            },
+            ActionRequest::AddProject {
+                start_page: false,
+                name: "My Project".into(),
+                path: "/home/user/projects/my-project-wt".into(),
+                nest_worktree: true,
+            },
+            ActionRequest::SetProjectParent {
+                project_id: "p2".into(),
+                parent_project_id: Some("p1".into()),
+            },
+            ActionRequest::SetProjectParent {
+                project_id: "p2".into(),
+                parent_project_id: None,
             },
             ActionRequest::CloneProject {
                 start_page: false,

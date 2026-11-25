@@ -921,10 +921,12 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
             start_page,
             name,
             path,
+            nest_worktree,
         } => ActionRequest::AddProject {
             start_page,
             name,
             path,
+            nest_worktree,
         },
         ActionRequest::CloneProject {
             start_page,
@@ -1015,6 +1017,13 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
             worktree_path,
             branch,
             start_page,
+        },
+        ActionRequest::SetProjectParent {
+            project_id,
+            parent_project_id,
+        } => ActionRequest::SetProjectParent {
+            project_id: s(&project_id),
+            parent_project_id: parent_project_id.as_deref().map(s),
         },
         ActionRequest::RerunHook {
             project_id,

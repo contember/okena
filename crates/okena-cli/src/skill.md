@@ -92,8 +92,11 @@ For terminals running `claude` with Claude Remote on (Settings → Terminal).
 
 ## Manage the workspace
 
-- Projects: `okena project add <path> | clone <url> | rm | rename | color | focus | show | hide`
-  (`clone` takes `--into <parent-dir>` (default CWD), `--dir <name>`, `--name <n>`)
+- Projects: `okena project add <path> | clone <url> | rm | rename | color | focus | show | hide | set-parent`
+  (`clone` takes `--into <parent-dir>` (default CWD), `--dir <name>`, `--name <n>`;
+  `add` on a linked git worktree nests it under the project of its repository's main
+  checkout, `--top-level` adds it on its own; `set-parent <project> <parent>|--top-level`
+  moves an existing worktree project without touching its terminals)
 - Layout: `okena term new | close | rename | split <h|v> | tab | focus | minimize | fullscreen`
   (`split h` = stacked top/bottom, `split v` = side by side left/right)
 - Window layout: `okena window layout <columns|rows|grid> [--min-width px] [--min-height px]`
