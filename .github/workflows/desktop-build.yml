@@ -32,8 +32,8 @@ jobs:
           - os: macos-latest
             target: aarch64-apple-darwin
             artifact: okena-macos-arm64
-          # Cross-compiled on Apple Silicon: the same cold build took 25 to 115 min
-          # on the Intel runner and about 20 min on arm64.
+          # Cross-compiled on Apple Silicon: the same cold `Build app` step took
+          # 19 to 90 min on the Intel runner and 6 to 21 min on arm64.
           - os: macos-latest
             target: x86_64-apple-darwin
             artifact: okena-macos-x64
@@ -44,9 +44,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     env:
       OKENA_NIGHTLY_MANIFEST: ${{ inputs.nightly_manifest }}
-    # A cold-cache build on the former Intel macOS runner took 114.7 min
-    # (okena#357); the cap stops a hung runner from holding the job for
-    # GitHub's 6-hour default.
+    # The cap stops a hung runner from holding the job for GitHub's 6-hour
+    # default.
     timeout-minutes: 120
 
     steps:
