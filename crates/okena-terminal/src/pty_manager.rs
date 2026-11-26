@@ -1512,6 +1512,11 @@ impl PtyManager {
                 launch_environment,
             ) {
                 Some((program, args)) => {
+                    let program = if matches!(session_backend, ResolvedBackend::Psmux { .. }) {
+                        crate::session_backend::psmux_program()
+                    } else {
+                        program
+                    };
                     let mut cmd = CommandBuilder::new(program);
                     for arg in args {
                         cmd.arg(arg);

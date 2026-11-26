@@ -84,8 +84,8 @@ impl SessionBackend {
                 }
             }
             Self::Psmux => {
-                if is_psmux_available() {
-                    ResolvedBackend::Psmux
+                if let Some(backend) = resolve_psmux_backend() {
+                    backend
                 } else {
                     log::warn!("psmux requested but not available, falling back to none");
                     ResolvedBackend::None
@@ -97,9 +97,9 @@ impl SessionBackend {
                 // interference) then tmux, then screen.
                 #[cfg(windows)]
                 {
-                    if is_psmux_available() {
+                    if let Some(backend) = resolve_psmux_backend() {
                         log::info!("Auto-detected psmux for session persistence");
-                        ResolvedBackend::Psmux
+                        backend
                     } else {
                         log::info!("No session backend available, sessions won't persist");
                         ResolvedBackend::None
@@ -161,7 +161,7 @@ pub enum ResolvedBackend {
     Tmux,
     Screen,
     Dtach,
-    Psmux,
+    Psmux { direct_argv: bool },
 }
 
 /// Exact command requested for a newly-created persistent session.
@@ -347,7 +347,7 @@ impl ResolvedBackend {
                 );
                 Some(("sh".to_string(), vec!["-c".to_string(), dtach_cmd]))
             }
-            Self::Psmux => {
+            Self::Psmux { direct_argv } => {
                 // psmux speaks tmux command language but we bypass any host shell:
                 // Windows cmd.exe doesn't honor sh-style single-quoting, and we have
                 // no need for it — `;` is psmux's literal command separator when
@@ -374,6 +374,11 @@ impl ResolvedBackend {
                 args.push("-c".to_string());
                 args.push(cwd.to_string());
                 if let Some(command) = command {
+                    if *direct_argv {
+                        // Without `--`, psmux joins the arguments into a script
+                        // for its default shell, which can reinterpret cmd syntax.
+                        args.push("--".to_string());
+                    }
                     match command {
                         SessionCommand::ShellScript(cmd) => {
                             // Preserve the legacy script API through cmd.exe.
@@ -447,7 +452,7 @@ impl ResolvedBackend {
     pub fn kill_session(&self, session_name: &str) -> bool {
         match self {
             Self::None => true,
-            Self::Tmux | Self::Screen | Self::Psmux => self.kill_session_with_executor(
+            Self::Tmux | Self::Screen | Self::Psmux { .. } => self.kill_session_with_executor(
                 session_name,
                 session_backend_output,
                 std::time::Duration::from_secs(2),
@@ -505,7 +510,7 @@ impl ResolvedBackend {
                 vec!["-S", session_name, "-X", "quit"],
                 vec!["-S", session_name, "-Q", "select", "."],
             ),
-            Self::Psmux => (
+            Self::Psmux { .. } => (
                 "psmux",
                 vec!["kill-session", "-t", session_name],
                 vec!["has-session", "-t", session_name],
@@ -521,6 +526,10 @@ impl ResolvedBackend {
 }
 
 fn session_backend_output(program: &str, args: &[&str]) -> std::io::Result<std::process::Output> {
+    #[cfg(windows)]
+    let psmux = (program == "psmux").then(psmux_program);
+    #[cfg(windows)]
+    let program = psmux.as_deref().unwrap_or(program);
     let mut command = crate::process::command(program);
     command.args(args);
     #[cfg(target_os = "macos")]
@@ -1878,7 +1887,7 @@ impl ResolvedBackend {
         let inner_cmd = match self {
             // psmux runs on the Windows host, never inside WSL. resolve_for_wsl
             // never returns Psmux, so reaching this arm is a programming error.
-            Self::None | Self::Psmux => return None,
+            Self::None | Self::Psmux { .. } => return None,
             Self::Tmux => {
                 // Tmux doesn't reference host paths or $SHELL, so delegate to build_command
                 let (_program, inner_args) =
@@ -1954,7 +1963,7 @@ pub fn kill_wsl_session(
     let kill_cmd = match backend {
         // Psmux is host-Windows only; resolve_for_wsl never returns it,
         // and kill_wsl_session is only called for WSL terminals.
-        ResolvedBackend::None | ResolvedBackend::Psmux => return true,
+        ResolvedBackend::None | ResolvedBackend::Psmux { .. } => return true,
         ResolvedBackend::Tmux => {
             format!("tmux kill-session -t {}", shell_escape(session_name))
         }
@@ -2424,24 +2433,61 @@ fn is_tmux_available() -> bool {
     }
 }
 
+#[cfg(windows)]
+pub(crate) fn psmux_program() -> String {
+    // Resolve the same executable for the version probe, PTY and teardown.
+    // portable-pty otherwise searches the registry PATH instead of the
+    // process PATH. An absolute program leaves the pane's environment intact.
+    let exe = std::env::current_exe().ok();
+    let path = std::env::var_os("PATH");
+    exe.as_deref()
+        .and_then(std::path::Path::parent)
+        .map(std::path::Path::to_path_buf)
+        .into_iter()
+        .chain(path.iter().flat_map(std::env::split_paths))
+        .filter(|dir| dir.is_absolute())
+        .map(|dir| dir.join("psmux.exe"))
+        .find(|candidate| candidate.is_file())
+        .and_then(|candidate| candidate.into_os_string().into_string().ok())
+        .unwrap_or_else(|| "psmux".to_owned())
+}
+
 /// Check if psmux is available on the system.
 /// Only enabled on Windows — psmux's purpose is being a native Windows tmux
 /// alternative, and the rest of okena's session-backend chain prefers dtach/tmux/screen
 /// on Unix.
-fn is_psmux_available() -> bool {
+fn resolve_psmux_backend() -> Option<ResolvedBackend> {
     #[cfg(not(windows))]
     {
-        false
+        None
     }
 
     #[cfg(windows)]
     {
-        let mut cmd = crate::process::command("psmux");
-        cmd.arg("-V");
-        crate::process::safe_output(&mut cmd)
-            .map(|o| o.status.success())
-            .unwrap_or(false)
+        let output = session_backend_output("psmux", &["-V"]).ok()?;
+        output.status.success().then(|| ResolvedBackend::Psmux {
+            direct_argv: psmux_supports_direct_argv(&String::from_utf8_lossy(&output.stdout)),
+        })
     }
+}
+
+#[cfg(any(windows, test))]
+fn psmux_supports_direct_argv(version_output: &str) -> bool {
+    // psmux 3.4.0 splits the command list before parsing `new-session`.
+    // Older versions consume the trailing setup commands as part of `--` argv.
+    version_output
+        .lines()
+        .find_map(|line| {
+            let mut version = line
+                .strip_prefix("psmux ")?
+                .split_whitespace()
+                .next()?
+                .split('.');
+            let major = version.next()?.parse::<u32>().ok()?;
+            let minor = version.next()?.parse::<u32>().ok()?;
+            Some((major, minor))
+        })
+        .is_some_and(|version| version >= (3, 4))
 }
 
 /// Check if screen is available on the system
@@ -2474,6 +2520,8 @@ fn is_screen_available() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const PSMUX: ResolvedBackend = ResolvedBackend::Psmux { direct_argv: true };
 
     #[test]
     fn launched_program_argv_puts_the_launcher_before_the_pane_program() {
@@ -2738,7 +2786,7 @@ mod tests {
                 ["-S", "tm-test", "-Q", "select", "."].as_slice(),
             ),
             (
-                ResolvedBackend::Psmux,
+                PSMUX,
                 "psmux",
                 ["kill-session", "-t", "tm-test"].as_slice(),
                 ["has-session", "-t", "tm-test"].as_slice(),
@@ -2782,11 +2830,7 @@ mod tests {
 
     #[test]
     fn command_backend_kill_failure_preserves_dependent_checkout() {
-        for backend in [
-            ResolvedBackend::Tmux,
-            ResolvedBackend::Screen,
-            ResolvedBackend::Psmux,
-        ] {
+        for backend in [ResolvedBackend::Tmux, ResolvedBackend::Screen, PSMUX] {
             let mut calls = Vec::new();
             assert!(!backend.kill_session_with_executor(
                 "tm-test",
@@ -3833,7 +3877,7 @@ holders() {{
 
     #[test]
     fn test_psmux_build_command_minimal() {
-        let backend = ResolvedBackend::Psmux;
+        let backend = PSMUX;
         // Use forward slashes so the test passes on Unix CI; on Windows in
         // production Path::file_name handles both separators identically.
         let result = backend.build_command("tm-12345678", "C:/projects/app", None, &[]);
@@ -3847,8 +3891,8 @@ holders() {{
         assert_eq!(args[3], "tm-12345678");
         assert_eq!(args[4], "-c");
         assert_eq!(args[5], "C:/projects/app");
-        // No initial program, then ';' separators with set/rename commands
-        assert!(args.contains(&";".to_string()));
+        // No program or argv delimiter before the session setup commands.
+        assert_eq!(args[6], ";");
         let semi_count = args.iter().filter(|a| a.as_str() == ";").count();
         assert_eq!(
             semi_count, 4,
@@ -3864,23 +3908,17 @@ holders() {{
 
     #[test]
     fn test_psmux_build_command_with_custom_command() {
-        let backend = ResolvedBackend::Psmux;
+        let backend = PSMUX;
         let result = backend.build_command("tm-test", "C:\\src", Some("npm run dev"), &[]);
         assert!(result.is_some());
         let (program, args) = result.unwrap();
         assert_eq!(program, "psmux");
-        // custom command is wrapped via cmd.exe /c
-        let cmd_pos = args
-            .iter()
-            .position(|a| a == "cmd.exe")
-            .expect("cmd.exe in args");
-        assert_eq!(args[cmd_pos + 1], "/c");
-        assert_eq!(args[cmd_pos + 2], "npm run dev");
+        assert_eq!(&args[6..11], ["--", "cmd.exe", "/c", "npm run dev", ";"]);
     }
 
     #[test]
     fn test_psmux_preserves_exact_custom_command_argv() {
-        let backend = ResolvedBackend::Psmux;
+        let backend = PSMUX;
         let command_args = vec![
             "/V:ON".to_string(),
             "/C".to_string(),
@@ -3898,19 +3936,50 @@ holders() {{
             )
             .unwrap();
 
-        let command_pos = args
-            .iter()
-            .position(|arg| arg == "cmd.exe")
-            .expect("custom executable in psmux argv");
         assert_eq!(
-            &args[command_pos..command_pos + 4],
-            ["cmd.exe", "/V:ON", "/C", "echo !ERRORLEVEL! & cmd /K"]
+            &args[6..12],
+            [
+                "--",
+                "cmd.exe",
+                "/V:ON",
+                "/C",
+                "echo !ERRORLEVEL! & cmd /K",
+                ";"
+            ]
+        );
+    }
+
+    #[test]
+    fn test_psmux_direct_argv_requires_command_list_support() {
+        for (version, direct_argv) in [
+            ("tmux 3.4.0\r\npsmux 3.4.0 (20aa1d7 2026-10-13)\r\n", true),
+            ("psmux 4.0.0", true),
+            ("tmux 3.3.8\npsmux 3.3.8 (66cf613 2026-08-18)\n", false),
+            ("tmux 3.4.0", false),
+        ] {
+            assert_eq!(
+                psmux_supports_direct_argv(version),
+                direct_argv,
+                "{version:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_psmux_legacy_version_preserves_command_list() {
+        let backend = ResolvedBackend::Psmux { direct_argv: false };
+        let (_, args) = backend
+            .build_command("tm-test", "C:/src", Some("echo ready"), &[])
+            .unwrap();
+        assert_eq!(
+            &args[6..13],
+            ["cmd.exe", "/c", "echo ready", ";", "set", "status", "off"]
         );
     }
 
     #[test]
     fn test_psmux_build_command_with_extra_env() {
-        let backend = ResolvedBackend::Psmux;
+        let backend = PSMUX;
         let env = vec![("CLAUDE_CONFIG_DIR".to_string(), Some("C:\\tmp".to_string()))];
         let (_, args) = backend
             .build_command("tm-test", "C:\\tmp", None, &env)
@@ -3925,12 +3994,12 @@ holders() {{
     #[test]
     fn test_psmux_socket_path_returns_none() {
         // psmux uses TCP IPC, not socket files
-        assert!(ResolvedBackend::Psmux.socket_path("tm-anything").is_none());
+        assert!(PSMUX.socket_path("tm-anything").is_none());
     }
 
     #[test]
     fn test_psmux_supports_persistence() {
-        assert!(ResolvedBackend::Psmux.supports_persistence());
+        assert!(PSMUX.supports_persistence());
     }
 
     #[test]
