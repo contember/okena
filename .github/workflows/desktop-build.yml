@@ -32,7 +32,9 @@ jobs:
           - os: macos-latest
             target: aarch64-apple-darwin
             artifact: okena-macos-arm64
-          - os: macos-15-intel
+          # Cross-compiled on Apple Silicon: the same cold build took 25 to 115 min
+          # on the Intel runner and about 20 min on arm64.
+          - os: macos-latest
             target: x86_64-apple-darwin
             artifact: okena-macos-x64
           - os: windows-latest
@@ -42,8 +44,9 @@ jobs:
     runs-on: ${{ matrix.os }}
     env:
       OKENA_NIGHTLY_MANIFEST: ${{ inputs.nightly_manifest }}
-    # A cold-cache macOS x64 build took 114.7 min (okena#357); the cap stops a
-    # hung runner from holding the job for GitHub's 6-hour default.
+    # A cold-cache build on the former Intel macOS runner took 114.7 min
+    # (okena#357); the cap stops a hung runner from holding the job for
+    # GitHub's 6-hour default.
     timeout-minutes: 120
 
     steps:
@@ -107,6 +110,7 @@ jobs:
         with:
           python-version: '3.12'
 
+      # On the arm64 runner the x86_64 binaries run under Rosetta 2.
       - name: Verify nightly versions before packaging
         if: inputs.nightly_manifest != ''
         shell: python
