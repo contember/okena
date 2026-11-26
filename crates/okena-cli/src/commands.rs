@@ -2490,6 +2490,7 @@ pub fn cli_update_revert(
     let plan = serde_json::json!({
         "current_version": catalog.current_version,
         "target_version": release.version,
+        "newer": release.newer,
         "legacy_nightly": release.legacy_nightly,
         "asset": release.asset_name,
         "config": config_action,
@@ -2509,12 +2510,14 @@ pub fn cli_update_revert(
     }
     if !yes {
         print_revert_plan(&plan, true);
-        eprintln!("Re-run with --yes to apply this revert.");
+        eprintln!("Re-run with --yes to apply this version change.");
         return 2;
     }
 
-    if let Err(error) = okena_ext_updater::daemon_client::request_revert(version, keep_config) {
-        eprintln!("Failed to start version revert: {error}");
+    if let Err(error) =
+        okena_ext_updater::daemon_client::request_revert(version, keep_config, catalog.channel)
+    {
+        eprintln!("Failed to start version change: {error}");
         return 1;
     }
     // Download + install of a full release, so generous — but a wedged daemon
@@ -2523,7 +2526,7 @@ pub fn cli_update_revert(
     let mut unreachable_for = std::time::Duration::ZERO;
     loop {
         if std::time::Instant::now() >= deadline {
-            eprintln!("Timed out waiting for version revert.");
+            eprintln!("Timed out waiting for version change.");
             return 1;
         }
         let poll_interval = std::time::Duration::from_millis(250);
@@ -2540,18 +2543,18 @@ pub fn cli_update_revert(
                         ..
                     } if ready_version == version => break,
                     okena_ext_updater::UpdateStatus::Failed { error } => {
-                        eprintln!("Version revert failed: {error}");
+                        eprintln!("Version change failed: {error}");
                         return 1;
                     }
                     okena_ext_updater::UpdateStatus::Idle => {
                         eprintln!(
-                            "Version revert was cancelled. Check the selected update channel before retrying."
+                            "Version change was cancelled. Check the selected update channel before retrying."
                         );
                         return 1;
                     }
                     status => {
                         eprintln!(
-                            "Version revert stopped in unexpected state: {}",
+                            "Version change stopped in unexpected state: {}",
                             update_status_label(status)
                         );
                         return 1;
@@ -2561,7 +2564,7 @@ pub fn cli_update_revert(
             Err(error) => {
                 unreachable_for += poll_interval;
                 if unreachable_for >= std::time::Duration::from_secs(15) {
-                    eprintln!("Lost contact with the daemon during the revert: {error}");
+                    eprintln!("Lost contact with the daemon during the version change: {error}");
                     return 1;
                 }
             }
@@ -2571,14 +2574,21 @@ pub fn cli_update_revert(
     if restart {
         eprintln!("Restarting the daemon; active terminal sessions will end.");
         if let Err(error) = okena_ext_updater::daemon_client::restart_daemon_and_wait() {
-            eprintln!("Revert installed, but daemon restart failed: {error}");
+            eprintln!("Version changed, but daemon restart failed: {error}");
             return 1;
         }
     }
 
+    let status = if !restart {
+        "ready-to-restart"
+    } else if release.newer {
+        "installed"
+    } else {
+        "reverted"
+    };
     if json_mode {
         let output = serde_json::json!({
-            "status": if restart { "reverted" } else { "ready-to-restart" },
+            "status": status,
             "version": version,
             "config": config_action,
         });
@@ -2586,10 +2596,8 @@ pub fn cli_update_revert(
             "{}",
             serde_json::to_string_pretty(&output).unwrap_or_else(|_| output.to_string())
         );
-    } else if restart {
-        println!("reverted\t{version}");
     } else {
-        println!("ready-to-restart\t{version}");
+        println!("{status}\t{version}");
     }
     0
 }
@@ -2602,6 +2610,12 @@ fn print_revert_plan(plan: &serde_json::Value, diagnostic: bool) {
         okena_ext_updater::update_version_label(current),
         okena_ext_updater::update_version_label(target)
     )];
+    let action = if plan["newer"] == true {
+        "Install"
+    } else {
+        "Revert"
+    };
+    lines.push(format!("Action: {action}"));
     if plan["legacy_nightly"] == true {
         lines.push(
             "After restart, this nightly reports its base version and checks only for stable releases."

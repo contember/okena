@@ -148,12 +148,17 @@ pub fn revert_block_reason(status: &UpdateStatus) -> Option<&'static str> {
     }
 }
 
-pub fn request_revert(version: &str, keep_config: bool) -> Result<UpdateStatusSnapshot> {
+pub fn request_revert(
+    version: &str,
+    keep_config: bool,
+    channel: UpdateChannel,
+) -> Result<UpdateStatusSnapshot> {
     post_snapshot(
         "/v1/update/revert",
         Some(serde_json::json!({
             "version": version,
             "keep_config": keep_config,
+            "channel": channel,
         })),
     )
 }

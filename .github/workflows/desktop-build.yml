@@ -49,6 +49,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Record source commit
+        shell: bash
+        run: echo "OKENA_BUILD_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
         with:

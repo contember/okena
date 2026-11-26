@@ -203,7 +203,7 @@ pub enum Command {
         #[command(subcommand)]
         cmd: PaletteCmd,
     },
-    /// Inspect updates or revert to an earlier release from the selected update channel
+    /// Inspect updates or install a version from the selected update channel's history
     Update {
         #[command(subcommand)]
         cmd: UpdateCmd,

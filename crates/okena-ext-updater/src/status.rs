@@ -43,7 +43,7 @@ pub enum UpdateStatus {
         version: String,
         #[serde(default)]
         config_restore: Option<okena_core::profiles::ConfigSnapshot>,
-        /// Installed from the version history rather than as the channel's update.
+        /// Installed a target that could not be confirmed newer than the running version.
         #[serde(default)]
         revert: bool,
     },
@@ -531,6 +531,15 @@ impl UpdateInfo {
             "version revert cancelled"
         );
         let lock = self.current_install_lock(&mut inner)?;
+        if inner.preference.channel == UpdateChannel::Nightly
+            && inner.preference.is_implicit()
+            && !version.starts_with("nightly-")
+        {
+            // A stable binary otherwise defaults to Release on its first start.
+            let stored = inner.preference.selecting(UpdateChannel::Nightly);
+            self.persist_preference(stored)?;
+            inner.preference = stored;
+        }
         inner.install_lock = lock;
         Self::update_status(&mut inner, UpdateStatus::Installing { version });
         Ok(())
@@ -1074,6 +1083,22 @@ mod tests {
         info.begin_revert_install(token, "nightly-20261121-292fa56".into())
             .unwrap();
         assert_eq!(info.snapshot().channel, super::UpdateChannel::Nightly);
+    }
+
+    #[test]
+    fn installing_stable_remembers_an_implicit_nightly_channel_for_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("channel.json");
+        std::fs::write(&path, r#"{"channel":"nightly","revision":0}"#).unwrap();
+        let info = UpdateInfo::with_channel_path("0.43.0".into(), Some(path.clone()), true);
+        let token = info
+            .try_start_revert(super::UpdateChannel::Nightly)
+            .unwrap();
+        info.begin_revert_install(token, "0.44.0".into()).unwrap();
+
+        let stored = super::preference::load(&path, Default::default()).unwrap();
+        assert_eq!(stored.channel, super::UpdateChannel::Nightly);
+        assert!(!stored.is_implicit());
     }
 
     #[test]

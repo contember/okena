@@ -1015,20 +1015,27 @@ impl Render for StatusBar {
                 }
 
                 let build = &*okena_core::build_info::BUILD_INFO;
+                let nightly_channel = cx
+                    .try_global::<okena_ext_updater::GlobalUpdateInfo>()
+                    .is_some_and(|info| {
+                        info.0.snapshot().channel == okena_ext_updater::UpdateChannel::Nightly
+                    });
                 let version = div()
                     .id("running-version")
                     .text_color(rgb(t.text_muted))
-                    .child(format!("v{}", build.version))
+                    .child(format!("v{}", build.status_label(nightly_channel)))
                     .when_some(build.nightly.as_ref(), |el, nightly| {
                         el.tooltip(move |window, cx| {
                             Tooltip::new(format!("{} · {} UTC", nightly.tag, nightly.date))
                                 .build(window, cx)
                         })
                     });
-                // macOS keeps a stable version in About Okena; a nightly keeps its build id in view.
+                // macOS keeps the default stable version in About Okena.
                 right
                     .when(
-                        cfg!(not(target_os = "macos")) || build.nightly.is_some(),
+                        cfg!(not(target_os = "macos"))
+                            || build.nightly.is_some()
+                            || nightly_channel,
                         |el| el.child(version),
                     )
                     .child(div().text_color(rgb(t.text_secondary)).child(time_str))

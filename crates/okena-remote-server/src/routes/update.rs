@@ -16,6 +16,8 @@ pub struct RevertRequest {
     pub version: String,
     #[serde(default)]
     pub keep_config: bool,
+    #[serde(default)]
+    pub channel: Option<UpdateChannel>,
 }
 
 pub async fn get_status(
@@ -282,15 +284,22 @@ pub async fn post_revert(
     // Unlike check/install, a rejected revert must be reported: the caller waits
     // for a status transition that would otherwise never come.
     info.refresh_channel();
-    let channel = if request.version.starts_with("nightly-") {
+    let nightly_target = request.version.starts_with("nightly-");
+    let channel = request.channel.unwrap_or(if nightly_target {
         UpdateChannel::Nightly
     } else {
         UpdateChannel::Release
-    };
-    if channel == UpdateChannel::Nightly && !request.keep_config {
+    });
+    if nightly_target && !request.keep_config {
         return Err((
             StatusCode::BAD_REQUEST,
             "nightly reverts keep the current configuration".into(),
+        ));
+    }
+    if nightly_target && channel != UpdateChannel::Nightly {
+        return Err((
+            StatusCode::CONFLICT,
+            "select Nightly to install a nightly build".into(),
         ));
     }
     let token = info
