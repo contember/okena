@@ -2738,7 +2738,8 @@ mod worktree_parent_tests {
             let dir =
                 std::env::temp_dir().join(format!("okena-wt-parent-{}", uuid::Uuid::new_v4()));
             std::fs::create_dir_all(&dir).unwrap();
-            Self(canonical_path(&dir))
+            // Git for Windows rejects verbatim paths as worktree and clone arguments.
+            Self(dunce::canonicalize(&dir).expect("resolve fixture root"))
         }
     }
 
@@ -2849,7 +2850,7 @@ mod worktree_parent_tests {
         };
         assert_eq!(parent_id, "parent");
         assert_eq!(found.branch, "feat");
-        assert_eq!(found.project_path, wt.to_string_lossy());
+        assert_eq!(found.project_path, canonical_path(&wt).to_string_lossy());
 
         let id = ws
             .add_found_worktree(found, &parent_id, WindowId::Main)
@@ -2894,7 +2895,7 @@ mod worktree_parent_tests {
     fn a_worktree_inside_the_main_checkout_still_nests_as_a_worktree() {
         let scratch = Scratch::new();
         let repo = repo(&scratch);
-        let inner = repo.join(".worktrees/feat");
+        let inner = repo.join(".worktrees").join("feat");
         worktree(&repo, &inner, "feat");
         let ws = workspace(vec![project("parent", &repo)]);
 
@@ -2903,7 +2904,10 @@ mod worktree_parent_tests {
         let WorktreePlacement::Nest { found, .. } = placement else {
             unreachable!()
         };
-        assert_eq!(found.worktree_path, inner.to_string_lossy());
+        assert_eq!(
+            found.worktree_path,
+            canonical_path(&inner).to_string_lossy()
+        );
     }
 
     #[test]
@@ -3025,7 +3029,7 @@ mod worktree_parent_tests {
         };
         assert_eq!(
             found.project_path,
-            wt.to_string_lossy(),
+            canonical_path(&wt).to_string_lossy(),
             "the path added stays"
         );
     }
@@ -3057,7 +3061,10 @@ mod worktree_parent_tests {
         let metadata = row.worktree_info.as_ref().unwrap();
         assert_eq!(metadata.parent_project_id, "parent");
         assert_eq!(metadata.branch_name, "feat");
-        assert_eq!(metadata.worktree_path, wt.to_string_lossy());
+        assert_eq!(
+            metadata.worktree_path,
+            canonical_path(&wt).to_string_lossy()
+        );
         assert_eq!(metadata.main_repo_path, repo.to_string_lossy());
         assert_eq!(
             ws.project("parent").unwrap().worktree_ids,
@@ -3221,8 +3228,13 @@ mod worktree_parent_tests {
         assert!(main.contains("main checkout"), "{main}");
 
         let error = check("untracked", true).unwrap_err();
+        let git_path = dunce::simplified(&untracked)
+            .to_string_lossy()
+            .replace('\\', "/");
         assert!(
-            error.contains(&format!("okena project add {}", untracked.display())),
+            error
+                .replace('\\', "/")
+                .contains(&format!("okena project add {git_path}")),
             "{error}"
         );
 
