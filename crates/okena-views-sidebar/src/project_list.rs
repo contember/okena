@@ -65,10 +65,13 @@ impl Sidebar {
             return false;
         };
         focused.project_id == project_id
-            && self.workspace.read(cx).project(project_id)
+            && self
+                .workspace
+                .read(cx)
+                .project(project_id)
                 .and_then(|project| project.layout.as_ref())
                 .and_then(|layout| layout.get_at_path(&focused.layout_path))
-                .is_some_and(|node| matches!(node, okena_workspace::state::LayoutNode::Terminal { terminal_id: Some(id), .. } if id == terminal_id))
+                .is_some_and(|node| node.pane_id() == Some(terminal_id))
     }
 
     /// Appends standard project row content (expand arrow, color dot, name, badges, visibility)
@@ -594,11 +597,19 @@ impl Sidebar {
         let project_id = project_id.to_string();
         let terminal_id = terminal_id.to_string();
 
-        // Priority: user-set custom name > non-prompt OSC title > directory fallback
-        // Also check for bell notification and cached idle/waiting state
-        let (terminal_name, has_bell, is_waiting, idle_label) = {
-            let ws = self.workspace.read(cx);
-            let project = ws.project(&project_id);
+        let ws = self.workspace.read(cx);
+        let project = ws.project(&project_id);
+        let layout = project.and_then(|project| project.layout.as_ref());
+        let pane_path = layout.and_then(|layout| layout.find_terminal_path(&terminal_id));
+        let is_start_page = layout
+            .zip(pane_path.as_deref())
+            .and_then(|(layout, path)| layout.get_at_path(path))
+            .is_some_and(|pane| pane.start_page().is_some());
+
+        let (terminal_name, has_bell, is_waiting, idle_label) = if is_start_page {
+            ("Start Page".to_owned(), false, false, None)
+        } else {
+            // User-set name > non-prompt OSC title > directory fallback.
             let terminals = self.terminals.lock();
             let terminal = terminals.get(terminal_id.as_str());
             let osc_title = terminal.and_then(|t| t.title());
@@ -611,35 +622,20 @@ impl Sidebar {
             };
             let bell = terminal.is_some_and(|t| t.has_bell());
             let waiting = terminal.is_some_and(|t| t.is_waiting_for_input());
-            let idle = if waiting {
-                terminal.map(|t| t.idle_duration_display())
-            } else {
-                None
-            };
+            let idle = terminal
+                .filter(|_| waiting)
+                .map(|t| t.idle_duration_display());
             (name, bell, waiting, idle)
         };
 
-        // Check if this terminal is being renamed
-        let is_renaming = is_renaming(
-            &self.terminal_rename,
-            &(project_id.clone(), terminal_id.clone()),
-        );
-
-        // Check if this terminal is currently focused
-        let is_focused = {
-            let ws = self.workspace.read(cx);
-            let fm = self.focus_manager.read(cx);
-            fm.focused_terminal_state().is_some_and(|ft| {
-                if let Some(proj) = ws.project(&project_id) {
-                    proj.layout
-                        .as_ref()
-                        .and_then(|l| l.find_terminal_path(&terminal_id))
-                        .is_some_and(|path| ft.project_id == project_id && ft.layout_path == path)
-                } else {
-                    false
-                }
-            })
-        };
+        let is_renaming = !is_start_page
+            && is_renaming(
+                &self.terminal_rename,
+                &(project_id.clone(), terminal_id.clone()),
+            );
+        let is_focused = pane_path
+            .as_ref()
+            .is_some_and(|path| self.focus_manager.read(cx).is_focused(&project_id, path));
 
         div()
             .id(ElementId::Name(
@@ -743,7 +739,7 @@ impl Sidebar {
                         let terminal_id = terminal_id.clone();
                         let terminal_name = terminal_name.clone();
                         move |this, _event: &ClickEvent, window, cx| {
-                            if this.check_double_click(&terminal_id) {
+                            if !is_start_page && this.check_double_click(&terminal_id) {
                                 this.start_rename(
                                     project_id.clone(),
                                     terminal_id.clone(),
@@ -785,59 +781,62 @@ impl Sidebar {
                     .gap(px(2.0))
                     .opacity(0.0)
                     .group_hover("terminal-item", |s| s.opacity(1.0))
-                    .child(
-                        // Minimize/restore button
-                        icon_button(
-                            ElementId::Name(
-                                format!("{}minimize-{}", id_prefix, terminal_id).into(),
-                            ),
-                            "icons/minimize.svg",
-                            &t,
-                        )
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(|_this, _, _, cx| {
-                                cx.stop_propagation();
-                            }),
-                        )
-                        .on_click(cx.listener({
-                            let project_id = project_id.clone();
-                            let terminal_id = terminal_id.clone();
-                            move |this, _, _window, cx| {
-                                cx.stop_propagation();
-                                this.dispatch_action_for_project(
-                                    &project_id,
-                                    ActionRequest::ToggleMinimized {
-                                        project_id: project_id.clone(),
-                                        terminal_id: terminal_id.clone(),
-                                    },
-                                    cx,
-                                );
-                            }
-                        }))
-                        .tooltip({
-                            let tooltip_text = if is_minimized { "Restore" } else { "Minimize" };
-                            let sidebar = cx.entity().downgrade();
-                            let project_id = project_id.clone();
-                            let terminal_id = terminal_id.clone();
-                            move |window, cx| {
-                                let matches = sidebar.upgrade().is_some_and(|sidebar| {
-                                    sidebar.read(cx).is_shortcut_terminal(
+                    .when(!is_start_page, |actions| {
+                        actions.child(
+                            // Minimize/restore button
+                            icon_button(
+                                ElementId::Name(
+                                    format!("{}minimize-{}", id_prefix, terminal_id).into(),
+                                ),
+                                "icons/minimize.svg",
+                                &t,
+                            )
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|_this, _, _, cx| {
+                                    cx.stop_propagation();
+                                }),
+                            )
+                            .on_click(cx.listener({
+                                let project_id = project_id.clone();
+                                let terminal_id = terminal_id.clone();
+                                move |this, _, _window, cx| {
+                                    cx.stop_propagation();
+                                    this.dispatch_action_for_project(
                                         &project_id,
-                                        &terminal_id,
+                                        ActionRequest::ToggleMinimized {
+                                            project_id: project_id.clone(),
+                                            terminal_id: terminal_id.clone(),
+                                        },
+                                        cx,
+                                    );
+                                }
+                            }))
+                            .tooltip({
+                                let tooltip_text =
+                                    if is_minimized { "Restore" } else { "Minimize" };
+                                let sidebar = cx.entity().downgrade();
+                                let project_id = project_id.clone();
+                                let terminal_id = terminal_id.clone();
+                                move |window, cx| {
+                                    let matches = sidebar.upgrade().is_some_and(|sidebar| {
+                                        sidebar.read(cx).is_shortcut_terminal(
+                                            &project_id,
+                                            &terminal_id,
+                                            window,
+                                            cx,
+                                        )
+                                    });
+                                    okena_ui::shortcuts::action_tooltip(
+                                        tooltip_text,
+                                        matches.then_some(&MinimizeTerminal as &dyn Action),
                                         window,
                                         cx,
                                     )
-                                });
-                                okena_ui::shortcuts::action_tooltip(
-                                    tooltip_text,
-                                    matches.then_some(&MinimizeTerminal as &dyn Action),
-                                    window,
-                                    cx,
-                                )
-                            }
-                        }),
-                    )
+                                }
+                            }),
+                        )
+                    })
                     .child(
                         // Fullscreen button
                         icon_button(

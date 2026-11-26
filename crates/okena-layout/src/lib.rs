@@ -58,6 +58,20 @@ impl LayoutNode {
         node
     }
 
+    /// Identity of a visible layout pane, including a deferred Start Page.
+    pub fn pane_id(&self) -> Option<&str> {
+        match self {
+            Self::Terminal {
+                terminal_id,
+                start_page,
+                ..
+            } => terminal_id
+                .as_deref()
+                .or_else(|| start_page.as_ref().map(|page| page.id.as_str())),
+            _ => None,
+        }
+    }
+
     pub fn start_page(&self) -> Option<&okena_core::api::StartPage> {
         match self {
             Self::Terminal { start_page, .. } => start_page.as_ref(),
@@ -240,15 +254,14 @@ impl LayoutNode {
 
     fn collect_ids_recursive(&self, ids: &mut Vec<String>, include_pages: bool) {
         match self {
-            LayoutNode::Terminal {
-                terminal_id,
-                start_page,
-                ..
-            } => {
-                if let Some(id) = terminal_id {
-                    ids.push(id.clone());
-                } else if include_pages && let Some(page) = start_page {
-                    ids.push(page.id.clone());
+            LayoutNode::Terminal { terminal_id, .. } => {
+                let id = if include_pages {
+                    self.pane_id()
+                } else {
+                    terminal_id.as_deref()
+                };
+                if let Some(id) = id {
+                    ids.push(id.to_owned());
                 }
             }
             LayoutNode::Split { children, .. } | LayoutNode::Tabs { children, .. } => {
@@ -502,9 +515,9 @@ impl LayoutNode {
         }
     }
 
-    /// Collect terminal IDs that are behind a non-active tab.
+    /// Collect pane IDs that are behind a non-active tab.
     /// A terminal is "inactive" if any ancestor Tabs node has it in a non-active child.
-    pub fn collect_inactive_tab_terminal_ids(&self) -> HashSet<String> {
+    pub fn collect_inactive_tab_pane_ids(&self) -> HashSet<String> {
         let mut result = HashSet::new();
         self.collect_inactive_tabs_recursive(&mut result, false);
         result
@@ -516,9 +529,9 @@ impl LayoutNode {
         is_behind_inactive_tab: bool,
     ) {
         match self {
-            LayoutNode::Terminal { terminal_id, .. } => {
-                if is_behind_inactive_tab && let Some(id) = terminal_id {
-                    result.insert(id.clone());
+            LayoutNode::Terminal { .. } => {
+                if is_behind_inactive_tab && let Some(id) = self.pane_id() {
+                    result.insert(id.to_owned());
                 }
             }
             LayoutNode::Split { children, .. } => {
@@ -538,9 +551,9 @@ impl LayoutNode {
         }
     }
 
-    /// Collect terminal IDs that belong to a Tabs node with 2+ children.
+    /// Collect pane IDs that belong to a Tabs node with 2+ children.
     /// These terminals are visually grouped in the sidebar with a vertical line.
-    pub fn collect_tab_group_terminal_ids(&self) -> HashSet<String> {
+    pub fn collect_tab_group_pane_ids(&self) -> HashSet<String> {
         let mut result = HashSet::new();
         self.collect_tab_group_recursive(&mut result, false);
         result
@@ -548,9 +561,9 @@ impl LayoutNode {
 
     fn collect_tab_group_recursive(&self, result: &mut HashSet<String>, inside_tab_group: bool) {
         match self {
-            LayoutNode::Terminal { terminal_id, .. } => {
-                if inside_tab_group && let Some(id) = terminal_id {
-                    result.insert(id.clone());
+            LayoutNode::Terminal { .. } => {
+                if inside_tab_group && let Some(id) = self.pane_id() {
+                    result.insert(id.to_owned());
                 }
             }
             LayoutNode::Split { children, .. } => {

@@ -1,13 +1,49 @@
 //! Actions shared by normal and Focus terminal headers.
 use crate::ActionDispatch;
 use gpui::*;
+use okena_core::api::ActionRequest;
 use okena_files::theme::theme;
 use okena_ui::header_buttons::{ButtonSize, HeaderAction, header_button_base};
 use okena_workspace::{
     focus::FocusManager,
     request_broker::RequestBroker,
-    state::{LayoutNode, SplitDirection, Workspace},
+    state::{SplitDirection, Workspace},
 };
+
+pub(crate) fn exit_zoom_request(project_id: &str) -> ActionRequest {
+    ActionRequest::SetFullscreen {
+        project_id: project_id.to_owned(),
+        terminal_id: None,
+        window: None,
+    }
+}
+
+pub(crate) fn render_exit_zoom_button<D: ActionDispatch>(
+    id_suffix: &str,
+    project_id: &str,
+    focus: FocusHandle,
+    dispatcher: Option<D>,
+    cx: &App,
+) -> Stateful<Div> {
+    let action = exit_zoom_request(project_id);
+    header_button_base(
+        HeaderAction::ExitZoom,
+        id_suffix,
+        ButtonSize::COMPACT,
+        &theme(cx),
+        None,
+        Some(okena_ui::shortcuts::ActionShortcut::new(
+            crate::actions::ToggleFullscreen,
+            move |window, cx| focus.contains_focused(window, cx),
+        )),
+    )
+    .on_click(move |_, _, cx| {
+        cx.stop_propagation();
+        if let Some(dispatcher) = &dispatcher {
+            dispatcher.dispatch(action.clone(), cx);
+        }
+    })
+}
 
 /// Context for tab action button closures.
 #[derive(Clone)]
@@ -60,10 +96,16 @@ pub(crate) fn render_action_buttons<D: ActionDispatch + Send + Sync>(
                 .iter()
                 .any(|context| context.contains("TerminalPane"))
                 && focus_manager.read(cx).is_focused(&project_id, &path)
-                && workspace.read(cx).project(&project_id)
+                && workspace
+                    .read(cx)
+                    .project(&project_id)
                     .and_then(|project| project.layout.as_ref())
                     .and_then(|layout| layout.get_at_path(&path))
-                    .is_some_and(|node| matches!(node, LayoutNode::Terminal { terminal_id: Some(id), .. } if Some(id) == terminal_id.as_ref()))
+                    .is_some_and(|node| {
+                        terminal_id
+                            .as_deref()
+                            .is_some_and(|id| node.pane_id() == Some(id))
+                    })
         }
     };
     let more_button = crate::layout::layout_container::terminal_actions_button(

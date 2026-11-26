@@ -1014,6 +1014,7 @@ pub struct SidebarProjectInfo {
     pub show_in_overview: bool,
     pub folder_color: FolderColor,
     pub has_layout: bool,
+    /// Panes listed in the tree, including Start Pages and excluding hook overlays.
     pub terminal_ids: Vec<String>,
     pub terminal_names: HashMap<String, String>,
     /// User-set board status of this project (a column id).
@@ -1048,6 +1049,20 @@ pub struct SidebarProjectInfo {
 }
 
 impl SidebarProjectInfo {
+    fn listed_pane_ids(project: &ProjectData) -> Vec<String> {
+        project
+            .layout
+            .as_ref()
+            .map(|layout| {
+                layout
+                    .collect_pane_ids()
+                    .into_iter()
+                    .filter(|id| !project.hook_terminals.contains_key(id))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     /// The label a project is listed under. A worktree follows its live git
     /// branch (falling back to the stored name until the first git poll lands)
     /// unless the user renamed it; every other project shows its stored name.
@@ -1087,19 +1102,12 @@ impl SidebarProjectInfo {
             // rule the terminal area and project column use.
             folder_color: workspace.effective_folder_color(project),
             has_layout: layout.is_some(),
-            terminal_ids: layout
-                .map(|l| {
-                    l.collect_terminal_ids()
-                        .into_iter()
-                        .filter(|tid| !project.hook_terminals.contains_key(tid))
-                        .collect()
-                })
-                .unwrap_or_default(),
+            terminal_ids: Self::listed_pane_ids(project),
             inactive_tab_terminals: layout
-                .map(|l| l.collect_inactive_tab_terminal_ids())
+                .map(|l| l.collect_inactive_tab_pane_ids())
                 .unwrap_or_default(),
             tab_group_terminals: layout
-                .map(|l| l.collect_tab_group_terminal_ids())
+                .map(|l| l.collect_tab_group_pane_ids())
                 .unwrap_or_default(),
             terminal_names: project.terminal_names.clone(),
             status: project.status.clone(),
@@ -1170,7 +1178,35 @@ fn any_needs_attention(
 
 #[cfg(test)]
 mod attention_tests {
-    use super::any_needs_attention;
+    use super::{SidebarProjectInfo, any_needs_attention};
+    use okena_workspace::state::{LayoutNode, ProjectData, WindowId, Workspace, WorkspaceData};
+
+    #[test]
+    fn sidebar_lists_start_pages_as_tab_peers() {
+        let mut terminal = LayoutNode::new_terminal();
+        if let LayoutNode::Terminal { terminal_id, .. } = &mut terminal {
+            *terminal_id = Some("t1".into());
+        }
+        let page = LayoutNode::new_start_page(okena_core::api::StartPage {
+            id: "page".into(),
+            cwd: ".".into(),
+        });
+        let layout = LayoutNode::Tabs {
+            children: vec![terminal, page],
+            active_tab: 0,
+        };
+        let project: ProjectData = serde_json::from_value(serde_json::json!({
+            "id": "p", "name": "Project", "path": ".", "layout": layout,
+        }))
+        .unwrap();
+        let workspace = Workspace::new(WorkspaceData::empty());
+
+        let info = SidebarProjectInfo::from_project(&project, &workspace, WindowId::Main);
+        assert_eq!(info.terminal_ids, ["t1", "page"]);
+        assert!(info.inactive_tab_terminals.contains("page"));
+        assert!(info.tab_group_terminals.contains("page"));
+        assert_eq!(project.layout.unwrap().collect_terminal_ids(), ["t1"]);
+    }
 
     fn ids(list: &[&str]) -> Vec<String> {
         list.iter().map(|s| s.to_string()).collect()

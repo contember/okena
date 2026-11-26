@@ -304,13 +304,9 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
             return None;
         }
 
-        for (i, child) in children.iter().enumerate() {
-            let ids = child.collect_terminal_ids();
-            if ids.iter().any(|id| id == fs_terminal_id) {
-                return Some(i);
-            }
-        }
-        None
+        children
+            .iter()
+            .position(|child| child.find_terminal_path(fs_terminal_id).is_some())
     }
 
     pub(super) fn deregister_resize_viewers(&mut self, cx: &mut Context<Self>) {
@@ -426,7 +422,8 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
     ) -> impl IntoElement {
         use crate::actions::{
             AddTab, CloseTerminal, FocusDown, FocusLeft, FocusNextTerminal, FocusPrevTerminal,
-            FocusRight, FocusUp, SplitHorizontal, SplitVertical,
+            FocusRight, FocusUp, FullscreenNextTerminal, FullscreenPrevTerminal, SplitHorizontal,
+            SplitVertical, ToggleFullscreen,
         };
 
         let t = theme(cx);
@@ -436,7 +433,8 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
             .clone();
         let fm = self.focus_manager.read(cx);
         if !fm.is_modal()
-            && fm.is_focused(&self.project_id, &self.layout_path)
+            && (fm.is_terminal_fullscreened(&self.project_id, &page.id)
+                || fm.is_focused(&self.project_id, &self.layout_path))
             && !focus.contains_focused(window, cx)
         {
             window.focus(&focus, cx);
@@ -451,6 +449,9 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
             })
             .unwrap_or_default();
         let page_id = page.id.clone();
+        let zoom_page_id = page.id.clone();
+        let next_page_id = page.id.clone();
+        let prev_page_id = page.id.clone();
         let default_launch = super::start_page::launch_request(
             &self.project_id,
             Some(&page.id),
@@ -576,6 +577,26 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
                     dispatcher.add_tab(&this.project_id, &this.layout_path, false, cx);
                 }
             }))
+            .on_action(cx.listener(move |this, _: &ToggleFullscreen, _, cx| {
+                if let Some(dispatcher) = &this.action_dispatcher {
+                    let action = if this.focus_manager.read(cx).has_fullscreen() {
+                        super::header_actions::exit_zoom_request(&this.project_id)
+                    } else {
+                        ActionRequest::SetFullscreen {
+                            project_id: this.project_id.clone(),
+                            terminal_id: Some(zoom_page_id.clone()),
+                            window: None,
+                        }
+                    };
+                    dispatcher.dispatch(action, cx);
+                }
+            }))
+            .on_action(cx.listener(move |this, _: &FullscreenNextTerminal, _, cx| {
+                this.navigate_zoomed_page(&next_page_id, true, cx);
+            }))
+            .on_action(cx.listener(move |this, _: &FullscreenPrevTerminal, _, cx| {
+                this.navigate_zoomed_page(&prev_page_id, false, cx);
+            }))
             .on_action(cx.listener(move |this, _: &CloseTerminal, _, cx| {
                 if let Some(dispatcher) = &this.action_dispatcher {
                     dispatcher.dispatch(
@@ -595,6 +616,23 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
                 tip,
                 cx,
             ))
+    }
+
+    fn navigate_zoomed_page(&self, page_id: &str, forward: bool, cx: &mut Context<Self>) {
+        if self
+            .focus_manager
+            .read(cx)
+            .is_terminal_fullscreened(&self.project_id, page_id)
+        {
+            super::zoom_header::navigate_zoom(
+                &self.workspace,
+                self.action_dispatcher.as_ref(),
+                &self.project_id,
+                page_id,
+                forward,
+                cx,
+            );
+        }
     }
 
     fn render_terminal(
@@ -627,7 +665,7 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
         };
 
         let in_tab_group = self.is_in_tab_group(cx);
-        let is_zoomed = terminal_id.as_ref().is_some_and(|tid| {
+        let is_zoomed = pane_id.as_ref().is_some_and(|tid| {
             let fm = self.focus_manager.read(cx);
             fm.is_terminal_fullscreened(&self.project_id, tid)
         });
@@ -636,7 +674,26 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
         // Reading the settings is a serde round-trip, so only ask once the
         // cheap structural checks have not already ruled the header out.
         // A compact grid tile's project header carries this title bar.
-        if !in_tab_group
+        if let Some(page) = &start_page
+            && is_zoomed
+            && let Some(focus) = &self.start_page_focus
+        {
+            container = container.child(
+                super::zoom_header::ZoomHeader {
+                    workspace: &self.workspace,
+                    request_broker: &self.request_broker,
+                    focus_manager: &self.focus_manager,
+                    dispatcher: &self.action_dispatcher,
+                    project_id: &self.project_id,
+                    layout_path: &self.layout_path,
+                    pane_id: Some(&page.id),
+                    focus,
+                    shell: None,
+                    can_export_buffer: false,
+                }
+                .render("Start Page".to_owned(), false, cx),
+            );
+        } else if !in_tab_group
             && !is_zoomed
             && (start_page.is_some()
                 || (!self

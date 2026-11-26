@@ -439,11 +439,10 @@ pub fn apply_remote_snapshot(
             Some(project) => {
                 let layout = project.layout.as_ref();
                 let closed = layout.is_none_or(|layout| {
-                    let remaining = layout.collect_terminal_ids();
-                    !pending
+                    pending
                         .closing_terminal_ids
                         .iter()
-                        .any(|id| remaining.contains(id))
+                        .all(|id| layout.find_terminal_path(id).is_none())
                 });
                 if closed {
                     // An empty project keeps focus on the project itself (empty

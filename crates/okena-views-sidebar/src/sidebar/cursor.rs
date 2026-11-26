@@ -1,7 +1,7 @@
 //! Keyboard cursor navigation: flat item list, cursor movement, action
 //! handlers for `SidebarUp`/`Down`/`Confirm`/`ToggleExpand`/`Escape`.
 
-use super::{GroupKind, Sidebar, SidebarCursorItem};
+use super::{GroupKind, Sidebar, SidebarCursorItem, SidebarProjectInfo};
 use crate::{SidebarConfirm, SidebarDown, SidebarEscape, SidebarToggleExpand, SidebarUp};
 use gpui::*;
 use okena_workspace::state::ProjectData;
@@ -240,23 +240,21 @@ impl Sidebar {
         cursor_items: &mut Vec<SidebarCursorItem>,
     ) {
         let project_id = project.id.as_str();
-        // Terminals group
-        if let Some(layout) = &project.layout {
-            let terminal_ids = layout.collect_terminal_ids();
-            if !terminal_ids.is_empty() {
-                cursor_items.push(SidebarCursorItem::GroupHeader {
-                    project_id: project_id.to_string(),
-                    group: GroupKind::Terminals,
-                });
+        // Terminals group: keyboard navigation follows the rendered tree.
+        let pane_ids = SidebarProjectInfo::listed_pane_ids(project);
+        if !pane_ids.is_empty() {
+            cursor_items.push(SidebarCursorItem::GroupHeader {
+                project_id: project_id.to_string(),
+                group: GroupKind::Terminals,
+            });
 
-                if !self.is_group_collapsed(project_id, &GroupKind::Terminals) {
-                    for tid in terminal_ids {
-                        cursor_items.push(SidebarCursorItem::Terminal {
-                            project_id: project_id.to_string(),
-                            terminal_id: tid,
-                        });
+            if !self.is_group_collapsed(project_id, &GroupKind::Terminals) {
+                cursor_items.extend(pane_ids.into_iter().map(|terminal_id| {
+                    SidebarCursorItem::Terminal {
+                        project_id: project_id.to_string(),
+                        terminal_id,
                     }
-                }
+                }));
             }
         }
 
