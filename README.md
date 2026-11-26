@@ -126,7 +126,7 @@ The install script includes built-in auto-update support. On macOS and Linux, Ok
 ### Auto-Update
 - **Built-in updater** - Background update checks via GitHub Releases
 - **Update channels** - Choose Release (the default) or Nightly in Settings → Auto Update. Okena downloads the selected build and waits for you to install and restart. To return from a nightly, choose Release and confirm the stable version.
-- **Version rollback** - Reinstall an earlier build from the selected Release or Nightly channel in Settings or with `okena update revert`
+- **Version history** - Reinstall an earlier stable release in Settings or with `okena update revert`. On the Nightly channel the list also holds nightly builds and newer stable releases, ordered by publication date, and installing a stable release keeps you on Nightly
 - **Config checkpoints** - Restore the matching pre-upgrade config by default, with an explicit keep-current opt-out
 - **SHA256 verification** - Downloaded updates are cryptographically verified
 - **Homebrew-aware** - Skips self-update when installed via Homebrew

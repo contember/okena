@@ -458,7 +458,8 @@ impl UpdaterSettingsView {
     ) -> AnyElement {
         let version = release.version.clone();
         let has_snapshot = release.config_snapshot.is_some();
-        let keep_config = self.catalog_channel == UpdateChannel::Nightly || !has_snapshot;
+        // Nightly rows never carry a checkpoint; a stable row restores its own, as on Release.
+        let keep_config = !has_snapshot;
         let request = self.catalog_request;
         let published = release
             .published_at
