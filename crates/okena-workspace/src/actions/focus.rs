@@ -170,6 +170,7 @@ impl Workspace {
 
         log::info!("layout_path for terminal: {:?}", layout_path);
 
+        let zoom_changed = !focus_manager.is_terminal_fullscreened(&project_id, &terminal_id);
         // Use FocusManager for fullscreen entry (saves current state + sets focused_project_id)
         focus_manager.enter_fullscreen(project_id, layout_path, terminal_id.clone());
 
@@ -179,14 +180,21 @@ impl Workspace {
         );
 
         cx.notify();
+        if zoom_changed {
+            cx.refresh_views();
+        }
     }
 
     /// Exit fullscreen mode
     ///
     /// Restores focus to the previously focused terminal and project view mode.
     pub fn exit_fullscreen(&mut self, focus_manager: &mut FocusManager, cx: &mut impl WorkspaceCx) {
+        let was_fullscreen = focus_manager.has_fullscreen();
         focus_manager.exit_fullscreen();
         cx.notify();
+        if was_fullscreen && !focus_manager.has_fullscreen() {
+            cx.refresh_views();
+        }
     }
 
     /// Apply an external fullscreen request once its terminal is in the mirror.
@@ -342,6 +350,8 @@ impl Workspace {
             self.notify_data(cx);
             // Reveal: retarget the active zoom/fullscreen onto the target so it
             // is actually visible, then focus it.
+            let zoom_changed = focus_manager.has_fullscreen()
+                && !focus_manager.is_terminal_fullscreened(project_id, terminal_id);
             focus_manager.reveal_terminal(
                 project_id.to_string(),
                 path,
@@ -351,6 +361,9 @@ impl Workspace {
             self.touch_project(project_id);
             self.bump_activity(project_id, cx);
             cx.notify();
+            if zoom_changed {
+                cx.refresh_views();
+            }
         }
     }
 }

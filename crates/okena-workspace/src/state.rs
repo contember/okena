@@ -36,6 +36,8 @@ struct FocusAnchor {
     previous: FocusedTerminalState,
     /// Terminal the focused path named — the thing to follow.
     terminal_id: String,
+    /// Terminal IDs before a Start Page was replaced in place or removed.
+    start_page_terminal_ids: Option<Vec<String>>,
     /// Where focus goes if that terminal is gone once the sync lands, resolved
     /// against the tree it still lived in.
     replacement: Option<String>,
@@ -61,10 +63,8 @@ struct SyncLayoutPreimage {
 /// The terminal slot at `path`: `Some(None)` for a pane whose PTY is still
 /// spawning, `None` when the path doesn't name a pane at all.
 fn terminal_slot_at<'a>(layout: &'a LayoutNode, path: &[usize]) -> Option<Option<&'a str>> {
-    match layout.get_at_path(path) {
-        Some(LayoutNode::Terminal { terminal_id, .. }) => Some(terminal_id.as_deref()),
-        _ => None,
-    }
+    let node = layout.get_at_path(path)?;
+    matches!(node, LayoutNode::Terminal { .. }).then(|| node.pane_id())
 }
 
 /// Diagnostics returned after atomically aborting a vanished before-remove hook.
@@ -1872,11 +1872,8 @@ impl Workspace {
 
         let focused_id = focused
             .filter(|f| f.project_id == project_id)
-            .and_then(|f| layout.get_at_path(&f.layout_path))
-            .and_then(|node| match node {
-                LayoutNode::Terminal { terminal_id, .. } => terminal_id.clone(),
-                _ => None,
-            });
+            .and_then(|f| terminal_slot_at(layout, &f.layout_path).flatten())
+            .map(str::to_owned);
 
         let next = match focused_id {
             Some(id) if !closing.contains(id.as_str()) => Some(id),
@@ -2550,6 +2547,9 @@ impl Workspace {
 
         let before = self.project_layouts();
         let presentation_before = self.project_presentation();
+        let fullscreen_before = focus_manager
+            .fullscreen_state()
+            .map(|(project, pane)| (project.to_owned(), pane.to_owned()));
         let taken_at = self.sync_generation;
 
         let outcome = crate::remote_apply::apply_remote_snapshot(
@@ -2593,23 +2593,27 @@ impl Workspace {
         // this window's hidden set or outside its folder filter — in which case
         // focusing by path alone lands on a pane that renders nowhere.
         for target in outcome.focus_targets {
-            let terminal_id = self
+            let pane_id = self
                 .project(&target.project_id)
                 .and_then(|project| project.layout.as_ref())
-                .and_then(|layout| layout.get_at_path(&target.layout_path))
-                .and_then(|node| match node {
-                    LayoutNode::Terminal { terminal_id, .. } => terminal_id.clone(),
-                    _ => None,
-                });
-            if let Some(terminal_id) = terminal_id {
+                .and_then(|layout| terminal_slot_at(layout, &target.layout_path).flatten())
+                .map(str::to_owned);
+            if let Some(pane_id) = pane_id {
                 self.focus_terminal_by_id(
                     focus_manager,
                     window_id,
                     &target.project_id,
-                    &terminal_id,
+                    &pane_id,
                     cx,
                 );
             } else {
+                if anchor.as_ref().is_some_and(|anchor| {
+                    anchor.start_page_terminal_ids.is_some()
+                        && focus_manager
+                            .is_terminal_fullscreened(&target.project_id, &anchor.terminal_id)
+                }) {
+                    focus_manager.exit_fullscreen();
+                }
                 self.set_focused_terminal(focus_manager, target.project_id, target.layout_path, cx);
             }
         }
@@ -2626,7 +2630,11 @@ impl Workspace {
         // never reaches. A rename or recolour made elsewhere (the sidebar,
         // another client) only became visible once something else happened
         // to repaint the window.
-        if self.project_presentation() != presentation_before {
+        let fullscreen_changed = focus_manager.fullscreen_state()
+            != fullscreen_before
+                .as_ref()
+                .map(|(project, pane)| (project.as_str(), pane.as_str()));
+        if fullscreen_changed || self.project_presentation() != presentation_before {
             cx.refresh_views();
         }
     }
@@ -2701,12 +2709,17 @@ impl Workspace {
         let previous = focus_manager.focused_terminal_state()?;
         let layout = self.focus_reference_layout(&previous.project_id, last_seen)?;
         let terminal_id = terminal_slot_at(layout, &previous.layout_path)??.to_string();
+        let start_page_terminal_ids = layout
+            .get_at_path(&previous.layout_path)
+            .and_then(LayoutNode::start_page)
+            .map(|_| layout.collect_terminal_ids());
         // Computed on the pre-sync tree, while the focused pane's position is
         // still known: where focus goes if this sync took that pane away.
         let replacement = layout.terminal_to_focus_after_closing(&previous.layout_path);
         Some(FocusAnchor {
             previous,
             terminal_id,
+            start_page_terminal_ids,
             replacement,
         })
     }
@@ -2736,11 +2749,18 @@ impl Workspace {
         if anchor.is_some_and(|anchor| anchor.previous != current) {
             return;
         }
+        let was_fullscreen_page = anchor.is_some_and(|anchor| {
+            anchor.start_page_terminal_ids.is_some()
+                && focus_manager.is_terminal_fullscreened(&current.project_id, &anchor.terminal_id)
+        });
         let Some(layout) = self
             .project(&current.project_id)
             .and_then(|p| p.layout.as_ref())
         else {
             // A project with no layout keeps focus on the project itself.
+            if was_fullscreen_page {
+                focus_manager.exit_fullscreen();
+            }
             return;
         };
 
@@ -2751,14 +2771,27 @@ impl Workspace {
                 {
                     return; // Still on the same terminal.
                 }
-                // Follow it if it merely moved; otherwise take the neighbour
-                // resolved against the tree it lived in.
-                layout.find_terminal_path(&anchor.terminal_id).or_else(|| {
-                    anchor
-                        .replacement
-                        .as_ref()
-                        .and_then(|id| layout.find_terminal_path(id))
-                })
+                layout
+                    .find_terminal_path(&anchor.terminal_id)
+                    .or_else(|| {
+                        // A launch consumes the page and gives this slot a new
+                        // PTY. A close can instead shift a surviving pane here.
+                        let old_ids = anchor.start_page_terminal_ids.as_ref()?;
+                        let LayoutNode::Terminal {
+                            terminal_id: Some(id),
+                            ..
+                        } = layout.get_at_path(&current.layout_path)?
+                        else {
+                            return None;
+                        };
+                        (!old_ids.contains(id)).then(|| current.layout_path.clone())
+                    })
+                    .or_else(|| {
+                        anchor
+                            .replacement
+                            .as_ref()
+                            .and_then(|id| layout.find_terminal_path(id))
+                    })
             }
             // Focus was already orphaned before this sync, so there is nothing
             // to follow — but if the path names a pane again, leave it be.
@@ -2770,8 +2803,14 @@ impl Workspace {
         // A degenerate tree (an empty container) has no terminal to offer, and
         // `find_visible_terminal_path` would hand back the container's own path
         // — leaving focus just as orphaned and re-running this every sync.
-        if path != current.layout_path && terminal_slot_at(layout, &path).is_some() {
-            focus_manager.focus_terminal(current.project_id, path);
+        if let Some(pane_id) = terminal_slot_at(layout, &path) {
+            if let Some(pane_id) = pane_id
+                && was_fullscreen_page
+            {
+                focus_manager.reveal_terminal(current.project_id, path, pane_id.to_owned(), false);
+            } else if path != current.layout_path {
+                focus_manager.focus_terminal(current.project_id, path);
+            }
         }
     }
 
@@ -4767,6 +4806,135 @@ mod gpui_tests {
             cols: None,
             rows: None,
         }
+    }
+
+    fn api_start_page(id: &str) -> ApiLayoutNode {
+        ApiLayoutNode::Terminal {
+            start_page: Some(okena_core::api::StartPage {
+                id: id.into(),
+                cwd: "/srv/p1".into(),
+            }),
+            terminal_id: None,
+            minimized: false,
+            detached: false,
+            shell_type: Default::default(),
+            cols: None,
+            rows: None,
+        }
+    }
+
+    #[gpui::test]
+    fn fullscreen_follows_a_new_start_page_and_its_terminal(cx: &mut gpui::TestAppContext) {
+        let workspace = workspace_hiding_projects_without_terminals(cx, false);
+        let mut fm = crate::focus::FocusManager::new();
+        let project_id = "remote:c1:p1";
+        let mut children = vec![api_terminal("original"), api_terminal("sibling")];
+        let tabs = |children: &[ApiLayoutNode], active_tab| ApiLayoutNode::Tabs {
+            children: children.to_vec(),
+            active_tab,
+        };
+        sync_and_read_focus(&workspace, &mut fm, cx, tabs(&children, 0));
+        fm.focus_terminal(project_id.into(), vec![0]);
+        fm.enter_fullscreen(project_id.into(), vec![0], "remote:c1:original".into());
+        let queue_focus = |cx: &mut gpui::TestAppContext| {
+            workspace.update(cx, |ws, _| {
+                let ids = ws
+                    .project(project_id)
+                    .unwrap()
+                    .layout
+                    .as_ref()
+                    .unwrap()
+                    .collect_pane_ids();
+                ws.queue_pending_remote_focus(WindowId::Main, project_id, ids);
+            });
+        };
+        queue_focus(cx);
+        children.push(api_start_page("page"));
+        assert_eq!(
+            sync_and_read_focus(&workspace, &mut fm, cx, tabs(&children, 2)),
+            Some(vec![2])
+        );
+        assert_eq!(fm.fullscreen_state(), Some((project_id, "remote:c1:page")));
+
+        queue_focus(cx);
+        children[2] = api_terminal("launched");
+        assert_eq!(
+            sync_and_read_focus(&workspace, &mut fm, cx, tabs(&children, 2)),
+            Some(vec![2])
+        );
+        assert_eq!(
+            fm.fullscreen_state(),
+            Some((project_id, "remote:c1:launched"))
+        );
+        fm.exit_fullscreen();
+        assert!(!fm.has_fullscreen());
+    }
+
+    #[gpui::test]
+    fn focus_follows_a_start_page_launched_by_another_client(cx: &mut gpui::TestAppContext) {
+        for fullscreen in [false, true] {
+            let workspace = workspace_hiding_projects_without_terminals(cx, false);
+            let mut fm = crate::focus::FocusManager::new();
+            let project_id = "remote:c1:p1";
+            let tabs = |tab| ApiLayoutNode::Tabs {
+                children: vec![api_terminal("sibling"), tab],
+                active_tab: 1,
+            };
+            sync_and_read_focus(&workspace, &mut fm, cx, tabs(api_start_page("page")));
+            fm.focus_terminal(project_id.into(), vec![1]);
+            if fullscreen {
+                fm.enter_fullscreen(project_id.into(), vec![1], "remote:c1:page".into());
+            }
+
+            let path = sync_and_read_focus(&workspace, &mut fm, cx, tabs(api_terminal("launched")));
+            assert_eq!(path, Some(vec![1]));
+            assert_eq!(
+                fm.fullscreen_state(),
+                fullscreen.then_some((project_id, "remote:c1:launched"))
+            );
+        }
+    }
+
+    #[gpui::test]
+    fn closing_a_fullscreen_start_page_reveals_its_neighbour(cx: &mut gpui::TestAppContext) {
+        let workspace = workspace_hiding_projects_without_terminals(cx, false);
+        let mut fm = crate::focus::FocusManager::new();
+        let project_id = "remote:c1:p1";
+        let page_id = "remote:c1:page";
+        let before = ApiLayoutNode::Tabs {
+            children: vec![
+                api_terminal("original"),
+                api_start_page("page"),
+                api_terminal("sibling"),
+            ],
+            active_tab: 1,
+        };
+        sync_and_read_focus(&workspace, &mut fm, cx, before.clone());
+        fm.enter_fullscreen(project_id.into(), vec![1], page_id.into());
+        let focused = fm.focused_terminal_state();
+        workspace.update(cx, |ws, _| {
+            ws.queue_focus_after_close(
+                WindowId::Main,
+                project_id,
+                &[page_id.into()],
+                focused.as_ref(),
+            );
+        });
+
+        sync_and_read_focus(&workspace, &mut fm, cx, before);
+        assert_eq!(fm.fullscreen_state(), Some((project_id, page_id)));
+        let after = ApiLayoutNode::Tabs {
+            children: vec![api_terminal("original"), api_terminal("sibling")],
+            active_tab: 1,
+        };
+        assert_eq!(
+            sync_and_read_focus(&workspace, &mut fm, cx, after),
+            Some(vec![1])
+        );
+        assert_eq!(
+            fm.fullscreen_state(),
+            Some((project_id, "remote:c1:sibling"))
+        );
     }
 
     fn api_split(ids: [&str; 2]) -> ApiLayoutNode {

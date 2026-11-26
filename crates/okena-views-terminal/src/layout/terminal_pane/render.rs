@@ -13,7 +13,6 @@ use crate::layout::navigation::NavigationDirection;
 use crate::terminal_view_settings;
 use gpui::prelude::FluentBuilder;
 use gpui::*;
-use okena_core::api::ActionRequest;
 use okena_files::theme::theme;
 use okena_workspace::state::SplitDirection;
 
@@ -305,13 +304,11 @@ impl<D: ActionDispatch + Send + Sync> Render for TerminalPane<D> {
             .on_action(cx.listener(|this, _: &ToggleFullscreen, _window, cx| {
                 let is_fullscreen = this.focus_manager.read(cx).has_fullscreen();
                 if is_fullscreen {
-                    let action = ActionRequest::SetFullscreen {
-                        project_id: this.project_id.clone(),
-                        terminal_id: None,
-                        window: None,
-                    };
                     if let Some(ref dispatcher) = this.action_dispatcher {
-                        dispatcher.dispatch(action, cx);
+                        dispatcher.dispatch(
+                            crate::layout::header_actions::exit_zoom_request(&this.project_id),
+                            cx,
+                        );
                     }
                 } else {
                     this.handle_fullscreen(cx);
@@ -319,12 +316,12 @@ impl<D: ActionDispatch + Send + Sync> Render for TerminalPane<D> {
             }))
             .on_action(
                 cx.listener(|this, _: &FullscreenNextTerminal, _window, cx| {
-                    this.handle_zoom_next_terminal(cx);
+                    this.navigate_zoom(true, cx);
                 }),
             )
             .on_action(
                 cx.listener(|this, _: &FullscreenPrevTerminal, _window, cx| {
-                    this.handle_zoom_prev_terminal(cx);
+                    this.navigate_zoom(false, cx);
                 }),
             )
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {

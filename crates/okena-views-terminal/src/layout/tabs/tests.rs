@@ -27,8 +27,13 @@ impl ActionDispatch for RecordedActions {
     fn split_terminal(&self, _: &str, _: &[usize], _: SplitDirection, _: &mut App) {
         panic!("unexpected split");
     }
-    fn add_tab(&self, _: &str, _: &[usize], _: bool, _: &mut App) {
-        panic!("unexpected add tab");
+    fn add_tab(&self, project_id: &str, path: &[usize], in_group: bool, _: &mut App) {
+        self.0.lock().push(ActionRequest::AddTab {
+            project_id: project_id.into(),
+            path: path.to_vec(),
+            in_group,
+            start_page: true,
+        });
     }
 }
 
@@ -263,7 +268,7 @@ fn pending_tabs_keep_separate_close_targets(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn pending_panes_navigate_and_launch_with_the_keyboard(cx: &mut TestAppContext) {
-    use crate::actions::FocusNextTerminal;
+    use crate::actions::{AddTab, CloseTerminal, FocusNextTerminal};
     use crate::layout::navigation::get_pane_map;
     use okena_core::shell::ShellType;
     use okena_workspace::state::ProjectData;
@@ -290,11 +295,11 @@ fn pending_panes_navigate_and_launch_with_the_keyboard(cx: &mut TestAppContext) 
             },
             |_, _, _| {},
         ));
-        cx.bind_keys([gpui::KeyBinding::new(
-            "ctrl-tab",
-            FocusNextTerminal,
-            Some("TerminalPane"),
-        )]);
+        cx.bind_keys([
+            gpui::KeyBinding::new("ctrl-tab", FocusNextTerminal, Some("TerminalPane")),
+            gpui::KeyBinding::new("ctrl-shift-t", AddTab, Some("TerminalPane")),
+            gpui::KeyBinding::new("ctrl-shift-w", CloseTerminal, Some("TerminalPane")),
+        ]);
     });
 
     let layout = LayoutNode::Split {
@@ -353,6 +358,42 @@ fn pending_panes_navigate_and_launch_with_the_keyboard(cx: &mut TestAppContext) 
         actions.0.lock().last(),
         Some(ActionRequest::LaunchStartPage { page_id: Some(id), command: Some(command), .. })
             if id == "second-page" && command == "cargo test"
+    ));
+
+    focus.update(cx, |fm, cx| {
+        // Keyboard focus follows the displayed pane ID, even while a layout
+        // update has left the keyboard path at the previous pane position.
+        fm.enter_fullscreen("project".into(), vec![1], "first-page".into());
+        cx.refresh_windows();
+    });
+    settle_frames(&mut visual);
+    visual.simulate_keystrokes("ctrl-shift-t");
+    assert!(matches!(
+        actions.0.lock().last(),
+        Some(ActionRequest::AddTab { path, .. }) if path == &[0]
+    ));
+    visual.simulate_keystrokes("ctrl-shift-w");
+    assert!(matches!(
+        actions.0.lock().last(),
+        Some(ActionRequest::CloseTerminal { terminal_id, .. }) if terminal_id == "first-page"
+    ));
+    visual.simulate_mouse_move(point(px(8.0), px(14.0)), None, Default::default());
+    settle_frames(&mut visual);
+    assert!(visual.debug_bounds("zoom-pane-position-1-2").is_some());
+    let next = visual.debug_bounds("zoom-next-btn-zoom").unwrap();
+    visual.simulate_click(next.center(), Default::default());
+    assert!(matches!(
+        actions.0.lock().last(),
+        Some(ActionRequest::SetFullscreen { terminal_id: Some(id), .. }) if id == "second-page"
+    ));
+    let exit = visual.debug_bounds("zoom-exit-btn-zoom").unwrap();
+    visual.simulate_click(exit.center(), Default::default());
+    assert!(matches!(
+        actions.0.lock().last(),
+        Some(ActionRequest::SetFullscreen {
+            terminal_id: None,
+            ..
+        })
     ));
 }
 

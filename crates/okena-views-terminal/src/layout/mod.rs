@@ -14,3 +14,4 @@ pub mod split_pane;
 pub mod start_page;
 mod tabs;
 pub mod terminal_pane;
+mod zoom_header;
