@@ -60,8 +60,8 @@ struct SyncLayoutPreimage {
     layouts: HashMap<String, LayoutNode>,
 }
 
-/// The terminal slot at `path`: `Some(None)` for a pane whose PTY is still
-/// spawning, `None` when the path doesn't name a pane at all.
+/// The pane ID at `path` (terminal or Start Page): `Some(None)` for a pane
+/// whose PTY is still spawning, `None` when the path doesn't name a pane at all.
 fn terminal_slot_at<'a>(layout: &'a LayoutNode, path: &[usize]) -> Option<Option<&'a str>> {
     let node = layout.get_at_path(path)?;
     matches!(node, LayoutNode::Terminal { .. }).then(|| node.pane_id())
