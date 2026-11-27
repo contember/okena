@@ -134,6 +134,7 @@ impl DiffViewer {
 
     pub(super) fn toggle_view_mode(&mut self, cx: &mut Context<Self>) {
         self.view_mode = self.view_mode.toggle();
+        self.wrapped_list.reset(0);
         self.selection.clear();
         self.selection_side = None;
         self.update_side_by_side_cache();
@@ -146,6 +147,40 @@ impl DiffViewer {
 
     pub(super) fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
         self.sidebar_visible = !self.sidebar_visible;
+        cx.notify();
+    }
+
+    pub(super) fn toggle_line_wrap(&mut self, cx: &mut Context<Self>) {
+        if self.wrap_lines {
+            self.scroll_handle.scroll_to_item(
+                self.wrapped_list.logical_scroll_top().item_ix,
+                ScrollStrategy::Top,
+            );
+        } else {
+            let y = self.scroll_handle.0.borrow().base_handle.offset().y;
+            let top_item = (-f32::from(y) / self.line_height()).max(0.0) as usize;
+            let count = match self.effective_view_mode() {
+                DiffViewMode::Unified => self
+                    .current_file
+                    .as_ref()
+                    .map_or(0, |file| file.items.len()),
+                DiffViewMode::SideBySide => self.side_by_side_lines.len(),
+            };
+            self.wrapped_list
+                .reset_with_uniform_height(count, px(self.line_height()));
+            self.wrapped_list.scroll_to(ListOffset {
+                item_ix: top_item.min(count.saturating_sub(1)),
+                offset_in_item: px(0.0),
+            });
+        }
+        self.wrap_lines = !self.wrap_lines;
+        self.scroll_x = 0.0;
+        self.scrollbar_drag = None;
+        self.h_scrollbar_drag = None;
+
+        let mut gs = git_settings(cx);
+        gs.diff_wrap_lines = self.wrap_lines;
+        set_git_settings(&gs, cx);
         cx.notify();
     }
 

@@ -77,6 +77,7 @@ mod tests {
                             serde_json::to_value(&okena_views_git::settings::GitViewSettings {
                                 diff_view_mode: s.settings.diff_view_mode,
                                 diff_ignore_whitespace: s.settings.diff_ignore_whitespace,
+                                diff_wrap_lines: s.settings.diff_wrap_lines,
                                 file_font_size: s.settings.file_font_size,
                                 file_font_family: s.settings.file_font_family.clone(),
                                 is_dark: true,

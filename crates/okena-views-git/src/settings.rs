@@ -14,6 +14,8 @@ const SETTINGS_ID: &str = "git";
 pub struct GitViewSettings {
     pub diff_view_mode: DiffViewMode,
     pub diff_ignore_whitespace: bool,
+    #[serde(default)]
+    pub diff_wrap_lines: bool,
     pub file_font_size: f32,
     #[serde(default = "default_file_font_family")]
     pub file_font_family: String,
@@ -25,6 +27,7 @@ impl Default for GitViewSettings {
         Self {
             diff_view_mode: DiffViewMode::default(),
             diff_ignore_whitespace: false,
+            diff_wrap_lines: false,
             file_font_size: 13.0,
             file_font_family: default_file_font_family(),
             is_dark: true,
@@ -49,5 +52,29 @@ pub fn git_settings(cx: &gpui::App) -> GitViewSettings {
 pub fn set_git_settings(settings: &GitViewSettings, cx: &mut gpui::App) {
     if let Ok(value) = serde_json::to_value(settings) {
         okena_extensions::ExtensionSettingsStore::update(SETTINGS_ID, value, cx);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::GitViewSettings;
+
+    #[test]
+    fn wrapping_defaults_off_for_existing_settings_and_round_trips() {
+        let mut value = serde_json::to_value(GitViewSettings::default()).unwrap();
+        let object = value.as_object_mut().unwrap();
+        object.remove("diff_wrap_lines");
+        assert!(
+            !serde_json::from_value::<GitViewSettings>(value.clone())
+                .unwrap()
+                .diff_wrap_lines
+        );
+
+        value["diff_wrap_lines"] = true.into();
+        assert!(
+            serde_json::from_value::<GitViewSettings>(value)
+                .unwrap()
+                .diff_wrap_lines
+        );
     }
 }

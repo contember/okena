@@ -49,6 +49,33 @@ pub fn get_action_descriptions() -> HashMap<&'static str, ActionDescription> {
             factory: || Box::new(ShowPairingDialog),
         },
     );
+    map.insert(
+        "ToggleDiffLineWrap",
+        ActionDescription {
+            name: "Toggle Line Wrap",
+            description: "Wrap long lines in Git Diff",
+            category: "Git",
+            factory: || Box::new(super::ToggleDiffLineWrap),
+        },
+    );
+    map.insert(
+        "ToggleDiffIgnoreWhitespace",
+        ActionDescription {
+            name: "Toggle Ignore Whitespace",
+            description: "Ignore whitespace changes in Git Diff",
+            category: "Git",
+            factory: || Box::new(super::ToggleDiffIgnoreWhitespace),
+        },
+    );
+    map.insert(
+        "ToggleDiffViewMode",
+        ActionDescription {
+            name: "Toggle Diff Layout",
+            description: "Switch between Unified and Split in Git Diff",
+            category: "Git",
+            factory: || Box::new(super::ToggleDiffViewMode),
+        },
+    );
     // Global actions
     map.insert(
         "Quit",

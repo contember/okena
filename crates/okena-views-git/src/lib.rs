@@ -11,4 +11,14 @@ pub mod settings;
 pub mod simple_input;
 pub mod worktree_dialog;
 
-gpui::actions!(okena_views_git, [Cancel]);
+gpui::actions!(
+    okena_views_git,
+    [
+        Cancel,
+        ToggleDiffLineWrap,
+        ToggleDiffIgnoreWhitespace,
+        ToggleDiffViewMode
+    ]
+);
+
+pub const DIFF_VIEWER_KEY_CONTEXT: &str = "DiffViewer";

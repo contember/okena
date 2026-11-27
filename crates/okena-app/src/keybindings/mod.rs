@@ -82,6 +82,8 @@ pub use okena_views_terminal::actions::{
     ToggleFullscreen, ToggleUnread, ZoomIn, ZoomOut,
 };
 
+pub use okena_views_git::{ToggleDiffIgnoreWhitespace, ToggleDiffLineWrap, ToggleDiffViewMode};
+
 // Sidebar-specific actions (defined in okena-views-sidebar crate)
 pub use okena_views_sidebar::{
     SidebarConfirm, SidebarDown, SidebarEscape, SidebarToggleExpand, SidebarUp,
@@ -347,6 +349,12 @@ pub(crate) fn create_keybinding(
         return None;
     }
     let action_box = action_for_name(action)?;
+    let context = match action {
+        "ToggleDiffLineWrap" | "ToggleDiffIgnoreWhitespace" | "ToggleDiffViewMode" => {
+            Some(okena_views_git::DIFF_VIEWER_KEY_CONTEXT)
+        }
+        _ => context,
+    };
     let predicate = match context.map(KeyBindingContextPredicate::parse) {
         None => None,
         Some(Ok(predicate)) => Some(Rc::new(predicate)),
@@ -429,6 +437,9 @@ pub(crate) fn action_for_name(action: &str) -> Option<Box<dyn Action>> {
         "FocusSidebar" => Some(Box::new(FocusSidebar)),
         "SidebarUp" => Some(Box::new(SidebarUp)),
         "SidebarDown" => Some(Box::new(SidebarDown)),
+        "ToggleDiffLineWrap" => Some(Box::new(ToggleDiffLineWrap)),
+        "ToggleDiffIgnoreWhitespace" => Some(Box::new(ToggleDiffIgnoreWhitespace)),
+        "ToggleDiffViewMode" => Some(Box::new(ToggleDiffViewMode)),
         "SidebarConfirm" => Some(Box::new(SidebarConfirm)),
         "SidebarToggleExpand" => Some(Box::new(SidebarToggleExpand)),
         "SidebarEscape" => Some(Box::new(SidebarEscape)),
@@ -500,6 +511,48 @@ mod escape_binding_tests {
                 bindings[0].keystrokes()[0].as_keystroke(),
                 &gpui::Keystroke::parse(expected).unwrap()
             );
+        }
+    }
+
+    #[gpui::test]
+    fn diff_toggles_can_be_reassigned_or_disabled_but_stay_in_the_diff(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let defaults = KeybindingConfig::defaults();
+        let descriptions = super::get_action_descriptions();
+        for (action, default_key) in [
+            ("ToggleDiffLineWrap", "alt-z"),
+            ("ToggleDiffIgnoreWhitespace", "w"),
+            ("ToggleDiffViewMode", "s"),
+        ] {
+            assert!(descriptions.contains_key(action));
+            let mut config = KeybindingConfig {
+                version: defaults.version,
+                bindings: std::collections::HashMap::from([(
+                    action.into(),
+                    defaults.bindings[action].clone(),
+                )]),
+            };
+
+            cx.update(|cx| {
+                for key in [default_key, "ctrl-f12"] {
+                    let bindings = bindings_for_platform(&config, ShortcutPlatform::Windows, cx);
+                    assert_eq!(bindings.len(), 1);
+                    assert_eq!(
+                        bindings[0].keystrokes()[0].as_keystroke(),
+                        &gpui::Keystroke::parse(key).unwrap()
+                    );
+                    assert_eq!(
+                        bindings[0].predicate().unwrap().to_string(),
+                        okena_views_git::DIFF_VIEWER_KEY_CONTEXT
+                    );
+                    config
+                        .bindings
+                        .insert(action.into(), vec![KeybindingEntry::new("ctrl-f12", None)]);
+                }
+                config.bindings.get_mut(action).unwrap().clear();
+                assert!(bindings_for_platform(&config, ShortcutPlatform::Windows, cx).is_empty());
+            });
         }
     }
 

@@ -630,6 +630,7 @@ fn main() {
                         serde_json::to_value(&okena_views_git::settings::GitViewSettings {
                             diff_view_mode: s.settings.diff_view_mode,
                             diff_ignore_whitespace: s.settings.diff_ignore_whitespace,
+                            diff_wrap_lines: s.settings.diff_wrap_lines,
                             file_font_size: s.settings.file_font_size,
                             file_font_family: s.settings.file_font_family.clone(),
                             is_dark,
@@ -675,6 +676,7 @@ fn main() {
                             settings::settings_entity(cx).update(cx, |state, cx| {
                                 state.settings.diff_view_mode = gs.diff_view_mode;
                                 state.settings.diff_ignore_whitespace = gs.diff_ignore_whitespace;
+                                state.settings.diff_wrap_lines = gs.diff_wrap_lines;
                                 state.settings.file_font_size = gs.file_font_size;
                                 state.settings.file_font_family = gs.file_font_family;
                                 state.save_and_notify(cx);

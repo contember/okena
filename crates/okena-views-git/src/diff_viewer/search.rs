@@ -87,8 +87,12 @@ impl DiffViewer {
             DiffViewMode::Unified => cell,
             DiffViewMode::SideBySide => cell / 2,
         };
-        self.scroll_handle
-            .scroll_to_item(item, ScrollStrategy::Center);
+        if self.wrap_lines {
+            self.wrapped_list.scroll_to_reveal_item(item);
+        } else {
+            self.scroll_handle
+                .scroll_to_item(item, ScrollStrategy::Center);
+        }
     }
 
     /// Recompute matches if content / query / case changed, then render the bar.
