@@ -52,11 +52,11 @@ impl CaptureQuery {
             });
     }
 
-    fn matches(&self, entry: &KeybindingEntry) -> bool {
+    pub(super) fn matches(&self, keystroke: Option<&str>) -> bool {
         if self.strokes.is_empty() {
             return true;
         }
-        sequence(&entry.keystroke).is_some_and(|keys| {
+        keystroke.and_then(sequence).is_some_and(|keys| {
             matches_prefix(&keys, &self.strokes)
                 && (self.waiting || keys.len() == self.strokes.len())
         })
@@ -177,7 +177,7 @@ fn build_rows_for_platform(
         let entries: Vec<_> = if let Some(capture) = capture {
             visible
                 .into_iter()
-                .filter(|(_, e)| capture.matches(e))
+                .filter(|(_, e)| capture.matches(Some(&e.keystroke)))
                 .collect()
         } else {
             let metadata_matches = query.is_empty()

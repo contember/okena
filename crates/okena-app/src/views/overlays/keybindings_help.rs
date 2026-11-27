@@ -1,8 +1,10 @@
 mod search;
 use crate::keybindings::{
-    Cancel, KeybindingEntry, ShowKeybindings, format_keystroke, get_action_descriptions,
-    get_config, get_keybindings_path, keystroke_to_config_string, reset_to_defaults, update_config,
+    Cancel, KeybindingEntry, ShowKeybindings, active_start_page_shortcut, format_keystroke,
+    get_action_descriptions, get_config, get_keybindings_path, keystroke_to_config_string,
+    reset_to_defaults, update_config,
 };
+use crate::settings::GlobalSettings;
 use crate::theme::theme;
 use crate::ui::tokens::{ui_text, ui_text_md, ui_text_ms, ui_text_sm, ui_text_xl};
 use crate::views::components::list_overlay::{focus_input, search_input_row};
@@ -21,6 +23,108 @@ use search::{CaptureQuery, build_rows};
 type BindingEntry = (String, usize, bool, bool);
 /// All binding entries for an action: `(action_name, entries)`.
 type ActionBindings = (String, Vec<BindingEntry>);
+
+const START_PAGE_CATEGORY: &str = "Start Page";
+
+fn start_page_rows(
+    query: &str,
+    capture: Option<&CaptureQuery>,
+    assigned_only: bool,
+    cx: &App,
+) -> Vec<(String, Option<String>)> {
+    let Some(settings) = cx.try_global::<GlobalSettings>() else {
+        return Vec::new();
+    };
+    settings
+        .0
+        .read(cx)
+        .settings
+        .start_page_buttons
+        .iter()
+        .filter_map(|button| {
+            let shortcut = button
+                .shortcut
+                .as_deref()
+                .and_then(|shortcut| active_start_page_shortcut(shortcut, cx));
+            if assigned_only && shortcut.is_none() {
+                return None;
+            }
+            let key = shortcut.as_ref().map(|(key, _)| key.as_str());
+            let matches = if let Some(capture) = capture {
+                capture.matches(key)
+            } else {
+                [
+                    Some(button.name.as_str()),
+                    Some(START_PAGE_CATEGORY),
+                    key,
+                    shortcut.as_ref().map(|(_, label)| label.as_str()),
+                ]
+                .into_iter()
+                .flatten()
+                .any(|part| part.to_lowercase().contains(query))
+            };
+            matches.then(|| (button.name.clone(), shortcut.map(|(_, label)| label)))
+        })
+        .collect()
+}
+
+fn shortcut_group_title(title: &str, cx: &App) -> Div {
+    div()
+        .text_size(ui_text(13.0, cx))
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(rgb(theme(cx).text_primary))
+        .mb(px(8.0))
+        .child(title.to_owned())
+}
+
+fn shortcut_group_card(cx: &App) -> Div {
+    let t = theme(cx);
+    div()
+        .bg(rgb(t.bg_secondary))
+        .rounded(px(6.0))
+        .border_1()
+        .border_color(rgb(t.border))
+}
+
+fn render_start_page_shortcuts(rows: &[(String, Option<String>)], cx: &App) -> Div {
+    let t = theme(cx);
+    div()
+        .mb(px(16.0))
+        .child(shortcut_group_title(START_PAGE_CATEGORY, cx))
+        .child(
+            shortcut_group_card(cx)
+                .child(
+                    div()
+                        .px(px(12.0))
+                        .py(px(8.0))
+                        .text_size(ui_text_ms(cx))
+                        .text_color(rgb(t.text_muted))
+                        .child("Edit these shortcuts in Settings → Start Page."),
+                )
+                .children(rows.iter().map(|(name, shortcut)| {
+                    h_flex()
+                        .justify_between()
+                        .gap(px(12.0))
+                        .px(px(12.0))
+                        .py(px(8.0))
+                        .border_t_1()
+                        .border_color(rgb(t.border))
+                        .child(
+                            div()
+                                .text_size(ui_text(13.0, cx))
+                                .text_color(rgb(t.text_primary))
+                                .child(name.clone()),
+                        )
+                        .child(
+                            div()
+                                .flex_shrink_0()
+                                .text_size(ui_text_md(cx))
+                                .text_color(rgb(t.text_secondary))
+                                .child(shortcut.clone().unwrap_or_else(|| "No shortcut".into())),
+                        )
+                })),
+        )
+}
 
 /// State for the keybinding currently being recorded
 #[derive(Clone, Debug)]
@@ -90,6 +194,10 @@ impl KeybindingsHelp {
             cx.new(|cx| SimpleInputState::new(cx).placeholder("Search keybindings…"));
         cx.subscribe(&search_input, |_, _, _: &InputChangedEvent, cx| cx.notify())
             .detach();
+        if let Some(settings) = cx.try_global::<GlobalSettings>() {
+            let settings = settings.0.clone();
+            cx.observe(&settings, |_, _, cx| cx.notify()).detach();
+        }
         Self {
             focus_handle,
             show_reset_confirmation: false,
@@ -807,25 +915,13 @@ impl KeybindingsHelp {
     ) -> impl IntoElement + use<> {
         let t = theme(cx);
         let descriptions = get_action_descriptions();
-        let category_string = category.to_string();
         let customized = get_config().get_customized_actions();
 
         div()
             .mb(px(16.0))
+            .child(shortcut_group_title(category, cx))
             .child(
-                div()
-                    .text_size(ui_text(13.0, cx))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(rgb(t.text_primary))
-                    .mb(px(8.0))
-                    .child(category_string),
-            )
-            .child(
-                div()
-                    .bg(rgb(t.bg_secondary))
-                    .rounded(px(6.0))
-                    .border_1()
-                    .border_color(rgb(t.border))
+                shortcut_group_card(cx)
                     .children(bindings.iter().enumerate().map(|(i, (action, entries))| {
                         let description = descriptions
                             .get(action.as_str())
@@ -1192,7 +1288,9 @@ impl Render for KeybindingsHelp {
                 .map_or("Other", |d| d.category);
             rows.push((category, (editing.action.clone(), Vec::new())));
         }
-        let empty_results = rows.is_empty();
+        let start_page_rows =
+            start_page_rows(&query, self.capture.as_ref(), self.assigned_only, cx);
+        let empty_results = rows.is_empty() && start_page_rows.is_empty();
         let mut categories: std::collections::HashMap<&str, Vec<ActionBindings>> =
             Default::default();
         for (category, row) in rows {
@@ -1350,6 +1448,9 @@ impl Render for KeybindingsHelp {
                             .when(empty_results, |d| {
                                 d.child(div().py(px(20.0)).child("No matching commands"))
                             })
+                            .when(!start_page_rows.is_empty(), |d| {
+                                d.child(render_start_page_shortcuts(&start_page_rows, cx))
+                            })
                             .children(category_order.iter().filter_map(|category| {
                                 categories
                                     .get(category)
@@ -1492,6 +1593,79 @@ mod capture_tests {
                     });
                 })
         }
+    }
+
+    #[gpui::test]
+    fn start_page_commands_use_live_shortcuts_and_follow_dialog_filters(cx: &mut TestAppContext) {
+        use super::start_page_rows;
+        use crate::keybindings::RunStartPageCommand;
+        use crate::settings::{GlobalSettings, SettingsState};
+        use okena_workspace::settings::{AppSettings, StartPageButton};
+
+        cx.update(|cx| {
+            let settings = cx.new(|_| {
+                let mut settings = AppSettings::default();
+                settings.start_page_buttons.extend(
+                    [
+                        ("Codex", Some(" Shift-Ctrl-Alt-X ")),
+                        ("Other command", None),
+                        ("Inactive command", Some("ctrl-alt-shift-y")),
+                    ]
+                    .into_iter()
+                    .map(|(name, shortcut)| StartPageButton {
+                        name: name.into(),
+                        shortcut: shortcut.map(str::to_owned),
+                        ..Default::default()
+                    }),
+                );
+                SettingsState::new(settings)
+            });
+            cx.set_global(GlobalSettings(settings));
+
+            let raw = "ctrl-alt-shift-x";
+            let normalized = crate::keybindings::keystroke_to_config_string(
+                &Keystroke::parse(raw).unwrap(),
+                cx.platform_info().os,
+            );
+            cx.bind_keys([KeyBinding::new(
+                raw,
+                RunStartPageCommand {
+                    shortcut: normalized.clone(),
+                },
+                None,
+            )]);
+            let codex = (
+                "Codex".to_owned(),
+                Some(okena_ui::shortcuts::format_keystroke(raw)),
+            );
+
+            assert_eq!(
+                start_page_rows("codex", None, false, cx).as_slice(),
+                std::slice::from_ref(&codex)
+            );
+            assert_eq!(
+                start_page_rows(&normalized, None, false, cx).as_slice(),
+                std::slice::from_ref(&codex)
+            );
+            assert_eq!(start_page_rows("start page", None, false, cx).len(), 3);
+            assert_eq!(
+                start_page_rows("", None, true, cx).as_slice(),
+                std::slice::from_ref(&codex)
+            );
+            assert_eq!(
+                start_page_rows("other command", None, false, cx),
+                [("Other command".to_owned(), None)]
+            );
+            assert!(start_page_rows("ctrl-alt-shift-y", None, false, cx).is_empty());
+
+            let mut capture = search::CaptureQuery::default();
+            let config = crate::keybindings::KeybindingConfig::defaults();
+            capture.push(&Keystroke::parse(raw).unwrap(), &config, false);
+            assert_eq!(start_page_rows("", Some(&capture), false, cx), [codex]);
+            cx.clear_key_bindings();
+            assert!(start_page_rows("", Some(&capture), false, cx).is_empty());
+            assert!(start_page_rows("", None, true, cx).is_empty());
+        });
     }
 
     #[gpui::test]

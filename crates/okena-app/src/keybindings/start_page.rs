@@ -177,15 +177,20 @@ pub(super) fn register_start_page_shortcuts(cx: &mut App) {
 }
 
 pub(crate) fn start_page_shortcut_label(shortcut: &str, cx: &App) -> Option<String> {
+    active_start_page_shortcut(shortcut, cx).map(|(_, label)| label)
+}
+
+pub(crate) fn active_start_page_shortcut(shortcut: &str, cx: &App) -> Option<(String, String)> {
     let platform = ShortcutPlatform::current();
     let stroke = shortcut_stroke(shortcut, platform).ok()?;
     let action = RunStartPageCommand {
         shortcut: keystroke_to_config_string(&stroke, platform.os()),
     };
-    // The tooltip describes the registered shortcut in a terminal context even
-    // when the user is hovering a different pane or the empty project screen.
+    // Discovery surfaces describe the registered shortcut in a terminal context
+    // even when the current focus is in a settings dialog or another pane.
     let context = gpui::KeyContext::parse("TerminalPane").ok()?;
-    okena_ui::shortcuts::shortcut_for_action_in(&action, &[context], cx)
+    let label = okena_ui::shortcuts::shortcut_for_action_in(&action, &[context], cx)?;
+    Some((action.shortcut, label))
 }
 
 pub(crate) fn start_page_button_for_shortcut<'a>(

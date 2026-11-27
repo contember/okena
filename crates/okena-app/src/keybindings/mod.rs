@@ -15,8 +15,8 @@ pub use descriptions::get_action_descriptions;
 pub use okena_ui::shortcuts::ShortcutPlatform;
 pub use start_page::observe_start_page_shortcuts;
 pub(crate) use start_page::{
-    RunStartPageCommand, start_page_button_for_shortcut, start_page_shortcut_is_editing,
-    start_page_shortcut_label, validate_start_page_shortcut,
+    RunStartPageCommand, active_start_page_shortcut, start_page_button_for_shortcut,
+    start_page_shortcut_is_editing, start_page_shortcut_label, validate_start_page_shortcut,
 };
 #[allow(unused_imports)]
 pub use types::{ActionDescription, KeybindingConflict, KeybindingEntry};
