@@ -5,7 +5,7 @@ use super::{
     keystroke_to_config_string,
 };
 use crate::settings::{GlobalSettings, settings_entity};
-use gpui::{Action, App, AsKeystroke, KeyBinding, KeyBindingContextPredicate, Keystroke, Window};
+use gpui::{Action, App, AsKeystroke, Global, KeyBinding, KeyBindingContextPredicate, Keystroke};
 use okena_workspace::settings::StartPageButton;
 use std::rc::Rc;
 
@@ -22,6 +22,27 @@ const EDITING_CONTEXTS: [&str; 6] = [
 #[action(namespace = okena, no_json)]
 pub(crate) struct RunStartPageCommand {
     pub shortcut: String,
+}
+
+/// Each button's shortcut as validated by the last keymap rebuild, by button index.
+#[derive(Default)]
+struct StartPageShortcutAssignments(Vec<Option<ShortcutAssignment>>);
+
+impl Global for StartPageShortcutAssignments {}
+
+struct ShortcutAssignment {
+    raw: String,
+    /// The registered config string, or why the shortcut was not registered.
+    result: Result<String, String>,
+}
+
+impl StartPageShortcutAssignments {
+    fn registered(&self, index: usize, raw: &str) -> Option<&ShortcutAssignment> {
+        self.0
+            .get(index)?
+            .as_ref()
+            .filter(|assignment| assignment.raw == raw)
+    }
 }
 
 /// Rebuild the managed keymap when assignments change, including settings synced
@@ -148,32 +169,36 @@ pub(super) fn register_start_page_shortcuts(cx: &mut App) {
         return;
     };
     let context = Rc::new(context);
-    let bindings = buttons
-        .iter()
-        .enumerate()
-        .filter_map(|(index, button)| {
-            let raw = button.shortcut.as_deref()?;
-            let shortcut = match validate_start_page_shortcut(raw, buttons, Some(index), cx) {
-                Ok(shortcut) => shortcut,
-                Err(error) => {
-                    log::warn!("Ignoring Start Page shortcut for {}: {error}", button.name);
-                    return None;
-                }
-            };
-            KeyBinding::load(
-                &shortcut,
-                Box::new(RunStartPageCommand {
-                    shortcut: shortcut.clone(),
-                }),
-                Some(context.clone()),
-                false,
-                None,
-                cx,
-            )
-            .ok()
-        })
-        .collect::<Vec<_>>();
+    let mut assignments = Vec::with_capacity(buttons.len());
+    let mut bindings = Vec::new();
+    for (index, button) in buttons.iter().enumerate() {
+        let Some(raw) = button.shortcut.clone() else {
+            assignments.push(None);
+            continue;
+        };
+        let result =
+            validate_start_page_shortcut(&raw, buttons, Some(index), cx).and_then(|shortcut| {
+                let binding = KeyBinding::load(
+                    &shortcut,
+                    Box::new(RunStartPageCommand {
+                        shortcut: shortcut.clone(),
+                    }),
+                    Some(context.clone()),
+                    false,
+                    None,
+                    cx,
+                )
+                .map_err(|error| error.to_string())?;
+                bindings.push(binding);
+                Ok(shortcut)
+            });
+        if let Err(error) = &result {
+            log::warn!("Ignoring Start Page shortcut for {}: {error}", button.name);
+        }
+        assignments.push(Some(ShortcutAssignment { raw, result }));
+    }
     bind_managed_keys(cx, bindings);
+    cx.set_global(StartPageShortcutAssignments(assignments));
 }
 
 pub(crate) fn start_page_shortcut_label(shortcut: &str, cx: &App) -> Option<String> {
@@ -193,28 +218,37 @@ pub(crate) fn active_start_page_shortcut(shortcut: &str, cx: &App) -> Option<(St
     Some((action.shortcut, label))
 }
 
+/// Why a button's saved shortcut is not active, if it is not.
+pub(crate) fn start_page_shortcut_error(
+    index: usize,
+    buttons: &[StartPageButton],
+    cx: &App,
+) -> Option<String> {
+    let raw = buttons.get(index)?.shortcut.as_deref()?;
+    let registered = cx
+        .try_global::<StartPageShortcutAssignments>()
+        .and_then(|assignments| assignments.registered(index, raw));
+    match registered {
+        Some(assignment) => assignment.result.clone().err(),
+        // The list differs from the last rebuild, for example while a save is in flight.
+        None => validate_start_page_shortcut(raw, buttons, Some(index), cx).err(),
+    }
+}
+
+/// The button whose registered shortcut is the single keystroke `shortcut`.
 pub(crate) fn start_page_button_for_shortcut<'a>(
     shortcut: &str,
     buttons: &'a [StartPageButton],
+    cx: &App,
 ) -> Option<&'a StartPageButton> {
     let platform = ShortcutPlatform::current();
-    let shortcut = shortcut_stroke(shortcut, platform).ok()?;
-    let mut matching = buttons.iter().filter(|button| {
-        button
-            .shortcut
-            .as_deref()
-            .and_then(|raw| shortcut_stroke(raw, platform).ok())
-            .is_some_and(|stroke| stroke == shortcut)
-    });
-    let button = matching.next()?;
-    matching.next().is_none().then_some(button)
-}
-
-pub(crate) fn start_page_shortcut_is_editing(window: &Window) -> bool {
-    window
-        .context_stack()
-        .iter()
-        .any(|context| EDITING_CONTEXTS.iter().any(|name| context.contains(name)))
+    let shortcut =
+        keystroke_to_config_string(&shortcut_stroke(shortcut, platform).ok()?, platform.os());
+    let assignments = cx.try_global::<StartPageShortcutAssignments>()?;
+    buttons.iter().enumerate().find_map(|(index, button)| {
+        let assignment = assignments.registered(index, button.shortcut.as_deref()?)?;
+        matches!(&assignment.result, Ok(registered) if *registered == shortcut).then_some(button)
+    })
 }
 
 #[cfg(test)]
@@ -272,12 +306,6 @@ mod tests {
             assert!(
                 validate_start_page_shortcut("ctrl-alt-shift-x", &buttons, Some(0), cx).is_err()
             );
-            assert!(start_page_button_for_shortcut("ctrl-alt-shift-x", &buttons).is_none());
-            assert_eq!(
-                start_page_button_for_shortcut("ctrl-alt-shift-x", &buttons[..1])
-                    .map(|button| button.name.as_str()),
-                Some("Codex")
-            );
         });
     }
 
@@ -315,6 +343,14 @@ mod tests {
                 assignments(cx),
                 [validate_start_page_shortcut("ctrl-alt-shift-x", &[], None, cx).unwrap()]
             );
+            let buttons = settings.read(cx).settings.start_page_buttons.clone();
+            assert_eq!(
+                start_page_button_for_shortcut("shift-ctrl-alt-x", &buttons, cx)
+                    .map(|button| button.name.as_str()),
+                Some("Codex")
+            );
+            assert!(start_page_button_for_shortcut("ctrl-alt-shift-y", &buttons, cx).is_none());
+            assert_eq!(start_page_shortcut_error(0, &buttons, cx), None);
 
             {
                 let keymap = cx.key_bindings();
@@ -376,6 +412,42 @@ mod tests {
             });
             super::super::apply_keybindings(cx, &config);
             assert!(start_page_shortcut_label("ctrl-alt-shift-y", cx).is_none());
+            let buttons = settings.read(cx).settings.start_page_buttons.clone();
+            assert!(start_page_button_for_shortcut("ctrl-alt-shift-y", &buttons, cx).is_none());
+            assert!(
+                start_page_shortcut_error(0, &buttons, cx)
+                    .is_some_and(|error| error.contains("existing Okena binding"))
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn duplicate_start_page_assignments_register_neither_button(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let button = |name: &str| StartPageButton {
+                name: name.into(),
+                shortcut: Some("ctrl-alt-shift-x".into()),
+                ..Default::default()
+            };
+            let settings = cx.new(|_| {
+                let mut settings = okena_workspace::settings::AppSettings::default();
+                settings.start_page_buttons = vec![button("Codex"), button("Claude")];
+                crate::settings::SettingsState::new(settings)
+            });
+            cx.set_global(GlobalSettings(settings.clone()));
+            super::super::apply_keybindings(cx, &super::super::KeybindingConfig::defaults());
+
+            let buttons = settings.read(cx).settings.start_page_buttons.clone();
+            assert!(start_page_button_for_shortcut("ctrl-alt-shift-x", &buttons, cx).is_none());
+            assert!(start_page_shortcut_label("ctrl-alt-shift-x", cx).is_none());
+            assert!(
+                start_page_shortcut_error(0, &buttons, cx)
+                    .is_some_and(|error| error.contains("Claude"))
+            );
+            assert!(
+                start_page_shortcut_error(1, &buttons, cx)
+                    .is_some_and(|error| error.contains("Codex"))
+            );
         });
     }
 }

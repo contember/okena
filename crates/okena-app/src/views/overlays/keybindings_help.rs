@@ -625,6 +625,7 @@ impl KeybindingsHelp {
                 crate::keybindings::start_page_button_for_shortcut(
                     first_stroke,
                     &settings.0.read(cx).settings.start_page_buttons,
+                    cx,
                 )
             })
         {

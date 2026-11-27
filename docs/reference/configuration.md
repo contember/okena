@@ -191,6 +191,11 @@ The recorder rejects shortcuts already assigned to another button or action,
 including the first key of an existing multi-step shortcut, such as Ctrl+K.
 Clear the shortcut to remove the assignment. Changing a shortcut requires a
 connected local daemon that supports command tabs.
+A shortcut edited into `settings.json` that is invalid or already taken stays
+inactive: Okena logs a warning, the button's row in Settings shows the reason, and
+Keyboard Shortcuts lists the button without a shortcut.
+The shortcuts act in Okena windows, not in a detached terminal window, which has
+no tabs to open a command in; there the key reaches the terminal program.
 
 #### Session Backend
 

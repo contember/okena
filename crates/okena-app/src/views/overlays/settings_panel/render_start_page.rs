@@ -1,5 +1,6 @@
 use crate::keybindings::{
-    format_keystroke, keystroke_to_config_string, validate_start_page_shortcut,
+    format_keystroke, keystroke_to_config_string, start_page_shortcut_error,
+    validate_start_page_shortcut,
 };
 use crate::settings::settings_entity;
 use crate::theme::theme;
@@ -101,11 +102,9 @@ impl SettingsPanel {
         }
         let shell = value.and_then(|button| button.shell.clone());
         let shortcut = value.and_then(|button| button.shortcut.clone());
-        let shortcut_error = original.as_ref().and_then(|(index, button)| {
+        let shortcut_error = original.as_ref().and_then(|(index, _)| {
             let buttons = &settings_entity(cx).read(cx).settings.start_page_buttons;
-            button.shortcut.as_deref().and_then(|shortcut| {
-                validate_start_page_shortcut(shortcut, buttons, Some(*index), cx).err()
-            })
+            start_page_shortcut_error(*index, buttons, cx)
         });
         name.read(cx).focus_handle(cx).focus(window, cx);
         self.start_page_button_draft = Some(StartPageButtonDraft {
@@ -503,9 +502,7 @@ impl SettingsPanel {
                             Some(shortcut) => format!("{shell} · {}", format_keystroke(shortcut)),
                             None => shell,
                         };
-                        let shortcut_error = item.shortcut.as_deref().and_then(|shortcut| {
-                            validate_start_page_shortcut(shortcut, &buttons, Some(index), cx).err()
-                        });
+                        let shortcut_error = start_page_shortcut_error(index, &buttons, cx);
                         let row = settings_input_row(
                             format!("start-page-command-{index}"),
                             &item.name,

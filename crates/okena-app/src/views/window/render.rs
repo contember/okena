@@ -1265,8 +1265,8 @@ impl Render for WindowView {
                 });
             }))
             .on_action(cx.listener(
-                |this, action: &crate::keybindings::RunStartPageCommand, window, cx| {
-                    this.run_start_page_command_shortcut(&action.shortcut, window, cx);
+                |this, action: &crate::keybindings::RunStartPageCommand, _, cx| {
+                    this.run_start_page_command_shortcut(&action.shortcut, cx);
                 },
             ))
             // Start the first terminal in a project that has none — the

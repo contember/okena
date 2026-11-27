@@ -12,6 +12,7 @@ use gpui::*;
 
 use okena_core::api::ActionRequest;
 use okena_views_terminal::ActionDispatch;
+use okena_workspace::settings::StartPageButton;
 
 use super::WindowView;
 
@@ -26,6 +27,69 @@ fn start_page_shortcut_pane<'a>(
             .and_then(|path| layout.get_at_path(&path)),
         None => layout.get_at_path(focused_path?),
     }
+}
+
+/// The window focus a Start Page command shortcut acts on.
+#[derive(Clone, Copy, Default)]
+struct StartPageShortcutFocus<'a> {
+    /// Project and pane shown in Focus mode.
+    fullscreen: Option<(&'a str, &'a str)>,
+    /// Project and layout path of the focused pane.
+    terminal: Option<(&'a str, &'a [usize])>,
+    focused_project: Option<&'a str>,
+}
+
+/// Map a shortcut press to the project it targets and the launch to send.
+///
+/// `project_layout` returns `None` for an unknown project and `Some(None)` for
+/// a project without panes.
+fn start_page_shortcut_action<'a>(
+    button: &StartPageButton,
+    focus: StartPageShortcutFocus<'_>,
+    project_layout: impl Fn(&str) -> Option<Option<&'a LayoutNode>>,
+    show_start_page: bool,
+) -> Option<(String, ActionRequest)> {
+    let project_id = focus
+        .fullscreen
+        .map(|(project_id, _)| project_id)
+        .or(focus.terminal.map(|(project_id, _)| project_id))
+        .or(focus.focused_project)?;
+    let node = match project_layout(project_id)? {
+        Some(layout) => Some(start_page_shortcut_pane(
+            layout,
+            focus.fullscreen.map(|(_, pane_id)| pane_id),
+            focus.terminal.map(|(_, path)| path),
+        )?),
+        None if show_start_page => None,
+        None => return None,
+    };
+
+    let shell = button.shell.clone().unwrap_or_default();
+    let command = button.command.clone();
+    let action = match node {
+        Some(LayoutNode::Terminal {
+            terminal_id: Some(terminal_id),
+            ..
+        }) => ActionRequest::AddCommandTab {
+            project_id: project_id.to_owned(),
+            terminal_id: terminal_id.clone(),
+            shell,
+            command,
+        },
+        Some(node) => ActionRequest::LaunchStartPage {
+            project_id: project_id.to_owned(),
+            page_id: Some(node.start_page()?.id.clone()),
+            shell,
+            command: Some(command),
+        },
+        None => ActionRequest::LaunchStartPage {
+            project_id: project_id.to_owned(),
+            page_id: None,
+            shell,
+            command: Some(command),
+        },
+    };
+    Some((project_id.to_owned(), action))
 }
 
 impl WindowView {
@@ -171,15 +235,8 @@ impl WindowView {
         }
     }
 
-    pub(super) fn run_start_page_command_shortcut(
-        &self,
-        shortcut: &str,
-        window: &Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.focus_manager.read(cx).is_modal()
-            || crate::keybindings::start_page_shortcut_is_editing(window)
-        {
+    pub(super) fn run_start_page_command_shortcut(&self, shortcut: &str, cx: &mut Context<Self>) {
+        if self.focus_manager.read(cx).is_modal() {
             cx.propagate();
             return;
         }
@@ -202,50 +259,28 @@ impl WindowView {
         let button = crate::keybindings::start_page_button_for_shortcut(
             shortcut,
             &settings.start_page_buttons,
+            cx,
         )?;
         let fm = self.focus_manager.read(cx);
-        let focus = fm.focused_terminal_state();
-        let project_id = fm
-            .fullscreen_project_id()
-            .or_else(|| focus.as_ref().map(|target| target.project_id.as_str()))
-            .or_else(|| fm.focused_project_id().map(String::as_str))?;
-        let project = self.workspace.read(cx).project(project_id)?;
-        let node = match &project.layout {
-            Some(layout) => Some(start_page_shortcut_pane(
-                layout,
-                fm.fullscreen_state().map(|(_, pane_id)| pane_id),
-                focus.as_ref().map(|state| state.layout_path.as_slice()),
-            )?),
-            None if settings.show_start_page => None,
-            None => return None,
+        let terminal = fm.focused_terminal_state();
+        let focus = StartPageShortcutFocus {
+            fullscreen: fm.fullscreen_state(),
+            terminal: terminal
+                .as_ref()
+                .map(|state| (state.project_id.as_str(), state.layout_path.as_slice())),
+            focused_project: fm.focused_project_id().map(String::as_str),
         };
-
-        let shell = button.shell.clone().unwrap_or_default();
-        let command = button.command.clone();
-        let action = match node {
-            Some(LayoutNode::Terminal {
-                terminal_id: Some(terminal_id),
-                ..
-            }) => ActionRequest::AddCommandTab {
-                project_id: project_id.to_owned(),
-                terminal_id: terminal_id.clone(),
-                shell,
-                command,
+        let workspace = self.workspace.read(cx);
+        start_page_shortcut_action(
+            button,
+            focus,
+            |project_id| {
+                workspace
+                    .project(project_id)
+                    .map(|project| project.layout.as_ref())
             },
-            Some(node) => ActionRequest::LaunchStartPage {
-                project_id: project_id.to_owned(),
-                page_id: Some(node.start_page()?.id.clone()),
-                shell,
-                command: Some(command),
-            },
-            None => ActionRequest::LaunchStartPage {
-                project_id: project_id.to_owned(),
-                page_id: None,
-                shell,
-                command: Some(command),
-            },
-        };
-        Some((project_id.to_owned(), action))
+            settings.show_start_page,
+        )
     }
 
     /// Paste a "Send to Terminal" payload into `target` — or, when the sender
@@ -1717,19 +1752,146 @@ fn collect_tab_pane_ids(
 
 #[cfg(test)]
 mod start_page_shortcut_tests {
-    use super::{LayoutNode, start_page_shortcut_pane};
+    use super::{
+        LayoutNode, StartPageButton, StartPageShortcutFocus, start_page_shortcut_action,
+        start_page_shortcut_pane,
+    };
+    use okena_core::shell::ShellType;
+    use serde_json::{Value, json};
+
+    fn running(terminal_id: &str) -> LayoutNode {
+        let mut node = LayoutNode::new_terminal();
+        if let LayoutNode::Terminal {
+            terminal_id: id, ..
+        } = &mut node
+        {
+            *id = Some(terminal_id.into());
+        }
+        node
+    }
+
+    fn start_page(id: &str) -> LayoutNode {
+        LayoutNode::new_start_page(okena_core::api::StartPage {
+            id: id.into(),
+            cwd: "project".into(),
+        })
+    }
+
+    fn button() -> StartPageButton {
+        StartPageButton {
+            name: "Check".into(),
+            command: "git status".into(),
+            shell: Some(ShellType::Custom {
+                path: "/bin/sh".into(),
+                args: vec![],
+            }),
+            shortcut: Some("ctrl-alt-shift-x".into()),
+        }
+    }
+
+    /// Resolve a press against projects `a` (running terminal, Start Page and a
+    /// pending pane in tabs) and `empty` (no panes).
+    fn press(focus: StartPageShortcutFocus<'_>, show_start_page: bool) -> Option<Value> {
+        let layout = LayoutNode::Tabs {
+            active_tab: 0,
+            children: vec![
+                running("t1"),
+                start_page("page"),
+                LayoutNode::new_terminal(),
+            ],
+        };
+        start_page_shortcut_action(
+            &button(),
+            focus,
+            |project_id| match project_id {
+                "a" => Some(Some(&layout)),
+                "empty" => Some(None),
+                _ => None,
+            },
+            show_start_page,
+        )
+        .map(|(project_id, action)| {
+            let mut value = serde_json::to_value(action).unwrap();
+            value["target_project"] = project_id.into();
+            value
+        })
+    }
+
+    fn terminal<'a>(project_id: &'a str, path: &'a [usize]) -> StartPageShortcutFocus<'a> {
+        StartPageShortcutFocus {
+            terminal: Some((project_id, path)),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn running_terminal_opens_a_command_tab_beside_it() {
+        assert_eq!(
+            press(terminal("a", &[0]), true),
+            Some(json!({
+                "action": "add_command_tab",
+                "project_id": "a",
+                "terminal_id": "t1",
+                "shell": button().shell,
+                "command": "git status",
+                "target_project": "a",
+            }))
+        );
+    }
+
+    #[test]
+    fn start_page_launches_the_command_in_place() {
+        let launched = press(terminal("a", &[1]), true).unwrap();
+        assert_eq!(launched["action"], "launch_start_page");
+        assert_eq!(launched["page_id"], "page");
+        assert_eq!(launched["command"], "git status");
+    }
+
+    #[test]
+    fn focus_mode_pane_wins_over_the_focused_path() {
+        let focus = StartPageShortcutFocus {
+            fullscreen: Some(("a", "page")),
+            terminal: Some(("other", &[0])),
+            focused_project: Some("other"),
+        };
+        let launched = press(focus, true).unwrap();
+        assert_eq!(launched["target_project"], "a");
+        assert_eq!(launched["page_id"], "page");
+    }
+
+    #[test]
+    fn empty_project_launches_only_with_start_pages_enabled() {
+        let focus = StartPageShortcutFocus {
+            focused_project: Some("empty"),
+            ..Default::default()
+        };
+        let launched = press(focus, true).unwrap();
+        assert_eq!(launched["action"], "launch_start_page");
+        assert_eq!(launched["page_id"], Value::Null);
+        assert_eq!(launched["target_project"], "empty");
+        assert_eq!(press(focus, false), None);
+    }
+
+    #[test]
+    fn presses_without_a_launchable_target_pass_through() {
+        // A pane that has not started yet, a missing path, an unknown project,
+        // a project without a focused pane and no focus at all.
+        assert_eq!(press(terminal("a", &[2]), true), None);
+        assert_eq!(press(terminal("a", &[7]), true), None);
+        assert_eq!(press(terminal("gone", &[0]), true), None);
+        let project_only = StartPageShortcutFocus {
+            focused_project: Some("a"),
+            ..Default::default()
+        };
+        assert_eq!(press(project_only, true), None);
+        assert_eq!(press(StartPageShortcutFocus::default(), true), None);
+    }
 
     #[test]
     fn fullscreen_shortcut_targets_the_displayed_start_page_id() {
         let layout = LayoutNode::Tabs {
             active_tab: 1,
-            children: vec![
-                LayoutNode::new_terminal(),
-                LayoutNode::new_start_page(okena_core::api::StartPage {
-                    id: "page".into(),
-                    cwd: "project".into(),
-                }),
-            ],
+            children: vec![LayoutNode::new_terminal(), start_page("page")],
         };
         let pane = start_page_shortcut_pane(&layout, Some("page"), Some(&[0]));
         assert_eq!(pane.and_then(LayoutNode::pane_id), Some("page"));

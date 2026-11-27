@@ -183,8 +183,13 @@ impl ActionDispatcher {
             }
             let result = manager.send_action_with_result(&connection_id, action, cx);
             cx.spawn(async move |_, cx| {
-                let Ok(value) = result.await else {
-                    return;
+                // Request failures already reach the user as a connection warning.
+                let value = match result.await {
+                    Ok(value) => value,
+                    Err(error) => {
+                        log::warn!("Command tab launch failed: {error}");
+                        return;
+                    }
                 };
                 let Some(terminal_id) = value
                     .get("terminal_ids")
