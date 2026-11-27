@@ -620,15 +620,18 @@ mod tests {
         let previous: AppSettings = serde_json::from_value(json!(legacy)).unwrap();
         assert!(!previous.show_start_page);
         assert!(previous.start_page_buttons.is_empty());
+        let legacy_button: StartPageButton = serde_json::from_value(json!({
+            "name": "Check status",
+            "command": "git status --short",
+            "shell": null,
+        }))
+        .unwrap();
+        assert_eq!(legacy_button.shortcut, None);
 
         let mut edited = previous.clone();
         edited.show_start_page = true;
         edited.start_page_buttons = vec![
-            StartPageButton {
-                name: "Check status".into(),
-                command: "git status --short".into(),
-                shell: None,
-            },
+            legacy_button,
             StartPageButton {
                 name: "Open build shell".into(),
                 command: "echo ready".into(),
@@ -636,10 +639,14 @@ mod tests {
                     path: "/bin/zsh".into(),
                     args: vec!["-l".into()],
                 }),
+                shortcut: Some("ctrl-alt-shift-x".into()),
             },
         ];
         edited.start_page_buttons.swap(0, 1);
         let patch = settings_delta(&shared(&previous), &shared(&edited));
+        let buttons = patch["start_page_buttons"].as_array().unwrap();
+        assert_eq!(buttons[0]["shortcut"], "ctrl-alt-shift-x");
+        assert!(buttons[1].get("shortcut").is_none());
         let saved = preview_settings_patch(&previous, patch).unwrap();
         let reloaded: AppSettings =
             serde_json::from_str(&serde_json::to_string(&saved).unwrap()).unwrap();

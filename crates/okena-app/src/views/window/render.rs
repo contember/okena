@@ -1264,6 +1264,11 @@ impl Render for WindowView {
                     ws.toggle_project_layout_mode(window_id, cx);
                 });
             }))
+            .on_action(cx.listener(
+                |this, action: &crate::keybindings::RunStartPageCommand, _, cx| {
+                    this.run_start_page_command_shortcut(&action.shortcut, cx);
+                },
+            ))
             // Start the first terminal in a project that has none — the
             // keyboard equivalent of the empty state's "Start Terminal" button.
             //

@@ -28,6 +28,7 @@ pub(crate) use render_ai_proxy::{format_remaining, login_age_text, send_ai_proxy
 use crate::keybindings::Cancel;
 use crate::remote::auth::TokenInfo;
 use crate::remote::local::DaemonEndpoint;
+use crate::remote_client::manager::RemoteConnectionManager;
 use crate::settings::settings_entity;
 use crate::terminal::shell_config::{AvailableShell, available_shells};
 use crate::theme::theme;
@@ -37,6 +38,7 @@ use crate::workspace::state::Workspace;
 use gpui::prelude::*;
 use gpui::*;
 use okena_extensions::ExtensionRegistry;
+use okena_transport::client::LOCAL_DAEMON_CONNECTION_ID;
 use okena_ui::scrollbar::vertical_scrollbar;
 use std::collections::HashMap;
 
@@ -72,6 +74,7 @@ pub struct SettingsPanel {
     start_page_shell_dropdown_open: bool,
     start_page_shell_button_bounds: Option<Bounds<Pixels>>,
     start_page_button_draft: Option<render_start_page::StartPageButtonDraft>,
+    remote_manager: Option<Entity<RemoteConnectionManager>>,
     // Global hook inputs
     pub(super) hook_project_open: Entity<SimpleInputState>,
     pub(super) hook_project_close: Entity<SimpleInputState>,
@@ -137,15 +140,17 @@ impl SettingsPanel {
     pub fn new(
         workspace: Entity<Workspace>,
         daemon_endpoint: Option<DaemonEndpoint>,
+        remote_manager: Option<Entity<RemoteConnectionManager>>,
         cx: &mut Context<Self>,
     ) -> Self {
-        Self::new_with_options(workspace, None, None, daemon_endpoint, cx)
+        Self::new_with_options(workspace, None, None, daemon_endpoint, remote_manager, cx)
     }
 
     pub fn new_for_project(
         workspace: Entity<Workspace>,
         project_id: String,
         daemon_endpoint: Option<DaemonEndpoint>,
+        remote_manager: Option<Entity<RemoteConnectionManager>>,
         cx: &mut Context<Self>,
     ) -> Self {
         Self::new_with_options(
@@ -153,6 +158,7 @@ impl SettingsPanel {
             Some(project_id),
             Some(SettingsCategory::Hooks),
             daemon_endpoint,
+            remote_manager,
             cx,
         )
     }
@@ -162,6 +168,7 @@ impl SettingsPanel {
         project_id: Option<String>,
         category: Option<SettingsCategory>,
         daemon_endpoint: Option<DaemonEndpoint>,
+        remote_manager: Option<Entity<RemoteConnectionManager>>,
         cx: &mut Context<Self>,
     ) -> Self {
         let s = settings_entity(cx).read(cx).settings.clone();
@@ -892,6 +899,25 @@ impl SettingsPanel {
         )
         .detach();
 
+        if let Some(manager) = &remote_manager {
+            let mut supported = manager
+                .read(cx)
+                .supports_command_tabs(LOCAL_DAEMON_CONNECTION_ID);
+            cx.observe(manager, move |panel, manager, cx| {
+                let current = manager
+                    .read(cx)
+                    .supports_command_tabs(LOCAL_DAEMON_CONNECTION_ID);
+                if current != supported {
+                    supported = current;
+                    if !current {
+                        panel.stop_start_page_shortcut_recording(cx);
+                    }
+                    cx.notify();
+                }
+            })
+            .detach();
+        }
+
         let mut panel = Self {
             workspace,
             focus_handle: cx.focus_handle(),
@@ -911,6 +937,7 @@ impl SettingsPanel {
             start_page_shell_dropdown_open: false,
             start_page_shell_button_bounds: None,
             start_page_button_draft: None,
+            remote_manager,
             hook_project_open,
             hook_project_close,
             hook_worktree_create,
@@ -950,6 +977,14 @@ impl SettingsPanel {
 
         panel.load_paired_devices(cx);
         panel
+    }
+
+    fn supports_start_page_shortcuts(&self, cx: &App) -> bool {
+        self.remote_manager.as_ref().is_some_and(|manager| {
+            manager
+                .read(cx)
+                .supports_command_tabs(LOCAL_DAEMON_CONNECTION_ID)
+        })
     }
 
     /// Fetch the paired-device list from the local daemon (`GET /v1/tokens`).
@@ -1038,6 +1073,7 @@ impl SettingsPanel {
 
     /// Switch to a different project (or "User" if None)
     pub(super) fn select_project(&mut self, project_id: Option<String>, cx: &mut Context<Self>) {
+        self.stop_start_page_shortcut_recording(cx);
         // Flush the outgoing project's hook edits before switching away.
         self.flush_project_hooks(cx);
         self.selected_project_id = project_id.clone();
@@ -1059,6 +1095,7 @@ impl SettingsPanel {
 
     /// Switch the visible category, scrolling the content pane back to the top.
     pub(super) fn set_category(&mut self, category: SettingsCategory, cx: &mut Context<Self>) {
+        self.stop_start_page_shortcut_recording(cx);
         self.active_category = category;
         self.close_all_dropdowns();
         self.content_scroll.set_offset(point(px(0.0), px(0.0)));

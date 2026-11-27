@@ -695,6 +695,7 @@ fn main() {
 
         // Initialize global settings entity (must be before workspace load)
         let settings_entity = settings::init_settings(cx);
+        keybindings::observe_start_page_shortcuts(cx);
         let app_settings = settings_entity.read(cx).get().clone();
 
 

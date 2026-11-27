@@ -1,5 +1,6 @@
 mod config;
 mod descriptions;
+mod start_page;
 mod types;
 
 use gpui::*;
@@ -12,6 +13,11 @@ pub use config::{
 };
 pub use descriptions::get_action_descriptions;
 pub use okena_ui::shortcuts::ShortcutPlatform;
+pub use start_page::observe_start_page_shortcuts;
+pub(crate) use start_page::{
+    RunStartPageCommand, active_start_page_shortcut, start_page_button_for_shortcut,
+    start_page_shortcut_error, start_page_shortcut_label, validate_start_page_shortcut,
+};
 #[allow(unused_imports)]
 pub use types::{ActionDescription, KeybindingConflict, KeybindingEntry};
 
@@ -159,7 +165,8 @@ fn apply_keybindings(cx: &mut App, config: &KeybindingConfig) {
     cx.bind_keys(preserved);
     register_bindings_from_config(cx, config);
 
-    // Re-register essential non-overridable bindings
+    // Essential non-overridable bindings. Tab/Shift+Tab must be captured to
+    // prevent GPUI's focus navigation from consuming them.
     bind_managed_keys(
         cx,
         [
@@ -184,6 +191,12 @@ fn apply_keybindings(cx: &mut App, config: &KeybindingConfig) {
         ],
     );
 
+    // Escape keybindings with context-based precedence:
+    //   Global:             escape → Cancel        (overlays, sidebar rename)
+    //   TerminalPane:       escape → SendEscape    (send 0x1b to PTY)
+    //   SearchBar:          escape → CloseSearch   (close search, deeper than TerminalPane)
+    //   TerminalRename:     escape → Cancel        (cancel rename, deeper than TerminalPane)
+    //   TerminalMenu:       escape → Cancel        (close the flyout, then the menu)
     bind_managed_keys(
         cx,
         [
@@ -266,6 +279,7 @@ fn apply_keybindings(cx: &mut App, config: &KeybindingConfig) {
             ),
         ],
     );
+    start_page::register_start_page_shortcuts(cx);
 }
 
 /// Get a mutable reference to the global keybinding configuration.
@@ -291,130 +305,7 @@ pub fn register_keybindings(cx: &mut App) {
     // Store config globally (thread-safe)
     *KEYBINDING_CONFIG.write() = Some(config.clone());
 
-    // Register bindings from config
-    register_bindings_from_config(cx, &config);
-
-    // Register essential terminal keybindings that should not be overridden
-    // Tab/Shift+Tab must be captured to prevent GPUI's focus navigation from consuming them
-    bind_managed_keys(
-        cx,
-        [
-            KeyBinding::new("tab", SendTab, Some("TerminalPane")),
-            KeyBinding::new("shift-tab", SendBacktab, Some("TerminalPane")),
-            // Override gpui-component Root's global `tab` → focus_next so the
-            // project switcher can use Tab to jump into a project's terminal.
-            KeyBinding::new("tab", JumpToProjectTerminal, Some("ProjectSwitcher")),
-        ],
-    );
-
-    // Register sidebar navigation keybindings (not user-configurable)
-    bind_managed_keys(
-        cx,
-        [
-            KeyBinding::new("up", SidebarUp, Some("Sidebar")),
-            KeyBinding::new("down", SidebarDown, Some("Sidebar")),
-            KeyBinding::new("enter", SidebarConfirm, Some("Sidebar")),
-            KeyBinding::new("space", SidebarToggleExpand, Some("Sidebar")),
-            KeyBinding::new("left", SidebarToggleExpand, Some("Sidebar")),
-            KeyBinding::new("right", SidebarToggleExpand, Some("Sidebar")),
-            KeyBinding::new("escape", SidebarEscape, Some("Sidebar")),
-        ],
-    );
-
-    // Register escape keybindings with context-based precedence:
-    //   Global:             escape → Cancel        (overlays, sidebar rename)
-    //   TerminalPane:       escape → SendEscape    (send 0x1b to PTY)
-    //   SearchBar:          escape → CloseSearch   (close search, deeper than TerminalPane)
-    //   TerminalRename:     escape → Cancel        (cancel rename, deeper than TerminalPane)
-    //   TerminalMenu:       escape → Cancel        (close the flyout, then the menu)
-    bind_managed_keys(
-        cx,
-        [
-            KeyBinding::new("escape", Cancel, None),
-            KeyBinding::new("escape", SendEscape, Some("TerminalPane")),
-            KeyBinding::new("escape", CloseSearch, Some("SearchBar")),
-            // Terminal rename uses the crate's Cancel action
-            KeyBinding::new(
-                "escape",
-                okena_views_terminal::actions::Cancel,
-                Some("TerminalRename"),
-            ),
-            // okena-files crate Cancel action for file search/viewer
-            KeyBinding::new(
-                "escape",
-                okena_files::file_search::Cancel,
-                Some("FileSearchDialog"),
-            ),
-            KeyBinding::new(
-                "escape",
-                okena_files::file_search::Cancel,
-                Some("FileViewer"),
-            ),
-            // okena-views-git crate Cancel actions for git overlays
-            KeyBinding::new("escape", okena_views_git::Cancel, Some("WorktreeDialog")),
-            KeyBinding::new(
-                "escape",
-                okena_views_git::Cancel,
-                Some("CloseWorktreeDialog"),
-            ),
-            KeyBinding::new(
-                "escape",
-                okena_views_git::diff_viewer::Cancel,
-                Some("DiffViewer"),
-            ),
-            // okena-views-sidebar crate Cancel actions for context menus
-            KeyBinding::new("escape", okena_views_sidebar::Cancel, Some("ContextMenu")),
-            KeyBinding::new(
-                "escape",
-                okena_views_sidebar::Cancel,
-                Some("FolderContextMenu"),
-            ),
-            KeyBinding::new(
-                "escape",
-                okena_views_sidebar::Cancel,
-                Some("RenameDirectoryDialog"),
-            ),
-            KeyBinding::new(
-                "escape",
-                okena_views_sidebar::Cancel,
-                Some("ChangePathDialog"),
-            ),
-            KeyBinding::new("escape", okena_views_sidebar::Cancel, Some("HookLog")),
-            // okena-views-terminal crate Cancel for shell selector + send composer
-            KeyBinding::new(
-                "escape",
-                okena_views_terminal::actions::Cancel,
-                Some("ShellSelectorOverlay"),
-            ),
-            // The terminal menu peels an open submenu flyout first, then closes itself.
-            KeyBinding::new(
-                "escape",
-                okena_views_terminal::actions::Cancel,
-                Some("TerminalMenu"),
-            ),
-            KeyBinding::new(
-                "escape",
-                okena_views_terminal::actions::Cancel,
-                Some("SendComposer"),
-            ),
-            // okena-views-remote crate Cancel actions
-            KeyBinding::new(
-                "escape",
-                okena_views_remote::Cancel,
-                Some("RemoteConnectDialog"),
-            ),
-            KeyBinding::new(
-                "escape",
-                okena_views_remote::Cancel,
-                Some("RemotePairDialog"),
-            ),
-            KeyBinding::new(
-                "escape",
-                okena_views_remote::Cancel,
-                Some("RemoteContextMenu"),
-            ),
-        ],
-    );
+    apply_keybindings(cx, &config);
 }
 
 /// Register keybindings from a configuration
@@ -651,28 +542,34 @@ mod escape_binding_tests {
         });
     }
 
-    /// Every dismissable popup needs an `escape` binding in *both* the initial
-    /// registration and the reload path, or its `Cancel` handler is dead code —
-    /// which is exactly what happened to the terminal menu until it grew a submenu.
-    #[test]
-    fn dismissable_overlays_bind_escape_in_both_paths() {
-        let src = include_str!("mod.rs");
-
-        for context in [
-            "TerminalMenu",
-            "TerminalRename",
-            "ShellSelectorOverlay",
-            "SendComposer",
-            "ContextMenu",
-            "FolderContextMenu",
-            "RemoteContextMenu",
-        ] {
-            let bound = src.matches(&format!("Some(\"{context}\")")).count();
-            assert!(
-                bound >= 2,
-                "{context} must bind escape in register_keybindings and reload_keybindings \
-                 (found {bound} occurrences)"
-            );
-        }
+    /// Every dismissable popup needs an `escape` binding, or its `Cancel`
+    /// handler is dead code — which is what happened to the terminal menu
+    /// until it grew a submenu.
+    #[gpui::test]
+    fn dismissable_overlays_bind_escape(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            super::apply_keybindings(cx, &KeybindingConfig::defaults());
+            let escape = [gpui::Keystroke::parse("escape").unwrap()];
+            for context in [
+                "TerminalMenu",
+                "TerminalRename",
+                "ShellSelectorOverlay",
+                "SendComposer",
+                "ContextMenu",
+                "FolderContextMenu",
+                "RemoteContextMenu",
+            ] {
+                let contexts = [gpui::KeyContext::parse(context).unwrap()];
+                let keymap = cx.key_bindings();
+                let keymap = keymap.borrow();
+                let (bindings, _) = keymap.bindings_for_input(&escape, &contexts);
+                assert!(
+                    bindings.iter().any(|binding| binding
+                        .predicate()
+                        .is_some_and(|predicate| { predicate.to_string() == context })),
+                    "{context} must bind escape"
+                );
+            }
+        });
     }
 }

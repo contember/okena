@@ -5111,6 +5111,10 @@ impl TerminalBackend for DeferredKillBackend<'_> {
         self.backend.get_shell_pid(terminal_id)
     }
 
+    fn has_live_terminal(&self, terminal_id: &str) -> bool {
+        self.backend.has_live_terminal(terminal_id)
+    }
+
     fn get_foreground_shell_pid(&self, terminal_id: &str) -> Option<u32> {
         self.backend.get_foreground_shell_pid(terminal_id)
     }
@@ -6775,6 +6779,7 @@ mod tests {
                 let resp: StateResponse =
                     serde_json::from_value(value).expect("deserialize StateResponse");
                 assert!(resp.supports_start_page);
+                assert!(resp.supports_command_tabs);
                 assert_eq!(resp.windows.len(), 1, "single synthetic window");
                 assert_eq!(resp.windows[0].id, "main");
                 assert_eq!(resp.windows[0].kind, "main");

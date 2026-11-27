@@ -171,12 +171,31 @@ If the file contains invalid JSON, Okena recovers as many fields as possible and
 | `default_shell` | string | `"Default"` | Shell for new terminals. `"Default"` uses the system shell. On Linux/macOS you can also use `"Bash"`, `"Zsh"`, `"Fish"`, etc. |
 | `show_shell_selector` | bool | `false` | Show shell picker in the terminal header |
 | `show_start_page` | bool | `false` | New projects, tabs and splits open a Start Page instead of a shell. The page offers **Start Terminal** and the `start_page_buttons`; nothing runs until one is chosen. A remote daemon without Start Page support keeps starting terminals directly |
-| `start_page_buttons` | array | `[]` | Start Page buttons, in display order. Each has `name`, `command` and an optional `shell` (same format as `default_shell`; `null` uses the project's shell). A button starts a terminal that runs the `terminal.on_create` hook, then `command`, then stays interactive. Like the hook, `command` runs before `shell_wrapper` takes effect. On Windows, end `command` without a trailing comment: for WSL and custom shells it is joined to the shell handoff on one line |
+| `start_page_buttons` | array | `[]` | Start Page buttons, in display order. Each has `name`, `command`, an optional `shell` (same format as `default_shell`; `null` uses the project's shell), and an optional `shortcut`. A button starts a terminal that runs the `terminal.on_create` hook, then `command`, then stays interactive. Like the hook, `command` runs before `shell_wrapper` takes effect. On Windows, end `command` without a trailing comment: for WSL and custom shells it is joined to the shell handoff on one line |
 | `auto_hide_single_terminal_header` | bool | `false` | Hide the 28px terminal header for standalone terminals. Its actions remain available from the owning project's focused-terminal menu. Multi-tab headers remain visible. |
 | `show_active_terminal_title` | bool | `false` | Show the active terminal display name followed by ` – Okena` in the native window title (including Task View and time trackers), regardless of maximization. Custom terminal names take precedence. Each window uses its own terminal; no active terminal means `Okena`. |
 | `show_terminal_name_when_inactive` | bool | `false` | Draw the terminal's name over every pane that does not have focus |
 | `idle_timeout_secs` | int | `0` | Seconds before a terminal is considered idle (0 = disabled) |
 | `terminal_option_as_meta` | bool | `false` | macOS only: Option+key sends the Meta escape prefix (`ESC` + character) instead of composing a character (Option+B is `∫`). No effect on Linux/Windows, where Alt already encodes Meta. |
+
+In **Settings → Start Page → Command Buttons**, record a shortcut while
+adding or editing a button. The shortcut launches the configured command and shell
+in the active Start Page pane or in a new tab beside the active running terminal.
+It can also start the first terminal in a focused empty project when **Show Start Page
+for new terminals** is on. With that setting off, the shortcut still works from a
+running terminal.
+Each shortcut uses a single [key combination](#keystroke-syntax), such as
+`"shortcut": "ctrl-alt-shift-x"`. For a printable key, hold Shift with Ctrl or Alt,
+or use a platform modifier outside Windows. Function keys are also available.
+The recorder rejects shortcuts already assigned to another button or action,
+including the first key of an existing multi-step shortcut, such as Ctrl+K.
+Clear the shortcut to remove the assignment. Changing a shortcut requires a
+connected local daemon that supports command tabs.
+A shortcut edited into `settings.json` that is invalid or already taken stays
+inactive: Okena logs a warning, the button's row in Settings shows the reason, and
+Keyboard Shortcuts lists the button without a shortcut.
+The shortcuts act in Okena windows, not in a detached terminal window, which has
+no tabs to open a command in; there the key reaches the terminal program.
 
 #### Session Backend
 

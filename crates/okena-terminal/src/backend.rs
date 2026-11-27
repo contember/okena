@@ -192,6 +192,10 @@ pub trait TerminalBackend: Send + Sync {
     fn supports_buffer_capture(&self) -> bool;
     fn is_remote(&self) -> bool;
     fn get_shell_pid(&self, terminal_id: &str) -> Option<u32>;
+    /// Whether the backend owns a live PTY for this ID, even without a shell PID.
+    fn has_live_terminal(&self, terminal_id: &str) -> bool {
+        self.get_shell_pid(terminal_id).is_some()
+    }
     /// Get the real foreground shell pid. With session backends this walks
     /// through dtach / tmux proxies to return the actual shell process; for
     /// plain PTYs it is the same as `get_shell_pid`. Callers inspecting
@@ -320,6 +324,10 @@ impl TerminalBackend for LocalBackend {
 
     fn get_shell_pid(&self, terminal_id: &str) -> Option<u32> {
         self.pty_manager.get_shell_pid(terminal_id)
+    }
+
+    fn has_live_terminal(&self, terminal_id: &str) -> bool {
+        self.pty_manager.current_generation(terminal_id).is_some()
     }
 
     fn get_foreground_shell_pid(&self, terminal_id: &str) -> Option<u32> {

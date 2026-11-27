@@ -289,7 +289,7 @@ fn pending_panes_navigate_and_launch_with_the_keyboard(cx: &mut TestAppContext) 
             |key, _| {
                 (key == "start_page_buttons").then(|| {
                     serde_json::json!([
-                        { "name": "Run tests", "command": "cargo test" }
+                        { "name": "Run tests", "command": "cargo test", "shortcut": "ctrl-alt-shift-x" }
                     ])
                 })
             },

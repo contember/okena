@@ -158,7 +158,11 @@ fn merge_settings_patches(base: &mut serde_json::Value, newer: serde_json::Value
 fn action_for_daemon(
     mut action: ActionRequest,
     supports_start_page: bool,
+    supports_command_tabs: bool,
 ) -> Result<ActionRequest, &'static str> {
+    if matches!(&action, ActionRequest::AddCommandTab { .. }) && !supports_command_tabs {
+        return Err("Command tabs are unavailable on this daemon");
+    }
     if supports_start_page {
         return Ok(action);
     }
@@ -685,6 +689,13 @@ impl RemoteConnectionManager {
             .is_some_and(|state| state.supports_start_page)
     }
 
+    pub fn supports_command_tabs(&self, connection_id: &str) -> bool {
+        self.connections
+            .get(connection_id)
+            .and_then(|connection| connection.remote_state())
+            .is_some_and(|state| state.supports_command_tabs)
+    }
+
     /// Auto-connect to all saved connections with valid tokens.
     pub fn auto_connect_all(&mut self, cx: &mut Context<Self>) {
         let settings = load_settings();
@@ -739,7 +750,11 @@ impl RemoteConnectionManager {
     ///
     /// Fire-and-forget from the UI thread, but FIFO within each connection.
     pub fn send_action(&self, connection_id: &str, action: ActionRequest, cx: &mut Context<Self>) {
-        let action = match action_for_daemon(action, self.supports_start_page(connection_id)) {
+        let action = match action_for_daemon(
+            action,
+            self.supports_start_page(connection_id),
+            self.supports_command_tabs(connection_id),
+        ) {
             Ok(action) => action,
             Err(error) => {
                 ToastManager::error(error.to_string(), cx);
@@ -861,7 +876,11 @@ impl RemoteConnectionManager {
         let Some(connection) = self.connections.get(connection_id) else {
             return Task::ready(Err(format!("Connection {connection_id} not found")));
         };
-        let action = match action_for_daemon(action, self.supports_start_page(connection_id)) {
+        let action = match action_for_daemon(
+            action,
+            self.supports_start_page(connection_id),
+            self.supports_command_tabs(connection_id),
+        ) {
             Ok(action) => action,
             Err(error) => return Task::ready(Err(error.to_string())),
         };
@@ -1480,13 +1499,13 @@ mod tests {
             project_id: "p1".into(),
             start_page: true,
         };
-        let legacy = super::action_for_daemon(action.clone(), false).unwrap();
+        let legacy = super::action_for_daemon(action.clone(), false, false).unwrap();
         assert_eq!(
             serde_json::to_value(legacy).unwrap(),
             json!({ "action": "create_terminal", "project_id": "p1" })
         );
         assert!(matches!(
-            super::action_for_daemon(action, true).unwrap(),
+            super::action_for_daemon(action, true, false).unwrap(),
             ActionRequest::CreateTerminal {
                 start_page: true,
                 ..
@@ -1500,13 +1519,36 @@ mod tests {
             command,
         };
         assert!(matches!(
-            super::action_for_daemon(launch(None), false).unwrap(),
+            super::action_for_daemon(launch(None), false, false).unwrap(),
             ActionRequest::CreateTerminal {
                 start_page: false,
                 ..
             }
         ));
-        assert!(super::action_for_daemon(launch(Some("echo original".into())), false).is_err());
+        assert!(
+            super::action_for_daemon(launch(Some("echo original".into())), false, false).is_err()
+        );
+    }
+
+    #[test]
+    fn command_tabs_require_an_explicit_daemon_capability() {
+        let action = ActionRequest::AddCommandTab {
+            project_id: "p1".into(),
+            terminal_id: "source".into(),
+            shell: okena_core::shell::ShellType::Default,
+            command: "echo command".into(),
+        };
+        for supports_start_page in [false, true] {
+            assert_eq!(
+                super::action_for_daemon(action.clone(), supports_start_page, false).err(),
+                Some("Command tabs are unavailable on this daemon")
+            );
+        }
+        let supported = super::action_for_daemon(action.clone(), true, true).unwrap();
+        assert_eq!(
+            serde_json::to_value(supported).unwrap(),
+            serde_json::to_value(action).unwrap()
+        );
     }
 
     fn accept_until(listener: &TcpListener, deadline: Instant) -> TcpStream {

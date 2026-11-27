@@ -5,6 +5,7 @@ use gpui_component::v_flex;
 use okena_core::api::ActionRequest;
 use okena_core::shell::ShellType;
 use okena_files::theme::theme;
+use okena_ui::shortcuts::shortcut_tooltip;
 use okena_ui::tokens::{ui_text_md, ui_text_xl};
 use okena_workspace::settings::StartPageButton;
 
@@ -70,7 +71,11 @@ fn render_start_page_buttons<D: ActionDispatch>(
     cx: &App,
 ) -> impl IntoElement {
     let t = theme(cx);
-    let launcher = |id: SharedString, label: SharedString, shell, command: Option<String>| {
+    let launcher = |id: SharedString,
+                    label: SharedString,
+                    shell,
+                    command: Option<String>,
+                    shortcut: Option<String>| {
         let primary = command.is_none();
         let action = if buttons.is_some() {
             launch_request(project_id, page_id, shell, command)
@@ -119,7 +124,16 @@ fn render_start_page_buttons<D: ActionDispatch>(
                         .text_color(rgb(fg)),
                 )
             })
-            .child(div().min_w_0().child(label))
+            .child(div().min_w_0().child(label.clone()))
+            .when_some(shortcut, |button, shortcut| {
+                let dispatcher = dispatcher.clone();
+                button.tooltip(move |window, cx| {
+                    let shortcut = dispatcher
+                        .as_ref()
+                        .and_then(|dispatcher| dispatcher.start_page_shortcut_label(&shortcut, cx));
+                    shortcut_tooltip(&label, shortcut.as_deref(), window, cx)
+                })
+            })
             .on_click(move |_, _, cx| {
                 if let Some(dispatcher) = &dispatcher {
                     dispatcher.dispatch(action.clone(), cx);
@@ -140,6 +154,7 @@ fn render_start_page_buttons<D: ActionDispatch>(
             "Start Terminal".into(),
             ShellType::Default,
             None,
+            None,
         ))
         .children(
             buttons
@@ -152,6 +167,7 @@ fn render_start_page_buttons<D: ActionDispatch>(
                         button.name.clone().into(),
                         button.shell.clone().unwrap_or_default(),
                         Some(button.command.clone()),
+                        button.shortcut.clone(),
                     )
                 }),
         )

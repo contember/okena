@@ -652,6 +652,7 @@ mod tests {
         StateResponse {
             state_version: 1,
             supports_start_page: false,
+            supports_command_tabs: false,
             projects,
             focused_project_id: None,
             fullscreen_terminal: None,
