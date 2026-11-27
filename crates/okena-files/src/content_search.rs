@@ -196,15 +196,23 @@ fn configure_walker(
     Ok(walk_builder)
 }
 
+/// Text of a file the walker listed, or `None` when it is no longer a regular
+/// UTF-8 file within `MAX_FILE_SIZE`. The walker's type and size checks ran on
+/// an earlier stat; this re-checks both on the open file, so a FIFO or a huge
+/// file swapped in since can neither block the search nor grow its memory.
+fn read_searchable_text(path: &Path) -> Option<String> {
+    let bytes = okena_core::regular_file::read(path, MAX_FILE_SIZE).ok()?;
+    String::from_utf8(bytes).ok()
+}
+
 /// Add context lines to matches by reading the file content.
 fn add_context_lines(matches: &mut [ContentMatch], file_path: &Path, context_lines: usize) {
     if context_lines == 0 || matches.is_empty() {
         return;
     }
 
-    let content = match std::fs::read_to_string(file_path) {
-        Ok(c) => c,
-        Err(_) => return,
+    let Some(content) = read_searchable_text(file_path) else {
+        return;
     };
 
     let all_lines: Vec<&str> = content.lines().collect();
@@ -521,9 +529,8 @@ fn search_content_fuzzy(
             }
 
             let path = entry.path();
-            let content = match std::fs::read_to_string(path) {
-                Ok(c) => c,
-                Err(_) => return WalkState::Continue,
+            let Some(content) = read_searchable_text(path) else {
+                return WalkState::Continue;
             };
 
             let mut scored_matches: Vec<(u16, ContentMatch)> = Vec::new();
@@ -722,6 +729,80 @@ mod tests {
 
         assert!(results.iter().any(|path| path == "small.txt"));
         assert!(!results.iter().any(|path| path == "big.log"));
+    }
+
+    /// Fails the test instead of hanging it when a read blocks on a FIFO.
+    fn within_seconds<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(f());
+        });
+        rx.recv_timeout(std::time::Duration::from_secs(10))
+            .expect("did not finish: it read a FIFO")
+    }
+
+    fn make_fifo(path: &Path) {
+        let status = std::process::Command::new("mkfifo")
+            .arg(path)
+            .status()
+            .expect("run mkfifo");
+        assert!(status.success(), "mkfifo {}", path.display());
+    }
+
+    fn a_match_on_line(line_number: usize) -> ContentMatch {
+        ContentMatch {
+            line_number,
+            line_content: "needle".to_string(),
+            match_ranges: Vec::new(),
+            context_before: Vec::new(),
+            context_after: Vec::new(),
+        }
+    }
+
+    /// The context lines `add_context_lines` attaches to a match on line 2.
+    fn context_for_line_two(path: PathBuf) -> usize {
+        within_seconds(move || {
+            let mut matches = vec![a_match_on_line(2)];
+            add_context_lines(&mut matches, &path, 1);
+            matches[0].context_before.len() + matches[0].context_after.len()
+        })
+    }
+
+    #[test]
+    fn searchable_text_reads_a_regular_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("notes.txt");
+        fs::write(&path, "one\nneedle\nthree\n").unwrap();
+        assert_eq!(
+            within_seconds(move || read_searchable_text(&path)).as_deref(),
+            Some("one\nneedle\nthree\n")
+        );
+        assert_eq!(context_for_line_two(dir.path().join("notes.txt")), 2);
+    }
+
+    #[test]
+    fn searchable_text_skips_a_fifo_without_blocking() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pipe");
+        make_fifo(&path);
+        let fifo = path.clone();
+        assert_eq!(within_seconds(move || read_searchable_text(&fifo)), None);
+        assert_eq!(context_for_line_two(path), 0);
+    }
+
+    #[test]
+    fn searchable_text_skips_a_file_over_the_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("big.log");
+        let mut big = b"one\nneedle\nthree\n".to_vec();
+        big.resize(MAX_FILE_SIZE as usize + 1, b'a');
+        fs::write(&path, big).unwrap();
+        let oversized = path.clone();
+        assert_eq!(
+            within_seconds(move || read_searchable_text(&oversized)),
+            None
+        );
+        assert_eq!(context_for_line_two(path), 0);
     }
 
     fn assert_dense_parallel_search_respects_cap(mode: SearchMode) {
