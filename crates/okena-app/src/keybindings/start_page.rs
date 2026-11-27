@@ -49,14 +49,19 @@ impl StartPageShortcutAssignments {
 /// by the daemon. The action resolves the command and shell from current settings.
 pub fn observe_start_page_shortcuts(cx: &mut App) {
     let entity = settings_entity(cx);
-    let assignments = |buttons: &[StartPageButton]| -> Vec<String> {
+    // Validation is cached by button position, including buttons without a shortcut,
+    // and a cached conflict names the other button, so watch names of assigned buttons too.
+    let assignments = |buttons: &[StartPageButton]| -> Vec<Option<(String, String)>> {
         buttons
             .iter()
-            .filter_map(|button| button.shortcut.clone())
+            .map(|button| {
+                let shortcut = button.shortcut.clone()?;
+                Some((shortcut, button.name.clone()))
+            })
             .collect()
     };
     let mut previous = assignments(&entity.read(cx).settings.start_page_buttons);
-    if !previous.is_empty() {
+    if previous.iter().any(Option::is_some) {
         apply_current_keybindings(cx);
     }
     cx.observe(&entity, move |entity, cx| {
@@ -417,6 +422,111 @@ mod tests {
             assert!(
                 start_page_shortcut_error(0, &buttons, cx)
                     .is_some_and(|error| error.contains("existing Okena binding"))
+            );
+        });
+    }
+
+    /// Installs `buttons` as settings and starts the settings observer.
+    fn observe_buttons(
+        cx: &mut gpui::TestAppContext,
+        buttons: Vec<StartPageButton>,
+    ) -> gpui::Entity<crate::settings::SettingsState> {
+        cx.update(|cx| {
+            let settings = cx.new(|_| {
+                let mut settings = okena_workspace::settings::AppSettings::default();
+                settings.start_page_buttons = buttons;
+                crate::settings::SettingsState::new(settings)
+            });
+            cx.set_global(GlobalSettings(settings.clone()));
+            super::super::set_test_keybinding_config(super::super::KeybindingConfig::defaults());
+            observe_start_page_shortcuts(cx);
+            settings
+        })
+    }
+
+    fn update_buttons(
+        cx: &mut gpui::TestAppContext,
+        settings: &gpui::Entity<crate::settings::SettingsState>,
+        edit: impl FnOnce(&mut Vec<StartPageButton>),
+    ) {
+        cx.update(|cx| {
+            settings.update(cx, |state, cx| {
+                let mut buttons = state.settings.start_page_buttons.clone();
+                edit(&mut buttons);
+                state.set_start_page_buttons(buttons, cx);
+            });
+        });
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn moving_or_deleting_an_unbound_button_keeps_the_following_shortcut(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let shortcut = "ctrl-alt-shift-x";
+        let settings = observe_buttons(
+            cx,
+            vec![
+                StartPageButton {
+                    name: "Shell".into(),
+                    ..Default::default()
+                },
+                StartPageButton {
+                    name: "Codex".into(),
+                    command: "codex --no-daemon".into(),
+                    shortcut: Some(shortcut.into()),
+                    ..Default::default()
+                },
+            ],
+        );
+
+        let command_for_shortcut = |cx: &mut gpui::TestAppContext| {
+            cx.update(|cx| {
+                let buttons = &settings.read(cx).settings.start_page_buttons;
+                start_page_button_for_shortcut(shortcut, buttons, cx)
+                    .map(|button| button.command.clone())
+            })
+        };
+        assert_eq!(
+            command_for_shortcut(cx).as_deref(),
+            Some("codex --no-daemon")
+        );
+
+        update_buttons(cx, &settings, |buttons| buttons.swap(0, 1));
+        assert_eq!(
+            command_for_shortcut(cx).as_deref(),
+            Some("codex --no-daemon")
+        );
+
+        update_buttons(cx, &settings, |buttons| buttons.swap(0, 1));
+        update_buttons(cx, &settings, |buttons| {
+            buttons.remove(0);
+        });
+        assert_eq!(
+            command_for_shortcut(cx).as_deref(),
+            Some("codex --no-daemon")
+        );
+
+        update_buttons(cx, &settings, Vec::clear);
+        assert!(command_for_shortcut(cx).is_none());
+        cx.update(|cx| assert!(start_page_shortcut_label(shortcut, cx).is_none()));
+    }
+
+    #[gpui::test]
+    fn renaming_a_conflicting_button_updates_the_conflict_reason(cx: &mut gpui::TestAppContext) {
+        let button = |name: &str| StartPageButton {
+            name: name.into(),
+            shortcut: Some("ctrl-alt-shift-x".into()),
+            ..Default::default()
+        };
+        let settings = observe_buttons(cx, vec![button("Codex"), button("Claude")]);
+
+        update_buttons(cx, &settings, |buttons| buttons[1].name = "Shell".into());
+        cx.update(|cx| {
+            let buttons = &settings.read(cx).settings.start_page_buttons;
+            assert!(
+                start_page_shortcut_error(0, buttons, cx)
+                    .is_some_and(|error| error.contains("Shell"))
             );
         });
     }
