@@ -15,6 +15,10 @@ use okena_terminal::shell_config::ShellType;
 #[cfg(feature = "gpui")]
 use okena_theme::ThemeMode;
 #[cfg(feature = "gpui")]
+use okena_workspace::settings::{
+    MAX_FONT_SIZE, MAX_LINE_HEIGHT, MAX_TERMINAL_CLOSE_GRACE_SECS, MAX_UI_FONT_SIZE, MIN_FONT_SIZE,
+    MIN_LINE_HEIGHT, MIN_UI_FONT_SIZE,
+};
 use okena_workspace::toast::ToastManager;
 
 /// Global settings wrapper for app-wide access
@@ -100,14 +104,38 @@ impl SettingsState {
     );
 
     // Generate all setters using the macro
-    setting_setter!(set_font_size, font_size, f32, 8.0, 48.0);
+    setting_setter!(set_font_size, font_size, f32, MIN_FONT_SIZE, MAX_FONT_SIZE);
     setting_setter!(set_font_family, font_family, String);
-    setting_setter!(set_line_height, line_height, f32, 1.0, 3.0);
-    setting_setter!(set_ui_font_size, ui_font_size, f32, 8.0, 24.0);
+    setting_setter!(
+        set_line_height,
+        line_height,
+        f32,
+        MIN_LINE_HEIGHT,
+        MAX_LINE_HEIGHT
+    );
+    setting_setter!(
+        set_ui_font_size,
+        ui_font_size,
+        f32,
+        MIN_UI_FONT_SIZE,
+        MAX_UI_FONT_SIZE
+    );
     setting_setter!(set_ui_font_family, ui_font_family, String);
-    setting_setter!(set_file_font_size, file_font_size, f32, 8.0, 24.0);
+    setting_setter!(
+        set_file_font_size,
+        file_font_size,
+        f32,
+        MIN_UI_FONT_SIZE,
+        MAX_UI_FONT_SIZE
+    );
     setting_setter!(set_file_font_family, file_font_family, String);
-    setting_setter!(set_file_line_height, file_line_height, f32, 1.0, 3.0);
+    setting_setter!(
+        set_file_line_height,
+        file_line_height,
+        f32,
+        MIN_LINE_HEIGHT,
+        MAX_LINE_HEIGHT
+    );
     /// Set the cursor style (Block, Bar, Underline)
     pub fn set_cursor_style(
         &mut self,
@@ -163,7 +191,7 @@ impl SettingsState {
         terminal_close_grace_secs,
         u32,
         0,
-        60
+        MAX_TERMINAL_CLOSE_GRACE_SECS
     );
     setting_setter!(set_show_focused_border, show_focused_border, bool);
     setting_setter!(
