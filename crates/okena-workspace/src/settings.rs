@@ -572,27 +572,42 @@ pub struct AppSettings {
 
     // Font settings
     /// Terminal font size (default: 14.0)
-    #[serde(default = "default_font_size")]
+    #[serde(
+        default = "default_font_size",
+        deserialize_with = "deserialize_font_size"
+    )]
     pub font_size: f32,
     /// Terminal font family (default: "JetBrains Mono")
     #[serde(default = "default_font_family")]
     pub font_family: String,
     /// Line height multiplier (default: 1.3)
-    #[serde(default = "default_line_height")]
+    #[serde(
+        default = "default_line_height",
+        deserialize_with = "deserialize_line_height"
+    )]
     pub line_height: f32,
     /// UI font size for panels/dialogs (default: 13.0)
-    #[serde(default = "default_ui_font_size")]
+    #[serde(
+        default = "default_ui_font_size",
+        deserialize_with = "deserialize_ui_font_size"
+    )]
     pub ui_font_size: f32,
     /// UI font family (default: system UI font)
     #[serde(default = "default_ui_font_family")]
     pub ui_font_family: String,
     /// File viewer/diff viewer font size (default: 12.0)
-    #[serde(default = "default_file_font_size")]
+    #[serde(
+        default = "default_file_font_size",
+        deserialize_with = "deserialize_ui_font_size"
+    )]
     pub file_font_size: f32,
     /// File viewer/diff viewer font family (default: "JetBrains Mono")
     #[serde(default = "default_file_font_family")]
     pub file_font_family: String,
-    #[serde(default = "default_file_line_height")]
+    #[serde(
+        default = "default_file_line_height",
+        deserialize_with = "deserialize_line_height"
+    )]
     pub file_line_height: f32,
 
     // Terminal settings
@@ -613,7 +628,10 @@ pub struct AppSettings {
     /// foreground process) is actually killed when closed. During this window
     /// the pane is removed but the PTY keeps running and a toast offers "Undo".
     /// `0` disables the feature entirely (close kills immediately, as before).
-    #[serde(default = "default_terminal_close_grace_secs")]
+    #[serde(
+        default = "default_terminal_close_grace_secs",
+        deserialize_with = "deserialize_terminal_close_grace_secs"
+    )]
     pub terminal_close_grace_secs: u32,
 
     // Shell settings
@@ -995,6 +1013,33 @@ fn default_terminal_close_grace_secs() -> u32 {
     5
 }
 
+// Like `deserialize_scrollback_lines`, these bound the value on every parse,
+// so the settings file, a client patch and a daemon snapshot share one range.
+fn deserialize_font_size<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<f32, D::Error> {
+    Ok(f32::deserialize(deserializer)?.clamp(8.0, 48.0))
+}
+
+fn deserialize_ui_font_size<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<f32, D::Error> {
+    Ok(f32::deserialize(deserializer)?.clamp(8.0, 24.0))
+}
+
+fn deserialize_line_height<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<f32, D::Error> {
+    Ok(f32::deserialize(deserializer)?.clamp(1.0, 3.0))
+}
+
+/// 0 disables the grace window; anything else is capped at a minute.
+fn deserialize_terminal_close_grace_secs<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<u32, D::Error> {
+    Ok(u32::deserialize(deserializer)?.min(60))
+}
+
 fn default_file_opener() -> String {
     String::new()
 }
@@ -1103,10 +1148,7 @@ fn recover_settings_from_json(content: &str) -> Result<AppSettings> {
     use anyhow::Context;
     use serde_json::{Map, Value};
 
-    // Compute the recovered `AppSettings` (fast path or cleaned), then funnel
-    // both paths through `clamp_settings` before returning so that numeric
-    // fields are bounded exactly as the old hand-rolled recovery did.
-    let mut settings = if let Ok(settings) = serde_json::from_str::<AppSettings>(content) {
+    let settings = if let Ok(settings) = serde_json::from_str::<AppSettings>(content) {
         // Fast path: the file is valid as-is. (`load_settings` already tries
         // this, but recovering directly keeps the function correct in isolation
         // and cheap in the common case.)
@@ -1139,20 +1181,7 @@ fn recover_settings_from_json(content: &str) -> Result<AppSettings> {
             .context("Failed to deserialize recovered settings")?
     };
 
-    clamp_settings(&mut settings);
     Ok(settings)
-}
-
-/// Clamp numeric settings into their valid ranges, preserving the bounds the
-/// old hand-rolled `recover_settings_from_json` enforced.
-fn clamp_settings(settings: &mut AppSettings) {
-    settings.font_size = settings.font_size.clamp(8.0, 48.0);
-    settings.line_height = settings.line_height.clamp(1.0, 3.0);
-    settings.ui_font_size = settings.ui_font_size.clamp(8.0, 24.0);
-    settings.file_font_size = settings.file_font_size.clamp(8.0, 24.0);
-    settings.file_line_height = settings.file_line_height.clamp(1.0, 3.0);
-    // 0 = disabled; otherwise cap the grace window at a sane upper bound.
-    settings.terminal_close_grace_secs = settings.terminal_close_grace_secs.min(60);
 }
 
 /// Migrate settings from older versions to the current version
@@ -1789,6 +1818,56 @@ mod tests {
         assert_eq!(parsed.scrollback_lines, MAX_SCROLLBACK_LINES);
         let parsed: AppSettings = serde_json::from_str(r#"{"scrollback_lines": 10}"#).unwrap();
         assert_eq!(parsed.scrollback_lines, MIN_SCROLLBACK_LINES);
+    }
+
+    #[test]
+    fn a_valid_settings_file_clamps_fonts_and_grace_on_the_direct_parse() {
+        // Same `serde_json::from_str` the clean branch of `load_settings` runs.
+        let high: AppSettings = serde_json::from_str(
+            r#"{
+                "font_size": 500.0,
+                "line_height": 9.0,
+                "ui_font_size": 100.0,
+                "file_font_size": 100.0,
+                "file_line_height": 9.0,
+                "terminal_close_grace_secs": 86400
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(high.font_size, 48.0);
+        assert_eq!(high.line_height, 3.0);
+        assert_eq!(high.ui_font_size, 24.0);
+        assert_eq!(high.file_font_size, 24.0);
+        assert_eq!(high.file_line_height, 3.0);
+        assert_eq!(high.terminal_close_grace_secs, 60);
+
+        let low: AppSettings = serde_json::from_str(
+            r#"{
+                "font_size": 1.0,
+                "line_height": 0.1,
+                "ui_font_size": 0.0,
+                "file_font_size": -4.0,
+                "file_line_height": 0.0,
+                "terminal_close_grace_secs": 0
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(low.font_size, 8.0);
+        assert_eq!(low.line_height, 1.0);
+        assert_eq!(low.ui_font_size, 8.0);
+        assert_eq!(low.file_font_size, 8.0);
+        assert_eq!(low.file_line_height, 1.0);
+        // 0 disables the grace window and must survive the bound.
+        assert_eq!(low.terminal_close_grace_secs, 0);
+    }
+
+    #[test]
+    fn recovery_clamps_the_fields_it_keeps_when_another_key_is_dropped() {
+        // A wrong-typed key forces the key-by-key slow path.
+        let recovered =
+            recover_settings_from_json(r#"{"font_family": 123, "font_size": 1000.0}"#).unwrap();
+        assert_eq!(recovered.font_family, AppSettings::default().font_family);
+        assert_eq!(recovered.font_size, 48.0);
     }
 
     #[test]

@@ -420,6 +420,28 @@ mod tests {
     }
 
     #[test]
+    fn a_settings_patch_clamps_out_of_range_fonts_and_grace() {
+        let patched = preview_settings_patch(
+            &AppSettings::default(),
+            json!({
+                "font_size": 500.0,
+                "line_height": 0.1,
+                "ui_font_size": 100.0,
+                "file_font_size": 1.0,
+                "file_line_height": 9.0,
+                "terminal_close_grace_secs": 86_400,
+            }),
+        )
+        .unwrap();
+        assert_eq!(patched.font_size, 48.0);
+        assert_eq!(patched.line_height, 1.0);
+        assert_eq!(patched.ui_font_size, 24.0);
+        assert_eq!(patched.file_font_size, 8.0);
+        assert_eq!(patched.file_line_height, 3.0);
+        assert_eq!(patched.terminal_close_grace_secs, 60);
+    }
+
+    #[test]
     fn merge_json_deep_merges_objects() {
         let mut base = json!({
             "a": 1,
