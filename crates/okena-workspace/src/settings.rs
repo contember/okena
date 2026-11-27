@@ -1013,31 +1013,41 @@ fn default_terminal_close_grace_secs() -> u32 {
     5
 }
 
+pub const MIN_FONT_SIZE: f32 = 8.0;
+pub const MAX_FONT_SIZE: f32 = 48.0;
+/// Bounds of the UI and the file viewer font sizes.
+pub const MIN_UI_FONT_SIZE: f32 = 8.0;
+pub const MAX_UI_FONT_SIZE: f32 = 24.0;
+/// Bounds of the terminal and the file viewer line heights.
+pub const MIN_LINE_HEIGHT: f32 = 1.0;
+pub const MAX_LINE_HEIGHT: f32 = 3.0;
+pub const MAX_TERMINAL_CLOSE_GRACE_SECS: u32 = 60;
+
 // Like `deserialize_scrollback_lines`, these bound the value on every parse,
 // so the settings file, a client patch and a daemon snapshot share one range.
 fn deserialize_font_size<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> Result<f32, D::Error> {
-    Ok(f32::deserialize(deserializer)?.clamp(8.0, 48.0))
+    Ok(f32::deserialize(deserializer)?.clamp(MIN_FONT_SIZE, MAX_FONT_SIZE))
 }
 
 fn deserialize_ui_font_size<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> Result<f32, D::Error> {
-    Ok(f32::deserialize(deserializer)?.clamp(8.0, 24.0))
+    Ok(f32::deserialize(deserializer)?.clamp(MIN_UI_FONT_SIZE, MAX_UI_FONT_SIZE))
 }
 
 fn deserialize_line_height<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> Result<f32, D::Error> {
-    Ok(f32::deserialize(deserializer)?.clamp(1.0, 3.0))
+    Ok(f32::deserialize(deserializer)?.clamp(MIN_LINE_HEIGHT, MAX_LINE_HEIGHT))
 }
 
 /// 0 disables the grace window; anything else is capped at a minute.
 fn deserialize_terminal_close_grace_secs<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> Result<u32, D::Error> {
-    Ok(u32::deserialize(deserializer)?.min(60))
+    Ok(u32::deserialize(deserializer)?.min(MAX_TERMINAL_CLOSE_GRACE_SECS))
 }
 
 fn default_file_opener() -> String {
