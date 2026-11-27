@@ -25,15 +25,18 @@ use okena_ui::toggle::segmented_toggle;
 use okena_ui::tokens::{ui_text, ui_text_md, ui_text_ms, ui_text_sm, ui_text_xl};
 use std::sync::Arc;
 
+/// The effective shortcut of `action` inside Git Diff, as the user configured it.
+fn diff_shortcut(action: &dyn Action, cx: &App) -> Option<String> {
+    let context = KeyContext::parse(DIFF_VIEWER_KEY_CONTEXT).ok()?;
+    shortcut_for_action_in(action, std::slice::from_ref(&context), cx)
+}
+
 fn diff_action_tooltip(
     description: &'static str,
     action: impl Action,
 ) -> impl Fn(&mut Window, &mut App) -> AnyView {
-    let context = KeyContext::parse(DIFF_VIEWER_KEY_CONTEXT).ok();
     move |window, cx| {
-        let shortcut = context
-            .as_ref()
-            .and_then(|context| shortcut_for_action_in(&action, std::slice::from_ref(context), cx));
+        let shortcut = diff_shortcut(&action, cx);
         shortcut_tooltip(description, shortcut.as_deref(), window, cx)
     }
 }
@@ -1273,7 +1276,9 @@ impl DiffViewer {
                     .when(is_uncommitted, |d| {
                         d.child(self.render_hint("Tab", "staged/unstaged", t, cx))
                     })
-                    .child(self.render_hint("S", "split", t, cx))
+                    .when_some(diff_shortcut(&ToggleDiffViewMode, cx), |d, key| {
+                        d.child(self.render_hint(&key, "split", t, cx))
+                    })
                     .child(self.render_hint("\u{2191}\u{2193}", "files", t, cx))
                     .when(shows_revision_bar, |d| {
                         d.child(self.render_hint("[ ]", "revisions", t, cx))
