@@ -992,8 +992,8 @@ impl DiffViewer {
                 };
                 let lines = if self.wrap_lines {
                     if self.wrapped_list.item_count() != item_count {
-                        let top_row = self.wrapped_list.logical_scroll_top().item_ix;
-                        self.reset_wrapped_list(item_count, top_row);
+                        let top = self.wrapped_list.logical_scroll_top();
+                        self.reset_wrapped_list(item_count, top);
                     }
                     list(self.wrapped_list.clone(), move |index, window, cx| {
                         render_items(index..index + 1, window, cx)

@@ -413,7 +413,7 @@ Bindings without a `context` are global. Adding a context limits the binding to 
 - `"TerminalPane"` -- only when a terminal pane has focus
 - `"SearchBar"` -- only when the search bar has focus
 - `"Sidebar"` -- only when the sidebar has focus
-- `"DiffViewer"` -- only when Git Diff has focus. Git Diff reserves its own navigation keys (Tab, arrows, `[`, `]`, Cmd/Ctrl+F, Cmd/Ctrl+C, Cmd/Ctrl+A); the shortcut recorder refuses them for bindings in this context
+- `"DiffViewer"` -- only when Git Diff has focus. Git Diff reserves its own navigation keys (Tab, arrows, `[`, `]`, Cmd/Ctrl+F, Cmd/Ctrl+C, Cmd/Ctrl+A); the shortcut recorder refuses them for bindings in this context and for global bindings of the Git Diff actions below
 
 ### Example: Custom Bindings
 

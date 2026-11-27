@@ -134,12 +134,15 @@ impl DiffViewer {
 
     pub(super) fn toggle_view_mode(&mut self, cx: &mut Context<Self>) {
         let top_row = self.wrapped_list.logical_scroll_top().item_ix;
+        let shown_mode = self.effective_view_mode();
         self.view_mode = self.view_mode.toggle();
         self.selection.clear();
         self.selection_side = None;
         self.update_side_by_side_cache();
         // Rows differ between layouts, so measured heights are stale even when the count matches.
-        self.reset_wrapped_list(self.row_count(), top_row);
+        if self.effective_view_mode() != shown_mode {
+            self.reset_wrapped_list(self.row_count(), row_top(top_row));
+        }
         // Persist through ExtensionSettingsStore
         let mut gs = git_settings(cx);
         gs.diff_view_mode = self.view_mode;
@@ -161,7 +164,7 @@ impl DiffViewer {
         } else {
             let offset_y = f32::from(self.scroll_handle.0.borrow().base_handle.offset().y);
             let top_row = first_visible_row(offset_y, self.line_height());
-            self.reset_wrapped_list(self.row_count(), top_row);
+            self.reset_wrapped_list(self.row_count(), row_top(top_row));
         }
         self.wrap_lines = !self.wrap_lines;
         self.scroll_x = 0.0;
@@ -185,12 +188,14 @@ impl DiffViewer {
         }
     }
 
-    /// Rebuilds the wrapped list for `count` rows with `top_row` at the top.
-    pub(super) fn reset_wrapped_list(&self, count: usize, top_row: usize) {
+    /// Rebuilds the wrapped list for `count` rows, scrolled to `top` (clamped to the last row).
+    pub(super) fn reset_wrapped_list(&self, count: usize, top: ListOffset) {
         self.wrapped_list.reset(count);
-        self.wrapped_list.scroll_to(ListOffset {
-            item_ix: top_row.min(count.saturating_sub(1)),
-            offset_in_item: px(0.0),
+        let last = count.saturating_sub(1);
+        self.wrapped_list.scroll_to(if top.item_ix > last {
+            row_top(last)
+        } else {
+            top
         });
     }
 
@@ -418,6 +423,13 @@ impl DiffViewer {
             });
         })
         .detach();
+    }
+}
+
+fn row_top(item_ix: usize) -> ListOffset {
+    ListOffset {
+        item_ix,
+        offset_in_item: px(0.0),
     }
 }
 

@@ -26,9 +26,16 @@ type ActionBindings = (String, Vec<BindingEntry>);
 
 const START_PAGE_CATEGORY: &str = "Start Page";
 
-/// Whether a binding in `context` would start with a key Git Diff handles itself.
-fn shadows_builtin_diff_key(keystrokes: &str, context: Option<&str>) -> bool {
-    context == Some(okena_views_git::DIFF_VIEWER_KEY_CONTEXT)
+/// Whether a binding of `action` in `context` would start with a key Git Diff
+/// handles itself. A global binding of a diff action is active in the diff too.
+fn shadows_builtin_diff_key(action: &str, keystrokes: &str, context: Option<&str>) -> bool {
+    let diff = Some(okena_views_git::DIFF_VIEWER_KEY_CONTEXT);
+    let acts_in_diff = context == diff
+        || (context.is_none()
+            && search::default_context(action, &crate::keybindings::KeybindingConfig::defaults())
+                .as_deref()
+                == diff);
+    acts_in_diff
         && keystrokes
             .split_whitespace()
             .next()
@@ -656,7 +663,7 @@ impl KeybindingsHelp {
                 .and_then(|entries| entries.get(editing.entry_index))
                 .and_then(|entry| entry.context.clone())
         });
-        if shadows_builtin_diff_key(&new_keystroke, context.as_deref()) {
+        if shadows_builtin_diff_key(&editing.action, &new_keystroke, context.as_deref()) {
             self.recording_error =
                 Some("Git Diff already uses this key. Choose a different shortcut.".to_string());
             cx.notify();
@@ -1599,14 +1606,17 @@ mod diff_key_tests {
     #[test]
     fn diff_bindings_cannot_take_keys_the_diff_handles_itself() {
         let diff = Some(DIFF_VIEWER_KEY_CONTEXT);
+        let action = "ToggleDiffViewMode";
         for taken in ["ctrl-f", "cmd-f", "tab", "shift-up", "]", "ctrl-c ctrl-x"] {
-            assert!(shadows_builtin_diff_key(taken, diff), "{taken}");
+            assert!(shadows_builtin_diff_key(action, taken, diff), "{taken}");
         }
         for free in ["f", "alt-z", "w", "ctrl-k ctrl-f"] {
-            assert!(!shadows_builtin_diff_key(free, diff), "{free}");
+            assert!(!shadows_builtin_diff_key(action, free, diff), "{free}");
         }
-        assert!(!shadows_builtin_diff_key("ctrl-f", None));
-        assert!(!shadows_builtin_diff_key("ctrl-f", Some("TerminalPane")));
+        // A global binding of a diff action also fires inside the diff.
+        assert!(shadows_builtin_diff_key(action, "ctrl-f", None));
+        assert!(!shadows_builtin_diff_key("ShowFileSearch", "ctrl-f", None));
+        assert!(!shadows_builtin_diff_key(action, "ctrl-f", Some("TerminalPane")));
     }
 }
 

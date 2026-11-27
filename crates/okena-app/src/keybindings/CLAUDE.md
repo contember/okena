@@ -27,6 +27,9 @@ Defines all keyboard actions, default bindings, and user-configurable keybinding
   first stroke of a chord) is not bound; it is logged and its Settings row shows the reason.
 - The Keyboard Shortcuts recorder rejects an action binding whose first stroke is a
   registered Start Page shortcut.
+- The recorder also rejects a Git Diff binding (`DiffViewer` context, or a global
+  binding of a diff action) whose first stroke is a key Git Diff handles itself;
+  `okena_views_git::diff_viewer::is_builtin_diff_key` is the single list.
 - The binding's context excludes text inputs, so typing in a field never launches a command.
 
 ## Global scope and Windows key policy
