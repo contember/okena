@@ -49,14 +49,15 @@ impl StartPageShortcutAssignments {
 /// by the daemon. The action resolves the command and shell from current settings.
 pub fn observe_start_page_shortcuts(cx: &mut App) {
     let entity = settings_entity(cx);
-    let assignments = |buttons: &[StartPageButton]| -> Vec<String> {
+    // Validation is cached by button position, including buttons without a shortcut.
+    let assignments = |buttons: &[StartPageButton]| -> Vec<Option<String>> {
         buttons
             .iter()
-            .filter_map(|button| button.shortcut.clone())
+            .map(|button| button.shortcut.clone())
             .collect()
     };
     let mut previous = assignments(&entity.read(cx).settings.start_page_buttons);
-    if !previous.is_empty() {
+    if previous.iter().any(Option::is_some) {
         apply_current_keybindings(cx);
     }
     cx.observe(&entity, move |entity, cx| {
@@ -418,6 +419,67 @@ mod tests {
                 start_page_shortcut_error(0, &buttons, cx)
                     .is_some_and(|error| error.contains("existing Okena binding"))
             );
+        });
+    }
+
+    #[gpui::test]
+    fn deleting_an_unbound_button_keeps_the_following_shortcut(cx: &mut gpui::TestAppContext) {
+        let shortcut = "ctrl-alt-shift-x";
+        let settings = cx.update(|cx| {
+            let settings = cx.new(|_| {
+                let mut settings = okena_workspace::settings::AppSettings::default();
+                settings.start_page_buttons = vec![
+                    StartPageButton {
+                        name: "Shell".into(),
+                        ..Default::default()
+                    },
+                    StartPageButton {
+                        name: "Codex".into(),
+                        command: "codex --no-daemon".into(),
+                        shortcut: Some(shortcut.into()),
+                        ..Default::default()
+                    },
+                ];
+                crate::settings::SettingsState::new(settings)
+            });
+            cx.set_global(GlobalSettings(settings.clone()));
+            super::super::set_test_keybinding_config(super::super::KeybindingConfig::defaults());
+            observe_start_page_shortcuts(cx);
+            settings
+        });
+
+        let command_for_shortcut = |cx: &App| {
+            let buttons = &settings.read(cx).settings.start_page_buttons;
+            start_page_button_for_shortcut(shortcut, buttons, cx)
+                .map(|button| button.command.clone())
+        };
+        cx.update(|cx| {
+            assert_eq!(
+                command_for_shortcut(cx).as_deref(),
+                Some("codex --no-daemon")
+            )
+        });
+        cx.update(|cx| {
+            settings.update(cx, |state, cx| {
+                let mut buttons = state.settings.start_page_buttons.clone();
+                buttons.remove(0);
+                state.set_start_page_buttons(buttons, cx);
+            });
+        });
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert_eq!(
+                command_for_shortcut(cx).as_deref(),
+                Some("codex --no-daemon")
+            );
+        });
+        cx.update(|cx| {
+            settings.update(cx, |state, cx| state.set_start_page_buttons(Vec::new(), cx));
+        });
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert!(command_for_shortcut(cx).is_none());
+            assert!(start_page_shortcut_label(shortcut, cx).is_none());
         });
     }
 
