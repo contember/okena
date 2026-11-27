@@ -61,11 +61,13 @@ jobs:
           toolchain: "1.98.1"
           targets: ${{ matrix.target }}
 
+      # Never saved: a cache saved from a tag is scoped to that tag, so no later
+      # run can restore it, and its ~1 GB per target evicts main's caches.
       - name: Setup Rust cache
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: ${{ matrix.target }}-${{ matrix.os }}
-          save-if: ${{ startsWith(github.ref, 'refs/tags/v') }}
+          save-if: false
 
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
