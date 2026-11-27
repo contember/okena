@@ -15,6 +15,19 @@ use okena_views_terminal::ActionDispatch;
 
 use super::WindowView;
 
+fn start_page_shortcut_pane<'a>(
+    layout: &'a LayoutNode,
+    fullscreen_id: Option<&str>,
+    focused_path: Option<&[usize]>,
+) -> Option<&'a LayoutNode> {
+    match fullscreen_id {
+        Some(id) => layout
+            .find_terminal_path(id)
+            .and_then(|path| layout.get_at_path(&path)),
+        None => layout.get_at_path(focused_path?),
+    }
+}
+
 impl WindowView {
     pub(super) fn local_daemon_action_client(
         &self,
@@ -156,6 +169,83 @@ impl WindowView {
         } else {
             None
         }
+    }
+
+    pub(super) fn run_start_page_command_shortcut(
+        &self,
+        shortcut: &str,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.focus_manager.read(cx).is_modal()
+            || crate::keybindings::start_page_shortcut_is_editing(window)
+        {
+            cx.propagate();
+            return;
+        }
+        let Some((project_id, action)) = self.start_page_shortcut_request(shortcut, cx) else {
+            cx.propagate();
+            return;
+        };
+        if let Some(dispatcher) = self.dispatcher_for_project(&project_id, cx) {
+            dispatcher.dispatch(action, cx);
+        }
+    }
+
+    fn start_page_shortcut_request(
+        &self,
+        shortcut: &str,
+        cx: &Context<Self>,
+    ) -> Option<(String, ActionRequest)> {
+        let settings = crate::settings::settings_entity(cx);
+        let settings = &settings.read(cx).settings;
+        let button = crate::keybindings::start_page_button_for_shortcut(
+            shortcut,
+            &settings.start_page_buttons,
+        )?;
+        let fm = self.focus_manager.read(cx);
+        let focus = fm.focused_terminal_state();
+        let project_id = fm
+            .fullscreen_project_id()
+            .or_else(|| focus.as_ref().map(|target| target.project_id.as_str()))
+            .or_else(|| fm.focused_project_id().map(String::as_str))?;
+        let project = self.workspace.read(cx).project(project_id)?;
+        let node = match &project.layout {
+            Some(layout) => Some(start_page_shortcut_pane(
+                layout,
+                fm.fullscreen_state().map(|(_, pane_id)| pane_id),
+                focus.as_ref().map(|state| state.layout_path.as_slice()),
+            )?),
+            None if settings.show_start_page => None,
+            None => return None,
+        };
+
+        let shell = button.shell.clone().unwrap_or_default();
+        let command = button.command.clone();
+        let action = match node {
+            Some(LayoutNode::Terminal {
+                terminal_id: Some(terminal_id),
+                ..
+            }) => ActionRequest::AddCommandTab {
+                project_id: project_id.to_owned(),
+                terminal_id: terminal_id.clone(),
+                shell,
+                command,
+            },
+            Some(node) => ActionRequest::LaunchStartPage {
+                project_id: project_id.to_owned(),
+                page_id: Some(node.start_page()?.id.clone()),
+                shell,
+                command: Some(command),
+            },
+            None => ActionRequest::LaunchStartPage {
+                project_id: project_id.to_owned(),
+                page_id: None,
+                shell,
+                command: Some(command),
+            },
+        };
+        Some((project_id.to_owned(), action))
     }
 
     /// Paste a "Send to Terminal" payload into `target` — or, when the sender
@@ -1622,5 +1712,27 @@ fn collect_tab_pane_ids(
             .collect(),
         LayoutNode::Terminal { .. } => vec![node.collect_pane_ids().into_iter().next()],
         _ => Vec::new(),
+    }
+}
+
+#[cfg(test)]
+mod start_page_shortcut_tests {
+    use super::{LayoutNode, start_page_shortcut_pane};
+
+    #[test]
+    fn fullscreen_shortcut_targets_the_displayed_start_page_id() {
+        let layout = LayoutNode::Tabs {
+            active_tab: 1,
+            children: vec![
+                LayoutNode::new_terminal(),
+                LayoutNode::new_start_page(okena_core::api::StartPage {
+                    id: "page".into(),
+                    cwd: "project".into(),
+                }),
+            ],
+        };
+        let pane = start_page_shortcut_pane(&layout, Some("page"), Some(&[0]));
+        assert_eq!(pane.and_then(LayoutNode::pane_id), Some("page"));
+        assert!(start_page_shortcut_pane(&layout, Some("gone"), Some(&[0])).is_none());
     }
 }

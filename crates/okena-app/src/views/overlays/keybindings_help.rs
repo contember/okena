@@ -508,6 +508,26 @@ impl KeybindingsHelp {
         self._chord_timer = None;
         self._interceptor = None;
 
+        // A Start Page shortcut owns its first stroke across workspace contexts.
+        if let Some(conflict) = new_keystroke
+            .split_whitespace()
+            .next()
+            .zip(cx.try_global::<crate::settings::GlobalSettings>())
+            .and_then(|(first_stroke, settings)| {
+                crate::keybindings::start_page_button_for_shortcut(
+                    first_stroke,
+                    &settings.0.read(cx).settings.start_page_buttons,
+                )
+            })
+        {
+            self.recording_error = Some(format!(
+                "This shortcut is already assigned to Start Page button {}.",
+                conflict.name
+            ));
+            cx.notify();
+            return;
+        }
+
         // Update the config
         update_config(|config| {
             if let Some(context) = editing.draft_context {

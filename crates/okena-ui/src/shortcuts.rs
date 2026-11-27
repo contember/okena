@@ -211,7 +211,17 @@ pub fn action_tooltip(
     window: &mut Window,
     cx: &mut App,
 ) -> AnyView {
-    let text = match action.and_then(|action| shortcut_for_action(action, window, cx)) {
+    let shortcut = action.and_then(|action| shortcut_for_action(action, window, cx));
+    shortcut_tooltip(label, shortcut.as_deref(), window, cx)
+}
+
+pub fn shortcut_tooltip(
+    label: &str,
+    shortcut: Option<&str>,
+    window: &mut Window,
+    cx: &mut App,
+) -> AnyView {
+    let text = match shortcut {
         Some(shortcut) => format!("{label} ({shortcut})"),
         None => label.to_owned(),
     };

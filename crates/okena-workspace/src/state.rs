@@ -1730,6 +1730,7 @@ impl Workspace {
         self.data.close_extra_window(id);
         if self.data.window(id).is_none() {
             self.remote_sync.take_requested_fullscreen(id);
+            self.remote_sync.take_requested_terminal_focus(id);
         }
         self.notify_data(cx);
     }
@@ -2620,6 +2621,7 @@ impl Workspace {
 
         self.reanchor_focus(focus_manager, anchor.as_ref());
         self.refocus_off_project_without_terminals(focus_manager, window_id, last_seen);
+        self.apply_requested_terminal_focus(focus_manager, window_id, cx);
         self.apply_requested_fullscreen(focus_manager, window_id, cx);
 
         // Notify UI without bumping data_version (remote changes shouldn't trigger auto-save)
@@ -2974,6 +2976,7 @@ mod workspace_tests {
             state: Some(StateResponse {
                 state_version: 1,
                 supports_start_page: false,
+                supports_command_tabs: false,
                 projects: vec![ApiProject {
                     id: "p1".to_string(),
                     name: "proj-p1".to_string(),
@@ -4755,6 +4758,7 @@ mod gpui_tests {
             state: Some(StateResponse {
                 state_version: 1,
                 supports_start_page: false,
+                supports_command_tabs: false,
                 projects: projects
                     .iter()
                     .map(|(id, layout)| ApiProject {
@@ -4821,6 +4825,73 @@ mod gpui_tests {
             cols: None,
             rows: None,
         }
+    }
+
+    #[gpui::test]
+    fn confirmed_terminal_focus_waits_for_its_exact_terminal(cx: &mut gpui::TestAppContext) {
+        let workspace = workspace_hiding_projects_without_terminals(cx, false);
+        let mut fm = crate::focus::FocusManager::new();
+        let project_id = "remote:c1:p1";
+        let original = "remote:c1:original";
+        sync_and_read_focus(&workspace, &mut fm, cx, api_terminal("original"));
+        fm.enter_fullscreen(project_id.into(), vec![], original.into());
+
+        workspace.update(cx, |ws, cx| {
+            ws.request_terminal_focus(
+                &mut fm,
+                WindowId::Main,
+                project_id.into(),
+                "remote:c1:command".into(),
+                cx,
+            );
+        });
+        let mut children = vec![api_terminal("original"), api_terminal("other-client")];
+        assert_eq!(
+            sync_and_read_focus(
+                &workspace,
+                &mut fm,
+                cx,
+                ApiLayoutNode::Tabs {
+                    children: children.clone(),
+                    active_tab: 1,
+                },
+            ),
+            Some(vec![0])
+        );
+        assert_eq!(fm.fullscreen_state(), Some((project_id, original)));
+
+        children.push(api_terminal("command"));
+        assert_eq!(
+            sync_and_read_focus(
+                &workspace,
+                &mut fm,
+                cx,
+                ApiLayoutNode::Tabs {
+                    children,
+                    active_tab: 1
+                },
+            ),
+            Some(vec![2])
+        );
+        assert_eq!(
+            fm.fullscreen_state(),
+            Some((project_id, "remote:c1:command"))
+        );
+
+        // The next reply arrives after its layout: focus applies immediately.
+        workspace.update(cx, |ws, cx| {
+            ws.request_terminal_focus(
+                &mut fm,
+                WindowId::Main,
+                project_id.into(),
+                "remote:c1:other-client".into(),
+                cx,
+            );
+        });
+        assert_eq!(
+            fm.fullscreen_state(),
+            Some((project_id, "remote:c1:other-client"))
+        );
     }
 
     #[gpui::test]

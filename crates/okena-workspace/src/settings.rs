@@ -533,6 +533,8 @@ pub struct StartPageButton {
     pub name: String,
     pub command: String,
     pub shell: Option<okena_core::shell::ShellType>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shortcut: Option<String>,
 }
 
 /// App settings (persisted separately from workspace)

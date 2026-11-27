@@ -433,6 +433,7 @@ pub struct OverlayManager {
     workspace: Entity<Workspace>,
     pub(crate) focus_manager: Entity<crate::workspace::focus::FocusManager>,
     request_broker: Entity<RequestBroker>,
+    settings_remote_manager: Option<Entity<RemoteConnectionManager>>,
 
     /// The single active modal overlay (only one can be open at a time).
     active_modal: Option<AnyView>,
@@ -481,6 +482,7 @@ impl OverlayManager {
             workspace,
             focus_manager,
             request_broker,
+            settings_remote_manager: None,
             active_modal: None,
             modal_type_id: None,
             modal_owner: None,
@@ -814,6 +816,10 @@ impl OverlayManager {
         });
     }
 
+    pub(super) fn set_settings_remote_manager(&mut self, manager: Entity<RemoteConnectionManager>) {
+        self.settings_remote_manager = Some(manager);
+    }
+
     /// Toggle settings panel overlay.
     pub fn toggle_settings_panel(
         &mut self,
@@ -824,7 +830,9 @@ impl OverlayManager {
             self.close_modal(cx);
         } else {
             let workspace = self.workspace.clone();
-            let entity = cx.new(|cx| SettingsPanel::new(workspace, daemon_endpoint, cx));
+            let remote_manager = self.settings_remote_manager.clone();
+            let entity =
+                cx.new(|cx| SettingsPanel::new(workspace, daemon_endpoint, remote_manager, cx));
             self.subscribe_settings_panel(&entity, cx);
             self.open_modal(entity, cx);
         }
@@ -836,8 +844,9 @@ impl OverlayManager {
         cx: &mut Context<Self>,
     ) {
         let workspace = self.workspace.clone();
+        let remote_manager = self.settings_remote_manager.clone();
         let entity = cx.new(|cx| {
-            let mut panel = SettingsPanel::new(workspace, daemon_endpoint, cx);
+            let mut panel = SettingsPanel::new(workspace, daemon_endpoint, remote_manager, cx);
             panel.show_updater(cx);
             panel
         });
@@ -912,8 +921,16 @@ impl OverlayManager {
         cx: &mut Context<Self>,
     ) {
         let workspace = self.workspace.clone();
-        let entity =
-            cx.new(|cx| SettingsPanel::new_for_project(workspace, project_id, daemon_endpoint, cx));
+        let remote_manager = self.settings_remote_manager.clone();
+        let entity = cx.new(|cx| {
+            SettingsPanel::new_for_project(
+                workspace,
+                project_id,
+                daemon_endpoint,
+                remote_manager,
+                cx,
+            )
+        });
         self.subscribe_settings_panel(&entity, cx);
         self.open_modal(entity, cx);
     }

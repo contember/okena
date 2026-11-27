@@ -5,12 +5,15 @@
 // more than it clarifies here.
 #![allow(clippy::too_many_arguments)]
 
-use super::{ActionResult, spawn_uninitialized_terminals};
+use super::{
+    ActionResult, ProjectTerminalLaunch, register_spawned_terminal, spawn_uninitialized_terminals,
+};
 use crate::workspace::focus::FocusManager;
 use crate::workspace::persistence::AppSettings;
-use crate::workspace::state::{DropZone, Workspace};
+use crate::workspace::state::{DropZone, LayoutNode, WindowId, Workspace};
 use okena_terminal::TerminalsRegistry;
 use okena_terminal::backend::TerminalBackend;
+use okena_terminal::shell_config::ShellType;
 use okena_workspace::context::WorkspaceCx;
 
 pub(super) fn add_tab(
@@ -54,6 +57,71 @@ pub(super) fn add_tab(
         inherit_cwd,
         cx,
     )
+}
+
+pub(super) fn add_command_tab(
+    ws: &mut Workspace,
+    window_id: WindowId,
+    focus_manager: &mut FocusManager,
+    project_id: &str,
+    source_id: &str,
+    shell: ShellType,
+    command: &str,
+    backend: &dyn TerminalBackend,
+    terminals: &TerminalsRegistry,
+    settings: &AppSettings,
+    cx: &mut impl WorkspaceCx,
+) -> ActionResult {
+    if command.trim().is_empty() {
+        return ActionResult::Err("command must not be empty".to_owned());
+    }
+    let Some(project) = ws.project(project_id) else {
+        return ActionResult::Err(format!("project not found: {project_id}"));
+    };
+    let source = project.layout.as_ref().and_then(|layout| {
+        let path = layout.find_terminal_path(source_id)?;
+        match layout.get_at_path(&path)? {
+            LayoutNode::Terminal {
+                terminal_id: Some(_),
+                start_page: None,
+                ..
+            } => Some(path),
+            _ => None,
+        }
+    });
+    let Some(path) = source.filter(|_| {
+        terminals.lock().contains_key(source_id) && backend.has_live_terminal(source_id)
+    }) else {
+        return ActionResult::Err(format!(
+            "source terminal is not running in this project: {source_id}"
+        ));
+    };
+    let cwd = super::inherited_cwd(ws, terminals, project_id, &path)
+        .unwrap_or_else(|| project.path.clone());
+    let launch = ProjectTerminalLaunch::new(ws, project, settings);
+    let plan = launch.plan(shell.clone(), &settings.default_shell, Some(command));
+
+    // Publish the new tab only after its command shell has started.
+    let terminal_id = match backend.create_terminal_with_plan(&cwd, &plan) {
+        Ok(terminal_id) => terminal_id,
+        Err(error) => {
+            log::error!("Failed to spawn command tab for project {project_id}: {error}");
+            return ActionResult::Err(format!("failed to spawn terminal: {error}"));
+        }
+    };
+    register_spawned_terminal(terminals, backend, &terminal_id, &cwd);
+    let leaf = LayoutNode::Terminal {
+        terminal_id: Some(terminal_id.clone()),
+        start_page: None,
+        pending_agent_resume: None,
+        minimized: false,
+        detached: false,
+        shell_type: shell,
+        zoom_level: 1.0,
+    };
+    ws.add_tab_with_leaf(focus_manager, project_id, &path, leaf, cx);
+    ws.focus_terminal_by_id(focus_manager, window_id, project_id, &terminal_id, cx);
+    ActionResult::Ok(Some(serde_json::json!({ "terminal_ids": [terminal_id] })))
 }
 
 pub(super) fn set_active_tab(

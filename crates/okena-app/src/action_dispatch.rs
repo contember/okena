@@ -9,7 +9,7 @@ use crate::workspace::focus::FocusManager;
 use crate::workspace::state::{ProjectLayoutMode, WindowId, Workspace};
 
 use okena_core::api::ActionRequest;
-use okena_transport::client::strip_prefix;
+use okena_transport::client::{make_prefixed_id, strip_prefix};
 
 use gpui::{AppContext, Entity};
 
@@ -153,6 +153,57 @@ impl ActionDispatcher {
             ..
         } = self;
         manager.read(cx).supports_start_page(connection_id)
+    }
+
+    fn dispatch_command_tab(
+        &self,
+        action: ActionRequest,
+        project_id: String,
+        cx: &mut impl AppContext,
+    ) {
+        let Self::Remote {
+            connection_id,
+            manager,
+            workspace,
+            focus_manager,
+            window_id,
+        } = self;
+        let action = strip_remote_ids(action, connection_id);
+        let connection_id = connection_id.clone();
+        let focus_manager = focus_manager.downgrade();
+        let workspace = workspace.downgrade();
+        let window_id = *window_id;
+        manager.update(cx, |manager, cx| {
+            if !manager.supports_command_tabs(&connection_id) {
+                crate::workspace::toast::ToastManager::error(
+                    "Command tabs are unavailable on this daemon",
+                    cx,
+                );
+                return;
+            }
+            let result = manager.send_action_with_result(&connection_id, action, cx);
+            cx.spawn(async move |_, cx| {
+                let Ok(value) = result.await else {
+                    return;
+                };
+                let Some(terminal_id) = value
+                    .get("terminal_ids")
+                    .and_then(|ids| ids.get(0))
+                    .and_then(serde_json::Value::as_str)
+                else {
+                    log::error!("Command tab action returned no terminal ID");
+                    return;
+                };
+                let terminal_id = make_prefixed_id(&connection_id, terminal_id);
+                let _ = focus_manager.update(cx, |fm, cx| {
+                    let _ = workspace.update(cx, |ws, cx| {
+                        ws.request_terminal_focus(fm, window_id, project_id, terminal_id, cx);
+                    });
+                    cx.notify();
+                });
+            })
+            .detach();
+        });
     }
 
     fn queue_focus_for_next_remote_terminal(
@@ -327,6 +378,10 @@ impl ActionDispatcher {
                     cx,
                 );
                 // Don't return — the daemon still performs the close
+            }
+            ActionRequest::AddCommandTab { project_id, .. } => {
+                self.dispatch_command_tab(action.clone(), project_id.clone(), cx);
+                return;
             }
             ActionRequest::CreateTerminal { project_id, .. }
             | ActionRequest::LaunchStartPage { project_id, .. } => {
@@ -520,6 +575,10 @@ impl ActionDispatcher {
 impl okena_views_terminal::ActionDispatch for ActionDispatcher {
     fn dispatch(&self, action: ActionRequest, cx: &mut gpui::App) {
         self.dispatch(action, cx);
+    }
+
+    fn start_page_shortcut_label(&self, shortcut: &str, cx: &gpui::App) -> Option<String> {
+        crate::keybindings::start_page_shortcut_label(shortcut, cx)
     }
 
     fn shares_local_filesystem(&self) -> bool {
@@ -792,6 +851,17 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
             project_id: s(&project_id),
             path,
             in_group,
+        },
+        ActionRequest::AddCommandTab {
+            project_id,
+            terminal_id,
+            shell,
+            command,
+        } => ActionRequest::AddCommandTab {
+            project_id: s(&project_id),
+            terminal_id: s(&terminal_id),
+            shell,
+            command,
         },
         ActionRequest::SetActiveTab {
             project_id,

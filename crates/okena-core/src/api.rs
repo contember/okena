@@ -43,6 +43,9 @@ pub struct StateResponse {
     /// Whether this daemon accepts Start Page creation and launch actions.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub supports_start_page: bool,
+    /// Whether this daemon supports running a command in a new tab.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub supports_command_tabs: bool,
     pub projects: Vec<ApiProject>,
     pub focused_project_id: Option<String>,
     pub fullscreen_terminal: Option<ApiFullscreen>,
@@ -1024,6 +1027,14 @@ pub enum ActionRequest {
         path: Vec<usize>,
         in_group: bool,
     },
+    /// Launch a command in a new tab alongside an existing running pane.
+    AddCommandTab {
+        project_id: String,
+        /// The source terminal whose current directory and tab group are used.
+        terminal_id: String,
+        shell: ShellType,
+        command: String,
+    },
     SetActiveTab {
         project_id: String,
         path: Vec<usize>,
@@ -1829,6 +1840,7 @@ mod tests {
         let resp = StateResponse {
             state_version: 42,
             supports_start_page: false,
+            supports_command_tabs: false,
             projects: vec![ApiProject {
                 id: "p1".into(),
                 name: "Test".into(),
@@ -2030,6 +2042,7 @@ mod tests {
         .unwrap();
         assert_eq!(state.claude_pr_links["t1"][0].number, 7);
         assert!(!state.supports_start_page);
+        assert!(!state.supports_command_tabs);
 
         let empty = StateResponse {
             claude_pr_links: Default::default(),
@@ -2038,6 +2051,7 @@ mod tests {
         };
         let json = serde_json::to_value(&empty).unwrap();
         assert!(json.get("claude_pr_links").is_none());
+        assert!(json.get("supports_command_tabs").is_none());
     }
 
     #[test]
@@ -2228,6 +2242,12 @@ mod tests {
                 project_id: "p1".into(),
                 path: vec![0, 1],
                 in_group: true,
+            },
+            ActionRequest::AddCommandTab {
+                project_id: "p1".into(),
+                terminal_id: "t1".into(),
+                shell: ShellType::Default,
+                command: "echo hello".into(),
             },
             ActionRequest::SetActiveTab {
                 project_id: "p1".into(),

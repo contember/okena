@@ -21,7 +21,7 @@ mod terminal_batch;
 use crate::workspace::focus::FocusManager;
 use crate::workspace::hooks;
 use crate::workspace::persistence::AppSettings;
-use crate::workspace::state::{LayoutNode, WindowId, Workspace};
+use crate::workspace::state::{LayoutNode, ProjectData, WindowId, Workspace};
 use okena_core::api::{ActionRequest, CommandResult};
 use okena_terminal::TerminalsRegistry;
 use okena_terminal::backend::{TerminalBackend, TerminalLaunchPlan};
@@ -296,6 +296,24 @@ pub fn execute_action(
             path,
             in_group,
             start_page,
+            backend,
+            terminals,
+            settings,
+            cx,
+        ),
+        ActionRequest::AddCommandTab {
+            project_id,
+            terminal_id,
+            shell,
+            command,
+        } => tab::add_command_tab(
+            ws,
+            window_id,
+            focus_manager,
+            &project_id,
+            &terminal_id,
+            shell,
+            &command,
             backend,
             terminals,
             settings,
@@ -855,6 +873,81 @@ fn effective_terminal_launch(
     hooks::terminal_launch_plan(shell, shell_wrapper, composed.as_deref(), env)
 }
 
+/// Project hook and shell inputs shared by new terminals and runtime recovery.
+struct ProjectTerminalLaunch {
+    project_default_shell: Option<ShellType>,
+    shell_wrapper: Option<String>,
+    on_create: Option<String>,
+    env: HashMap<String, String>,
+    root_project_id: String,
+}
+
+impl ProjectTerminalLaunch {
+    fn new(ws: &Workspace, project: &ProjectData, settings: &AppSettings) -> Self {
+        let parent_hooks = project
+            .worktree_info
+            .as_ref()
+            .and_then(|worktree| ws.project(&worktree.parent_project_id))
+            .map(|parent| &parent.hooks);
+        let folder = ws.folder_for_project_or_parent(&project.id);
+        Self {
+            project_default_shell: project.default_shell.clone(),
+            shell_wrapper: hooks::resolve_shell_wrapper(
+                &project.hooks,
+                parent_hooks,
+                &settings.hooks,
+            ),
+            on_create: hooks::resolve_terminal_on_create_simple(
+                &project.hooks,
+                parent_hooks,
+                &settings.hooks,
+            ),
+            env: hooks::terminal_hook_env(
+                &project.id,
+                &project.name,
+                &project.path,
+                project.worktree_info.is_some(),
+                folder.map(|folder| folder.id.as_str()),
+                folder.map(|folder| folder.name.as_str()),
+            ),
+            root_project_id: project.root_project_id().to_owned(),
+        }
+    }
+
+    fn plan(
+        &self,
+        shell: ShellType,
+        global_default_shell: &ShellType,
+        startup_command: Option<&str>,
+    ) -> TerminalLaunchPlan {
+        effective_terminal_launch(
+            shell,
+            self.project_default_shell.as_ref(),
+            global_default_shell,
+            self.shell_wrapper.as_deref(),
+            self.on_create.as_deref(),
+            startup_command,
+            &self.env,
+        )
+        .for_project(&self.root_project_id)
+    }
+}
+
+fn register_spawned_terminal(
+    terminals: &TerminalsRegistry,
+    backend: &dyn TerminalBackend,
+    terminal_id: &str,
+    cwd: &str,
+) {
+    let terminal = Arc::new(Terminal::new(
+        terminal_id.to_owned(),
+        TerminalSize::default(),
+        backend.transport(),
+        cwd.to_owned(),
+    ));
+    terminals.lock().insert(terminal_id.to_owned(), terminal);
+}
+
 /// Reserve IDs and launch plans for runtime-recovery slots without touching the backend.
 pub fn reserve_uninitialized_terminal_launches(
     ws: &mut Workspace,
@@ -868,54 +961,20 @@ pub fn reserve_uninitialized_terminal_launches(
             .project(project_id)
             .ok_or_else(|| format!("project not found: {project_id}"))?;
         let project_path = project.path.clone();
-        let project_name = project.name.clone();
-        let project_hooks = project.hooks.clone();
-        let root_project_id = project.root_project_id().to_owned();
-        let is_worktree = project.worktree_info.is_some();
-        let parent_hooks = project
-            .worktree_info
-            .as_ref()
-            .and_then(|worktree| ws.project(&worktree.parent_project_id))
-            .map(|parent| parent.hooks.clone());
-        let project_default_shell = project.default_shell.clone();
+        let launch = ProjectTerminalLaunch::new(ws, project, settings);
         let mut uninitialized = Vec::new();
         if let Some(layout) = &project.layout {
             collect_uninitialized_terminals_with_shell(layout, Vec::new(), &mut uninitialized);
         }
-        let shell_wrapper =
-            hooks::resolve_shell_wrapper(&project_hooks, parent_hooks.as_ref(), &settings.hooks);
-        let on_create = hooks::resolve_terminal_on_create_simple(
-            &project_hooks,
-            parent_hooks.as_ref(),
-            &settings.hooks,
-        );
-        let folder = ws.folder_for_project_or_parent(project_id);
-        let env = hooks::terminal_hook_env(
-            project_id,
-            &project_name,
-            &project_path,
-            is_worktree,
-            folder.map(|folder| folder.id.as_str()),
-            folder.map(|folder| folder.name.as_str()),
-        );
         for (path, shell_type) in uninitialized {
             launches.push(PreparedTerminalLaunch::new(
                 project_id.clone(),
                 path,
                 uuid::Uuid::new_v4().to_string(),
                 project_path.clone(),
-                effective_terminal_launch(
-                    shell_type,
-                    project_default_shell.as_ref(),
-                    &settings.default_shell,
-                    shell_wrapper.as_deref(),
-                    on_create.as_deref(),
-                    // Recovery re-launches panes that already hold live ids, so
-                    // no restore-time resume is queued for them.
-                    None,
-                    &env,
-                )
-                .for_project(&root_project_id),
+                // Recovery re-launches panes that already hold live ids, so
+                // no restore-time resume is queued for them.
+                launch.plan(shell_type, &settings.default_shell, None),
             ));
         }
     }
@@ -1050,20 +1109,10 @@ fn spawn_terminals(
         None => return ActionResult::Err(format!("project not found: {}", project_id)),
     };
 
-    let project_path = project.path.clone();
     // The directory new PTYs actually spawn in: the inherited (source-terminal)
     // cwd when provided, else the project path.
-    let spawn_cwd = inherit_cwd.unwrap_or_else(|| project_path.clone());
-    let project_name = project.name.clone();
-    let project_hooks = project.hooks.clone();
-    let root_project_id = project.root_project_id().to_owned();
-    let is_worktree = project.worktree_info.is_some();
-    let parent_hooks = project
-        .worktree_info
-        .as_ref()
-        .and_then(|wt| ws.project(&wt.parent_project_id))
-        .map(|p| p.hooks.clone());
-    let project_default_shell = project.default_shell.clone();
+    let spawn_cwd = inherit_cwd.unwrap_or_else(|| project.path.clone());
+    let launch = ProjectTerminalLaunch::new(ws, project, settings);
     let mut uninitialized = Vec::new();
     if let Some(choice) = &selection {
         uninitialized.push((choice.path.clone(), choice.shell.clone()));
@@ -1076,29 +1125,7 @@ fn spawn_terminals(
         uninitialized.len()
     );
 
-    let global_default = settings.default_shell.clone();
-    let global_hooks = settings.hooks.clone();
     let auto_resume = settings.auto_resume_agent_sessions;
-
-    // Resolve shell_wrapper and on_create once for all terminals in this project
-    let shell_wrapper =
-        hooks::resolve_shell_wrapper(&project_hooks, parent_hooks.as_ref(), &global_hooks);
-    let on_create_cmd = hooks::resolve_terminal_on_create_simple(
-        &project_hooks,
-        parent_hooks.as_ref(),
-        &global_hooks,
-    );
-    let folder = ws.folder_for_project_or_parent(project_id);
-    let folder_id = folder.map(|f| f.id.as_str());
-    let folder_name = folder.map(|f| f.name.as_str());
-    let env = hooks::terminal_hook_env(
-        project_id,
-        &project_name,
-        &project_path,
-        is_worktree,
-        folder_id,
-        folder_name,
-    );
 
     let mut spawned_ids = Vec::new();
     for (path, shell_type) in uninitialized {
@@ -1125,16 +1152,7 @@ fn spawn_terminals(
             .as_ref()
             .and_then(|choice| choice.command.as_deref())
             .or(resume_command.as_deref());
-        let plan = effective_terminal_launch(
-            shell_type,
-            project_default_shell.as_ref(),
-            &global_default,
-            shell_wrapper.as_deref(),
-            on_create_cmd.as_deref(),
-            startup_command,
-            &env,
-        )
-        .for_project(&root_project_id);
+        let plan = launch.plan(shell_type, &settings.default_shell, startup_command);
 
         match backend.create_terminal_with_plan(&spawn_cwd, &plan) {
             Ok(terminal_id) => {
@@ -1153,14 +1171,7 @@ fn spawn_terminals(
                 if let Some(session) = pending_session {
                     ws.set_agent_session(project_id, &terminal_id, session, cx);
                 }
-                let terminal = Arc::new(Terminal::new(
-                    terminal_id.clone(),
-                    TerminalSize::default(),
-                    backend.transport(),
-                    spawn_cwd.clone(),
-                ));
-
-                terminals.lock().insert(terminal_id.clone(), terminal);
+                register_spawned_terminal(terminals, backend, &terminal_id, &spawn_cwd);
                 spawned_ids.push(terminal_id);
             }
             Err(e) => {
@@ -1403,6 +1414,7 @@ mod reconnect_shell_tests {
         observed_registry: Option<TerminalsRegistry>,
         registered_at_reconnect: Mutex<Vec<bool>>,
         fail_next_reconnect: std::sync::atomic::AtomicBool,
+        live_source: std::sync::atomic::AtomicBool,
     }
 
     impl TerminalBackend for RecordingBackend {
@@ -1506,6 +1518,9 @@ mod reconnect_shell_tests {
         fn get_shell_pid(&self, _terminal_id: &str) -> Option<u32> {
             None
         }
+        fn has_live_terminal(&self, terminal_id: &str) -> bool {
+            terminal_id == "source" && self.live_source.load(std::sync::atomic::Ordering::Relaxed)
+        }
         fn get_service_pids(&self, _terminal_id: &str) -> Vec<u32> {
             Vec::new()
         }
@@ -1522,6 +1537,109 @@ mod reconnect_shell_tests {
         fn hook_monitor(&self) -> Option<crate::workspace::hook_monitor::HookMonitor> {
             None
         }
+    }
+
+    #[test]
+    fn command_tab_preserves_source_and_reveals_only_a_successful_launch() {
+        use super::{ActionRequest, ActionResult, WindowId, execute_action};
+        use crate::workspace::focus::FocusManager;
+        use std::sync::atomic::Ordering;
+
+        let mut ws = workspace_with_terminal(ShellType::Default, None, Some("source"), None);
+        let terminals: TerminalsRegistry = Arc::new(Default::default());
+        let backend = RecordingBackend::default();
+        terminals.lock().insert(
+            "source".into(),
+            Arc::new(okena_terminal::terminal::Terminal::new(
+                "source".into(),
+                Default::default(),
+                backend.transport(),
+                "/project/source-cwd".into(),
+            )),
+        );
+        let mut focus = FocusManager::default();
+        focus.enter_fullscreen("project".into(), vec![], "source".into());
+        let mut settings = AppSettings::default();
+        settings.hooks.terminal.on_create = Some("echo hook".into());
+        #[cfg(windows)]
+        let shell = ShellType::Cmd;
+        #[cfg(not(windows))]
+        let shell = ShellType::Custom {
+            path: "/bin/sh".into(),
+            args: vec![],
+        };
+        let command_tab = |project_id: &str, source_id: &str| ActionRequest::AddCommandTab {
+            project_id: project_id.into(),
+            terminal_id: source_id.into(),
+            shell: shell.clone(),
+            command: "my-alias --check".into(),
+        };
+        let run = |request, ws: &mut Workspace, focus: &mut FocusManager| {
+            execute_action(
+                request,
+                ws,
+                WindowId::Main,
+                focus,
+                &backend,
+                &terminals,
+                &settings,
+                &mut TestCx,
+            )
+        };
+        let original = ws.project("project").unwrap().layout.clone();
+        // A layout entry with a registry model but no live PTY is stale too.
+        assert!(matches!(
+            run(command_tab("project", "source"), &mut ws, &mut focus),
+            ActionResult::Err(_)
+        ));
+        backend.live_source.store(true, Ordering::Relaxed);
+        for action in [
+            command_tab("project", "closed"),
+            command_tab("other", "source"),
+        ] {
+            assert!(matches!(
+                run(action, &mut ws, &mut focus),
+                ActionResult::Err(_)
+            ));
+        }
+        assert!(backend.plans.lock().unwrap().is_empty());
+
+        backend.fail_next_spawn.store(true, Ordering::Relaxed);
+        assert!(matches!(
+            run(command_tab("project", "source"), &mut ws, &mut focus),
+            ActionResult::Err(_)
+        ));
+        assert_eq!(ws.project("project").unwrap().layout, original);
+        assert_eq!(focus.fullscreen_state(), Some(("project", "source")));
+        assert_eq!(terminals.lock().len(), 1);
+        assert_eq!(backend.plans.lock().unwrap().len(), 1);
+        assert!(backend.created_shells.lock().unwrap().is_empty());
+
+        let launch = |ws: &mut Workspace, focus: &mut FocusManager| {
+            let ActionResult::Ok(Some(result)) = run(command_tab("project", "source"), ws, focus)
+            else {
+                panic!("command tab did not launch");
+            };
+            result["terminal_ids"][0].as_str().unwrap().to_owned()
+        };
+        let first = launch(&mut ws, &mut focus);
+        let second = launch(&mut ws, &mut focus);
+        let layout = ws.project("project").unwrap().layout.as_ref().unwrap();
+        assert_eq!(layout.find_terminal_path("source"), Some(vec![0]));
+        assert_eq!(layout.find_terminal_path(&first), Some(vec![1]));
+        assert_eq!(layout.find_terminal_path(&second), Some(vec![2]));
+        assert_eq!(layout.find_visible_terminal_path(), vec![2]);
+        assert_eq!(focus.fullscreen_state(), Some(("project", second.as_str())));
+        assert!(terminals.lock().contains_key(&second));
+        assert_eq!(
+            backend.spawn_cwds.lock().unwrap().last().unwrap(),
+            "/project/source-cwd"
+        );
+        let plan = backend.plans.lock().unwrap().last().unwrap().clone();
+        assert_eq!(plan.route, shell);
+        let body = plan.initial_command.unwrap().args.join(" ");
+        assert!(body.find("echo hook").unwrap() < body.find("my-alias --check").unwrap());
+        assert!(backend.input_transport.input.lock().unwrap().is_empty());
     }
 
     #[test]

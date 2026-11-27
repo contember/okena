@@ -31,6 +31,11 @@ pub trait ActionDispatch: Clone + 'static {
     /// Dispatch a standard action.
     fn dispatch(&self, action: ActionRequest, cx: &mut gpui::App);
 
+    /// Read a configured command's registered client-local shortcut for its tooltip.
+    fn start_page_shortcut_label(&self, _shortcut: &str, _cx: &gpui::App) -> Option<String> {
+        None
+    }
+
     /// Whether the client and daemon see the same local filesystem.
     fn shares_local_filesystem(&self) -> bool;
 

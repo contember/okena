@@ -30,6 +30,8 @@ pub struct RemoteSyncState {
     /// originating window and project ID are recorded here. On that window's
     /// next sync, we detect the new terminal and focus it in the same window.
     pending_focus: HashMap<WindowId, HashMap<String, Vec<String>>>,
+    /// Confirmed launches awaiting their exact terminal in a window's snapshot.
+    requested_terminal_focus: HashMap<WindowId, PendingTerminalFocus>,
     /// Where each window's focus should land once the daemon confirms a close.
     ///
     /// Closing is a daemon round-trip: the client sends the action, the daemon
@@ -70,6 +72,13 @@ pub struct PendingRemoteFocus {
     pub old_terminal_ids: Vec<String>,
 }
 
+#[derive(Debug)]
+pub(crate) struct PendingTerminalFocus {
+    pub project_id: String,
+    pub terminal_id: String,
+    attempts: u8,
+}
+
 /// A window's focus intent for an in-flight close.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PendingCloseFocus {
@@ -86,10 +95,9 @@ pub struct PendingCloseFocus {
     attempts: u8,
 }
 
-/// Give up on an unresolved close intent after this many syncs. Generous: a
-/// sync fires on every remote-manager notification, not just the one carrying
-/// the close.
-const MAX_CLOSE_FOCUS_ATTEMPTS: u8 = 50;
+/// Give up on unresolved focus intents after this many attempts. A sync can
+/// fire on any remote-manager notification before the target layout arrives.
+const MAX_REMOTE_FOCUS_ATTEMPTS: u8 = 50;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct PendingRemoteProjectVisibility {
@@ -135,6 +143,40 @@ impl RemoteSyncState {
             .unwrap_or_default()
     }
 
+    pub(crate) fn queue_requested_terminal_focus(
+        &mut self,
+        window_id: WindowId,
+        project_id: String,
+        terminal_id: String,
+    ) {
+        self.requested_terminal_focus.insert(
+            window_id,
+            PendingTerminalFocus {
+                project_id,
+                terminal_id,
+                attempts: 0,
+            },
+        );
+    }
+
+    pub(crate) fn retry_requested_terminal_focus(
+        &mut self,
+        window_id: WindowId,
+        mut request: PendingTerminalFocus,
+    ) {
+        request.attempts += 1;
+        if request.attempts < MAX_REMOTE_FOCUS_ATTEMPTS {
+            self.requested_terminal_focus.insert(window_id, request);
+        }
+    }
+
+    pub(crate) fn take_requested_terminal_focus(
+        &mut self,
+        window_id: WindowId,
+    ) -> Option<PendingTerminalFocus> {
+        self.requested_terminal_focus.remove(&window_id)
+    }
+
     // === pending close focus ===
 
     pub fn queue_close_focus(
@@ -164,7 +206,7 @@ impl RemoteSyncState {
     /// close yet. Dropped once it has waited too long.
     pub fn retry_close_focus(&mut self, window_id: WindowId, mut pending: PendingCloseFocus) {
         pending.attempts += 1;
-        if pending.attempts < MAX_CLOSE_FOCUS_ATTEMPTS {
+        if pending.attempts < MAX_REMOTE_FOCUS_ATTEMPTS {
             self.pending_close_focus.insert(window_id, pending);
         }
     }
@@ -323,6 +365,8 @@ impl RemoteSyncState {
     pub fn remove_project(&mut self, project_id: &str) {
         self.snapshots.remove(project_id);
         self.preserved_project_layouts.remove(project_id);
+        self.requested_terminal_focus
+            .retain(|_, request| request.project_id != project_id);
         for projects in self.pending_focus.values_mut() {
             projects.remove(project_id);
         }
@@ -374,6 +418,8 @@ impl RemoteSyncState {
 
     /// Remove all cached remote state whose project ID starts with the prefix.
     pub fn retain_not_starting_with(&mut self, prefix: &str) -> Vec<String> {
+        self.requested_terminal_focus
+            .retain(|_, request| !request.project_id.starts_with(prefix));
         self.requested_fullscreen
             .retain(|_, request| !request.project_id.starts_with(prefix));
         let mut removed: HashSet<String> = self
@@ -448,6 +494,20 @@ mod tests {
                 old_terminal_ids: vec!["t2".to_string()],
             }]
         );
+    }
+
+    #[test]
+    fn requested_terminal_focus_expires_after_repeated_misses() {
+        let window = WindowId::Extra(Uuid::new_v4());
+        let mut sync = RemoteSyncState::new();
+
+        sync.queue_requested_terminal_focus(window, "remote:a:p1".into(), "remote:a:t1".into());
+        for _ in 0..MAX_REMOTE_FOCUS_ATTEMPTS {
+            let request = sync.take_requested_terminal_focus(window).unwrap();
+            assert_eq!(request.terminal_id, "remote:a:t1");
+            sync.retry_requested_terminal_focus(window, request);
+        }
+        assert!(sync.take_requested_terminal_focus(window).is_none());
     }
 
     #[test]

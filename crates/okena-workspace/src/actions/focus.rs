@@ -251,6 +251,53 @@ impl Workspace {
         }
     }
 
+    /// Focus a confirmed launch when its ID reaches this window's layout mirror.
+    pub fn request_terminal_focus(
+        &mut self,
+        focus_manager: &mut FocusManager,
+        window_id: WindowId,
+        project_id: String,
+        terminal_id: String,
+        cx: &mut impl WorkspaceCx,
+    ) {
+        self.remote_sync
+            .queue_requested_terminal_focus(window_id, project_id, terminal_id);
+        self.apply_requested_terminal_focus(focus_manager, window_id, cx);
+    }
+
+    pub(crate) fn apply_requested_terminal_focus(
+        &mut self,
+        focus_manager: &mut FocusManager,
+        window_id: WindowId,
+        cx: &mut impl WorkspaceCx,
+    ) {
+        let Some(request) = self.remote_sync.take_requested_terminal_focus(window_id) else {
+            return;
+        };
+        if self.data().window(window_id).is_none() {
+            return;
+        }
+        let Some(project) = self.project(&request.project_id) else {
+            return;
+        };
+        let known = project
+            .layout
+            .as_ref()
+            .is_some_and(|layout| layout.find_terminal_path(&request.terminal_id).is_some());
+        if known {
+            self.focus_terminal_by_id(
+                focus_manager,
+                window_id,
+                &request.project_id,
+                &request.terminal_id,
+                cx,
+            );
+        } else {
+            self.remote_sync
+                .retry_requested_terminal_focus(window_id, request);
+        }
+    }
+
     /// Set focused terminal (for visual indicator)
     ///
     /// Focus events propagate: terminal focus -> pane focus -> project awareness
