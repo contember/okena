@@ -133,10 +133,16 @@ impl DiffViewer {
     }
 
     pub(super) fn toggle_view_mode(&mut self, cx: &mut Context<Self>) {
+        let top_row = self.wrapped_list.logical_scroll_top().item_ix;
+        let shown_mode = self.effective_view_mode();
         self.view_mode = self.view_mode.toggle();
         self.selection.clear();
         self.selection_side = None;
         self.update_side_by_side_cache();
+        // Rows differ between layouts, so measured heights are stale even when the count matches.
+        if self.effective_view_mode() != shown_mode {
+            self.reset_wrapped_list(self.row_count(), row_top(top_row));
+        }
         // Persist through ExtensionSettingsStore
         let mut gs = git_settings(cx);
         gs.diff_view_mode = self.view_mode;
@@ -147,6 +153,50 @@ impl DiffViewer {
     pub(super) fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
         self.sidebar_visible = !self.sidebar_visible;
         cx.notify();
+    }
+
+    pub(super) fn toggle_line_wrap(&mut self, cx: &mut Context<Self>) {
+        if self.wrap_lines {
+            self.scroll_handle.scroll_to_item(
+                self.wrapped_list.logical_scroll_top().item_ix,
+                ScrollStrategy::Top,
+            );
+        } else {
+            let offset_y = f32::from(self.scroll_handle.0.borrow().base_handle.offset().y);
+            let top_row = first_visible_row(offset_y, self.line_height());
+            self.reset_wrapped_list(self.row_count(), row_top(top_row));
+        }
+        self.wrap_lines = !self.wrap_lines;
+        self.scroll_x = 0.0;
+        self.scrollbar_drag = None;
+        self.h_scrollbar_drag = None;
+
+        let mut gs = git_settings(cx);
+        gs.diff_wrap_lines = self.wrap_lines;
+        set_git_settings(&gs, cx);
+        cx.notify();
+    }
+
+    /// Rows of the current file in the effective layout.
+    pub(super) fn row_count(&self) -> usize {
+        match self.effective_view_mode() {
+            DiffViewMode::Unified => self
+                .current_file
+                .as_ref()
+                .map_or(0, |file| file.items.len()),
+            DiffViewMode::SideBySide => self.side_by_side_lines.len(),
+        }
+    }
+
+    /// Rebuilds the wrapped list for `count` rows, scrolled to `top` (clamped to the last row).
+    pub(super) fn reset_wrapped_list(&self, count: usize, top: ListOffset) {
+        self.wrapped_list.reset(count);
+        let last = count.saturating_sub(1);
+        self.wrapped_list.scroll_to(if top.item_ix > last {
+            row_top(last)
+        } else {
+            top
+        });
     }
 
     pub(super) fn toggle_ignore_whitespace(&mut self, cx: &mut Context<Self>) {
@@ -376,10 +426,26 @@ impl DiffViewer {
     }
 }
 
+fn row_top(item_ix: usize) -> ListOffset {
+    ListOffset {
+        item_ix,
+        offset_in_item: px(0.0),
+    }
+}
+
+/// Row at the top of a uniform-height list scrolled to `offset_y` (zero or negative).
+fn first_visible_row(offset_y: f32, row_height: f32) -> usize {
+    if row_height <= 0.0 {
+        return 0;
+    }
+    (-offset_y / row_height).max(0.0) as usize
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        RevisionTarget, history_starts_at_head, newer_revision_target, older_revision_target,
+        RevisionTarget, first_visible_row, history_starts_at_head, newer_revision_target,
+        older_revision_target,
     };
     use okena_git::CommitLogEntry;
 
@@ -431,5 +497,16 @@ mod tests {
             Some(RevisionTarget::Commit(2))
         );
         assert_eq!(older_revision_target(false, 2, 3, false), None);
+    }
+
+    #[test]
+    fn first_visible_row_counts_whole_rows_scrolled_past() {
+        assert_eq!(first_visible_row(0.0, 20.0), 0);
+        assert_eq!(first_visible_row(-19.9, 20.0), 0);
+        assert_eq!(first_visible_row(-20.0, 20.0), 1);
+        assert_eq!(first_visible_row(-250.0, 20.0), 12);
+        // Overscroll past the top and an unmeasured row height never go negative.
+        assert_eq!(first_visible_row(15.0, 20.0), 0);
+        assert_eq!(first_visible_row(-250.0, 0.0), 0);
     }
 }

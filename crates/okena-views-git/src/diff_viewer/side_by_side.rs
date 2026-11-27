@@ -258,7 +258,8 @@ impl DiffViewer {
         div()
             .id(ElementId::Name(format!("sbs-line-{}", idx).into()))
             .w_full()
-            .h(px(line_height))
+            .when(self.wrap_lines, |d| d.min_h(px(line_height)))
+            .when(!self.wrap_lines, |d| d.h(px(line_height)))
             .text_size(px(font_size))
             .font(self.file_font.clone())
             .flex()
@@ -273,7 +274,7 @@ impl DiffViewer {
             .child(
                 div()
                     .w(px(1.0))
-                    .h(px(line_height))
+                    .when(!self.wrap_lines, |d| d.h(px(line_height)))
                     .bg(rgb(border_color))
                     .flex_shrink_0(),
             )
@@ -351,9 +352,9 @@ impl DiffViewer {
                         format!("sbs-{}-{}", side_label, sbs_line_index).into(),
                     ))
                     .flex_1()
-                    .h(px(line_height))
+                    .min_w_0()
                     .flex()
-                    .items_center()
+                    .when(!self.wrap_lines, |d| d.h(px(line_height)).items_center())
                     .overflow_hidden()
                     .on_mouse_down(MouseButton::Left, {
                         let text_layout = text_layout.clone();
@@ -418,7 +419,7 @@ impl DiffViewer {
                 // Left accent bar (fixed width child, always present for alignment)
                 let accent = div()
                     .w(px(ACCENT_WIDTH))
-                    .h_full()
+                    .when(!self.wrap_lines, |d| d.h_full())
                     .flex_shrink_0()
                     .when_some(accent_color, |d, color| d.bg(color));
 
@@ -427,7 +428,7 @@ impl DiffViewer {
                     .flex_shrink_0()
                     .flex()
                     .items_center()
-                    .h_full()
+                    .h(px(line_height))
                     .child(
                         div()
                             .w(px(num_col_width))
@@ -454,7 +455,8 @@ impl DiffViewer {
                         format!("sbs-{}-{}", side_label, sbs_line_index).into(),
                     ))
                     .flex_1()
-                    .h(px(line_height))
+                    .min_w_0()
+                    .when(!self.wrap_lines, |d| d.h(px(line_height)))
                     .bg(rgba(t.bg_secondary, 0.5))
                     .on_mouse_move(cx.listener(
                         move |this, _event: &MouseMoveEvent, _window, cx| {

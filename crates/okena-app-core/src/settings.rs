@@ -625,7 +625,7 @@ impl SettingsState {
         self.save_and_notify(cx);
     }
 
-    // Note: diff_view_mode and diff_ignore_whitespace are managed via
+    // Note: diff_view_mode, diff_ignore_whitespace and diff_wrap_lines are managed via
     // ExtensionSettingsStore ("git" namespace). Changes are written back
     // to AppSettings fields by the store's setter callback in main.rs.
 

@@ -36,6 +36,7 @@ use types::{
 };
 
 // Re-export for use in settings (and use locally)
+pub use render::is_builtin_diff_key;
 pub use types::DiffViewMode as DiffViewModeReexport;
 
 gpui::actions!(okena_git, [Cancel]);
@@ -68,6 +69,7 @@ pub struct DiffViewer {
     pub(super) view_mode: DiffViewMode,
     /// Ignore whitespace changes in diff.
     pub(super) ignore_whitespace: bool,
+    pub(super) wrap_lines: bool,
     /// Provider for fetching diff data (local or remote).
     pub(super) provider: Arc<dyn provider::GitProvider>,
     /// Whether diff data is currently being loaded.
@@ -89,6 +91,7 @@ pub struct DiffViewer {
     pub(super) selected_file_index: usize,
     pub(super) selection: Selection,
     pub(super) scroll_handle: UniformListScrollHandle,
+    pub(super) wrapped_list: ListState,
     pub(super) tree_scroll_handle: ScrollHandle,
     /// Whether the file tree sidebar is visible.
     pub(super) sidebar_visible: bool,
@@ -217,6 +220,7 @@ impl DiffViewer {
             diff_mode: DiffMode::WorkingTree,
             view_mode,
             ignore_whitespace,
+            wrap_lines: gs.diff_wrap_lines,
             provider: provider.clone(),
             loading: false,
             request_generation: 0,
@@ -231,6 +235,8 @@ impl DiffViewer {
             selected_file_index: 0,
             selection: Selection::default(),
             scroll_handle: UniformListScrollHandle::new(),
+            // Unmeasured rows count as zero height, which breaks the scrollbar and search reveal.
+            wrapped_list: ListState::new(0, ListAlignment::Top, px(400.0)).measure_all(),
             tree_scroll_handle: ScrollHandle::new(),
             sidebar_visible: true,
             sidebar_resize: ResizableSidebarState::default(),

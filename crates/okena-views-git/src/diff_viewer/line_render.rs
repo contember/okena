@@ -218,17 +218,7 @@ impl DiffViewer {
     ) -> (Div, TextLayout) {
         let styled_text = build_styled_text_with_backgrounds(spans, bg_ranges);
         let text_layout = styled_text.layout().clone();
-        let content = div()
-            .flex_1()
-            .overflow_hidden()
-            .whitespace_nowrap()
-            .line_height(px(line_height))
-            .child(
-                div()
-                    .pl(px(CONTENT_PADDING))
-                    .ml(px(-self.scroll_x))
-                    .child(styled_text),
-            );
+        let content = self.render_scrollable_content_with_text(styled_text, line_height);
         (content, text_layout)
     }
 
@@ -240,13 +230,15 @@ impl DiffViewer {
     ) -> Div {
         div()
             .flex_1()
+            .min_w_0()
             .overflow_hidden()
-            .whitespace_nowrap()
+            .when(self.wrap_lines, |d| d.whitespace_normal())
+            .when(!self.wrap_lines, |d| d.whitespace_nowrap())
             .line_height(px(line_height))
             .child(
                 div()
                     .pl(px(CONTENT_PADDING))
-                    .ml(px(-self.scroll_x))
+                    .when(!self.wrap_lines, |d| d.ml(px(-self.scroll_x)))
                     .child(styled_text),
             )
     }
@@ -295,7 +287,8 @@ impl DiffViewer {
             .id(ElementId::Name(format!("diff-line-{}", line_index).into()))
             .w_full()
             .flex()
-            .h(px(line_height))
+            .when(self.wrap_lines, |d| d.min_h(px(line_height)))
+            .when(!self.wrap_lines, |d| d.h(px(line_height)))
             .text_size(px(font_size))
             .font(self.file_font.clone())
             .when_some(line_bg, |d, bg| d.bg(bg))
@@ -358,7 +351,7 @@ impl DiffViewer {
             .child(
                 div()
                     .w(px(ACCENT_WIDTH))
-                    .h_full()
+                    .when(!self.wrap_lines, |d| d.h_full())
                     .flex_shrink_0()
                     .when_some(accent_color, |d, color| d.bg(color)),
             )
@@ -366,7 +359,7 @@ impl DiffViewer {
             .child(
                 h_flex()
                     .flex_shrink_0()
-                    .h_full()
+                    .h(px(line_height))
                     .items_center()
                     .child(
                         div()

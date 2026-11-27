@@ -746,6 +746,9 @@ pub struct AppSettings {
     /// Whether to ignore whitespace changes in diff viewer
     #[serde(default)]
     pub diff_ignore_whitespace: bool,
+    /// Whether long lines wrap in diff viewer
+    #[serde(default)]
+    pub diff_wrap_lines: bool,
 
     /// Whether the per-line git blame gutter is shown in the file viewer.
     #[serde(default)]
@@ -923,6 +926,7 @@ impl Default for AppSettings {
             min_tile_width: default_min_tile_width(),
             min_tile_height: default_min_tile_height(),
             diff_ignore_whitespace: false,
+            diff_wrap_lines: false,
             blame_visible: false,
             detached_overlays_by_default: false,
             cap_unfocused_window_fps: false,

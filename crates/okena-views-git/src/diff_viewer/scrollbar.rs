@@ -8,18 +8,24 @@ impl DiffViewer {
     /// Get scrollbar geometry if scrollable.
     /// Returns (viewport_height, content_height, thumb_y, thumb_height).
     pub(super) fn get_scrollbar_geometry(&self) -> Option<(f32, f32, f32, f32)> {
-        let state = self.scroll_handle.0.borrow();
-        let item_size = state.last_item_size?;
-
-        let viewport_height = f32::from(item_size.item.height);
-        let content_height = f32::from(item_size.contents.height);
+        let (viewport_height, content_height) = if self.wrap_lines {
+            let viewport = self.wrapped_list.viewport_bounds().size.height;
+            let scrollable = self.wrapped_list.max_offset_for_scrollbar().y;
+            (f32::from(viewport), f32::from(viewport + scrollable))
+        } else {
+            let state = self.scroll_handle.0.borrow();
+            let item_size = state.last_item_size?;
+            (
+                f32::from(item_size.item.height),
+                f32::from(item_size.contents.height),
+            )
+        };
 
         if content_height <= viewport_height {
             return None;
         }
 
-        let scroll_offset = state.base_handle.offset();
-        let scroll_y = -f32::from(scroll_offset.y);
+        let scroll_y = self.vertical_scroll_y();
 
         let thumb_height = (viewport_height / content_height * viewport_height).max(20.0);
         let scrollable_content = content_height - viewport_height;
@@ -30,11 +36,21 @@ impl DiffViewer {
         Some((viewport_height, content_height, thumb_y, thumb_height))
     }
 
+    fn vertical_scroll_y(&self) -> f32 {
+        let offset = if self.wrap_lines {
+            self.wrapped_list.scroll_px_offset_for_scrollbar()
+        } else {
+            self.scroll_handle.0.borrow().base_handle.offset()
+        };
+        -f32::from(offset.y)
+    }
+
     /// Start scrollbar drag.
     pub(super) fn start_scrollbar_drag(&mut self, y: f32, cx: &mut Context<Self>) {
-        let state = self.scroll_handle.0.borrow();
-        let scroll_y = -f32::from(state.base_handle.offset().y);
-        drop(state);
+        if self.wrap_lines {
+            self.wrapped_list.scrollbar_drag_started();
+        }
+        let scroll_y = self.vertical_scroll_y();
 
         self.scrollbar_drag = Some(ScrollbarDrag {
             start_y: y,
@@ -65,17 +81,21 @@ impl DiffViewer {
         let delta_scroll = delta_y * scrollable_content / scrollable_track;
         let new_scroll = (drag.start_scroll_y + delta_scroll).clamp(0.0, scrollable_content);
 
-        let state = self.scroll_handle.0.borrow_mut();
-        state
-            .base_handle
-            .set_offset(point(px(0.0), px(-new_scroll)));
-        drop(state);
+        let offset = point(px(0.0), px(-new_scroll));
+        if self.wrap_lines {
+            self.wrapped_list.set_offset_from_scrollbar(offset);
+        } else {
+            self.scroll_handle.0.borrow().base_handle.set_offset(offset);
+        }
 
         cx.notify();
     }
 
     /// End scrollbar drag.
     pub(super) fn end_scrollbar_drag(&mut self, cx: &mut Context<Self>) {
+        if self.wrap_lines {
+            self.wrapped_list.scrollbar_drag_ended();
+        }
         self.scrollbar_drag = None;
         cx.notify();
     }
@@ -108,7 +128,11 @@ impl DiffViewer {
 
     /// Max horizontal scroll range.
     pub(super) fn max_scroll_x(&self) -> f32 {
-        (self.max_text_width() - self.available_text_width()).max(0.0)
+        if self.wrap_lines {
+            0.0
+        } else {
+            (self.max_text_width() - self.available_text_width()).max(0.0)
+        }
     }
 
     /// Get the viewport width from the scroll handle, or use cached value.

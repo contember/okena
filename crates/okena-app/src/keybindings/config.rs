@@ -140,6 +140,21 @@ impl KeybindingConfig {
             vec![cmd_default("cmd-e", None), ctrl_default("ctrl-e", None)],
         );
 
+        let diff_context = Some(okena_views_git::DIFF_VIEWER_KEY_CONTEXT);
+        bindings.insert(
+            "ToggleDiffLineWrap".to_string(),
+            vec![KeybindingEntry::new("alt-z", diff_context)],
+        );
+        bindings.insert(
+            "ToggleDiffIgnoreWhitespace".to_string(),
+            vec![KeybindingEntry::new("w", diff_context)],
+        );
+
+        bindings.insert(
+            "ToggleDiffViewMode".to_string(),
+            vec![KeybindingEntry::new("s", diff_context)],
+        );
+
         // Fullscreen keybindings
         bindings.insert(
             "ToggleFullscreen".to_string(),

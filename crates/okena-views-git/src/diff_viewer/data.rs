@@ -75,6 +75,7 @@ impl DiffViewer {
         self.selection_side = None;
         self.side_by_side_lines.clear();
         self.scroll_x = 0.0;
+        self.wrapped_list.reset(0);
         self.max_line_chars = 0;
         self.composition.clear();
         cx.notify();
@@ -290,6 +291,7 @@ impl DiffViewer {
                         this.line_num_width = max_line_num.to_string().len().max(3);
                         this.max_line_chars = Self::calc_max_line_chars(&display_file);
                         this.current_file = Some(display_file);
+                        this.wrapped_list.reset(0);
                         this.update_side_by_side_cache();
                     }
                     Ok(ProcessedFile::Binary {

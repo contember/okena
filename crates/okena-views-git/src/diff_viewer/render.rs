@@ -2,6 +2,9 @@
 
 use super::types::DiffViewMode;
 use super::{Cancel, DiffViewer};
+use crate::{
+    DIFF_VIEWER_KEY_CONTEXT, ToggleDiffIgnoreWhitespace, ToggleDiffLineWrap, ToggleDiffViewMode,
+};
 use gpui::prelude::*;
 use gpui::*;
 use gpui_component::{h_flex, v_flex};
@@ -17,9 +20,96 @@ use okena_ui::modal::{
     window_min_max_controls,
 };
 use okena_ui::resizable_sidebar::resizable_sidebar;
+use okena_ui::shortcuts::{shortcut_for_action_in, shortcut_tooltip};
 use okena_ui::toggle::segmented_toggle;
 use okena_ui::tokens::{ui_text, ui_text_md, ui_text_ms, ui_text_sm, ui_text_xl};
 use std::sync::Arc;
+
+/// The effective shortcut of `action` inside Git Diff, as the user configured it.
+fn diff_shortcut(action: &dyn Action, cx: &App) -> Option<String> {
+    let context = KeyContext::parse(DIFF_VIEWER_KEY_CONTEXT).ok()?;
+    shortcut_for_action_in(action, std::slice::from_ref(&context), cx)
+}
+
+fn diff_action_tooltip(
+    description: &'static str,
+    action: impl Action,
+) -> impl Fn(&mut Window, &mut App) -> AnyView {
+    move |window, cx| {
+        let shortcut = diff_shortcut(&action, cx);
+        shortcut_tooltip(description, shortcut.as_deref(), window, cx)
+    }
+}
+
+fn diff_toggle(
+    id: &'static str,
+    label: &'static str,
+    description: &'static str,
+    action: impl Action,
+    active: bool,
+    t: &ThemeColors,
+    cx: &App,
+) -> Stateful<Div> {
+    div()
+        .id(id)
+        .cursor_pointer()
+        .px(px(10.0))
+        .py(px(5.0))
+        .rounded(px(6.0))
+        .border_1()
+        .border_color(rgb(if active {
+            t.border_active
+        } else {
+            t.bg_primary
+        }))
+        .bg(rgb(if active { t.bg_secondary } else { t.bg_primary }))
+        .hover(|s| s.bg(rgb(t.bg_hover)))
+        .tooltip(diff_action_tooltip(description, action))
+        .text_size(ui_text_md(cx))
+        .text_color(rgb(if active {
+            t.text_primary
+        } else {
+            t.text_secondary
+        }))
+        .child(label)
+}
+
+/// Commands the diff viewer reads from raw key presses instead of bindable actions.
+enum BuiltinKey {
+    Search,
+    ToggleMode,
+    PrevFile,
+    NextFile,
+    ScrollLeft,
+    ScrollRight,
+    Newer,
+    Older,
+    Copy,
+    SelectAll,
+}
+
+fn builtin_key(keystroke: &Keystroke) -> Option<BuiltinKey> {
+    let primary = keystroke.modifiers.platform || keystroke.modifiers.control;
+    Some(match keystroke.key.as_str() {
+        "f" if primary => BuiltinKey::Search,
+        "tab" => BuiltinKey::ToggleMode,
+        "up" => BuiltinKey::PrevFile,
+        "down" => BuiltinKey::NextFile,
+        "left" => BuiltinKey::ScrollLeft,
+        "right" => BuiltinKey::ScrollRight,
+        "[" => BuiltinKey::Newer,
+        "]" => BuiltinKey::Older,
+        "c" if primary => BuiltinKey::Copy,
+        "a" if primary => BuiltinKey::SelectAll,
+        _ => return None,
+    })
+}
+
+/// Whether Git Diff handles `keystroke` itself. An action bound to it in the
+/// diff runs first and stops the key, so the built-in command never fires.
+pub fn is_builtin_diff_key(keystroke: &Keystroke) -> bool {
+    builtin_key(keystroke).is_some()
+}
 
 fn binary_preview_message<T: 'static>(
     message: &str,
@@ -298,41 +388,29 @@ impl DiffViewer {
                 h_flex()
                     .flex_shrink_0()
                     .gap(px(8.0))
-                    // Whitespace toggle
                     .child(
-                        div()
-                            .id("ignore-whitespace-toggle")
-                            .cursor_pointer()
-                            .px(px(10.0))
-                            .py(px(5.0))
-                            .rounded(px(6.0))
-                            .border_1()
-                            .border_color(rgb(if ignore_whitespace {
-                                t.border_active
-                            } else {
-                                t.bg_primary
-                            }))
-                            .bg(rgb(if ignore_whitespace {
-                                t.bg_secondary
-                            } else {
-                                t.bg_primary
-                            }))
-                            .hover(|s| s.bg(rgb(t.bg_hover)))
-                            .on_click(
-                                cx.listener(|this, _, _window, cx| {
-                                    this.toggle_ignore_whitespace(cx)
-                                }),
-                            )
-                            .child(
-                                div()
-                                    .text_size(ui_text_md(cx))
-                                    .text_color(rgb(if ignore_whitespace {
-                                        t.text_primary
-                                    } else {
-                                        t.text_secondary
-                                    }))
-                                    .child("Whitespace"),
-                            ),
+                        diff_toggle(
+                            "wrap-lines-toggle",
+                            "Wrap lines",
+                            "Wrap long lines",
+                            ToggleDiffLineWrap,
+                            self.wrap_lines,
+                            t,
+                            cx,
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| this.toggle_line_wrap(cx))),
+                    )
+                    .child(
+                        diff_toggle(
+                            "ignore-whitespace-toggle",
+                            "Whitespace",
+                            "Ignore whitespace changes",
+                            ToggleDiffIgnoreWhitespace,
+                            ignore_whitespace,
+                            t,
+                            cx,
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| this.toggle_ignore_whitespace(cx))),
                     )
                     // Separator
                     .child(div().w(px(1.0)).h(px(20.0)).bg(rgb(t.border)).mx(px(4.0)))
@@ -340,6 +418,10 @@ impl DiffViewer {
                     .child(
                         div()
                             .id("view-mode-toggle")
+                            .tooltip(diff_action_tooltip(
+                                "Toggle Diff Layout",
+                                ToggleDiffViewMode,
+                            ))
                             .on_click(cx.listener(|this, _, _window, cx| this.toggle_view_mode(cx)))
                             .child(segmented_toggle(
                                 &[("Unified", is_unified), ("Split", !is_unified)],
@@ -782,7 +864,9 @@ impl DiffViewer {
         // Horizontal scrollbar
         let scroll_x = self.scroll_x;
         self.viewport_width(); // update cached width from scroll handle
-        let has_h_scroll = if self.diff_pane_width > 0.0 {
+        let has_h_scroll = if self.wrap_lines {
+            false
+        } else if self.diff_pane_width > 0.0 {
             self.max_scroll_x() > 1.0
         } else {
             // Viewport not yet measured — skip scrollbar, schedule re-render
@@ -898,40 +982,53 @@ impl DiffViewer {
                     DiffViewMode::SideBySide => side_by_side_count,
                 };
 
+                let render_items = move |range, _window: &mut Window, cx: &mut App| {
+                    view.update(cx, |this, cx| match view_mode {
+                        DiffViewMode::Unified => {
+                            this.render_visible_lines(range, &tc, gutter_width, cx)
+                        }
+                        DiffViewMode::SideBySide => this.render_side_by_side_lines(range, &tc, cx),
+                    })
+                };
+                let lines = if self.wrap_lines {
+                    if self.wrapped_list.item_count() != item_count {
+                        let top = self.wrapped_list.logical_scroll_top();
+                        self.reset_wrapped_list(item_count, top);
+                    }
+                    list(self.wrapped_list.clone(), move |index, window, cx| {
+                        render_items(index..index + 1, window, cx)
+                            .pop()
+                            .unwrap_or_else(|| div().into_any_element())
+                    })
+                    .size_full()
+                    .cursor(CursorStyle::IBeam)
+                    .into_any_element()
+                } else {
+                    uniform_list("diff-lines", item_count, render_items)
+                        .size_full()
+                        .cursor(CursorStyle::IBeam)
+                        .map(|mut list| {
+                            // Prevent GPUI from redirecting horizontal delta to
+                            // vertical scroll when only overflow-y is set (which
+                            // causes diagonal scroll on Shift+wheel).
+                            list.style().restrict_scroll_to_axis = Some(true);
+                            list
+                        })
+                        .on_scroll(cx.listener(move |this, event: &ScrollEvent, _window, cx| {
+                            this.handle_scroll_x(event, cx);
+                        }))
+                        .track_scroll(&self.scroll_handle)
+                        .into_any_element()
+                };
+
+                // GPUI's variable-height List paints only its rows.
                 d.child(
                     div()
                         .flex_1()
                         .min_h_0()
                         .relative()
-                        .child(
-                            uniform_list("diff-lines", item_count, move |range, _window, cx| {
-                                let tc = tc.clone();
-                                view.update(cx, |this, cx| match view_mode {
-                                    DiffViewMode::Unified => {
-                                        this.render_visible_lines(range, &tc, gutter_width, cx)
-                                    }
-                                    DiffViewMode::SideBySide => {
-                                        this.render_side_by_side_lines(range, &tc, cx)
-                                    }
-                                })
-                            })
-                            .size_full()
-                            .bg(rgb(t.bg_secondary))
-                            .cursor(CursorStyle::IBeam)
-                            .map(|mut list| {
-                                // Prevent GPUI from redirecting horizontal delta to
-                                // vertical scroll when only overflow-y is set (which
-                                // causes diagonal scroll on Shift+wheel).
-                                list.style().restrict_scroll_to_axis = Some(true);
-                                list
-                            })
-                            .on_scroll(cx.listener(
-                                move |this, event: &ScrollEvent, _window, cx| {
-                                    this.handle_scroll_x(event, cx);
-                                },
-                            ))
-                            .track_scroll(&self.scroll_handle),
-                        )
+                        .bg(rgb(t.bg_secondary))
+                        .child(lines)
                         .when_some(scrollbar_geometry, |d, (_, _, thumb_y, thumb_height)| {
                             d.child(self.render_scrollbar_thumb(
                                 t,
@@ -1179,7 +1276,9 @@ impl DiffViewer {
                     .when(is_uncommitted, |d| {
                         d.child(self.render_hint("Tab", "staged/unstaged", t, cx))
                     })
-                    .child(self.render_hint("S", "split", t, cx))
+                    .when_some(diff_shortcut(&ToggleDiffViewMode, cx), |d, key| {
+                        d.child(self.render_hint(&key, "split", t, cx))
+                    })
                     .child(self.render_hint("\u{2191}\u{2193}", "files", t, cx))
                     .when(shows_revision_bar, |d| {
                         d.child(self.render_hint("[ ]", "revisions", t, cx))
@@ -1450,37 +1549,53 @@ impl Render for DiffViewer {
         };
         outer
             .track_focus(&focus_handle)
-            .key_context("DiffViewer")
+            .key_context(DIFF_VIEWER_KEY_CONTEXT)
+            .on_action(cx.listener(|this, _: &ToggleDiffLineWrap, window, cx| {
+                if this.focus_handle.is_focused(window) {
+                    this.toggle_line_wrap(cx);
+                } else {
+                    cx.propagate();
+                }
+            }))
+            .on_action(
+                cx.listener(|this, _: &ToggleDiffIgnoreWhitespace, window, cx| {
+                    if this.focus_handle.is_focused(window) {
+                        this.toggle_ignore_whitespace(cx);
+                    } else {
+                        cx.propagate();
+                    }
+                }),
+            )
+            .on_action(cx.listener(|this, _: &ToggleDiffViewMode, window, cx| {
+                if this.focus_handle.is_focused(window) {
+                    this.toggle_view_mode(cx);
+                } else {
+                    cx.propagate();
+                }
+            }))
             .on_action(cx.listener(|this, _: &Cancel, window, cx| {
                 this.handle_cancel(window, cx);
             }))
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
-                let key = event.keystroke.key.as_str();
-                let modifiers = &event.keystroke.modifiers;
-
-                match key {
-                    "f" if modifiers.platform || modifiers.control => {
-                        this.open_search(window, cx);
-                    }
-                    "tab" => this.toggle_mode(cx),
-                    "s" => this.toggle_view_mode(cx),
-                    "w" => this.toggle_ignore_whitespace(cx),
-                    "up" => this.prev_file(cx),
-                    "down" => this.next_file(cx),
-                    "left" => {
+                match builtin_key(&event.keystroke) {
+                    Some(BuiltinKey::Search) => this.open_search(window, cx),
+                    Some(BuiltinKey::ToggleMode) => this.toggle_mode(cx),
+                    Some(BuiltinKey::PrevFile) => this.prev_file(cx),
+                    Some(BuiltinKey::NextFile) => this.next_file(cx),
+                    Some(BuiltinKey::ScrollLeft) => {
                         this.scroll_x = (this.scroll_x - 40.0).max(0.0);
                         cx.notify();
                     }
-                    "right" => {
+                    Some(BuiltinKey::ScrollRight) => {
                         let max = this.max_scroll_x();
                         this.scroll_x = (this.scroll_x + 40.0).min(max);
                         cx.notify();
                     }
-                    "[" => this.navigate_newer(cx),
-                    "]" => this.navigate_older(cx),
-                    "c" if modifiers.platform || modifiers.control => this.copy_selection(cx),
-                    "a" if modifiers.platform || modifiers.control => this.select_all(cx),
-                    _ => {}
+                    Some(BuiltinKey::Newer) => this.navigate_newer(cx),
+                    Some(BuiltinKey::Older) => this.navigate_older(cx),
+                    Some(BuiltinKey::Copy) => this.copy_selection(cx),
+                    Some(BuiltinKey::SelectAll) => this.select_all(cx),
+                    None => {}
                 }
             }))
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {

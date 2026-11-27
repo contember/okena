@@ -82,6 +82,8 @@ pub use okena_views_terminal::actions::{
     ToggleFullscreen, ToggleUnread, ZoomIn, ZoomOut,
 };
 
+pub use okena_views_git::{ToggleDiffIgnoreWhitespace, ToggleDiffLineWrap, ToggleDiffViewMode};
+
 // Sidebar-specific actions (defined in okena-views-sidebar crate)
 pub use okena_views_sidebar::{
     SidebarConfirm, SidebarDown, SidebarEscape, SidebarToggleExpand, SidebarUp,
@@ -227,7 +229,7 @@ fn apply_keybindings(cx: &mut App, config: &KeybindingConfig) {
             KeyBinding::new(
                 "escape",
                 okena_views_git::diff_viewer::Cancel,
-                Some("DiffViewer"),
+                Some(okena_views_git::DIFF_VIEWER_KEY_CONTEXT),
             ),
             KeyBinding::new("escape", okena_views_sidebar::Cancel, Some("ContextMenu")),
             KeyBinding::new(
@@ -429,6 +431,9 @@ pub(crate) fn action_for_name(action: &str) -> Option<Box<dyn Action>> {
         "FocusSidebar" => Some(Box::new(FocusSidebar)),
         "SidebarUp" => Some(Box::new(SidebarUp)),
         "SidebarDown" => Some(Box::new(SidebarDown)),
+        "ToggleDiffLineWrap" => Some(Box::new(ToggleDiffLineWrap)),
+        "ToggleDiffIgnoreWhitespace" => Some(Box::new(ToggleDiffIgnoreWhitespace)),
+        "ToggleDiffViewMode" => Some(Box::new(ToggleDiffViewMode)),
         "SidebarConfirm" => Some(Box::new(SidebarConfirm)),
         "SidebarToggleExpand" => Some(Box::new(SidebarToggleExpand)),
         "SidebarEscape" => Some(Box::new(SidebarEscape)),
@@ -500,6 +505,61 @@ mod escape_binding_tests {
                 bindings[0].keystrokes()[0].as_keystroke(),
                 &gpui::Keystroke::parse(expected).unwrap()
             );
+        }
+    }
+
+    #[gpui::test]
+    fn diff_toggles_bind_in_the_diff_by_default_and_can_be_reassigned_or_disabled(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let defaults = KeybindingConfig::defaults();
+        let descriptions = super::get_action_descriptions();
+        let diff_context = Some(okena_views_git::DIFF_VIEWER_KEY_CONTEXT);
+        for (action, default_key) in [
+            ("ToggleDiffLineWrap", "alt-z"),
+            ("ToggleDiffIgnoreWhitespace", "w"),
+            ("ToggleDiffViewMode", "s"),
+        ] {
+            assert!(descriptions.contains_key(action));
+            let mut config = KeybindingConfig {
+                version: defaults.version,
+                bindings: std::collections::HashMap::from([(
+                    action.into(),
+                    defaults.bindings[action].clone(),
+                )]),
+            };
+
+            cx.update(|cx| {
+                let assert_bound =
+                    |config: &KeybindingConfig, key: &'static str, context: Option<&str>| {
+                        let bindings = bindings_for_platform(config, ShortcutPlatform::Windows, cx);
+                        assert_eq!(bindings.len(), 1);
+                        assert_eq!(
+                            bindings[0].keystrokes()[0].as_keystroke(),
+                            &gpui::Keystroke::parse(key).unwrap()
+                        );
+                        assert_eq!(
+                            bindings[0].predicate().map(|p| p.to_string()).as_deref(),
+                            context
+                        );
+                    };
+                assert_bound(&config, default_key, diff_context);
+
+                config.bindings.insert(
+                    action.into(),
+                    vec![KeybindingEntry::new("ctrl-f12", diff_context)],
+                );
+                assert_bound(&config, "ctrl-f12", diff_context);
+
+                // An explicit global entry stays global, as the dialog and conflict check show it.
+                config
+                    .bindings
+                    .insert(action.into(), vec![KeybindingEntry::new("ctrl-f12", None)]);
+                assert_bound(&config, "ctrl-f12", None);
+
+                config.bindings.get_mut(action).unwrap().clear();
+                assert!(bindings_for_platform(&config, ShortcutPlatform::Windows, cx).is_empty());
+            });
         }
     }
 
