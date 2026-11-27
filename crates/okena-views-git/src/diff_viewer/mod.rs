@@ -36,6 +36,7 @@ use types::{
 };
 
 // Re-export for use in settings (and use locally)
+pub use render::is_builtin_diff_key;
 pub use types::DiffViewMode as DiffViewModeReexport;
 
 gpui::actions!(okena_git, [Cancel]);
@@ -234,7 +235,8 @@ impl DiffViewer {
             selected_file_index: 0,
             selection: Selection::default(),
             scroll_handle: UniformListScrollHandle::new(),
-            wrapped_list: ListState::new(0, ListAlignment::Top, px(400.0)),
+            // Unmeasured rows count as zero height, which breaks the scrollbar and search reveal.
+            wrapped_list: ListState::new(0, ListAlignment::Top, px(400.0)).measure_all(),
             tree_scroll_handle: ScrollHandle::new(),
             sidebar_visible: true,
             sidebar_resize: ResizableSidebarState::default(),

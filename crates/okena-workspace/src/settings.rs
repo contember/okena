@@ -746,6 +746,7 @@ pub struct AppSettings {
     /// Whether to ignore whitespace changes in diff viewer
     #[serde(default)]
     pub diff_ignore_whitespace: bool,
+    /// Whether long lines wrap in diff viewer
     #[serde(default)]
     pub diff_wrap_lines: bool,
 

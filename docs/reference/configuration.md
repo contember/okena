@@ -126,6 +126,7 @@ If the file contains invalid JSON, Okena recovers as many fields as possible and
   "auto_update_enabled": true,
   "diff_view_mode": "Unified",
   "diff_ignore_whitespace": false,
+  "diff_wrap_lines": false,
   "idle_timeout_secs": 0,
   "min_column_width": 400,
   "min_tile_width": 600,
@@ -250,6 +251,7 @@ no tabs to open a command in; there the key reaches the terminal program.
 |-----|------|---------|-------------|
 | `diff_view_mode` | string | `"Unified"` | Diff display mode: `"Unified"` or `"SideBySide"` |
 | `diff_ignore_whitespace` | bool | `false` | Ignore whitespace changes in diffs |
+| `diff_wrap_lines` | bool | `false` | Wrap long lines in Unified and Split diffs instead of scrolling horizontally |
 
 #### Remote Server
 
@@ -411,6 +413,7 @@ Bindings without a `context` are global. Adding a context limits the binding to 
 - `"TerminalPane"` -- only when a terminal pane has focus
 - `"SearchBar"` -- only when the search bar has focus
 - `"Sidebar"` -- only when the sidebar has focus
+- `"DiffViewer"` -- only when Git Diff has focus. Git Diff reserves its own navigation keys (Tab, arrows, `[`, `]`, Cmd/Ctrl+F, Cmd/Ctrl+C, Cmd/Ctrl+A); the shortcut recorder refuses them for bindings in this context
 
 ### Example: Custom Bindings
 
@@ -487,6 +490,9 @@ Set `enabled` to `false` to disable a specific binding without removing it:
 | `FocusLeft/Right/Up/Down` | `Cmd+Alt+Arrow` | Directional focus navigation |
 | `ToggleFullscreen` | `Shift+Escape` (in terminal) | Toggle terminal fullscreen |
 | `TogglePaneSwitcher` | `` Cmd+` `` / `` Ctrl+` `` | Quick pane switcher |
+| `ToggleDiffLineWrap` | `Option+Z` / `Alt+Z` (in Git Diff) | Wrap long lines in Git Diff |
+| `ToggleDiffIgnoreWhitespace` | `W` (in Git Diff) | Ignore whitespace changes in Git Diff |
+| `ToggleDiffViewMode` | `S` (in Git Diff) | Switch Git Diff between Unified and Split |
 
 Okena warns on startup if it detects conflicting keybindings (same keystroke and context assigned to different actions).
 

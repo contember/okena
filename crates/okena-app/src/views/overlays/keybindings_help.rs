@@ -26,6 +26,18 @@ type ActionBindings = (String, Vec<BindingEntry>);
 
 const START_PAGE_CATEGORY: &str = "Start Page";
 
+/// Whether a binding in `context` would start with a key Git Diff handles itself.
+fn shadows_builtin_diff_key(keystrokes: &str, context: Option<&str>) -> bool {
+    context == Some(okena_views_git::DIFF_VIEWER_KEY_CONTEXT)
+        && keystrokes
+            .split_whitespace()
+            .next()
+            .and_then(|first| {
+                Keystroke::parse_with_os(first, ShortcutPlatform::current().os()).ok()
+            })
+            .is_some_and(|first| okena_views_git::diff_viewer::is_builtin_diff_key(&first))
+}
+
 fn start_page_rows(
     query: &str,
     capture: Option<&CaptureQuery>,
@@ -633,6 +645,20 @@ impl KeybindingsHelp {
                 "This shortcut is already assigned to Start Page button {}.",
                 conflict.name
             ));
+            cx.notify();
+            return;
+        }
+
+        let context = editing.draft_context.clone().unwrap_or_else(|| {
+            get_config()
+                .bindings
+                .get(&editing.action)
+                .and_then(|entries| entries.get(editing.entry_index))
+                .and_then(|entry| entry.context.clone())
+        });
+        if shadows_builtin_diff_key(&new_keystroke, context.as_deref()) {
+            self.recording_error =
+                Some("Git Diff already uses this key. Choose a different shortcut.".to_string());
             cx.notify();
             return;
         }
@@ -1564,6 +1590,25 @@ impl Render for KeybindingsHelp {
 }
 
 impl_focusable!(KeybindingsHelp);
+
+#[cfg(test)]
+mod diff_key_tests {
+    use super::shadows_builtin_diff_key;
+    use okena_views_git::DIFF_VIEWER_KEY_CONTEXT;
+
+    #[test]
+    fn diff_bindings_cannot_take_keys_the_diff_handles_itself() {
+        let diff = Some(DIFF_VIEWER_KEY_CONTEXT);
+        for taken in ["ctrl-f", "cmd-f", "tab", "shift-up", "]", "ctrl-c ctrl-x"] {
+            assert!(shadows_builtin_diff_key(taken, diff), "{taken}");
+        }
+        for free in ["f", "alt-z", "w", "ctrl-k ctrl-f"] {
+            assert!(!shadows_builtin_diff_key(free, diff), "{free}");
+        }
+        assert!(!shadows_builtin_diff_key("ctrl-f", None));
+        assert!(!shadows_builtin_diff_key("ctrl-f", Some("TerminalPane")));
+    }
+}
 
 #[cfg(test)]
 mod capture_tests {

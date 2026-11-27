@@ -71,6 +71,43 @@ fn diff_toggle(
         .child(label)
 }
 
+/// Commands the diff viewer reads from raw key presses instead of bindable actions.
+enum BuiltinKey {
+    Search,
+    ToggleMode,
+    PrevFile,
+    NextFile,
+    ScrollLeft,
+    ScrollRight,
+    Newer,
+    Older,
+    Copy,
+    SelectAll,
+}
+
+fn builtin_key(keystroke: &Keystroke) -> Option<BuiltinKey> {
+    let primary = keystroke.modifiers.platform || keystroke.modifiers.control;
+    Some(match keystroke.key.as_str() {
+        "f" if primary => BuiltinKey::Search,
+        "tab" => BuiltinKey::ToggleMode,
+        "up" => BuiltinKey::PrevFile,
+        "down" => BuiltinKey::NextFile,
+        "left" => BuiltinKey::ScrollLeft,
+        "right" => BuiltinKey::ScrollRight,
+        "[" => BuiltinKey::Newer,
+        "]" => BuiltinKey::Older,
+        "c" if primary => BuiltinKey::Copy,
+        "a" if primary => BuiltinKey::SelectAll,
+        _ => return None,
+    })
+}
+
+/// Whether Git Diff handles `keystroke` itself. An action bound to it in the
+/// diff runs first and stops the key, so the built-in command never fires.
+pub fn is_builtin_diff_key(keystroke: &Keystroke) -> bool {
+    builtin_key(keystroke).is_some()
+}
+
 fn binary_preview_message<T: 'static>(
     message: &str,
     t: &ThemeColors,
@@ -952,11 +989,8 @@ impl DiffViewer {
                 };
                 let lines = if self.wrap_lines {
                     if self.wrapped_list.item_count() != item_count {
-                        let top = self.wrapped_list.logical_scroll_top();
-                        self.wrapped_list
-                            .reset_with_uniform_height(item_count, px(self.line_height()));
-                        self.wrapped_list.scroll_to(top);
-                        cx.notify();
+                        let top_row = self.wrapped_list.logical_scroll_top().item_ix;
+                        self.reset_wrapped_list(item_count, top_row);
                     }
                     list(self.wrapped_list.clone(), move |index, window, cx| {
                         render_items(index..index + 1, window, cx)
@@ -1538,30 +1572,25 @@ impl Render for DiffViewer {
                 this.handle_cancel(window, cx);
             }))
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
-                let key = event.keystroke.key.as_str();
-                let modifiers = &event.keystroke.modifiers;
-
-                match key {
-                    "f" if modifiers.platform || modifiers.control => {
-                        this.open_search(window, cx);
-                    }
-                    "tab" => this.toggle_mode(cx),
-                    "up" => this.prev_file(cx),
-                    "down" => this.next_file(cx),
-                    "left" => {
+                match builtin_key(&event.keystroke) {
+                    Some(BuiltinKey::Search) => this.open_search(window, cx),
+                    Some(BuiltinKey::ToggleMode) => this.toggle_mode(cx),
+                    Some(BuiltinKey::PrevFile) => this.prev_file(cx),
+                    Some(BuiltinKey::NextFile) => this.next_file(cx),
+                    Some(BuiltinKey::ScrollLeft) => {
                         this.scroll_x = (this.scroll_x - 40.0).max(0.0);
                         cx.notify();
                     }
-                    "right" => {
+                    Some(BuiltinKey::ScrollRight) => {
                         let max = this.max_scroll_x();
                         this.scroll_x = (this.scroll_x + 40.0).min(max);
                         cx.notify();
                     }
-                    "[" => this.navigate_newer(cx),
-                    "]" => this.navigate_older(cx),
-                    "c" if modifiers.platform || modifiers.control => this.copy_selection(cx),
-                    "a" if modifiers.platform || modifiers.control => this.select_all(cx),
-                    _ => {}
+                    Some(BuiltinKey::Newer) => this.navigate_newer(cx),
+                    Some(BuiltinKey::Older) => this.navigate_older(cx),
+                    Some(BuiltinKey::Copy) => this.copy_selection(cx),
+                    Some(BuiltinKey::SelectAll) => this.select_all(cx),
+                    None => {}
                 }
             }))
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {

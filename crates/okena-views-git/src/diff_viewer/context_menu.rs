@@ -533,7 +533,7 @@ impl DiffViewer {
         Some(
             modal_backdrop("dv-delete-backdrop", t)
                 .items_center()
-                .key_context("DiffViewer")
+                .key_context(crate::DIFF_VIEWER_KEY_CONTEXT)
                 .on_action(cx.listener(|this, _: &Cancel, _, cx| {
                     this.cancel_delete(cx);
                 }))
@@ -685,7 +685,7 @@ impl DiffViewer {
         Some(
             modal_backdrop("dv-discard-backdrop", t)
                 .items_center()
-                .key_context("DiffViewer")
+                .key_context(crate::DIFF_VIEWER_KEY_CONTEXT)
                 .on_action(cx.listener(|this, _: &Cancel, _, cx| {
                     this.cancel_discard(cx);
                 }))
