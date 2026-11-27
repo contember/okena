@@ -741,6 +741,7 @@ mod tests {
             .expect("did not finish: it read a FIFO")
     }
 
+    #[cfg(unix)]
     fn make_fifo(path: &Path) {
         let status = std::process::Command::new("mkfifo")
             .arg(path)
@@ -780,6 +781,7 @@ mod tests {
         assert_eq!(context_for_line_two(dir.path().join("notes.txt")), 2);
     }
 
+    #[cfg(unix)]
     #[test]
     fn searchable_text_skips_a_fifo_without_blocking() {
         let dir = tempfile::tempdir().unwrap();
